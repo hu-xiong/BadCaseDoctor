@@ -1,0 +1,16 @@
+Flask
+Flask-SQLAlchemy
+Flask-Login
+Flask-Mail
+Flask-WTF
+WTForms
+pandas
+openpyxl
+pymysql
+python-dotenv
+passlib
+email-validator
+Werkzeug
+Jinja2 
+boto3
+Pillow 

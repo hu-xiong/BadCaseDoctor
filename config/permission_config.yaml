@@ -1,0 +1,67 @@
+start_url: "http://localhost:5173"  # 待测试页面URL
+wait_until: "networkidle"           # load | domcontentloaded | networkidle
+
+# 可选：进入页面后执行的一系列动作（按顺序）
+actions:
+  - wait: 500                      # 等待 500ms
+  - click: "text=登录"              # 点击包含文字的元素
+  - wait_for_selector: "#username" # 等待输入框出现
+  - fill:                          # 在输入框输入
+      selector: "#username"
+      value: "demo-user"
+  - fill:
+      selector: "#password"
+      value: "demo-pass"
+  - press:
+      selector: "#password"
+      press: "Enter"              # 回车提交
+  - wait: 1500
+  # 下载文件（两种方式：点击选择器 或 直接URL）
+  - download: "a.download-report"   # 通过点击触发下载链接
+    filename: "report.xlsx"
+  - download: "https://example.com/image.png"  # 直接URL下载
+    filename: "image.png"
+  # 截图（整页或元素）
+  - screenshot: true
+    filename: "page.png"
+    full_page: true
+  - screenshot: true
+    selector: "#chart"
+    filename: "chart.png"
+
+capture:
+  url_include_patterns:
+    - "/api/"                        # 正则或子串，留空表示捕获全部
+  methods: [POST, GET, PUT, PATCH, DELETE]
+
+overrides:
+  # 可将接口域名替换到测试网关等
+  url_base_replace_from: “"https://njjs-its-aitpm04.njjs.baidu.com:8690/” 
+  url_base_replace_to:   "https://localhost:8794/"
+
+  # 覆盖/新增请求头（如 Authorization）
+  headers:
+     # toB token
+    Authorization: "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbkNyZWF0ZVRpbWUiOjE3NTU4NDk5NDY3ODgsIlgtdHJhZmZpYy1Vc2VySWQiOjE3NTk2MzkyNjU0NjExLCJ1c2VyX25hbWUiOiJzaWdhbWFyIiwic2NvcGUiOlsiYWxsIl0sIm5pY2tuYW1lIjoic2lnYW1hciIsImV4cCI6MTc2MzYyNTk0NiwianRpIjoiZjRmNjdiZTUtYzFlYS00MzA2LWEzM2YtN2YwMmE3OGU2MjIxIiwiY2xpZW50X2lkIjoiZnJvbnRlbmQifQ.G-MEIFmqNiNWbca9XNBgwHluXy1c1GDg3sEtZEK-NE1sd4kLYeSkkJKUCm4rTMwzZlKIPKtl3uIPp2TnFdr4zoQ5tKDXXngouDKULp_Uhca-SQKPugADnvD21T1mUSK6RpgyE_fvtc_niPIWb1yjBAytdqcnaHiyUyC2AIND-t6HuyBFw3K_8XyswC3ThKRUs8XrBthqECIK21kVeRxyFgcn2w-199-ZiJhqOVTXoE4TK90ns72Q2qWa16-HHNvjj5Nh-YmCYIMR48NqSzubrwcrWbEOsKnfNt_NFaCBLOFFlxP_QYnxUm8umWAX5Cz7IWZOGsdiNIEdwNpo5uM-5w"
+    # toC token
+    toCAuthorization: "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbkNyZWF0ZVRpbWUiOjE3NTUyMjQwMDI3NTAsIlgtdHJhZmZpYy1Vc2VySWQiOjEsInVzZXJfbmFtZSI6ImJvc3MiLCJzY29wZSI6WyJhbGwiXSwibmlja25hbWUiOiLns7vnu5_nrqHnkIblkZgiLCJleHAiOjE3NjMwMDAwMDIsImp0aSI6IjBlMmU0ZDRjLTY1NjUtNDRhOS05ZjMzLTAwNGIwNWI4Y2IyMyIsImNsaWVudF9pZCI6ImZyb250ZW5kIn0.FYorghF3Zly-fIRJGOE0HWjiafJeBSU8trD1DzKj3hIUDpWfijIFPHh5rlrQUxbXe5WR96zpE40utgfSnxf_DvVtumud7nfT7IpbRStLLjqjdq1g5DeU41PPYxIfmEqhYd1hJdfmSlHUbaO1-ekDBwI8F3V01Z8M14v3xI2YFTuwjXa2kETxHYoHxNI9ldRux-36P45NlZZEmzI2Qw5kDQIgkuAYMLCsMZF7waWbZgHEfQdcMLfdl86GjVS9ILAXgSvg7U8jl0wGC5dbMqAjUgjG3Z8zCrnSt9G1mKHMKRsjkmaIW-4XJhVFV5FYv1l0AGo5WAGCBorr4tZHZanrjg"
+
+  # 追加/覆盖查询参数
+  query_params:
+    debug: "true"
+
+  # 覆盖 JSON Body 字段（仅 Content-Type 为 application/json 时生效）
+  body_overrides:
+    traceId: "demo-trace-id"
+
+execute:
+  run: false          # true 则自动执行 curl
+  timeout: 30
+
+browser:
+  headless: true
+  user_agent: null
+
+output_dir: "captures"
+
+

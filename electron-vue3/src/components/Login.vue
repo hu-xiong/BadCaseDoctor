@@ -1,0 +1,500 @@
+<template>
+  <div class="login-container">
+    <div class="background-animation"></div>
+    <div class="login-card">
+      <div class="text-center mb-4">
+        <h2 class="text-primary">BadCase Doctor</h2>
+        <p class="text-muted">登录您的账户</p>
+      </div>
+      
+      <form @submit.prevent="handleLogin">
+        <div class="mb-3">
+          <label for="email" class="form-label">邮箱地址</label>
+          <input
+            type="email"
+            class="form-control"
+            id="email"
+            v-model="form.email"
+            required
+            placeholder="请输入邮箱地址"
+          />
+        </div>
+        
+        <div class="mb-3">
+          <label for="password" class="form-label">密码</label>
+          <input
+            type="password"
+            class="form-control"
+            id="password"
+            v-model="form.password"
+            required
+            placeholder="请输入密码"
+          />
+        </div>
+        
+        <div class="d-grid gap-2">
+          <button type="submit" class="btn btn-primary" :disabled="loading">
+            <span v-if="loading" class="spinner-border spinner-border-sm me-2"></span>
+            {{ loading ? '登录中...' : '登录' }}
+          </button>
+        </div>
+        
+
+      </form>
+      
+      <div class="mt-3 text-center">
+        <a href="#" @click.prevent="showRegister = true" class="text-decoration-none">
+          还没有账户？立即注册
+        </a>
+      </div>
+      
+      <div class="mt-2 text-center">
+        <a href="#" @click.prevent="showForgotPassword = true" class="text-decoration-none">
+          忘记密码？
+        </a>
+      </div>
+    </div>
+    
+    <!-- 注册模态框 -->
+    <div v-if="showRegister" class="modal fade show d-block" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">用户注册</h5>
+            <button type="button" class="btn-close" @click="showRegister = false"></button>
+          </div>
+          <div class="modal-body">
+            <form @submit.prevent="handleRegister">
+              <div class="mb-3">
+                <label for="reg-email" class="form-label">邮箱地址</label>
+                <div class="input-group">
+                  <input
+                    type="email"
+                    class="form-control"
+                    id="reg-email"
+                    v-model="registerForm.email"
+                    required
+                    placeholder="请输入邮箱地址"
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-outline-secondary"
+                    @click="sendVerificationCode"
+                    :disabled="codeSending"
+                  >
+                    {{ codeSending ? '发送中...' : '发送验证码' }}
+                  </button>
+                </div>
+              </div>
+              
+              <div class="mb-3">
+                <label for="verification-code" class="form-label">验证码</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="verification-code"
+                  v-model="registerForm.verification_code"
+                  required
+                  placeholder="请输入验证码"
+                />
+              </div>
+              
+              <div class="mb-3">
+                <label for="reg-name" class="form-label">姓名</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="reg-name"
+                  v-model="registerForm.name"
+                  required
+                  placeholder="请输入姓名"
+                />
+              </div>
+              
+              <div class="mb-3">
+                <label for="reg-password" class="form-label">密码</label>
+                <input
+                  type="password"
+                  class="form-control"
+                  id="reg-password"
+                  v-model="registerForm.password"
+                  required
+                  placeholder="请输入密码"
+                />
+              </div>
+              
+              <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-primary" :disabled="registerLoading">
+                  {{ registerLoading ? '注册中...' : '注册' }}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 忘记密码模态框 -->
+    <div v-if="showForgotPassword" class="modal fade show d-block" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">忘记密码</h5>
+            <button type="button" class="btn-close" @click="showForgotPassword = false"></button>
+          </div>
+          <div class="modal-body">
+            <form @submit.prevent="handleForgotPassword">
+              <div class="mb-3">
+                <label for="forgot-email" class="form-label">邮箱地址</label>
+                <input
+                  type="email"
+                  class="form-control"
+                  id="forgot-email"
+                  v-model="forgotPasswordForm.email"
+                  required
+                  placeholder="请输入邮箱地址"
+                />
+              </div>
+              
+              <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-primary" :disabled="forgotPasswordLoading">
+                  {{ forgotPasswordLoading ? '发送中...' : '发送重置链接' }}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import { ref, reactive } from 'vue'
+import { useRouter } from 'vue-router'
+import { login, register, sendVerificationCode } from '../api.js'
+import { setUser } from '../store/user.js'
+
+export default {
+  name: 'Login',
+  setup() {
+    const router = useRouter()
+    
+    const form = reactive({
+      email: '',
+      password: ''
+    })
+    
+    const registerForm = reactive({
+      email: '',
+      name: '',
+      password: '',
+      verification_code: ''
+    })
+    
+    const forgotPasswordForm = reactive({
+      email: ''
+    })
+    
+    const loading = ref(false)
+    const showRegister = ref(false)
+    const showForgotPassword = ref(false)
+    const codeSending = ref(false)
+    const registerLoading = ref(false)
+    const forgotPasswordLoading = ref(false)
+    
+    const handleLogin = async () => {
+      loading.value = true
+      try {
+        const response = await login({
+          email: form.email,
+          password: form.password
+        })
+        
+        if (response.data.success) {
+          // 登录成功，保存用户状态
+          setUser(response.data.user)
+          // 跳转到dashboard
+          router.push('/dashboard')
+        } else {
+          alert(response.data.error || '登录失败')
+        }
+      } catch (error) {
+        console.error('登录失败:', error)
+        if (error.response) {
+          alert(`登录失败: ${error.response.data?.error || error.response.statusText}`)
+        } else {
+          alert(`登录失败: ${error.message}`)
+        }
+      } finally {
+        loading.value = false
+      }
+    }
+    
+    const handleRegister = async () => {
+      registerLoading.value = true
+      try {
+        const response = await register({
+          email: registerForm.email,
+          name: registerForm.name,
+          password: registerForm.password,
+          verification_code: registerForm.verification_code
+        })
+        
+        if (response.data.success) {
+        showRegister.value = false
+        alert('注册成功！请登录')
+          // 清空注册表单
+          Object.assign(registerForm, {
+            email: '',
+            name: '',
+            password: '',
+            verification_code: ''
+          })
+        } else {
+          alert(response.data.error || '注册失败')
+        }
+      } catch (error) {
+        console.error('注册失败:', error)
+        if (error.response) {
+          alert(`注册失败: ${error.response.data?.error || error.response.statusText}`)
+        } else {
+          alert(`注册失败: ${error.message}`)
+        }
+      } finally {
+        registerLoading.value = false
+      }
+    }
+    
+    const handleSendVerificationCode = async () => {
+      if (!registerForm.email) {
+        alert('请先输入邮箱地址')
+        return
+      }
+      
+      codeSending.value = true
+      try {
+        const response = await sendVerificationCode({
+          email: registerForm.email
+        })
+        
+        if (response.data.success) {
+        alert('验证码已发送到您的邮箱')
+        } else {
+          alert(response.data.error || '发送验证码失败')
+        }
+      } catch (error) {
+        console.error('发送验证码失败:', error)
+        if (error.response) {
+          alert(`发送验证码失败: ${error.response.data?.error || error.response.statusText}`)
+        } else {
+          alert(`发送验证码失败: ${error.message}`)
+        }
+      } finally {
+        codeSending.value = false
+      }
+    }
+    
+    const handleForgotPassword = async () => {
+      forgotPasswordLoading.value = true
+      try {
+        // 这里可以调用忘记密码的API
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        showForgotPassword.value = false
+        alert('重置链接已发送到您的邮箱')
+      } catch (error) {
+        console.error('发送重置链接失败:', error)
+        alert('发送重置链接失败')
+      } finally {
+        forgotPasswordLoading.value = false
+      }
+    }
+
+    return {
+      form,
+      registerForm,
+      forgotPasswordForm,
+      loading,
+      showRegister,
+      showForgotPassword,
+      codeSending,
+      registerLoading,
+      forgotPasswordLoading,
+      handleLogin,
+      handleRegister,
+      sendVerificationCode: handleSendVerificationCode,
+      handleForgotPassword
+    }
+  }
+}
+</script>
+
+<style scoped>
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.background-animation {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(45deg, #667eea, #764ba2, #f093fb, #f5576c);
+  background-size: 400% 400%;
+  animation: gradientShift 15s ease infinite;
+  opacity: 0.8;
+}
+
+@keyframes gradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.login-card {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 20px;
+  padding: 40px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+  width: 100%;
+  max-width: 400px;
+  position: relative;
+  z-index: 1;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  animation: slideIn 0.6s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.login-card h2 {
+  color: #333;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.login-card p {
+  color: #666;
+  margin-bottom: 30px;
+}
+
+.form-label {
+  font-weight: 500;
+  color: #333;
+  margin-bottom: 8px;
+}
+
+.form-control {
+  border: 2px solid #e1e5e9;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 14px;
+  transition: all 0.3s ease;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.form-control:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+  outline: none;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  border-radius: 10px;
+  padding: 12px 24px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+}
+
+.btn-primary:disabled {
+  transform: none;
+  box-shadow: none;
+}
+
+.text-decoration-none {
+  color: #667eea;
+  transition: color 0.3s ease;
+}
+
+.text-decoration-none:hover {
+  color: #764ba2;
+}
+
+.modal {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(5px);
+}
+
+.modal-content {
+  border-radius: 15px;
+  border: none;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+}
+
+.modal-header {
+  border-bottom: 1px solid #e1e5e9;
+  padding: 20px 25px;
+}
+
+.modal-body {
+  padding: 25px;
+}
+
+.btn-close {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  color: #666;
+}
+
+.btn-close:hover {
+  color: #333;
+}
+
+.input-group .btn {
+  border-radius: 0 10px 10px 0;
+  border-left: none;
+}
+
+.input-group .form-control {
+  border-radius: 10px 0 0 10px;
+}
+
+/* 响应式设计 */
+@media (max-width: 480px) {
+  .login-card {
+    margin: 20px;
+    padding: 30px 20px;
+  }
+}
+</style> 

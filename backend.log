@@ -1,0 +1,57 @@
+开始同步数据库表结构...
+数据库表结构同步完成
+开始创建性能优化索引...
+索引 idx_user_email 已存在，跳过
+索引 idx_user_created_at 已存在，跳过
+索引 idx_project_user_id 已存在，跳过
+索引 idx_project_status 已存在，跳过
+索引 idx_project_created_at 已存在，跳过
+索引 idx_project_name 已存在，跳过
+索引 idx_permission_user_id 已存在，跳过
+索引 idx_permission_project_id 已存在，跳过
+索引 unique_user_project 已存在，跳过
+索引 idx_badcase_project_id 已存在，跳过
+索引 idx_badcase_creator_id 已存在，跳过
+索引 idx_badcase_status 已存在，跳过
+索引 idx_badcase_priority 已存在，跳过
+索引 idx_badcase_created_at 已存在，跳过
+索引 idx_badcase_project_status 已存在，跳过
+索引 idx_badcase_project_created 已存在，跳过
+索引 idx_comment_badcase_id 已存在，跳过
+索引 idx_comment_user_id 已存在，跳过
+索引 idx_comment_created_at 已存在，跳过
+索引 idx_template_project_id 已存在，跳过
+索引 idx_template_name 已存在，跳过
+索引 idx_plan_project_id 已存在，跳过
+索引 idx_plan_parent_id 已存在，跳过
+索引 idx_plan_type 已存在，跳过
+索引 idx_plan_status 已存在，跳过
+索引 idx_plan_creator_id 已存在，跳过
+索引 idx_plan_assignee_id 已存在，跳过
+索引 idx_bug_project_id 已存在，跳过
+索引 idx_bug_plan_id 已存在，跳过
+索引 idx_bug_creator_id 已存在，跳过
+索引 idx_bug_assignee_id 已存在，跳过
+索引 idx_bug_status 已存在，跳过
+索引 idx_bug_priority 已存在，跳过
+索引 idx_bug_severity 已存在，跳过
+索引 idx_bug_comment_bug_id 已存在，跳过
+索引 idx_bug_comment_user_id 已存在，跳过
+索引 idx_badcase_plan_id 已存在，跳过
+性能优化索引创建完成
+已更新用户密码: 2629258027@qq.com / 123456
+数据库初始化成功
+正在初始化MinIO...
+存储桶 apaas-root 已存在
+正在初始化Redis...
+正在连接Redis: 117.72.33.38:26378
+✅ Redis连接成功
+✅ Redis初始化成功
+ * Serving Flask app 'app'
+ * Debug mode: on
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+[33mPress CTRL+C to quit[0m
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 891-762-665
