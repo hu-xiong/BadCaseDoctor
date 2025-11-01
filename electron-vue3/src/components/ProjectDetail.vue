@@ -588,18 +588,19 @@
           'with-collapsed-sidebar': !leftSidebarHidden && planCollapsed,
           'with-right-sidebar': currentLayout === 'right'
         }" :style="{ 
-          width: currentLayout === 'right' ? 'calc(100% - ' + rightSidebarWidth + 'px)' : '100%'
+          width: currentLayout === 'right' ? 'calc(100% - ' + rightSidebarWidth + 'px)' : '100%',
+          height: bottomPanelHeight + 'px'
         }">
+          <!-- 拖拽手柄 -->
+          <div class="drag-handle-horizontal" @mousedown="startDragBottomPanel"></div>
+          
           <div class="panel-tabs">
             <div class="tab-item active">Terminal</div>
             <div class="tab-item">Output</div>
           </div>
           <div class="panel-content">
-            <!-- 使用新的Terminal组件 -->
-            <Terminal 
-              :initial-working-dir="currentWorkingDir"
-              :session-id="`project-${projectId}`"
-            />
+            <!-- 使用XTerminal组件 -->
+            <XTerminal />
           </div>
         </div>
       </div>
@@ -634,32 +635,9 @@
             </div>
           </div>
         </div>
-        
-        
-        
-        <!-- 对话区域 -->
-        <div class="ai-chat-panel">
-          <div class="chat-header">
-            <h3>AI 助手</h3>
-          </div>
-          <div class="chat-content">
-            <div class="chat-message ai">
-              <div class="message-avatar">🤖</div>
-              <div class="message-content">
-                您好！我是BadCase Doctor的AI助手，有什么可以帮助您的吗？
-              </div>
-            </div>
-            <div class="chat-message user">
-              <div class="message-avatar">👤</div>
-              <div class="message-content">
-                请帮我分析一下这个BadCase的问题
-              </div>
-            </div>
-          </div>
-          <div class="chat-input">
-            <input type="text" placeholder="输入您的问题..." class="chat-input-field" />
-            <button class="chat-send-btn">发送</button>
-          </div>
+        <!-- 聊天面板区域 -->
+        <div class="chat-panel-container">
+          <SimpleChatPanel />
         </div>
       </div>
     </div>
@@ -1014,7 +992,8 @@ import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, updateBadcasePlan, getProjectMembers } from '../api.js'
 import TeamManagement from './TeamManagement.vue'
-import Terminal from './Terminal.vue'
+import XTerminal from './XTerminal.vue'
+import SimpleChatPanel from './SimpleChatPanel.vue'
 import userStore from '../store/user.js'
 
 // 在浏览器环境中，这些Node.js模块可能不可用，需要处理
@@ -1037,7 +1016,8 @@ export default {
   name: 'ProjectDetail',
   components: {
     TeamManagement,
-    Terminal
+    XTerminal,
+    SimpleChatPanel
   },
   setup() {
     const router = useRouter()
@@ -1048,781 +1028,38 @@ export default {
     const projectId = ref(null)
     // 工作目录（保留用于Terminal组件）
     const currentWorkingDir = ref('/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor')
-
-    // 项目数据
     // 搜索和过滤
     const planSearchText = ref('')
     const showOnlyMine = ref(false)
     const includeSubPlans = ref(false)
-    
+
     // 新增搜索和筛选变量
     const searchText = ref('')
     const selectedAssignee = ref('')
     const selectedStatus = ref('')
     const projectMembers = ref([])
-    
-    // 展开状态
-    const expandedSections = ref({
-      unplanned: true,
-      inProgress: true,
-      archived: false
-    })
-    const expandedUnplannedBadcase = ref(true)
-    
-    // 选择状态
-    const selectedPlan = ref(null)
-    const selectAll = ref(false)
-    const selectedTasks = ref(new Set())
-    
-    // 项目计划数据
-    const projectPlans = ref([])
-    const filteredPlans = ref([])
-    const loading = ref(false)
-    
-    // 悬停状态
-    const hoveredPlan = ref(null)
-    const contextMenu = ref({
-      show: false,
-      x: 0,
-      y: 0,
-      plan: null
-    })
-    
-    // 侧边栏状态
-    const planCollapsed = ref(false)
-    const expandedPlans = ref(new Set())
-    
-    // 模态框状态
-    const showCreateModal = ref(false)
-    const showTeamManagementModal = ref(false)
-    const showProjectSettingsModal = ref(false)
-    const showPermissionSettingsModal = ref(false)
-    
-    // 计划创建状态
-    const isCreatingSubPlan = ref(false)
-    const isCreatingSiblingPlan = ref(false)
-    const isEditingPlan = ref(false)
-    const editingPlanId = ref(null)
-    
-    // 新计划数据
-    const newPlan = ref({
-      name: '',
-      description: '',
-      parent_id: null,
-      type: 'task',
-      priority: 'medium',
-      assignee_id: null,
-      due_date: null
-    })
-    
-    // 可用父计划
-    const availableParentPlans = ref([])
-    
-    // 表单验证
-    const namePlaceholder = computed(() => {
-      if (isCreatingSubPlan.value) return '输入子计划名称'
-      if (isCreatingSiblingPlan.value) return '输入同级计划名称'
-      if (isEditingPlan.value) return '输入计划名称'
-      return '输入计划名称'
-    })
-    
-    const isFormValid = computed(() => {
-      return newPlan.value.name.trim().length > 0
-    })
-    
-    // 计算属性
-    const unplannedBadcaseCount = computed(() => {
-      return badcases.value.filter(badcase => !badcase.plan_id).length
-    })
-    
-    const inProgressPlans = computed(() => {
-      return filteredPlans.value.filter(plan => plan.status === 'in_progress')
-    })
-    
-    const unplannedPlans = computed(() => {
-      return filteredPlans.value.filter(plan => plan.status === 'unplanned')
-    })
-    
-    const archivedPlans = computed(() => {
-      return filteredPlans.value.filter(plan => plan.status === 'archived')
-    })
-    
-    // BadCase数据
-    const badcases = ref([])
-    const filteredBadcases = ref([])
-    const badcaseLoading = ref(false)
-    const totalBadcases = ref(0)
-    
-    // 用户相关
-    const currentUser = ref(null)
-    const showUserDropdown = ref(false)
-    
-    // 布局相关
-    const currentLayout = ref('bottom')
-    const leftSidebarHidden = ref(false)
-    const rightSidebarWidth = ref(300)
-    
-    // AI助手相关
-    const showDropdown = ref(false)
-    const currentSession = ref(null)
-    const sessions = ref([])
-    
-    // 基线管理相关
-    const selectedBaselinePlan = ref(null)
-    const selectedBaseline = ref(null)
-    const selectedBadcases = ref([])
-    const baselines = ref([])
-    const availableBadcases = ref([])
-    const selectedBaselinePlanName = ref('')
-    const hasBaselines = ref(false)
-    const showBaselineManagementModal = ref(false)
-    
-    // 基础函数定义
-    const toggleSection = (section) => {
-      expandedSections.value[section] = !expandedSections.value[section]
-    }
-    
-    const toggleUnplannedBadcaseSection = () => {
-      expandedUnplannedBadcase.value = !expandedUnplannedBadcase.value
-    }
-    
-    const selectPlan = (plan) => {
-      selectedPlan.value = plan
-    }
-    
-    const selectUnplanned = () => {
-      // 选择未计划的BadCase
-    }
-    
-    const selectUnplannedBadcase = (badcase) => {
-      // 选择未计划的BadCase
-    }
-    
-    const selectBadcasePlan = (badcase, plan) => {
-      // 为BadCase选择计划
-    }
-    
-    const createPlanForBadcase = (badcase) => {
-      // 为BadCase创建计划
-    }
-    
-    const associateBadcaseWithPlan = (badcase, plan) => {
-      // 将BadCase关联到计划
-    }
-    
-    const filterBadcasesByPlan = (plan) => {
-      // 根据计划过滤BadCase
-    }
-    
-    const toggleSelectAll = () => {
-      selectAll.value = !selectAll.value
-    }
-    
-    const toggleTaskSelection = (task) => {
-      // 切换任务选择状态
-    }
-    
-    const createNewBadcase = () => {
-      // 创建新的BadCase
-    }
-    
-    const editBadcase = (badcase) => {
-      // 编辑BadCase
-    }
-    
-    const goToDashboard = () => {
-      router.push('/dashboard')
-    }
-    
-    const showPlanActions = (plan) => {
-      hoveredPlan.value = plan
-    }
-    
-    const hidePlanActions = () => {
-      hoveredPlan.value = null
-    }
-    
-    const showContextMenu = (event, plan) => {
-      contextMenu.value = {
-        show: true,
-        x: event.clientX,
-        y: event.clientY,
-        plan: plan
-      }
-    }
-    
-    const closeContextMenu = () => {
-      contextMenu.value.show = false
-    }
-    
-    const createSubPlan = (parentPlan) => {
-      isCreatingSubPlan.value = true
-      newPlan.value.parent_id = parentPlan.id
-      showCreateModal.value = true
-    }
-    
-    const createSiblingPlan = (siblingPlan) => {
-      isCreatingSiblingPlan.value = true
-      newPlan.value.parent_id = siblingPlan.parent_id
-      showCreateModal.value = true
-    }
-    
-    const editPlan = (plan) => {
-      isEditingPlan.value = true
-      editingPlanId.value = plan.id
-      newPlan.value = { ...plan }
-      showCreateModal.value = true
-    }
-    
-    const archivePlan = (plan) => {
-      // 归档计划
-    }
-    
-    const deletePlan = (plan) => {
-      // 删除计划
-    }
-    
-    const pinPlan = (plan) => {
-      // 置顶计划
-    }
-    
-    const favoritePlan = (plan) => {
-      // 收藏计划
-    }
-    
-    const createBaseline = (plan) => {
-      // 创建基线
-    }
-    
-    const showCreatePlanModal = () => {
-      showCreateModal.value = true
-    }
-    
-    const closeCreateModal = () => {
-      showCreateModal.value = false
-      isCreatingSubPlan.value = false
-      isCreatingSiblingPlan.value = false
-      isEditingPlan.value = false
-      editingPlanId.value = null
-      newPlan.value = {
-        name: '',
-        description: '',
-        parent_id: null,
-        type: 'task',
-        priority: 'medium',
-        assignee_id: null,
-        due_date: null
-      }
-    }
-    
-    const getModalTitle = () => {
-      if (isCreatingSubPlan.value) return '创建子计划'
-      if (isCreatingSiblingPlan.value) return '创建同级计划'
-      if (isEditingPlan.value) return '编辑计划'
-      return '创建计划'
-    }
-    
-    const showBaselineManagement = () => {
-      showBaselineManagementModal.value = true
-    }
-    
-    const closeBaselineManagementModal = () => {
-      showBaselineManagementModal.value = false
-    }
-    
-    const selectBaselinePlan = (plan) => {
-      selectedBaselinePlan.value = plan
-    }
-    
-    const toggleBadcaseSelection = (badcase) => {
-      // 切换BadCase选择状态
-    }
-    
-    const createNewBaseline = () => {
-      // 创建新基线
-    }
-    
-    const compareBaselines = () => {
-      // 比较基线
-    }
-    
-    const selectBaseline = (baseline) => {
-      selectedBaseline.value = baseline
-    }
-    
-    const viewBaseline = (baseline) => {
-      // 查看基线
-    }
-    
-    const deleteBaseline = (baseline) => {
-      // 删除基线
-    }
-    
-    const toggleBaselinePlanExpansion = (plan) => {
-      // 切换基线计划展开状态
-    }
-    
-    const manualRefreshPlans = () => {
-      // 手动刷新计划
-    }
-    
-    const togglePlanCollapse = () => {
-      planCollapsed.value = !planCollapsed.value
-    }
-    
-    const searchPlans = () => {
-      // 搜索计划
-    }
-    
-    const clearSearch = () => {
-      planSearchText.value = ''
-    }
-    
-    const filterPlans = () => {
-      // 过滤计划
-    }
-    
-    const filterPlansRecursively = (plans, searchText) => {
-      // 递归过滤计划
-      return plans.filter(plan => {
-        const matches = plan.name.toLowerCase().includes(searchText.toLowerCase())
-        const childrenMatch = plan.children ? filterPlansRecursively(plan.children, searchText) : []
-        return matches || childrenMatch.length > 0
-      })
-    }
-    
-    const calculateEndDate = (startDate, duration) => {
-      // 计算结束日期
-      return new Date(startDate.getTime() + duration * 24 * 60 * 60 * 1000)
-    }
-    
-    const createPlan = async () => {
-      // 创建计划
-    }
-    
-    const fetchBadcases = async () => {
-      // 获取BadCase列表
-    }
-    
-    const fetchUnplannedBadcases = async () => {
-      // 获取未计划的BadCase
-    }
-    
-    const refreshBadcases = () => {
-      // 刷新BadCase
-    }
-    
-    const getBadcaseStatusText = (status) => {
-      const statusMap = {
-        'pending': '待处理',
-        'resolved': '已处理',
-        'hold': '暂停',
-        'reopen': '重新打开',
-        'close': '已解决'
-      }
-      return statusMap[status] || status
-    }
-    
-    const getBadcaseTypeText = (type) => {
-      const typeMap = {
-        'BadCase': 'BadCase',
-        'bug': 'Bug',
-        'feature': '功能'
-      }
-      return typeMap[type] || type
-    }
-    
-    const getBadcaseBackgroundClass = (status) => {
-      const classMap = {
-        'pending': 'badcase-pending',
-        'resolved': 'badcase-resolved',
-        'hold': 'badcase-hold',
-        'reopen': 'badcase-reopen',
-        'close': 'badcase-close'
-      }
-      return classMap[status] || ''
-    }
-    
-    const getBadcaseIcon = (type) => {
-      const iconMap = {
-        'BadCase': '🔴',
-        'bug': '🐛',
-        'feature': '✨'
-      }
-      return iconMap[type] || '📋'
-    }
-    
-    const acceptBadcase = (badcase) => {
-      // 接受BadCase
-    }
-    
-    const rejectBadcase = (badcase) => {
-      // 拒绝BadCase
-    }
-    
-    const getPlanIcon = (type) => {
-      const iconMap = {
-        'epic': '🎯',
-        'story': '📖',
-        'task': '✅',
-        'bug': '🐛'
-      }
-      return iconMap[type] || '📋'
-    }
-    
-    const getPlanTypeText = (type) => {
-      const typeMap = {
-        'epic': '史诗',
-        'story': '故事',
-        'task': '任务',
-        'bug': 'Bug'
-      }
-      return typeMap[type] || type
-    }
-    
-    const ensureUnplannedBadcasePlan = () => {
-      // 确保未计划BadCase计划存在
-    }
-    
-    const createUnplannedBadcasePlan = () => {
-      // 创建未计划BadCase计划
-    }
-    
-    const getAssigneeDisplayText = (assignee) => {
-      if (Array.isArray(assignee)) {
-        return assignee.map(a => a.name || a).join(', ')
-      }
-      return assignee?.name || assignee || '未分配'
-    }
-    
-    const applyFilters = () => {
-      // 应用过滤器
-    }
-    
-    const fetchProjectMembers = async () => {
-      // 获取项目成员
-    }
-    
-    const generateBreadcrumb = () => {
-      // 生成面包屑
-    }
-    
-    const togglePlanExpansion = (planId) => {
-      if (expandedPlans.value.has(planId)) {
-        expandedPlans.value.delete(planId)
-      } else {
-        expandedPlans.value.add(planId)
-      }
-    }
-    
-    const showTeamManagement = () => {
-      showTeamManagementModal.value = true
-    }
-    
-    const showProjectSettings = () => {
-      showProjectSettingsModal.value = true
-    }
-    
-    const showPermissionSettings = () => {
-      showPermissionSettingsModal.value = true
-    }
-    
-    const closeConfigModals = () => {
-      showTeamManagementModal.value = false
-      showProjectSettingsModal.value = false
-      showPermissionSettingsModal.value = false
-    }
-    
-    const toggleUserDropdown = () => {
-      showUserDropdown.value = !showUserDropdown.value
-    }
-    
-    const showUserProfile = () => {
-      // 显示用户资料
-    }
-    
-    const showNotifications = () => {
-      // 显示通知
-    }
-    
-    const showHelp = () => {
-      // 显示帮助
-    }
-    
-    const logout = () => {
-      // 登出
-    }
-    
-    const setLayout = (layout) => {
-      currentLayout.value = layout
-    }
-    
-    const startDragRightSidebar = () => {
-      // 开始拖拽右侧边栏
-    }
-    
-    const toggleDropdown = () => {
-      showDropdown.value = !showDropdown.value
-    }
-    
-    const closeSession = (sessionId) => {
-      // 关闭会话
-    }
-    
-    const exportChat = () => {
-      // 导出聊天记录
-    }
-    
-    const clearMessages = () => {
-      // 清空消息
-    }
-    
-    const switchSession = (sessionId) => {
-      // 切换会话
-    }
-    
-    const createNewSession = () => {
-      // 创建新会话
-    }
-    
-    const closeSessionTab = (sessionId) => {
-      // 关闭会话标签
-    }
-      
-      // 重置历史索引
-      historyIndex.value = -1
-      
-      // 处理多行输入
-      const multilineResult = handleMultilineInput(cmd)
-      if (multilineResult === true) return // 继续多行输入
-      if (multilineResult !== false) cmd = multilineResult // 使用完整的多行命令
-      
-      // 添加到命令历史
-      if (cmd && !commandHistory.value.includes(cmd)) {
-        commandHistory.value.push(cmd)
-        if (commandHistory.value.length > 100) {
-          commandHistory.value.shift()
-        }
-      }
-      
-      // 处理特殊命令
-      if (handleSpecialCommands(cmd)) {
-        terminalInputCommand.value = ''
-        return
-      }
-      
-      appendHistory(`$ ${cmd}`, 'command')
-      terminalInputCommand.value = ''
-      terminalExecuting.value = true
-      
-      try {
-        const resp = await executeTerminalCommand({ 
-          command: cmd, 
-          cwd: currentWorkingDir.value, 
-          timeout: 30,
-          session_id: terminalSessionId.value
-        })
-        
-        // 检查响应是否存在
-        if (!resp) {
-          appendHistory('ERR: 服务器无响应', 'error')
-          return
-        }
-        
-        // 检查响应数据结构
-        if (resp.data && resp.data.success) {
-          // 更新工作目录
-          if (resp.data.cwd && resp.data.cwd !== currentWorkingDir.value) {
-            currentWorkingDir.value = resp.data.cwd
-          }
-          
-          if (resp.data.stdout) appendHistory(resp.data.stdout, 'output')
-          if (resp.data.stderr) appendHistory(resp.data.stderr, 'error')
-          if (resp.data.code !== 0) {
-            appendHistory(`[exit ${resp.data.code}]`, 'system')
-          }
-          terminalSessionActive.value = true
-        } else if (resp.data) {
-          // 响应存在但执行失败
-          const errorMsg = resp.data.error || '执行失败'
-          if (errorMsg.includes('未登录') || errorMsg.includes('login')) {
-            appendHistory('ERR: 用户未登录，请重新登录后重试', 'error')
-            // 可以在这里添加自动跳转到登录页的逻辑
-          } else {
-            appendHistory(`ERR: ${errorMsg}`, 'error')
-          }
-        } else {
-          // 响应格式异常
-          appendHistory('ERR: 服务器响应格式异常', 'error')
-        }
-      } catch (e) {
-        console.error('Terminal execution error:', e)
-        let errorMsg = '执行失败'
-        
-        if (e?.response?.data?.error) {
-          errorMsg = e.response?.data?.error || '未知错误'
-          if (errorMsg.includes('未登录') || errorMsg.includes('login')) {
-            errorMsg = '用户未登录，请重新登录后重试'
-          }
-        } else if (e?.response?.data?.message) {
-          errorMsg = e.response.data.message
-        } else if (e?.message) {
-          errorMsg = e.message
-        } else if (typeof e === 'string') {
-          errorMsg = e
-        }
-        
-        appendHistory(`ERR: ${errorMsg}`, 'error')
-      } finally {
-        terminalExecuting.value = false
-      }
-    
 
-    // 键盘事件处理
-    const handleTerminalKeydown = (event) => {
-      // 上下箭头 - 命令历史
-      if (event.key === 'ArrowUp') {
-        event.preventDefault()
-        navigateHistory('up')
-      } else if (event.key === 'ArrowDown') {
-        event.preventDefault()
-        navigateHistory('down')
-      }
-      
-      // Tab - 自动补全
-      else if (event.key === 'Tab') {
-        event.preventDefault()
-        const input = terminalInputCommand.value.trim()
-        if (input) {
-          getAutocompleteOptions(input).then(options => {
-            if (options.length > 0) {
-              autocompleteOptions.value = options
-              showAutocomplete.value = true
-              autocompleteIndex.value = 0
-            }
-          })
-        }
-      }
-      
-      // Ctrl+C - 终止
-      else if (event.ctrlKey && event.key === 'c') {
-        event.preventDefault()
-        if (terminalExecuting.value) {
-          terminalInputCommand.value = '^C'
-          onExecuteTerminal()
-        }
-      }
-      
-      // Ctrl+L - 清屏
-      else if (event.ctrlKey && event.key === 'l') {
-        event.preventDefault()
-        terminalInputCommand.value = '^L'
-        onExecuteTerminal()
-      }
-      
-      // Ctrl+U - 清空当前行
-      else if (event.ctrlKey && event.key === 'u') {
-        event.preventDefault()
-        terminalInputCommand.value = ''
-      }
-      
-      // Ctrl+K - 删除到行尾
-      else if (event.ctrlKey && event.key === 'k') {
-        event.preventDefault()
-        const cursorPos = event.target.selectionStart
-        terminalInputCommand.value = terminalInputCommand.value.substring(0, cursorPos)
-      }
-      
-      // Ctrl+A - 移动到行首
-      else if (event.ctrlKey && event.key === 'a') {
-        event.preventDefault()
-        event.target.setSelectionRange(0, 0)
-      }
-      
-      // Ctrl+E - 移动到行尾
-      else if (event.ctrlKey && event.key === 'e') {
-        event.preventDefault()
-        const len = terminalInputCommand.value.length
-        event.target.setSelectionRange(len, len)
-      }
-      
-      // Escape - 取消自动补全
-      else if (event.key === 'Escape') {
-        showAutocomplete.value = false
-        autocompleteIndex.value = -1
-      }
-    }
-
-    // 选择自动补全
-    const selectAutocomplete = (option) => {
-      terminalInputCommand.value = option
-      showAutocomplete.value = false
-      autocompleteIndex.value = -1
-    }
-
-    // 终止当前命令
-    const stopCurrentCommand = async () => {
-      try {
-        await killTerminalSession(terminalSessionId.value)
-        terminalExecuting.value = false
-        terminalSessionActive.value = false
-        appendHistory('命令已终止', 'system')
-      } catch (e) {
-        appendHistory(`终止失败: ${e?.message || e}`, 'error')
-      }
-    }
-
-    // 初始化终端
-    const initTerminal = async () => {
-      appendHistory('Terminal initialized', 'system')
-      appendHistory(`Working directory: ${currentWorkingDir.value}`, 'system')
-      
-      // 检查会话状态
-      try {
-        const statusResp = await getTerminalStatus(terminalSessionId.value)
-        if (statusResp && statusResp.data && statusResp.data.success) {
-          terminalSessionActive.value = statusResp.data.alive
-          if (statusResp.data.cwd) {
-            currentWorkingDir.value = statusResp.data.cwd
-          }
-        }
-      } catch (e) {
-        console.log('Terminal status check failed:', e)
-      }
-    }
-    
-    // 搜索和过滤
-    const planSearchText = ref('')
-    const showOnlyMine = ref(false)
-    const includeSubPlans = ref(false)
-    
-    // 新增搜索和筛选变量
-    const searchText = ref('')
-    const selectedAssignee = ref('')
-    const selectedStatus = ref('')
-    const projectMembers = ref([])
-    
     // 展开状态
     const expandedSections = reactive({
       inProgress: true,
       archived: false,
       unplanned: true
     })
-    
+
     // 未计划badcase展开状态
     const expandedUnplannedBadcase = ref(false)
-    
+
     // 选择状态
     const selectedPlan = ref(null)
     const currentPlan = ref(null) // 当前选中的计划
     const selectAll = ref(false)
     const selectedTasks = ref([])
-    
+
     // 项目计划数据
     const projectPlans = ref([])
     const filteredPlans = ref([])
     const loading = ref(false)
-    
+
     // 悬停和上下文菜单状态
     const hoveredPlan = ref(null)
     const contextMenu = reactive({
@@ -1831,16 +1068,16 @@ export default {
       x: 0,
       y: 0
     })
-    
+
     // 显示状态
     const planCollapsed = ref(false)
-    
+
     // AI助手下拉菜单状态
     const showDropdown = ref(false)
-    
+
     // Terminal命令输入栏状态
     const showTerminalInput = ref(false)
-    
+
     // 会话管理
     const currentSession = ref('session1')
     const sessions = ref({
@@ -1850,24 +1087,23 @@ export default {
         messages: []
       },
       session2: {
-        id: 'session2', 
+        id: 'session2',
         title: '启动前端和后端',
         messages: []
       }
     })
-    
 
     const showTeamManagementModal = ref(false)
     const showProjectSettingsModal = ref(false)
     const showPermissionSettingsModal = ref(false)
     const showBaselineManagementModal = ref(false)
-    
+
     // 用户下拉菜单状态
     const showUserDropdown = ref(false)
     const currentUser = ref(null)
     
     // 布局对齐状态
-    const currentLayout = ref('left') // 'left', 'bottom', 'right'
+    const currentLayout = ref('left') // 'left', 'bottom', 'right' - 默认左对齐，点击右对齐按钮显示AI助手
     
     // 左侧边栏完全隐藏状态
     const leftSidebarHidden = ref(false)
@@ -1877,6 +1113,12 @@ export default {
     const isDraggingRightSidebar = ref(false)
     const dragStartX = ref(0)
     const dragStartWidth = ref(320)
+    
+    // 底部面板拖拽状态
+    const bottomPanelHeight = ref(300)
+    const isDraggingBottomPanel = ref(false)
+    const dragStartY = ref(0)
+    const dragStartHeight = ref(300)
     
     // 基线管理相关状态
     const selectedBaselinePlan = ref(null)
@@ -2185,7 +1427,7 @@ export default {
       // 清空对话功能
       console.log('清空对话')
     }
-    
+
     // 会话管理方法
     const switchSession = (sessionId) => {
       currentSession.value = sessionId
@@ -2200,7 +1442,7 @@ export default {
         messages: []
       }
       currentSession.value = newSessionId
-      
+
       // 显示terminal命令输入栏
       showTerminalInput.value = true
     }
@@ -2223,24 +1465,7 @@ export default {
       }
     }
     
-    // Terminal命令输入相关方法
-    const hideTerminalInput = () => {
-      showTerminalInput.value = false
-    }
-    
-    const executeTerminalCommand = () => {
-      return
-      
-      // 执行terminal命令的逻辑
-      // 已由底部栏实现
-      
-      // 这里可以添加实际的命令执行逻辑
-      // 例如：发送到后端执行，或显示在对话区域等
-      
-      // 清空命令输入并隐藏
-      showTerminalInput.value = false
-    }
-    
+
     // 当显示terminal输入时，自动聚焦到输入框（已由新的终端实现）
 
 
@@ -3922,6 +3147,47 @@ export default {
       }
     }
     
+    // 底部面板拖拽相关函数
+    const startDragBottomPanel = (event) => {
+      isDraggingBottomPanel.value = true
+      dragStartY.value = event.clientY
+      dragStartHeight.value = bottomPanelHeight.value
+      
+      document.body.classList.add('dragging')
+      
+      document.addEventListener('mousemove', handleDragBottomPanel)
+      document.addEventListener('mouseup', stopDragBottomPanel)
+      
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    
+    const handleDragBottomPanel = (event) => {
+      if (!isDraggingBottomPanel.value) return
+      
+      event.preventDefault()
+      event.stopPropagation()
+      
+      // 向上拖拽时，deltaY为负数，面板高度增加
+      const deltaY = dragStartY.value - event.clientY
+      const newHeight = Math.max(150, Math.min(800, dragStartHeight.value + deltaY))
+      bottomPanelHeight.value = newHeight
+    }
+    
+    const stopDragBottomPanel = (event) => {
+      isDraggingBottomPanel.value = false
+      
+      document.body.classList.remove('dragging')
+      
+      document.removeEventListener('mousemove', handleDragBottomPanel)
+      document.removeEventListener('mouseup', stopDragBottomPanel)
+      
+      if (event) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    }
+    
     const showTeamManagement = () => {
       showUserDropdown.value = false
       showTeamManagementModal.value = true
@@ -4177,6 +3443,8 @@ export default {
       leftSidebarHidden,
       rightSidebarWidth,
       startDragRightSidebar,
+      bottomPanelHeight,
+      startDragBottomPanel,
       selectedBaselinePlan,
       selectedBaseline,
       selectedBadcases,
@@ -6485,10 +5753,50 @@ export default {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 200px;
+  /* height: 由内联样式动态设置 */
+  min-height: 150px;
+  max-height: 800px;
   background: #1e1e1e;
   border-top: 1px solid #333;
   z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 横向拖拽手柄（用于底部面板） */
+.drag-handle-horizontal {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  background: transparent;
+  cursor: ns-resize;
+  z-index: 10;
+  transition: background-color 0.2s;
+}
+
+.drag-handle-horizontal:hover {
+  background: linear-gradient(to bottom, 
+    transparent 0%, 
+    rgba(96, 165, 250, 0.3) 50%, 
+    transparent 100%);
+}
+
+.drag-handle-horizontal::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 40px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+}
+
+.drag-handle-horizontal:hover::before {
+  background: rgba(96, 165, 250, 0.6);
 }
 
 /* 当左侧边栏存在时，调整底部面板的左边距 */
@@ -6507,6 +5815,8 @@ export default {
   display: flex;
   background: #2d2d2d;
   border-bottom: 1px solid #333;
+  flex-shrink: 0;
+  margin-top: 6px; /* 为拖拽手柄留出空间 */
 }
 
 .tab-item {
@@ -6528,9 +5838,12 @@ export default {
 }
 
 .panel-content {
-  height: calc(100% - 40px);
+  flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  overflow-x: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .terminal-content {
@@ -6547,17 +5860,18 @@ export default {
 /* 右侧AI助手面板样式 */
 .right-sidebar {
   position: fixed;
-  top: 0;
+  top: 60px;
   right: 0;
   width: 400px;
-  height: 100vh;
-  background: white;
-  border-left: 1px solid #e1e5e9;
-  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.1);
-  z-index: 100;
+  height: calc(100vh - 60px);
+  background: #252526;
+  border-left: 1px solid #3e3e3e;
+  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
+  z-index: 110;
   display: flex;
   flex-direction: column;
-  position: relative;
+  padding: 0;
+  margin: 0;
 }
 
 .ai-assistant-panel {
@@ -6565,6 +5879,10 @@ export default {
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  padding: 0;
+  margin: 0;
 }
 
 /* AI面板头部 */
@@ -6572,10 +5890,28 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  background: #f8f9fa;
-  border-bottom: 1px solid #e1e5e9;
-  min-height: 48px;
+  padding: 10px 12px;
+  background: #2d2d2d;
+  border-bottom: 1px solid #3e3e3e;
+  border-top: none;
+  flex-shrink: 0;
+  min-height: 44px;
+  margin: 0;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+/* 确保聊天面板容器占据剩余空间，紧贴头部 */
+.ai-assistant-panel .chat-panel-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  border: none;
+  margin-top: 0;
+  padding-top: 0;
 }
 
 .ai-panel-tabs {
@@ -6588,10 +5924,10 @@ export default {
 .ai-tab {
   position: relative;
   padding: 6px 12px 6px 16px;
-  background: #e9ecef;
+  background: #1e1e1e;
   border-radius: 4px 4px 0 0;
   font-size: 12px;
-  color: #6c757d;
+  color: #888;
   cursor: pointer;
   transition: all 0.2s;
   white-space: nowrap;
@@ -6602,16 +5938,16 @@ export default {
 }
 
 .ai-tab.active {
-  background: #007bff;
-  color: white;
+  background: #007acc;
+  color: #fff;
 }
 
 .ai-tab:hover {
-  background: #dee2e6;
+  background: #2a2a2a;
 }
 
 .ai-tab.active:hover {
-  background: #0056b3;
+  background: #005a9e;
 }
 
 .tab-close {
@@ -6643,7 +5979,7 @@ export default {
   background: none;
   border: none;
   font-size: 16px;
-  color: #6c757d;
+  color: #888;
   cursor: pointer;
   padding: 6px;
   border-radius: 4px;
@@ -6656,12 +5992,12 @@ export default {
 }
 
 .ai-action-btn:hover {
-  background: #e9ecef;
-  color: #495057;
+  background: #37373d;
+  color: #d4d4d4;
 }
 
 .ai-action-btn:active {
-  background: #dee2e6;
+  background: #2a2d2e;
 }
 
 /* 下拉菜单样式 */
@@ -6674,10 +6010,10 @@ export default {
   position: absolute;
   top: 100%;
   right: 0;
-  background: white;
-  border: 1px solid #e1e5e9;
+  background: #2d2d2d;
+  border: 1px solid #3e3e3e;
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
   z-index: 1000;
   min-width: 120px;
   opacity: 0;
@@ -6695,15 +6031,15 @@ export default {
 .dropdown-item {
   display: block;
   padding: 8px 16px;
-  color: #495057;
+  color: #d4d4d4;
   text-decoration: none;
   font-size: 13px;
   transition: background-color 0.2s;
 }
 
 .dropdown-item:hover {
-  background-color: #f8f9fa;
-  color: #212529;
+  background-color: #37373d;
+  color: #fff;
 }
 
 .dropdown-item:first-child {
@@ -7027,6 +6363,51 @@ export default {
   display: flex;
   flex-direction: column;
 }
+
+/* 聊天面板容器样式 */
+.chat-panel-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #1e1e1e;
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 0;
+}
+
+/* 确保 SimpleChatPanel 的输入框可见 */
+.chat-panel-container :deep(.simple-chat-panel) {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 2;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+/* 确保消息容器不添加额外的 padding，紧贴顶部 */
+.chat-panel-container :deep(.simple-chat-panel .messages-container) {
+  padding-top: 0;
+  margin-top: 0;
+}
+
+/* 确保输入框始终可见且不被遮挡 */
+.chat-panel-container :deep(.input-container) {
+  position: relative;
+  z-index: 100;
+  flex-shrink: 0;
+  min-height: 62px;
+  background: #2d2d2d;
+}
+
 
 /* 当左侧边栏存在时，调整主内容区域的右边距，为右侧对话框留出空间 */
 /* 主内容区域的右边距通过内联样式动态设置 */
