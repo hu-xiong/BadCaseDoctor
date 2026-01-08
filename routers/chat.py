@@ -6,6 +6,7 @@ from flask_login import current_user
 
 from agents.mysql_agent import MySQLAgent
 from agents.redis_agent import RedisAgent
+from agents.scriptAgent import scriptAgengt
 from llm.factory import get_llm
 
 chat_bp = Blueprint('chat', __name__)
@@ -30,15 +31,19 @@ def chat_stream():
     for intent in intentList:
 
         agent = intent.get("agent")
+        redis_agent = RedisAgent()
+        mysql_agent = MySQLAgent()
+        script_agent = scriptAgengt()
         print(agent)
         if agent == "redis_agent":
-            redis_agent = RedisAgent()
             result = redis_agent.handle(userId=current_user.id,action=intent.get("action"),llm_intent="",llm=llm, llm_script=intent.get("script"),info=intent.get("info"))
             return jsonify(result)
         elif agent == "mysql_agent":
-            mysql_agent = MySQLAgent()
             result = mysql_agent.handle(user_input, intent.get("info"))
             return jsonify({"code":200,"message":"sucess","data":result})
+        elif agent == "scriptAgent":
+            result = script_agent.handle(userId=current_user.id,action=intent.get("action"),llm_intent="",llm=llm, llm_script=intent.get("script"),info=intent.get("info"))
+            return jsonify(result)
         print("================")
         print(intent)
 

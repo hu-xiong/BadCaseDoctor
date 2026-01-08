@@ -39,7 +39,7 @@ class QwenLLM:
         你是一个智能路由助手。请根据用户输入和历史对话，**严格输出一个 JSON 数组**，不要任何其他内容（不要解释、不要代码块、不要 Markdown）。
 
         每个数组元素是一个任务对象，包含以下字段：
-        - "agent": 字符串，值必须是 ["redis_agent", "mysql_agent", "other"] 之一。
+        - "agent": 字符串，值必须是 ["redis_agent", "mysql_agent", "other","scriptAgent"] 之一。
         - "planActions": 字符串，详细描述该任务的执行步骤（例如："连接 Redis，获取 key 'user:1001' 的值"）。
         - "action": 字符串，表示操作类型。可选值包括：
             "connect", "disconnect", "query", "delete", "update", "add",
@@ -179,5 +179,90 @@ class QwenLLM:
 
 
 
+
+
+
+    def splitTask(self, user_input: str, info: str,history: list = None):
+        prompt=f"""
+        该任务是将用户的描述细分化，要将任务拆分成每一个小步骤，如排查host1，host2，host3，是否有文件aa是否有error存在，则生成多个对象，1.校验各个host是否联通，2.查找文件aa位置，3.打开文件aa，4.查找error，5退出操作，如，要生成执行步骤:
+        每个步骤都用一个json对象表示，格式为:
+         每个数组元素是一个任务对象，包含以下字段：
+            "task":"任务名词",  
+            "info": "任务具体步骤，将任务详情化"
+        输入:{user_input}
+        用户信息:{info}
+        只输出标准json，不要任何格式，不要任何解释，以供代码解析，不要多余字节，要可以给
+        """
+        response = Generation.call(
+            model=self.model,
+            prompt=prompt,
+            result_format='text'
+        )
+        if response.status_code == 200:
+            try:
+                print("=--=")
+                print(response.output.text)
+                print("----===0")
+                return json.loads(response.output.text.strip())
+            except json.JSONDecodeError as e:
+                print(f"JSON 解析错误: {e}")
+                return {"agent": "other", "action": "other", "info": {}}
+        else:
+            print("error")
+            return {"agent": "other", "action": "other", "info": {}}
+
+    def generateScript(self, user_input: str, info: str,history: list = None):
+        prompt=f"""
+        该任务是生成linux脚本，请生成
+        输入:{user_input}
+        用户信息:{info}
+        只输出标准json，不要任何格式，不要任何解释，以供代码解析，不要多余字节，要可以给
+        """
+        response = Generation.call(
+            model=self.model,
+            prompt=prompt,
+            result_format='text'
+        )
+        if response.status_code == 200:
+            try:
+                print("=--=")
+                print(response.output.text)
+                print("----===0")
+                return json.loads(response.output.text.strip())
+            except json.JSONDecodeError as e:
+                print(f"JSON 解析错误: {e}")
+                return {"agent": "other", "action": "other", "info": {}}
+        else:
+            print("error")
+            return {"agent": "other", "action": "other", "info": {}}
+    def dealScript(self, user_input: str, info: str,history: list = None):
+        print("dealScript",user_input)
+
+        print("uiiy-"*30)
+        print(user_input)
+        prompt=f"""
+        该任务是生成将各个任务linux脚本合成一个可执行的脚本，请生成
+        输入:{user_input}
+        用户信息:{info}
+        只输出标准json，不要任何格式，不要任何解释，以供代码解析，不要多余字节，要可以给
+        """
+
+        response = Generation.call(
+            model=self.model,
+            prompt=prompt,
+            result_format='text'
+        )
+        if response.status_code == 200:
+            try:
+                print("=--=")
+                print(response.output.text)
+                print("----===0")
+                return json.loads(response.output.text.strip())
+            except json.JSONDecodeError as e:
+                print(f"JSON 解析错误: {e}")
+                return {"agent": "other", "action": "other", "info": {}}
+        else:
+            print("error")
+            return {"agent": "other", "action": "other", "info": {}}
 
 
