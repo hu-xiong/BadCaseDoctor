@@ -605,39 +605,57 @@
         </div>
       </div>
       
-      <!-- 右侧AI助手面板 -->
-      <div v-if="currentLayout === 'right'" class="right-sidebar ai-assistant-panel" :style="{ width: rightSidebarWidth + 'px' }">
-        <!-- 拖拽手柄 -->
-        <div class="drag-handle" @mousedown="startDragRightSidebar"></div>
-        
-        <!-- 面板头部 -->
-        <div class="ai-panel-header">
-          <div class="ai-panel-tabs">
-            <div class="ai-tab" :class="{ 'active': currentSession === 'session1' }" @click="switchSession('session1')">
-              启动前端和后端
-              <button class="tab-close" @click.stop="closeSessionTab('session1')">×</button>
+
+    </div>
+    
+    <!-- 右侧AI助手面板 - 移出main-container以确保position:fixed生效 -->
+    <div v-if="currentLayout === 'right'" class="right-sidebar ai-assistant-panel" :style="{ width: rightSidebarWidth + 'px', zIndex: 1000 }">
+      <!-- 拖拽手柄 -->
+      <div class="drag-handle" @mousedown="startDragRightSidebar"></div>
+      
+      <div class="ai-panel-layout">
+        <!-- 左侧会话列表 -->
+        <div class="session-sidebar">
+          <div class="session-list">
+            <div 
+              v-for="session in sessions" 
+              :key="session.id"
+              class="session-item" 
+              :class="{ 'active': currentSession === session.id }"
+              @click="switchSession(session.id)"
+            >
+              <div class="session-title">{{ session.title || 'newchat' }}</div>
+              <button class="session-close" @click.stop="closeSessionTab(session.id)">×</button>
             </div>
-            <div class="ai-tab" :class="{ 'active': currentSession === 'session2' }" @click="switchSession('session2')">
-              启动前端和后端
-              <button class="tab-close" @click.stop="closeSessionTab('session2')">×</button>
-            </div>
-          </div>
-          <div class="ai-panel-actions">
-            <button class="ai-action-btn" title="新增会话" @click="createNewSession">+</button>
-            <button class="ai-action-btn" title="会话历史">🕐</button>
-            <div class="dropdown">
-              <button class="ai-action-btn dropdown-toggle" title="更多选项" @click="toggleDropdown">⋯</button>
-              <div class="dropdown-menu" :class="{ 'show': showDropdown }">
-                <a class="dropdown-item" href="#" @click="closeSession">关闭会话</a>
-                <a class="dropdown-item" href="#" @click="exportChat">导出对话</a>
-                <a class="dropdown-item" href="#" @click="clearMessages">清空对话</a>
-              </div>
+            <!-- 如果没有会话，显示一个提示或空状态 -->
+            <div v-if="sessions.length === 0" class="session-empty-hint">
+              暂无会话
             </div>
           </div>
         </div>
-        <!-- 聊天面板区域 -->
-        <div class="chat-panel-container">
-          <SimpleChatPanel />
+        
+        <!-- 右侦聊天区域 -->
+        <div class="chat-area">
+          <!-- 顶部操作栏 -->
+          <div class="chat-header">
+            <div class="chat-title">{{ getCurrentSessionData()?.title || 'newchat' }}</div>
+            <div class="chat-actions">
+              <button class="chat-action-btn" title="新增会话" @click="createNewSession">+</button>
+              <button class="chat-action-btn" title="会话历史">🕐</button>
+              <div class="dropdown">
+                <button class="chat-action-btn dropdown-toggle" title="更多选项" @click="toggleDropdown">⋯</button>
+                <div class="dropdown-menu" :class="{ 'show': showDropdown }">
+                  <a class="dropdown-item" href="#" @click="closeSession">关闭会话</a>
+                  <a class="dropdown-item" href="#" @click="exportChat">导出对话</a>
+                  <a class="dropdown-item" href="#" @click="clearMessages">清空对话</a>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- 聊天面板区域 -->
+          <div class="chat-panel-container">
+            <SimpleChatPanel :session-id="currentSession" :project-id="projectId" />
+          </div>
         </div>
       </div>
     </div>
@@ -990,7 +1008,7 @@
 <script>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, updateBadcasePlan, getProjectMembers } from '../api.js'
+import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, deleteChatSession } from '../api.js'
 import TeamManagement from './TeamManagement.vue'
 import XTerminal from './XTerminal.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
@@ -1026,6 +1044,7 @@ export default {
     // 项目信息
     const projectName = ref('项目详情')
     const projectId = ref(null)
+    const project = ref(null)
     // 工作目录（保留用于Terminal组件）
     const currentWorkingDir = ref('/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor')
     // 搜索和过滤
@@ -1079,17 +1098,114 @@ export default {
     const showTerminalInput = ref(false)
 
     // 会话管理
-    const currentSession = ref('session1')
-    const sessions = ref({
-      session1: {
-        id: 'session1',
-        title: '启动前端和后端',
-        messages: []
-      },
-      session2: {
-        id: 'session2',
-        title: '启动前端和后端',
-        messages: []
+    const currentSession = ref(null)
+    const sessions = ref([])
+    
+    // 加载会话列表
+    const loadChatSessions = async () => {
+      if (!projectId.value) {
+        console.error('项目 ID 不存在')
+        return
+      }
+      
+      try {
+        console.log('[DEBUG] 开始加载会话，projectId:', projectId.value)
+        const response = await getChatSessions(projectId.value)
+        console.log('[DEBUG] 会话响应:', response.data)
+        if (response.data.success) {
+          sessions.value = response.data.sessions
+          console.log('[DEBUG] 会话列表已加载:', sessions.value.length, '个会话')
+          // 如果有会话，默认选中第一个
+          if (sessions.value.length > 0) {
+            currentSession.value = sessions.value[0].id
+            console.log('[DEBUG] 选中会话:', currentSession.value)
+          } else {
+            // 如果没有会话，创建一个默认会话
+            console.log('[DEBUG] 没有会话，创建默认会话')
+            await createNewSession()
+          }
+        }
+      } catch (error) {
+        console.error('加载会话列表失败:', error)
+      }
+    }
+    
+    // 创建新会话
+    const createNewSession = async () => {
+      if (!projectId.value) {
+        console.error('项目 ID 不存在')
+        alert('错误：项目 ID 不存在')
+        return
+      }
+      
+      try {
+        console.log('正在创建新会话，项目ID:', projectId.value)
+        const response = await createChatSession(projectId.value, {
+          title: 'newchat',
+          memory_enabled: true
+        })
+        console.log('创建会话响应:', response.data)
+        if (response.data.success) {
+          sessions.value.push(response.data.session)
+          currentSession.value = response.data.session.id
+          console.log('新会话创建成功:', response.data.session)
+        } else {
+          console.error('创建会话失败:', response.data.error)
+          alert('创建会话失败: ' + (response.data.error || '未知错误'))
+        }
+      } catch (error) {
+        console.error('创建会话失败:', error)
+        if (error.response) {
+          console.error('错误响应:', error.response.data)
+          alert('创建会话失败: ' + (error.response.data.error || error.message))
+        } else {
+          alert('创建会话失败: ' + error.message)
+        }
+      }
+    }
+    
+    // 切换会话
+    const switchSession = (sessionId) => {
+      currentSession.value = sessionId
+    }
+    
+    // 关闭会话标签
+    const closeSessionTab = async (sessionId) => {
+      try {
+        await deleteChatSession(sessionId)
+        sessions.value = sessions.value.filter(s => s.id !== sessionId)
+        // 如果关闭的是当前会话，切换到另一个
+        if (currentSession.value === sessionId && sessions.value.length > 0) {
+          currentSession.value = sessions.value[0].id
+        }
+      } catch (error) {
+        console.error('关闭会话失败:', error)
+      }
+    }
+    
+    // 获取当前会话对象
+    const getCurrentSessionData = () => {
+      return sessions.value.find(s => s.id === currentSession.value)
+    }
+    
+    // 初始化加载会话
+    onMounted(async () => {
+      // 获取项目 ID
+      const id = route.params.id
+      if (id) {
+        projectId.value = id
+        // 加载项目详情
+        try {
+          const response = await getProjectDetail(id)
+          if (response.data.success) {
+            project.value = response.data.project
+            projectName.value = project.value.name
+            // 加载会话列表
+            await loadChatSessions()
+          }
+        } catch (error) {
+          console.error('加载项目详情失败:', error)
+        }
       }
     })
 
@@ -1427,44 +1543,6 @@ export default {
       // 清空对话功能
       console.log('清空对话')
     }
-
-    // 会话管理方法
-    const switchSession = (sessionId) => {
-      currentSession.value = sessionId
-      showDropdown.value = false
-    }
-    
-    const createNewSession = () => {
-      const newSessionId = 'session' + Date.now()
-      sessions.value[newSessionId] = {
-        id: newSessionId,
-        title: '新会话',
-        messages: []
-      }
-      currentSession.value = newSessionId
-
-      // 显示terminal命令输入栏
-      showTerminalInput.value = true
-    }
-    
-    const closeSessionTab = (sessionId) => {
-      if (Object.keys(sessions.value).length <= 1) {
-        // 如果只有一个会话，则关闭整个面板
-        setLayout('left')
-        return
-      }
-      
-      delete sessions.value[sessionId]
-      
-      // 如果关闭的是当前会话，切换到第一个可用会话
-      if (currentSession.value === sessionId) {
-        const availableSessions = Object.keys(sessions.value)
-        if (availableSessions.length > 0) {
-          currentSession.value = availableSessions[0]
-        }
-      }
-    }
-    
 
     // 当显示terminal输入时，自动聚焦到输入框（已由新的终端实现）
 
@@ -3060,6 +3138,8 @@ export default {
     
     // 设置布局对齐
     const setLayout = (layout) => {
+      console.log('[DEBUG] setLayout called with:', layout, 'current:', currentLayout.value)
+      console.log('[DEBUG] sessions count:', sessions.value.length, 'currentSession:', currentSession.value)
       // 如果点击的是当前已激活的布局，则切换状态
       if (currentLayout.value === layout) {
         if (layout === 'left') {
@@ -3073,7 +3153,7 @@ export default {
       }
       
       currentLayout.value = layout
-      console.log('布局已设置为:', layout)
+      console.log('[DEBUG] 布局已设置为:', layout, '新值:', currentLayout.value)
       
       // 根据布局类型执行相应的布局逻辑
       switch (layout) {
@@ -3089,6 +3169,7 @@ export default {
         case 'right':
           // 右对齐：切换右侧对话区域，保持左侧边栏状态
           // 不改变左侧边栏的显示状态，让它们共存
+          console.log('[DEBUG] 切换到right布局')
           break
       }
     }
@@ -3306,6 +3387,10 @@ export default {
         // 确保有未计划的BadCase类型计划
         console.log('检查并确保有未计划的BadCase类型计划...')
         await ensureUnplannedBadcasePlan()
+        
+        // 加载AI助手会话列表
+        console.log('开始加载AI助手会话列表...')
+        await loadChatSessions()
       } else {
         console.error('项目ID为空，无法获取数据')
       }
@@ -5860,14 +5945,15 @@ export default {
 /* 右侧AI助手面板样式 */
 .right-sidebar {
   position: fixed;
-  top: 60px;
+  top: 0;
   right: 0;
   width: 400px;
-  height: calc(100vh - 60px);
+  min-width: 300px;
+  height: 100vh;
   background: #252526;
   border-left: 1px solid #3e3e3e;
   box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
-  z-index: 110;
+  z-index: 1000;
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -5875,43 +5961,161 @@ export default {
 }
 
 .ai-assistant-panel {
-  width: 100%;
-  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   position: relative;
   padding: 0;
   margin: 0;
+  background: #252526;
 }
 
-/* AI面板头部 */
-.ai-panel-header {
+/* AI面板布局 */
+.ai-panel-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  height: 100%;
+}
+
+/* 左侧会话侧边栏 */
+.session-sidebar {
+  width: 200px;
+  background: #1e1e1e;
+  border-right: 1px solid #3e3e3e;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.session-empty-hint {
+  padding: 20px;
+  text-align: center;
+  color: #666;
+  font-size: 12px;
+}
+
+.session-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
+  margin-bottom: 4px;
   background: #2d2d2d;
-  border-bottom: 1px solid #3e3e3e;
-  border-top: none;
-  flex-shrink: 0;
-  min-height: 44px;
-  margin: 0;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
 }
 
-/* 确保聊天面板容器占据剩余空间，紧贴头部 */
-.ai-assistant-panel .chat-panel-container {
+.session-item:hover {
+  background: #37373d;
+}
+
+.session-item.active {
+  background: #007acc;
+  color: #fff;
+}
+
+.session-title {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #d4d4d4;
+}
+
+.session-item.active .session-title {
+  color: #fff;
+  font-weight: 500;
+}
+
+.session-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0;
+  transition: all 0.2s;
+}
+
+.session-item:hover .session-close,
+.session-item.active .session-close {
+  opacity: 1;
+}
+
+.session-close:hover {
+  color: #fff;
+}
+
+/* 右侧聊天区域 */
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #2d2d2d;
+  border-bottom: 1px solid #3e3e3e;
+  flex-shrink: 0;
+  min-height: 48px;
+}
+
+.chat-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d4d4d4;
+}
+
+.chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-action-btn {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-action-btn:hover {
+  background: #37373d;
+  color: #d4d4d4;
+}
+
+/* 聊天面板容器 */
+.chat-area .chat-panel-container {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   margin: 0;
   padding: 0;
-  border: none;
-  margin-top: 0;
-  padding-top: 0;
+  overflow: hidden;
 }
 
 .ai-panel-tabs {

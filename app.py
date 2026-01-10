@@ -706,6 +706,38 @@ class Bug(db.Model):
     creator = db.relationship('User', foreign_keys=[creator_id], backref='created_bugs')
     assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_bugs')
 
+class ChatSession(db.Model):
+    __tablename__ = 'chat_session'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    memory_enabled = db.Column(db.Boolean, default=True)
+    memory_data = db.Column(db.Text)  # JSON格式存储
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # 关系
+    project = db.relationship('Project', backref='chat_sessions')
+    user = db.relationship('User', backref='chat_sessions')
+
+class ChatMessage(db.Model):
+    __tablename__ = 'chat_message'
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('chat_session.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    is_user = db.Column(db.Boolean, default=True)
+    content = db.Column(db.Text)
+    understanding = db.Column(db.Text)
+    steps = db.Column(db.Text)  # JSON格式存储
+    final_response = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # 关系
+    session = db.relationship('ChatSession', backref='messages')
+    user = db.relationship('User', backref='chat_messages')
+
 class BugComment(db.Model):
     __tablename__ = 'bug_comment'
     id = db.Column(db.Integer, primary_key=True)
@@ -3137,6 +3169,36 @@ def sync_database_schema():
                     'FOREIGN KEY (bug_id) REFERENCES bug(id)',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
+            },
+            'chat_session': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'title VARCHAR(200) NOT NULL',
+                    'project_id INT NOT NULL',
+                    'user_id INT NOT NULL',
+                    'is_active BOOLEAN DEFAULT 1',
+                    'memory_enabled BOOLEAN DEFAULT 1',
+                    'memory_data TEXT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'FOREIGN KEY (project_id) REFERENCES project(id)',
+                    'FOREIGN KEY (user_id) REFERENCES user(id)'
+                ]
+            },
+            'chat_message': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'session_id INT NOT NULL',
+                    'user_id INT',
+                    'is_user BOOLEAN DEFAULT 1',
+                    'content TEXT NOT NULL',
+                    'understanding TEXT',
+                    'steps TEXT',
+                    'final_response TEXT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
+                    'FOREIGN KEY (user_id) REFERENCES user(id)'
+                ]
             }
         }
         
@@ -4155,5 +4217,223 @@ if __name__ == '__main__':
             db.session.rollback()
             print(f"添加Bug评论失败: {e}")
             return jsonify({'success': False, 'error': '添加评论失败'}), 500
+
+    # ==================== Chat Session API ====================
+    
+    @app.route('/api/projects/<int:project_id>/chat-sessions', methods=['GET'])
+    @login_required
+    def api_get_chat_sessions(project_id):
+        """获取项目的所有会话"""
+        try:
+            # 检查项目权限
+            if not has_project_permission(current_user.id, project_id):
+                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+            
+            sessions = ChatSession.query.filter_by(
+                project_id=project_id,
+                user_id=current_user.id
+            ).order_by(ChatSession.updated_at.desc()).all()
+            
+            return jsonify({
+                'success': True,
+                'sessions': [{
+                    'id': s.id,
+                    'title': s.title,
+                    'is_active': s.is_active,
+                    'memory_enabled': s.memory_enabled,
+                    'created_at': s.created_at.isoformat(),
+                    'updated_at': s.updated_at.isoformat()
+                } for s in sessions]
+            })
+            
+        except Exception as e:
+            print(f"获取会话列表失败: {e}")
+            return jsonify({'success': False, 'error': '获取会话列表失败'}), 500
+    
+    @app.route('/api/projects/<int:project_id>/chat-sessions', methods=['POST'])
+    @login_required
+    def api_create_chat_session(project_id):
+        """创建新会话"""
+        try:
+            # 检查项目权限
+            if not has_project_permission(current_user.id, project_id):
+                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+            
+            data = request.get_json()
+            title = data.get('title', '新建会话')
+            
+            session = ChatSession(
+                title=title,
+                project_id=project_id,
+                user_id=current_user.id,
+                memory_enabled=data.get('memory_enabled', True)
+            )
+            
+            db.session.add(session)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'session': {
+                    'id': session.id,
+                    'title': session.title,
+                    'is_active': session.is_active,
+                    'memory_enabled': session.memory_enabled,
+                    'created_at': session.created_at.isoformat(),
+                    'updated_at': session.updated_at.isoformat()
+                }
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"创建会话失败: {e}")
+            return jsonify({'success': False, 'error': '创建会话失败'}), 500
+    
+    @app.route('/api/chat-sessions/<int:session_id>', methods=['GET'])
+    @login_required
+    def api_get_chat_session(session_id):
+        """获取会话详情"""
+        try:
+            session = ChatSession.query.get(session_id)
+            if not session:
+                return jsonify({'success': False, 'error': '会话不存在'}), 404
+            
+            # 检查权限
+            if session.user_id != current_user.id:
+                return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
+            
+            # 获取消息
+            messages = []
+            for msg in session.messages:
+                messages.append({
+                    'id': msg.id,
+                    'is_user': msg.is_user,
+                    'content': msg.content,
+                    'understanding': msg.understanding,
+                    'steps': msg.steps,
+                    'final_response': msg.final_response,
+                    'created_at': msg.created_at.isoformat()
+                })
+            
+            return jsonify({
+                'success': True,
+                'session': {
+                    'id': session.id,
+                    'title': session.title,
+                    'is_active': session.is_active,
+                    'memory_enabled': session.memory_enabled,
+                    'memory_data': session.memory_data,
+                    'created_at': session.created_at.isoformat(),
+                    'updated_at': session.updated_at.isoformat(),
+                    'messages': messages
+                }
+            })
+            
+        except Exception as e:
+            print(f"获取会话详情失败: {e}")
+            return jsonify({'success': False, 'error': '获取会话详情失败'}), 500
+    
+    @app.route('/api/chat-sessions/<int:session_id>', methods=['PUT'])
+    @login_required
+    def api_update_chat_session(session_id):
+        """更新会话"""
+        try:
+            session = ChatSession.query.get(session_id)
+            if not session:
+                return jsonify({'success': False, 'error': '会话不存在'}), 404
+            
+            # 检查权限
+            if session.user_id != current_user.id:
+                return jsonify({'success': False, 'error': '没有权限修改此会话'}), 403
+            
+            data = request.get_json()
+            if 'title' in data:
+                session.title = data['title']
+            if 'is_active' in data:
+                session.is_active = data['is_active']
+            if 'memory_enabled' in data:
+                session.memory_enabled = data['memory_enabled']
+            if 'memory_data' in data:
+                session.memory_data = data['memory_data']
+            
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '会话更新成功'
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"更新会话失败: {e}")
+            return jsonify({'success': False, 'error': '更新会话失败'}), 500
+    
+    @app.route('/api/chat-sessions/<int:session_id>', methods=['DELETE'])
+    @login_required
+    def api_delete_chat_session(session_id):
+        """删除会话"""
+        try:
+            session = ChatSession.query.get(session_id)
+            if not session:
+                return jsonify({'success': False, 'error': '会话不存在'}), 404
+            
+            # 检查权限
+            if session.user_id != current_user.id:
+                return jsonify({'success': False, 'error': '没有权限删除此会话'}), 403
+            
+            # 删除会话及其所有消息
+            ChatMessage.query.filter_by(session_id=session_id).delete()
+            db.session.delete(session)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '会话删除成功'
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"删除会话失败: {e}")
+            return jsonify({'success': False, 'error': '删除会话失败'}), 500
+    
+    @app.route('/api/chat-sessions/<int:session_id>/messages', methods=['POST'])
+    @login_required
+    def api_add_chat_message(session_id):
+        """添加消息"""
+        try:
+            session = ChatSession.query.get(session_id)
+            if not session:
+                return jsonify({'success': False, 'error': '会话不存在'}), 404
+            
+            # 检查权限
+            if session.user_id != current_user.id:
+                return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
+            
+            data = request.get_json()
+            
+            message = ChatMessage(
+                session_id=session_id,
+                user_id=current_user.id if data.get('is_user') else None,
+                is_user=data.get('is_user', True),
+                content=data.get('content'),
+                understanding=data.get('understanding'),
+                steps=data.get('steps'),
+                final_response=data.get('final_response')
+            )
+            
+            db.session.add(message)
+            session.updated_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message_id': message.id,
+                'created_at': message.created_at.isoformat()
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"添加消息失败: {e}")
+            return jsonify({'success': False, 'error': '添加消息失败'}), 500
 
     app.run(debug=True, port=5000) 

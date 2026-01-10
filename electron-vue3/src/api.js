@@ -188,4 +188,36 @@ export function getTerminalStatus(sessionId = 'default') {
   return api.get(`/api/terminal/status?session_id=${sessionId}`)
 }
 
+// ==================== Chat Session API ====================
+
+// 获取项目的所有会话
+export function getChatSessions(projectId) {
+  return api.get(`/api/projects/${projectId}/chat-sessions`)
+}
+
+// 创建新会话
+export function createChatSession(projectId, data) {
+  return api.post(`/api/projects/${projectId}/chat-sessions`, data)
+}
+
+// 获取会话详情
+export function getChatSession(sessionId) {
+  return api.get(`/api/chat-sessions/${sessionId}`)
+}
+
+// 更新会话
+export function updateChatSession(sessionId, data) {
+  return api.put(`/api/chat-sessions/${sessionId}`, data)
+}
+
+// 删除会话
+export function deleteChatSession(sessionId) {
+  return api.delete(`/api/chat-sessions/${sessionId}`)
+}
+
+// 添加消息
+export function addChatMessage(sessionId, data) {
+  return api.post(`/api/chat-sessions/${sessionId}/messages`, data)
+}
+
 export default api 

@@ -63,6 +63,12 @@ const routes = [
     meta: { requiresAuth: true }
   },
   { 
+    path: '/chat-sessions/:projectId?', 
+    name: 'ChatSessions', 
+    component: () => import('../components/ChatSessions.vue'),
+    meta: { requiresAuth: true }
+  },
+  { 
     path: '/terminal-test', 
     name: 'TerminalTest', 
     component: () => import('../components/TerminalTest.vue'),
