@@ -7,6 +7,12 @@ WTForms
 pandas
 openpyxl
 pymysql
+flask-session
+redis
+openai
+langchain_community
+dashscope
+langchain_core
 python-dotenv
 passlib
 email-validator

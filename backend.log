@@ -226,8 +226,8 @@ base64转换完成，长度: 70604 字符
 项目信息获取成功: A计划项目
 BadCase统计完成: 总计=3, 待处理=1, 已解决=0, 已关闭=0
 获取会话列表失败: (sqlite3.OperationalError) no such table: chat_session
-[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at 
-FROM chat_session 
+[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at
+FROM chat_session
 WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_session.updated_at DESC]
 [parameters: (1, 1)]
 (Background on this error at: https://sqlalche.me/e/20/e3q8)
@@ -236,8 +236,8 @@ WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_ses
 项目信息获取成功: A计划项目
 BadCase统计完成: 总计=3, 待处理=1, 已解决=0, 已关闭=0
 获取会话列表失败: (sqlite3.OperationalError) no such table: chat_session
-[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at 
-FROM chat_session 
+[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at
+FROM chat_session
 WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_session.updated_at DESC]
 [parameters: (1, 1)]
 (Background on this error at: https://sqlalche.me/e/20/e3q8)
@@ -246,8 +246,8 @@ WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_ses
 项目信息获取成功: A计划项目
 BadCase统计完成: 总计=3, 待处理=1, 已解决=0, 已关闭=0
 获取会话列表失败: (sqlite3.OperationalError) no such table: chat_session
-[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at 
-FROM chat_session 
+[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at
+FROM chat_session
 WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_session.updated_at DESC]
 [parameters: (1, 1)]
 (Background on this error at: https://sqlalche.me/e/20/e3q8)
@@ -256,8 +256,8 @@ WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_ses
 项目信息获取成功: A计划项目
 BadCase统计完成: 总计=3, 待处理=1, 已解决=0, 已关闭=0
 获取会话列表失败: (sqlite3.OperationalError) no such table: chat_session
-[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at 
-FROM chat_session 
+[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at
+FROM chat_session
 WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_session.updated_at DESC]
 [parameters: (1, 1)]
 (Background on this error at: https://sqlalche.me/e/20/e3q8)
@@ -266,8 +266,8 @@ WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_ses
 项目信息获取成功: A计划项目
 BadCase统计完成: 总计=3, 待处理=1, 已解决=0, 已关闭=0
 获取会话列表失败: (sqlite3.OperationalError) no such table: chat_session
-[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at 
-FROM chat_session 
+[SQL: SELECT chat_session.id AS chat_session_id, chat_session.title AS chat_session_title, chat_session.project_id AS chat_session_project_id, chat_session.user_id AS chat_session_user_id, chat_session.is_active AS chat_session_is_active, chat_session.memory_enabled AS chat_session_memory_enabled, chat_session.memory_data AS chat_session_memory_data, chat_session.created_at AS chat_session_created_at, chat_session.updated_at AS chat_session_updated_at
+FROM chat_session
 WHERE chat_session.project_id = ? AND chat_session.user_id = ? ORDER BY chat_session.updated_at DESC]
 [parameters: (1, 1)]
 (Background on this error at: https://sqlalche.me/e/20/e3q8)127.0.0.1 - - [05/Jan/2026 21:05:51] "GET /api/projects/1/chat-sessions HTTP/1.1" 500 -

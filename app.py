@@ -25,11 +25,12 @@ import redis
 import base64
 from urllib.parse import unquote
 import subprocess
-import ptyprocess
 import threading
 import time
 import signal
 import os
+
+from routers.chat import chat_bp
 
 load_dotenv()
 
@@ -66,6 +67,7 @@ app.config['MAIL_USE_SSL'] = os.getenv('MAIL_USE_SSL', 'true').lower() == 'true'
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
+app.register_blueprint(chat_bp)
 
 # MinIO配置
 MINIO_CONFIG = {
@@ -580,7 +582,7 @@ class ProjectPermission(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     role = db.Column(db.String(20), nullable=False)  # admin, collaborator
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
+
     # 关系
     project = db.relationship('Project', backref='permissions')
     user = db.relationship('User', backref='project_permissions')
@@ -592,7 +594,7 @@ class Team(db.Model):
     project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
+
     # 关系
     project = db.relationship('Project', backref='teams')
     creator = db.relationship('User', backref='created_teams')
@@ -604,7 +606,7 @@ class TeamMember(db.Model):
     role = db.Column(db.String(20), default='member')  # leader, member
     permissions = db.Column(db.Text)  # 权限JSON字符串
     joined_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
+
     # 关系
     team = db.relationship('Team', backref='members')
     user = db.relationship('User', backref='team_memberships')
@@ -635,7 +637,7 @@ class BadCase(db.Model):
     assigned_users = db.Column(db.Text)  # 指派的人员，JSON格式存储
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # 关系
     project = db.relationship('Project', backref='badcases')
     plan_relation = db.relationship('Plan', backref='badcases')
@@ -670,7 +672,7 @@ class Plan(db.Model):
     scope_notification = db.Column(db.Boolean, default=False)  # 范围变更通知
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # 关系
     parent = db.relationship('Plan', remote_side=[id], backref='children')
     project = db.relationship('Project', backref='plans')
@@ -699,7 +701,7 @@ class Bug(db.Model):
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # 关系
     plan = db.relationship('Plan', backref='bugs')
     project = db.relationship('Project', backref='bugs')
@@ -745,7 +747,7 @@ class BugComment(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
+
     # 关系
     bug = db.relationship('Bug', backref='comments')
     user = db.relationship('User', backref='bug_comments')
@@ -1341,7 +1343,7 @@ def import_database():
     
     return render_template('import_database.html', projects=projects)
 
-@app.route('/chat')
+#@app.route('/chat')
 @login_required
 def chat():
     return render_template('chat.html')
@@ -3361,6 +3363,8 @@ def create_performance_indexes():
         db.session.rollback()
 
 if __name__ == '__main__':
+    print(generate_password_hash("123456"))
+
     with app.app_context():
         # 使用新的数据库同步函数
         if sync_database_schema():
@@ -3374,8 +3378,8 @@ if __name__ == '__main__':
     
     # 初始化Redis
     print("正在初始化Redis...")
-    redis_client = get_redis_client()
-    if redis_client:
+    app.redis_client = get_redis_client()
+    if app.redis_client:
         print("✅ Redis初始化成功")
     else:
         print("❌ Redis初始化失败，缓存功能将不可用")
