@@ -1,3 +1,4 @@
+from typing import Dict, Union
 from langchain_core.language_models import BaseLLM
 
 
@@ -6,7 +7,7 @@ class scriptAgengt:
     def __init__(self):
         print("初始化scriptAgent")
 
-    def handle(self, userId: str,action:str,llm_intent: str,llm: BaseLLM,llm_script:str,info:dict) -> dict[str, int | str]:
+    def handle(self, userId: str,action:str,llm_intent: str,llm: BaseLLM,llm_script:str,info:dict) -> Dict[str, Union[int, str]]:
         print("处理scriptAgent")
         user_input = llm.splitTask(llm_script, info)
         intput=""

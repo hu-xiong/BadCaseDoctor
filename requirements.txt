@@ -1,4 +1,5 @@
 Flask
+flask-cors
 Flask-SQLAlchemy
 Flask-Login
 Flask-Mail
@@ -19,4 +20,5 @@ email-validator
 Werkzeug
 Jinja2 
 boto3
-Pillow 
+Pillow
+prometheus-client

@@ -110,6 +110,7 @@ export default {
   setup() {
     const router = useRouter()
     const projects = ref([])
+    // 搜索关键字
     const searchKeyword = ref('')
     const currentPage = ref(1)
     const pageSize = ref(12)

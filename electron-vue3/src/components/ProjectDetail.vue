@@ -17,15 +17,15 @@
       </div>
       
       <div class="top-right">
-        <!-- 布局对齐按钮组 -->
+        <!-- 布局控制按钮组 -->
         <div class="layout-buttons">
-          <button class="layout-btn" :class="{ active: currentLayout === 'left' }" @click="setLayout('left')" title="左对齐">
+          <button class="layout-btn" :class="{ active: !leftSidebarHidden }" @click="setLayout('left')" title="切换侧边栏">
             <div class="layout-icon left-aligned"></div>
           </button>
-          <button class="layout-btn" :class="{ active: currentLayout === 'bottom' }" @click="setLayout('bottom')" title="底部对齐">
+          <button class="layout-btn" :class="{ active: showTerminal }" @click="setLayout('bottom')" title="切换终端">
             <div class="layout-icon bottom-aligned"></div>
           </button>
-          <button class="layout-btn" :class="{ active: currentLayout === 'right' }" @click="setLayout('right')" title="右对齐">
+          <button class="layout-btn" :class="{ active: showAIAssistant }" @click="setLayout('right')" title="切换AI助手">
             <div class="layout-icon right-aligned"></div>
           </button>
         </div>
@@ -79,6 +79,9 @@
             <div class="header-top">
               <h3>迭代计划</h3>
                             <div class="header-actions">
+                <button class="action-icon-btn" @click="manualRefreshPlans" title="刷新所有数据">
+                  <span class="icon">🔄</span>
+                </button>
                 <button class="action-icon-btn" @click="showCreatePlanModal" title="新增计划">
                   <span class="icon">➕</span>
                 </button>
@@ -120,39 +123,72 @@
                     <span class="section-icon">📋</span>
                     <span class="section-title">BadCase</span>
                   </div>
-               <!--  
-                  <div v-if="expandedUnplannedBadcase && filteredBadcases.length > 0" class="section-content">
-                    <div v-if="badcaseLoading" class="loading-state">
-                      <span class="loading-text">加载中...</span>
+                </div>
+
+                <!-- 渲染未计划类型的计划 -->
+                <div v-if="unplannedPlans.length > 0" class="plan-list">
+                  <template v-for="plan in unplannedPlans" :key="plan.id">
+                    <div 
+                      class="plan-item"
+                      :class="{ 'active': selectedPlan === plan.id }"
+                      @click="selectPlan(plan.id)"
+                      @mouseenter="showPlanActions(plan.id)"
+                      @mouseleave="hidePlanActions(plan.id)"
+                    >
+                      <span 
+                        v-if="plan.children && plan.children.length > 0" 
+                        class="expand-arrow"
+                        :class="{ 'expanded': expandedPlans.includes(plan.id) }"
+                        @click.stop="togglePlanExpansion(plan.id)"
+                      >▶</span>
+                      <span v-else class="expand-placeholder"></span>
+                      <span class="plan-icon">{{ getPlanIcon(plan.content_type || plan.plan_type || 'badcase') }}</span>
+                      <span class="plan-name">
+                        {{ plan.name }}
+                        <span v-if="plan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                      </span>
+                      <span class="plan-info">
+                        <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
+                        <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
+                      </span>
+                      
+                      <!-- 操作按钮 -->
+                      <div v-show="hoveredPlan === plan.id" class="plan-actions">
+                        <button class="action-btn" @click.stop="showContextMenu(plan, $event)">
+                          ⚙️
+                        </button>
+                      </div>
                     </div>
-                    
-                    <div v-else class="badcase-list">
+
+                    <!-- 子计划 -->
+                    <div v-if="plan.children && plan.children.length > 0 && expandedPlans.includes(plan.id)" class="sub-plan-list">
                       <div 
-                        v-for="badcase in filteredBadcases" 
-                        :key="badcase.id"
-                        class="badcase-item"
-                        :class="getBadcaseBackgroundClass(badcase)"
-                        @click="selectBadcasePlan(badcase)"
+                        v-for="childPlan in plan.children" 
+                        :key="childPlan.id"
+                        class="plan-item sub-plan"
+                        :class="{ 'active': selectedPlan === childPlan.id }"
+                        @click="selectPlan(childPlan.id)"
+                        @mouseenter="showPlanActions(childPlan.id)"
+                        @mouseleave="hidePlanActions(childPlan.id)"
                       >
-                        <div class="badcase-content">
-                          <span class="badcase-icon">{{ getBadcaseIcon(badcase) }}</span>
-                          <span class="badcase-title">{{ badcase.title }}</span>
-                          <span class="badcase-status">{{ getBadcaseStatusText(badcase.status) }}</span>
-                        </div>
-                        <div class="badcase-actions" v-if="badcase.source === 'ai-generated'">
-                          <button @click.stop="acceptBadcase(badcase)" class="action-btn accept" title="接受">
-                            ✓
-                          </button>
-                          <button @click.stop="rejectBadcase(badcase)" class="action-btn reject" title="拒绝">
-                            ✗
+                        <span class="expand-placeholder"></span>
+                        <span class="plan-icon">{{ getPlanIcon(childPlan.content_type || childPlan.plan_type || 'badcase') }}</span>
+                        <span class="plan-name">{{ childPlan.name }}</span>
+                        <span class="plan-info">
+                          <span v-if="childPlan.badcase_count > 0" class="count-badge badcase">{{ childPlan.badcase_count }}</span>
+                          <span v-if="childPlan.bug_count > 0" class="count-badge bug">{{ childPlan.bug_count }}</span>
+                        </span>
+                        
+                        <!-- 操作按钮 -->
+                        <div v-show="hoveredPlan === childPlan.id" class="plan-actions">
+                          <button class="action-btn" @click.stop="showContextMenu(childPlan, $event)">
+                            ⚙️
                           </button>
                         </div>
                       </div>
                     </div>
-                  </div>
-                  --> 
+                  </template>
                 </div>
-
               </div>
             </div>
             
@@ -268,7 +304,7 @@
                               @click.stop="togglePlanExpansion(childPlan.id)"
                             >▶</span>
                             <span v-else class="expand-placeholder"></span>
-                            <span class="plan-icon">{{ childPlan.icon }}</span>
+                            <span class="plan-icon">{{ getPlanIcon(childPlan.content_type || childPlan.plan_type || 'badcase') }}</span>
                             <span class="plan-name">
                               {{ childPlan.name }}
                               <span v-if="childPlan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
@@ -339,7 +375,7 @@
                               @mouseleave="hidePlanActions(grandChildPlan.id)"
                             >
                               <span class="expand-placeholder"></span>
-                              <span class="plan-icon">{{ grandChildPlan.icon }}</span>
+                              <span class="plan-icon">{{ getPlanIcon(grandChildPlan.content_type || grandChildPlan.plan_type || 'badcase') }}</span>
                               <span class="plan-name">
                                 {{ grandChildPlan.name }}
                                 <span v-if="grandChildPlan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
@@ -465,9 +501,9 @@
       <!-- 主内容区域 -->
       <div class="main-content" :class="{ 
         'full-width': leftSidebarHidden,
-        'with-right-sidebar': currentLayout === 'right'
+        'with-right-sidebar': showAIAssistant
       }" :style="{ 
-        width: currentLayout === 'right' ? 'calc(100% - ' + rightSidebarWidth + 'px)' : '100%'
+        width: showAIAssistant ? 'calc(100% - ' + rightSidebarWidth + 'px)' : '100%'
       }">
         <div class="content-header">
           <div class="content-title">
@@ -478,7 +514,9 @@
         
         <div class="content-toolbar">
           <div class="toolbar-left">
-            <button @click="createNewBadcase" class="quick-create-btn">+快速新建BadCase</button>
+            <button @click="createNewBadcase" class="quick-create-btn">
+              +快速新建{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}
+            </button>
           </div>
           
           <div class="toolbar-right">
@@ -516,7 +554,7 @@
                 <option value="close">已关闭</option>
                 <option value="hold">暂停</option>
                 <option value="reopen">重新打开</option>
-                <option value="not_badcase">非BadCase</option>
+                <option value="not_badcase">非{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</option>
               </select>
             </div>
             
@@ -532,7 +570,7 @@
             <div class="header-checkbox">
               <input type="checkbox" v-model="selectAll" @change="toggleSelectAll" />
             </div>
-            <div class="header-title">BadCase标题</div>
+            <div class="header-title">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}标题</div>
             <div class="header-type">类型</div>
             <div class="header-status">状态</div>
             <div class="header-assignee">负责人</div>
@@ -544,7 +582,7 @@
               <div class="loading-text">加载中...</div>
             </div>
             <div v-else-if="filteredBadcases.length === 0" class="empty-row">
-              <div class="empty-text">暂无BadCase数据</div>
+              <div class="empty-text">暂无{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}数据</div>
             </div>
             <div 
               v-else
@@ -567,7 +605,7 @@
                 <span class="badcase-title">{{ badcase.title }}</span>
               </div>
               <div class="row-type">
-                <span class="type-badge badcase">BadCase</span>
+                <span class="type-badge" :class="currentPlanType">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</span>
               </div>
               <div class="row-status">
                 <span class="status-badge" :class="badcase.status">{{ getBadcaseStatusText(badcase.status) }}</span>
@@ -583,13 +621,12 @@
         </div>
         
         <!-- 底部Terminal和Output区域 -->
-        <div v-if="currentLayout === 'bottom' || currentLayout === 'right'" class="bottom-panel" :class="{
+        <div v-if="showTerminal" class="bottom-panel" :class="{
           'with-left-sidebar': !leftSidebarHidden && !planCollapsed,
-          'with-collapsed-sidebar': !leftSidebarHidden && planCollapsed,
-          'with-right-sidebar': currentLayout === 'right'
+          'with-collapsed-sidebar': !leftSidebarHidden && planCollapsed
         }" :style="{ 
-          width: currentLayout === 'right' ? 'calc(100% - ' + rightSidebarWidth + 'px)' : '100%',
-          height: bottomPanelHeight + 'px'
+          height: bottomPanelHeight + 'px',
+          zIndex: 100
         }">
           <!-- 拖拽手柄 -->
           <div class="drag-handle-horizontal" @mousedown="startDragBottomPanel"></div>
@@ -606,25 +643,42 @@
       </div>
       
       <!-- 右侧AI助手面板 -->
-      <div v-if="currentLayout === 'right'" class="right-sidebar ai-assistant-panel" :style="{ width: rightSidebarWidth + 'px' }">
+      <div v-if="showAIAssistant" class="right-sidebar ai-assistant-panel" :style="{ width: rightSidebarWidth + 'px' }">
         <!-- 拖拽手柄 -->
         <div class="drag-handle" @mousedown="startDragRightSidebar"></div>
         
         <!-- 面板头部 -->
         <div class="ai-panel-header">
           <div class="ai-panel-tabs">
-            <div class="ai-tab" :class="{ 'active': currentSession === 'session1' }" @click="switchSession('session1')">
-              启动前端和后端
-              <button class="tab-close" @click.stop="closeSessionTab('session1')">×</button>
+            <div v-if="currentSession && sessions[currentSession]" class="ai-tab active">
+              {{ sessions[currentSession].title || '未命名会话' }}
+              <button class="tab-close" @click.stop="closeSessionTab(currentSession)">×</button>
             </div>
-            <div class="ai-tab" :class="{ 'active': currentSession === 'session2' }" @click="switchSession('session2')">
-              启动前端和后端
-              <button class="tab-close" @click.stop="closeSessionTab('session2')">×</button>
+            <div v-else-if="currentSession" class="ai-tab active">
+              会话加载中...
             </div>
           </div>
           <div class="ai-panel-actions">
             <button class="ai-action-btn" title="新增会话" @click="createNewSession">+</button>
-            <button class="ai-action-btn" title="会话历史">🕐</button>
+            <div class="dropdown">
+              <button class="ai-action-btn" title="会话历史" @click="toggleHistory">🕐</button>
+              <div class="dropdown-menu history-menu" :class="{ 'show': showHistory }">
+                <div v-if="historyLoading" class="dropdown-item loading">加载中...</div>
+                <div v-else-if="sessionHistory.length === 0" class="dropdown-item empty">暂无历史会话</div>
+                <template v-else>
+                  <div 
+                    v-for="session in sessionHistory" 
+                    :key="session.id" 
+                    class="dropdown-item history-item"
+                    :class="{ 'active': currentSession === session.id }"
+                    @click="switchSession(session.id)"
+                  >
+                    <div class="history-title">{{ session.title || '未命名会话' }}</div>
+                    <div class="history-time">{{ new Date(session.created_at).toLocaleString() }}</div>
+                  </div>
+                </template>
+              </div>
+            </div>
             <div class="dropdown">
               <button class="ai-action-btn dropdown-toggle" title="更多选项" @click="toggleDropdown">⋯</button>
               <div class="dropdown-menu" :class="{ 'show': showDropdown }">
@@ -637,7 +691,10 @@
         </div>
         <!-- 聊天面板区域 -->
         <div class="chat-panel-container">
-          <SimpleChatPanel />
+          <SimpleChatPanel v-if="currentSession" :sessionId="currentSession" :projectId="projectId" />
+          <div v-else class="chat-empty-placeholder">
+            <p>选择或创建一个会话开始聊天</p>
+          </div>
         </div>
       </div>
     </div>
@@ -984,16 +1041,24 @@
         </div>
       </div>
     </div>
+
+    <!-- 个人资料弹窗 -->
+    <UserProfile 
+      v-if="showProfileModal" 
+      :user="currentUser" 
+      @close="showProfileModal = false"
+    />
   </div>
 </template>
 
 <script>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, updateBadcasePlan, getProjectMembers } from '../api.js'
+import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
 import TeamManagement from './TeamManagement.vue'
 import XTerminal from './XTerminal.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
+import UserProfile from './UserProfile.vue'
 import userStore from '../store/user.js'
 
 // 在浏览器环境中，这些Node.js模块可能不可用，需要处理
@@ -1017,7 +1082,8 @@ export default {
   components: {
     TeamManagement,
     XTerminal,
-    SimpleChatPanel
+    SimpleChatPanel,
+    UserProfile
   },
   setup() {
     const router = useRouter()
@@ -1051,7 +1117,44 @@ export default {
 
     // 选择状态
     const selectedPlan = ref(null)
-    const currentPlan = ref(null) // 当前选中的计划
+    const currentPlan = computed(() => {
+      if (!selectedPlan.value || selectedPlan.value === 'unplanned') {
+        return null
+      }
+      
+      const findPlan = (plans, id) => {
+        for (const p of plans) {
+          if (p.id == id) return p
+          if (p.children && p.children.length > 0) {
+            const found = findPlan(p.children, id)
+            if (found) return found
+          }
+        }
+        return null
+      }
+      return findPlan(projectPlans.value, selectedPlan.value)
+    })
+    
+    const currentPlanType = computed(() => {
+      if (selectedPlan.value === 'unplanned') {
+        console.log('🐛 currentPlanType: unplanned → badcase')
+        return 'badcase'
+      }
+      if (!currentPlan.value) {
+        console.log('🐛 currentPlanType: no currentPlan → badcase')
+        return 'badcase'
+      }
+      const planType = currentPlan.value.content_type || currentPlan.value.plan_type || 'badcase'
+      console.log('🐛 currentPlanType:', {
+        planId: selectedPlan.value,
+        planName: currentPlan.value.name,
+        content_type: currentPlan.value.content_type,
+        plan_type: currentPlan.value.plan_type,
+        finalType: planType
+      })
+      return planType
+    })
+    
     const selectAll = ref(false)
     const selectedTasks = ref([])
 
@@ -1079,19 +1182,11 @@ export default {
     const showTerminalInput = ref(false)
 
     // 会话管理
-    const currentSession = ref('session1')
-    const sessions = ref({
-      session1: {
-        id: 'session1',
-        title: '启动前端和后端',
-        messages: []
-      },
-      session2: {
-        id: 'session2',
-        title: '启动前端和后端',
-        messages: []
-      }
-    })
+    const currentSession = ref(null)
+    const sessions = ref({})
+    const showHistory = ref(false)
+    const sessionHistory = ref([])
+    const historyLoading = ref(false)
 
     const showTeamManagementModal = ref(false)
     const showProjectSettingsModal = ref(false)
@@ -1100,12 +1195,12 @@ export default {
 
     // 用户下拉菜单状态
     const showUserDropdown = ref(false)
+    const showProfileModal = ref(false)
     const currentUser = ref(null)
     
-    // 布局对齐状态
-    const currentLayout = ref('left') // 'left', 'bottom', 'right' - 默认左对齐，点击右对齐按钮显示AI助手
-    
-    // 左侧边栏完全隐藏状态
+    // 布局控制状态
+    const showTerminal = ref(false)
+    const showAIAssistant = ref(false)
     const leftSidebarHidden = ref(false)
     
     // 右侧对话框拖拽状态
@@ -1196,9 +1291,14 @@ export default {
     
     // 根据状态类型过滤计划
     const inProgressPlans = computed(() => {
-      // 兼容现有数据结构：status === 'active' 表示进行中
+      // 兼容更多可能的状态值
       const plans = projectPlans.value.filter(plan => 
-        (plan.status_type === 'in_progress') || (plan.status === 'active')
+        (plan.status_type === 'in_progress') || 
+        (plan.status === 'active') || 
+        (plan.status === 'in_progress') ||
+        (plan.status === 'running') ||
+        (plan.status === 'open') ||
+        (plan.status === 'doing')
       )
       console.log('🔍 进行中计划过滤结果:', {
         total: projectPlans.value.length,
@@ -1209,16 +1309,35 @@ export default {
     })
     
     const unplannedPlans = computed(() => {
-      // 兼容现有数据结构：status === 'unplanned' 或没有status字段
-      return projectPlans.value.filter(plan => 
-        (plan.status_type === 'unplanned') || (plan.status === 'unplanned') || (!plan.status && !plan.status_type)
+      // 兼容更多可能的状态值，包括新创建和待处理状态
+      const plans = projectPlans.value.filter(plan => 
+        (plan.status_type === 'unplanned') || 
+        (plan.status === 'unplanned') || 
+        (plan.status === 'new') ||
+        (!plan.status && !plan.status_type)
       )
+
+      // 去重逻辑：针对名称为“未计划BadCase”的自动创建计划，只保留第一个
+      const seenUnplannedSystemPlan = new Set()
+      return plans.filter(plan => {
+        if (plan.name === '未计划BadCase') {
+          if (seenUnplannedSystemPlan.has(plan.name)) {
+            return false
+          }
+          seenUnplannedSystemPlan.add(plan.name)
+        }
+        return true
+      })
     })
     
     const archivedPlans = computed(() => {
-      // 兼容现有数据结构：status === 'archived' 或 'completed' 表示已归档
+      // 兼容更多可能的状态值，包括已归档、已完成和已结束状态
       return projectPlans.value.filter(plan => 
-        (plan.status_type === 'archived') || (plan.status === 'archived') || (plan.status === 'completed')
+        (plan.status_type === 'archived') || 
+        (plan.status === 'archived') || 
+        (plan.status === 'completed') ||
+        (plan.status === 'finished') ||
+        (plan.status === 'done')
       )
     })
     
@@ -1236,14 +1355,39 @@ export default {
       
       badcaseLoading.value = true
       try {
-        console.log('调用API: getProjectBadcases')
-        const response = await getProjectBadcases(projectId.value, page, badcasePerPage.value)
+        console.log('调用API: 获取列表')
+        const additionalParams = {}
+        if (selectedPlan.value && selectedPlan.value !== 'unplanned') {
+          // 确保是数字类型传递给后端
+          const planId = parseInt(selectedPlan.value)
+          if (!isNaN(planId)) {
+            additionalParams.plan_id = planId
+          }
+        } else if (selectedPlan.value === 'unplanned') {
+          additionalParams.status_type = 'unplanned'
+        }
+        
+        // 如果有特定的内容类型，也传递给后端
+        if (currentPlanType.value) {
+          additionalParams.content_type = currentPlanType.value
+        }
+        
+        let response
+        if (currentPlanType.value === 'bug') {
+          console.log('🔍 检测到当前计划类型为 bug，调用 getProjectBugs')
+          response = await getProjectBugs(projectId.value, page, badcasePerPage.value, additionalParams)
+        } else {
+          console.log('🔍 调用 getProjectBadcases')
+          response = await getProjectBadcases(projectId.value, page, badcasePerPage.value, additionalParams)
+        }
+        
         console.log('API响应:', response)
         
         if (response && response.data && response.data.success) {
           badcases.value = response.data.badcases || []
           filteredBadcases.value = [...badcases.value] // 初始化过滤后的BadCase
-          totalBadcases.value = response.data.total || 0
+          // 兼容 pagination.total 和直接的 total
+          totalBadcases.value = (response.data.pagination && response.data.pagination.total) || response.data.total || 0
           badcasePage.value = page
           console.log('BadCase数据获取成功:', badcases.value)
           console.log('BadCase数量:', badcases.value.length)
@@ -1409,6 +1553,32 @@ export default {
     // AI助手下拉菜单相关方法
     const toggleDropdown = () => {
       showDropdown.value = !showDropdown.value
+      showHistory.value = false
+    }
+
+    const toggleHistory = async () => {
+      showHistory.value = !showHistory.value
+      showDropdown.value = false
+      if (showHistory.value) {
+        await fetchSessions()
+      }
+    }
+
+    const fetchSessions = async () => {
+      if (!projectId.value) return
+      historyLoading.value = true
+      try {
+        const response = await getChatSessions(projectId.value)
+        if (response.data.success) {
+          sessionHistory.value = response.data.sessions.sort((a, b) => 
+            new Date(b.created_at) - new Date(a.created_at)
+          )
+        }
+      } catch (error) {
+        console.error('获取会话历史失败:', error)
+      } finally {
+        historyLoading.value = false
+      }
     }
     
     const closeSession = () => {
@@ -1432,37 +1602,52 @@ export default {
     const switchSession = (sessionId) => {
       currentSession.value = sessionId
       showDropdown.value = false
+      showHistory.value = false
+      
+      // 确保该会话在 sessions 对象中（如果需要的话，SimpleChatPanel 内部也会根据 sessionId 加载）
+      if (!sessions.value[sessionId]) {
+        // 查找历史记录中的信息填充到 sessions
+        const sessionInfo = sessionHistory.value.find(s => s.id === sessionId)
+        if (sessionInfo) {
+          sessions.value[sessionId] = sessionInfo
+        } else {
+          // 如果历史中没有，可能需要调用 getChatSession 获取
+          sessions.value[sessionId] = { id: sessionId, title: '加载中...' }
+        }
+      }
     }
     
-    const createNewSession = () => {
-      const newSessionId = 'session' + Date.now()
-      sessions.value[newSessionId] = {
-        id: newSessionId,
-        title: '新会话',
-        messages: []
+    const createNewSession = async () => {
+      if (!projectId.value) {
+        alert('错误：项目 ID 不存在')
+        return
       }
-      currentSession.value = newSessionId
 
-      // 显示terminal命令输入栏
-      showTerminalInput.value = true
+      try {
+        const response = await createChatSession(projectId.value, {
+          title: 'newchat',
+          memory_enabled: true
+        })
+
+        if (response.data.success) {
+          const newSess = response.data.session
+          sessions.value[newSess.id] = newSess
+          currentSession.value = newSess.id
+          showTerminalInput.value = true
+          showHistory.value = false
+          console.log('新建会话成功:', newSess)
+        } else {
+          alert('新建会话失败: ' + (response.data.error || '未知错误'))
+        }
+      } catch (error) {
+        console.error('新建会话异常:', error)
+        alert('新建会话异常')
+      }
     }
     
     const closeSessionTab = (sessionId) => {
-      if (Object.keys(sessions.value).length <= 1) {
-        // 如果只有一个会话，则关闭整个面板
-        setLayout('left')
-        return
-      }
-      
-      delete sessions.value[sessionId]
-      
-      // 如果关闭的是当前会话，切换到第一个可用会话
-      if (currentSession.value === sessionId) {
-        const availableSessions = Object.keys(sessions.value)
-        if (availableSessions.length > 0) {
-          currentSession.value = availableSessions[0]
-        }
-      }
+      // 这里的逻辑改为关闭右侧面板
+      setLayout('left')
     }
     
 
@@ -1481,12 +1666,15 @@ export default {
     
     // 根据内容类型获取计划图标
     const getPlanIcon = (contentType) => {
+      console.log('📦 getPlanIcon 被调用:', contentType)
       const iconMap = {
         'badcase': '📋',
         'bug': '🐛',
         'test_case': '🧪'
       }
-      return iconMap[contentType] || '📋'
+      const icon = iconMap[contentType] || '📋'
+      console.log('📦 返回图标:', icon, '（contentType:', contentType, '）')
+      return icon
     }
     
     // 根据内容类型获取计划类型文本
@@ -1524,20 +1712,40 @@ export default {
 
     // 生成面包屑导航
     const generateBreadcrumb = () => {
+      const managementLabel = currentPlanType.value === 'bug' ? 'Bug管理' : (currentPlanType.value === 'test_case' ? '测试用例管理' : 'BadCase管理')
+      
       if (!currentPlan.value) {
-        return 'BadCase管理'
+        return managementLabel
       }
       
       const breadcrumb = []
       let plan = currentPlan.value
       
+      const findParent = (plans, parentId) => {
+        for (const p of plans) {
+          if (p.id == parentId) return p
+          if (p.children && p.children.length > 0) {
+            const found = findParent(p.children, parentId)
+            if (found) return found
+          }
+        }
+        return null
+      }
+
       // 从当前计划向上遍历，构建完整路径
-      while (plan) {
-        breadcrumb.unshift(plan.name)
+      let tempPlan = plan
+      while (tempPlan) {
+        breadcrumb.unshift(tempPlan.name)
         // 查找父计划
-        plan = projectPlans.value.find(p => p.id === plan.parent_id)
+        if (tempPlan.parent_id) {
+          tempPlan = findParent(projectPlans.value, tempPlan.parent_id)
+        } else {
+          tempPlan = null
+        }
       }
       
+      // 添加管理类型前缀
+      breadcrumb.unshift(managementLabel)
       // 添加项目名称
       breadcrumb.unshift(projectName.value)
       
@@ -1546,12 +1754,19 @@ export default {
     
     // 处理计划数据，添加图标和格式化
     const processPlanData = (plans) => {
-      return plans.map(plan => ({
-        ...plan,
-        icon: getPlanIcon(plan.content_type),
-        statusText: getPlanStatusText(plan.status),
-        children: plan.children ? processPlanData(plan.children) : []
-      }))
+      if (!plans) return []
+      return plans.map(plan => {
+        const contentType = plan.content_type || plan.plan_type || 'badcase'
+        console.log('🔍 处理计划:', plan.name, '，plan_type:', plan.plan_type, '，content_type:', plan.content_type, '，最终使用:', contentType)
+        return {
+          ...plan,
+          // 兼容后端返回的 plan_type 和前端使用的 content_type
+          content_type: contentType,
+          icon: getPlanIcon(contentType),
+          statusText: getPlanStatusText(plan.status),
+          children: plan.children ? processPlanData(plan.children) : []
+        }
+      })
     }
     
     // 计算属性
@@ -1629,14 +1844,18 @@ export default {
     }
     
     // 确保有未计划的BadCase类型计划
+    let isEnsuringUnplannedPlan = false
     const ensureUnplannedBadcasePlan = async () => {
+      if (isEnsuringUnplannedPlan) return
+      
       try {
+        isEnsuringUnplannedPlan = true
         console.log('🔍 检查未计划的BadCase类型计划...')
         
         // 检查是否已有未计划的BadCase类型计划
         const existingUnplannedBadcasePlan = projectPlans.value.find(plan => 
           (plan.status_type === 'unplanned' || plan.status === 'unplanned') && 
-          (plan.content_type === 'badcase' || plan.plan_type === 'badcase')
+          (plan.content_type === 'badcase' || plan.plan_type === 'badcase' || plan.name === '未计划BadCase')
         )
         
         if (existingUnplannedBadcasePlan) {
@@ -1671,8 +1890,12 @@ export default {
           const createdPlan = response.data.plan
           console.log('✅ 未计划的BadCase类型计划创建成功:', createdPlan.name, '(ID:', createdPlan.id, ')')
           
-          // 刷新计划列表
-          await fetchProjectPlans()
+          // 刷新计划列表（不直接在此递归调用 fetchProjectPlans，避免循环）
+          const freshResponse = await getProjectPlans(projectId.value)
+          if (freshResponse && freshResponse.data && freshResponse.data.success) {
+             projectPlans.value = processPlanData(freshResponse.data.plans)
+             filterPlans()
+          }
           
           // 自动展开未计划section
           expandedSections.unplanned = true
@@ -1684,7 +1907,8 @@ export default {
         }
       } catch (error) {
         console.error('❌ 确保未计划的BadCase类型计划时发生错误:', error)
-        console.error('错误详情:', error.message)
+      } finally {
+        isEnsuringUnplannedPlan = false
       }
     }
     
@@ -2109,12 +2333,15 @@ export default {
       
       badcaseLoading.value = true
       try {
-        // 构建API参数 - 只处理数字类型的planId
+        // 构建API参数 - 处理数字或字符串类型的planId
         const params = {}
         
-        if (planId && typeof planId === 'number') {
-          params.plan_id = planId
-          console.log(`🔍 检索计划ID: ${planId} 的BadCase`)
+        // 转换为数字，如果有效则设置参数
+        const numericPlanId = typeof planId === 'number' ? planId : parseInt(planId)
+        
+        if (planId && !isNaN(numericPlanId)) {
+          params.plan_id = numericPlanId
+          console.log(`🔍 检索计划ID: ${numericPlanId} 的数据`)
         } else {
           console.error('❌ 无效的计划ID:', planId, '类型:', typeof planId)
           return
@@ -2122,10 +2349,14 @@ export default {
         
         console.log('📋 API参数:', params)
         
-        console.log('调用API: getProjectBadcases，参数:', params)
-        console.log(`🔍 检索条件: 项目ID=${projectId.value}, 页码=${page}, 每页数量=${badcasePerPage.value}`)
-        
-        const response = await getProjectBadcases(projectId.value, page, badcasePerPage.value, params)
+        let response
+        if (currentPlanType.value === 'bug') {
+          console.log(`🔍 调用 getProjectBugs，检索计划ID: ${planId}`)
+          response = await getProjectBugs(projectId.value, page, badcasePerPage.value, params)
+        } else {
+          console.log(`🔍 调用 getProjectBadcases，检索计划ID: ${planId}`)
+          response = await getProjectBadcases(projectId.value, page, badcasePerPage.value, params)
+        }
         console.log('API响应:', response)
         
         if (response && response.data && response.data.success) {
@@ -2211,9 +2442,11 @@ export default {
     }
     
     const createNewBadcase = () => {
-      let url = `/new-badcase?project_id=${projectId.value}`
+      // 根据当前计划类型决定跳转到哪个路由
+      const basePath = currentPlanType.value === 'bug' ? '/new-bug' : '/new-badcase'
+      let url = `${basePath}?project_id=${projectId.value}`
       
-      // 如果选中了未计划，不传递plan_id
+      // 如果选中了具体计划，传递 plan_id
       if (selectedPlan.value && selectedPlan.value !== 'unplanned') {
         url += `&plan_id=${selectedPlan.value}`
       }
@@ -2224,12 +2457,13 @@ export default {
     // 编辑BadCase
     const editBadcase = (badcaseId) => {
       console.log('=== editBadcase函数被调用 ===')
-      console.log('BadCase ID:', badcaseId)
+      console.log('BadCase/Bug ID:', badcaseId)
       console.log('项目ID:', projectId.value)
       console.log('当前路由:', route.path)
       
       try {
-        const targetUrl = `/new-badcase?id=${badcaseId}&project_id=${projectId.value}&edit=true`
+        const basePath = currentPlanType.value === 'bug' ? '/new-bug' : '/new-badcase'
+        const targetUrl = `${basePath}?id=${badcaseId}&project_id=${projectId.value}&edit=true`
         console.log('目标URL:', targetUrl)
         router.push(targetUrl)
         console.log('路由跳转成功')
@@ -2437,6 +2671,10 @@ export default {
       newPlan.parentId = plan.parent_id || ''
       newPlan.description = plan.description || ''
       newPlan.scopeNotification = plan.scope_notification || false
+      newPlan.statusType = plan.status_type || 'in_progress'
+      newPlan.contentType = plan.content_type || plan.plan_type || 'badcase'  // 重要：从计划中加载 plan_type
+      
+      console.log('🐛 编辑计划，加载的 contentType:', newPlan.contentType)
       
       // 设置编辑状态
       isEditingPlan.value = true
@@ -2860,21 +3098,25 @@ export default {
     }
     
     const manualRefreshPlans = async () => {
-      console.log('=== 手动刷新计划列表 ===')
-      console.log('当前项目ID:', projectId.value)
-      console.log('当前搜索文本:', planSearchText.value)
-      console.log('进行中计划是否展开:', expandedSections.inProgress)
-      console.log('loading状态:', loading.value)
-      console.log('刷新前计划数量:', projectPlans.value.length)
-      await fetchProjectPlans()
-      console.log('刷新后计划数量:', projectPlans.value.length)
-      console.log('刷新后过滤计划数量:', filteredPlans.value.length)
-      console.log('显示条件检查:')
-      console.log('- loading:', loading.value)
-      console.log('- filteredPlans.length === 0 && projectPlans.length === 0:', filteredPlans.value.length === 0 && projectPlans.value.length === 0)
-      console.log('- filteredPlans.length === 0 && planSearchText:', filteredPlans.value.length === 0 && planSearchText.value)
-      console.log('- 应该显示计划列表:', !(loading.value) && !(filteredPlans.value.length === 0 && projectPlans.value.length === 0) && !(filteredPlans.value.length === 0 && planSearchText.value))
-      alert(`刷新完成！当前计划数量：${projectPlans.value.length}，过滤后：${filteredPlans.value.length}`)
+      console.log('=== 手动刷新页面数据 ===')
+      loading.value = true
+      try {
+        await Promise.all([
+          fetchProjectInfo(),
+          fetchProjectPlans(),
+          fetchBadcases(),
+          fetchProjectMembers()
+        ])
+        
+        // 确保有未计划的BadCase类型计划
+        await ensureUnplannedBadcasePlan()
+        
+        console.log('数据刷新完成')
+      } catch (error) {
+        console.error('刷新数据失败:', error)
+      } finally {
+        loading.value = false
+      }
     }
     
     const togglePlanCollapse = () => {
@@ -2965,10 +3207,9 @@ export default {
           scope_notification: newPlan.scopeNotification,
           parent_id: newPlan.parentId || null,
           project_id: projectId.value,
-          // 新增：计划状态类型和内容类型
+          // 计划状态类型和内容类型
           status_type: newPlan.statusType,
-          content_type: newPlan.contentType,
-          plan_type: 'badcase',  // 明确设置计划类型
+          plan_type: newPlan.contentType,  // 使用用户选择的内容类型
           status: 'active'       // 明确设置状态
         }
         
@@ -3060,35 +3301,24 @@ export default {
     
     // 设置布局对齐
     const setLayout = (layout) => {
-      // 如果点击的是当前已激活的布局，则切换状态
-      if (currentLayout.value === layout) {
-        if (layout === 'left') {
-          // 左对齐：交替切换左侧边栏显示/隐藏
-          // 第一次点击隐藏，再次点击显示，实现交替效果
-          leftSidebarHidden.value = !leftSidebarHidden.value
-          planCollapsed.value = leftSidebarHidden.value
-          console.log('左侧边栏状态切换为:', leftSidebarHidden.value ? '隐藏' : '显示')
-          return
-        }
-      }
+      console.log('切换布局:', layout)
       
-      currentLayout.value = layout
-      console.log('布局已设置为:', layout)
-      
-      // 根据布局类型执行相应的布局逻辑
       switch (layout) {
         case 'left':
-          // 左对齐：隐藏左侧计划边栏
-          planCollapsed.value = true
-          leftSidebarHidden.value = true
+          // 左侧边栏切换
+          leftSidebarHidden.value = !leftSidebarHidden.value
+          planCollapsed.value = leftSidebarHidden.value
+          console.log('左侧边栏状态:', leftSidebarHidden.value ? '隐藏' : '显示')
           break
         case 'bottom':
-          // 底部对齐：显示terminal和output区域，保持左侧边栏状态
-          // 不改变左侧边栏的显示状态，让它们共存
+          // Terminal 面板切换
+          showTerminal.value = !showTerminal.value
+          console.log('Terminal 面板状态:', showTerminal.value ? '显示' : '隐藏')
           break
         case 'right':
-          // 右对齐：切换右侧对话区域，保持左侧边栏状态
-          // 不改变左侧边栏的显示状态，让它们共存
+          // AI 助手面板切换
+          showAIAssistant.value = !showAIAssistant.value
+          console.log('AI 助手面板状态:', showAIAssistant.value ? '显示' : '隐藏')
           break
       }
     }
@@ -3215,8 +3445,7 @@ export default {
     
     const showUserProfile = () => {
       showUserDropdown.value = false
-      // TODO: 实现个人资料页面
-      alert('个人资料功能开发中...')
+      showProfileModal.value = true
     }
     
     const showNotifications = () => {
@@ -3247,10 +3476,11 @@ export default {
       filterPlans()
     })
 
-    // 监听路由变化，当从新建BadCase页面返回时刷新数据
+    // 监听路由变化，当从新建BadCase或Bug页面返回时刷新数据
     watch(() => route.path, (newPath, oldPath) => {
-      if (newPath === route.path && oldPath && oldPath.includes('/new-badcase')) {
-        console.log('从新建BadCase页面返回，刷新数据')
+      if (newPath === route.path && oldPath && (oldPath.includes('/new-badcase') || oldPath.includes('/new-bug'))) {
+        console.log('从新建/编辑页面返回，刷新数据')
+        // 如果路由中有expand_plan，则fetchBadcases会根据选中的计划自动过滤
         fetchBadcases()
       }
     })
@@ -3262,16 +3492,31 @@ export default {
       }
     }, { immediate: true })
     
+    // 监听项目ID变化，确保在路由切换或刷新时同步加载数据
+    watch(() => route.params.id, async (newId) => {
+      if (newId) {
+        projectId.value = newId
+        console.log('项目ID发生变化:', newId)
+        await manualRefreshPlans()
+        await fetchSessions()
+        if (sessionHistory.value.length > 0) {
+          currentSession.value = sessionHistory.value[0].id
+          sessions.value[currentSession.value] = sessionHistory.value[0]
+        }
+      }
+    }, { immediate: true })
+
     onMounted(async () => {
-      // 获取项目ID
-      projectId.value = route.params.id
       console.log('=== ProjectDetail onMounted ===')
-      console.log('项目ID:', projectId.value)
-      console.log('路由参数:', route.params)
-      
-      // 初始化终端
-      initTerminal()
-      
+          
+      // 检查URL参数，如果有expand_plan参数，先设置选中的计划ID
+      // 这样后续的manualRefreshPlans中的fetchBadcases就能带上正确的plan_id
+      const expandPlanId = route.query.expand_plan
+      if (expandPlanId) {
+        console.log('检测到expand_plan参数，预设selectedPlan:', expandPlanId)
+        selectedPlan.value = expandPlanId
+      }
+              
       // 获取当前用户信息
       if (userStore.value) {
         currentUser.value = userStore.value
@@ -3286,30 +3531,7 @@ export default {
           }
         }
       }
-      
-      if (projectId.value) {
-        // 获取项目信息和计划数据
-        console.log('开始获取项目信息和计划数据...')
-        await Promise.all([
-          fetchProjectInfo(),
-          fetchProjectPlans()
-        ])
-        
-        // 获取BadCase数据
-        console.log('开始获取BadCase数据...')
-        await fetchBadcases()
-        
-        // 获取项目成员
-        console.log('开始获取项目成员...')
-        await fetchProjectMembers()
-        
-        // 确保有未计划的BadCase类型计划
-        console.log('检查并确保有未计划的BadCase类型计划...')
-        await ensureUnplannedBadcasePlan()
-      } else {
-        console.error('项目ID为空，无法获取数据')
-      }
-      
+              
       // 添加全局点击监听器，点击外部关闭用户下拉菜单
       document.addEventListener('click', (event) => {
         const userDropdown = document.querySelector('.user-dropdown')
@@ -3317,6 +3539,50 @@ export default {
           showUserDropdown.value = false
         }
       })
+              
+      // 处理计划展开逻辑
+      if (expandPlanId) {
+        // 等待计划数据加载完成（manualRefreshPlans会在watch中被调用）
+        // 我们需要等待projectPlans被填充后再执行展开逻辑
+        const waitForPlansAndExpand = async () => {
+          let attempts = 0
+          while (attempts < 20 && projectPlans.value.length === 0) {
+            await new Promise(resolve => setTimeout(resolve, 100))
+            attempts++
+          }
+              
+          if (projectPlans.value.length > 0) {
+            console.log('计划数据已加载，开始执行展开逻辑')
+            // 查找并展开该计划及其父计划
+            const findAndExpand = (plans, targetId, parents = []) => {
+              for (const plan of plans) {
+                if (plan.id == targetId) {
+                  parents.forEach(parentId => {
+                    if (!expandedPlans.value.includes(parentId)) {
+                      expandedPlans.value.push(parentId)
+                    }
+                  })
+                  if (!expandedPlans.value.includes(plan.id)) {
+                    expandedPlans.value.push(plan.id)
+                  }
+                  // 再次确保选中该计划并触发数据刷新（以防之前的请求没带上plan_id）
+                  selectPlan(plan.id)
+                  console.log('已自动展开并刷新计划数据:', plan.name)
+                  return true
+                }
+                if (plan.children && plan.children.length > 0) {
+                  if (findAndExpand(plan.children, targetId, [...parents, plan.id])) {
+                    return true
+                  }
+                }
+              }
+              return false
+            }
+            findAndExpand(projectPlans.value, expandPlanId)
+          }
+        }
+        waitForPlansAndExpand()
+      }
     })
     
     return {
@@ -3357,6 +3623,8 @@ export default {
       availableParentPlans,
       namePlaceholder,
       isFormValid,
+      currentPlan,  // 新增：当前选中的计划
+      currentPlanType,  // 新增：当前计划类型
       toggleSection,
       toggleUnplannedBadcaseSection,
       selectPlan,
@@ -3435,11 +3703,14 @@ export default {
       currentUser,
       toggleUserDropdown,
       showUserProfile,
+      showProfileModal,
       showNotifications,
       showHelp,
       logout,
-      currentLayout,
+      showTerminal,
+      showAIAssistant,
       setLayout,
+      planCollapsed,
       leftSidebarHidden,
       rightSidebarWidth,
       startDragRightSidebar,
@@ -3462,6 +3733,11 @@ export default {
       // 会话管理
       currentSession,
       sessions,
+      showHistory,
+      sessionHistory,
+      historyLoading,
+      toggleHistory,
+      fetchSessions,
       switchSession,
       createNewSession,
       closeSessionTab,
@@ -4865,17 +5141,21 @@ export default {
 
 .quick-create-btn {
   padding: 6px 12px;
-  background: #667eea;
+  background: #4a90e2;
   color: white;
   border: none;
   border-radius: 4px;
   font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
   transition: background-color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .quick-create-btn:hover {
-  background: #5a6fd8;
+  background: #357abd;
 }
 
 .toolbar-right {
@@ -5860,14 +6140,14 @@ export default {
 /* 右侧AI助手面板样式 */
 .right-sidebar {
   position: fixed;
-  top: 60px;
+  top: 0;
   right: 0;
   width: 400px;
-  height: calc(100vh - 60px);
+  height: 100vh;
   background: #252526;
   border-left: 1px solid #3e3e3e;
   box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
-  z-index: 110;
+  z-index: 2000;
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -5890,15 +6170,13 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 0 12px;
   background: #2d2d2d;
   border-bottom: 1px solid #3e3e3e;
   border-top: none;
   flex-shrink: 0;
-  min-height: 44px;
+  min-height: 48px;
   margin: 0;
-  padding-top: 10px;
-  padding-bottom: 10px;
 }
 
 /* 确保聊天面板容器占据剩余空间，紧贴头部 */
@@ -6026,6 +6304,68 @@ export default {
   opacity: 1;
   visibility: visible;
   transform: translateY(0);
+}
+
+.history-menu {
+  width: 240px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 16px;
+  border-bottom: 1px solid #3e3e3e;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.history-item:last-child {
+  border-bottom: none;
+}
+
+.history-item:hover {
+  background-color: #37373d;
+}
+
+.history-item.active {
+  background-color: #0e639c;
+  color: #fff;
+}
+
+.history-title {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-time {
+  font-size: 11px;
+  color: #888;
+}
+
+.history-item.active .history-time {
+  color: #add6ff;
+}
+
+.dropdown-item.loading, .dropdown-item.empty {
+  padding: 16px;
+  text-align: center;
+  color: #888;
+  font-style: italic;
+}
+
+.chat-empty-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #666;
+  font-size: 14px;
 }
 
 .dropdown-item {

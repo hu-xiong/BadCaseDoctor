@@ -220,4 +220,49 @@ export function addChatMessage(sessionId, data) {
   return api.post(`/api/chat-sessions/${sessionId}/messages`, data)
 }
 
+// ==================== Bug API ====================
+
+// 新建 Bug
+export function createBug(data) {
+  return api.post('/api/bugs', data)
+}
+
+// 更新 Bug
+export function updateBug(id, data) {
+  return api.put(`/api/bugs/${id}`, data)
+}
+
+// 获取 Bug 详情
+export function getBugDetail(id) {
+  return api.get(`/api/bugs/${id}`)
+}
+
+// 获取项目 Bug 列表
+export function getProjectBugs(projectId, page = 1, perPage = 10, additionalParams = {}) {
+  const params = { page, per_page: perPage, ...additionalParams }
+  return api.get(`/api/projects/${projectId}/bugs`, { params })
+}
+
+// 更新 Bug 状态
+export function updateBugStatus(id, data) {
+  return api.post(`/api/bugs/${id}/status`, data)
+}
+
+// 删除 Bug
+export function deleteBug(id) {
+  return api.delete(`/api/bugs/${id}`)
+}
+
+// ==================== Agent API ====================
+
+// 执行通用 Agent
+export function executeAgent(data) {
+  return api.post('/api/agent/execute', data)
+}
+
+// 保存 Agent 生成的 Bug
+export function saveAgentBugs(data) {
+  return api.post('/api/agent/save-bugs', data)
+}
+
 export default api 

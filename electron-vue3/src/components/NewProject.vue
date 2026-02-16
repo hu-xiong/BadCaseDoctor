@@ -50,6 +50,59 @@
         <span class="input-count">{{ project.intro.length }} / 150</span>
       </div>
     </div>
+    
+    <!-- 网站登录配置 -->
+    <div class="section-card">
+      <div class="section-title">网站登录配置</div>
+      <div class="login-configs-container">
+        <div v-for="(config, index) in project.loginConfigs" :key="index" class="login-config-item">
+          <div class="config-fields">
+            <div class="config-field">
+              <label>网站URL：</label>
+              <input 
+                type="text" 
+                v-model="config.url" 
+                placeholder="如: http://localhost:5173" 
+                class="config-input"
+              />
+            </div>
+            <div class="config-field">
+              <label>用户名：</label>
+              <input 
+                type="text" 
+                v-model="config.username" 
+                placeholder="admin" 
+                class="config-input"
+                autocomplete="off"
+              />
+            </div>
+            <div class="config-field">
+              <label>密码：</label>
+              <input 
+                type="password" 
+                v-model="config.password" 
+                placeholder="123456" 
+                class="config-input"
+                autocomplete="new-password"
+              />
+            </div>
+            <div class="config-field config-field-full">
+              <label>备注：</label>
+              <input 
+                type="text" 
+                v-model="config.note" 
+                placeholder="备注信息（可选）" 
+                class="config-input"
+              />
+            </div>
+          </div>
+          <button class="remove-config-btn" @click="removeLoginConfig(index)" title="删除">×</button>
+        </div>
+        <button class="add-config-btn" @click="addLoginConfig">
+          + 添加网站登录配置
+        </button>
+      </div>
+    </div>
     <div class="action-bar">
       <button class="action-btn save-btn" @click="saveProject" :disabled="saveLoading || publishLoading || revokeLoading">
         {{ saveLoading ? '保存中...' : '保存' }}
@@ -95,8 +148,24 @@ export default {
       intro: '',
       status: 'unpublished',  // 添加状态字段
       imageError: false,  // 添加图片错误状态
-      retryCount: 0 // 添加重试计数
+      retryCount: 0, // 添加重试计数
+      loginConfigs: []  // 网站登录配置
     })
+    
+    // 添加登录配置
+    const addLoginConfig = () => {
+      project.value.loginConfigs.push({
+        url: '',
+        username: '',
+        password: '',
+        note: ''  // 添加备注字段
+      })
+    }
+    
+    // 删除登录配置
+    const removeLoginConfig = (index) => {
+      project.value.loginConfigs.splice(index, 1)
+    }
     
     // 添加头像预览URL
     const avatarPreview = ref('')
@@ -252,6 +321,10 @@ export default {
           
           if (response.data.success && response.data.project) {
             project.value = { ...project.value, ...response.data.project }
+            // 加载登录配置
+            if (response.data.project.login_configs) {
+              project.value.loginConfigs = response.data.project.login_configs
+            }
             // 设置头像预览 - 使用API URL
             if (response.data.project.avatar) {
               // 从MinIO URL中提取文件名
@@ -296,7 +369,8 @@ export default {
             description: project.value.description,
             avatar: project.value.avatar,  // 添加头像URL
             owner: project.value.owner,
-            intro: project.value.intro
+            intro: project.value.intro,
+            login_configs: project.value.loginConfigs  // 添加登录配置
         })
         
           if (result.data.success) {
@@ -315,7 +389,8 @@ export default {
             description: project.value.description,
             avatar: project.value.avatar,  // 添加头像URL
             owner: project.value.owner,
-            intro: project.value.intro
+            intro: project.value.intro,
+            login_configs: project.value.loginConfigs  // 添加登录配置
           })
           
           if (result.data.success) {
@@ -459,7 +534,9 @@ export default {
       handleRevoke,
       goBack,
       handleImageError,
-      handleImageLoad
+      handleImageLoad,
+      addLoginConfig,
+      removeLoginConfig
     }
   }
 }
@@ -641,5 +718,101 @@ export default {
   .form-label {
     width: 90px;
   }
+}
+
+/* 网站登录配置样式 */
+.login-configs-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-config-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.config-fields {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+  flex: 1;
+}
+
+.config-field-full {
+  flex-basis: 100%;
+  min-width: 100%;
+}
+
+.config-field label {
+  font-size: 13px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.config-input {
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: border-color 0.2s;
+}
+
+.config-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.config-input::placeholder {
+  color: #9ca3af;
+}
+
+.remove-config-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: #fee2e2;
+  color: #ef4444;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: bold;
+  transition: background-color 0.2s;
+  flex-shrink: 0;
+}
+
+.remove-config-btn:hover {
+  background: #fecaca;
+}
+
+.add-config-btn {
+  padding: 10px 16px;
+  border: 2px dashed #d1d5db;
+  background: transparent;
+  color: #6b7280;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.add-config-btn:hover {
+  border-color: #667eea;
+  color: #667eea;
+  background: rgba(102, 126, 234, 0.05);
 }
 </style> 

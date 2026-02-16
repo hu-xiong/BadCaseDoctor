@@ -4,7 +4,8 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
-from datetime import datetime, timedelta
+import json
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pymysql
 from dotenv import load_dotenv
@@ -31,6 +32,11 @@ import signal
 import os
 
 from routers.chat import chat_bp
+from routers.agent import agent_bp
+from routers.payment import payment_bp
+
+# 导入 Prometheus
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 load_dotenv()
 
@@ -59,6 +65,19 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 # 添加CORS支持
 CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8080', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173', 'http://127.0.0.1:8080'])
 
+# 全局 OPTIONS 处理器 - 处理 CORS 预检请求
+@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    """处理所有 OPTIONS 请求（CORS 预检）"""
+    response = app.make_response(('', 204))
+    response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    response.headers['Access-Control-Max-Age'] = '86400'
+    return response
+
 # 邮件配置 - 使用环境变量
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.163.com')
 app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 465))
@@ -68,6 +87,8 @@ app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
 app.register_blueprint(chat_bp)
+app.register_blueprint(agent_bp)
+app.register_blueprint(payment_bp)
 
 # MinIO配置
 MINIO_CONFIG = {
@@ -151,7 +172,17 @@ def get_redis_client():
 # 全局进程管理
 active_processes = {}
 
-# 终端命令执行接口（使用真正的Shell）
+# ==================== Prometheus 指标端点 ====================
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    """
+    暴露 Prometheus 指标端点
+    使用 curl http://localhost:5000/metrics 查看
+    """
+    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
+# ==================== 终端接口 ====================
 @app.route('/api/terminal/exec', methods=['POST'])
 @login_required
 def terminal_exec():
@@ -565,6 +596,29 @@ class User(UserMixin, db.Model):
     verification_expires = db.Column(db.DateTime)  # 验证码过期时间
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+
+class UserCredits(db.Model):
+    """用户额度表"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), unique=True, nullable=False)
+    credits = db.Column(db.Integer, default=0)  # 剩余使用次数
+    total_purchased = db.Column(db.Integer, default=0)  # 累计购买次数
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class PaymentHistory(db.Model):
+    """支付历史记录"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    plan_id = db.Column(db.String(50), nullable=False)  # basic/standard/professional/enterprise
+    credits = db.Column(db.Integer, nullable=False)  # 购买的额度
+    amount = db.Column(db.Integer, nullable=False)  # 支付金额(美分)
+    stripe_session_id = db.Column(db.String(200))  # Stripe 会话ID
+    status = db.Column(db.String(20), default='pending')  # pending/completed/failed
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
@@ -573,6 +627,7 @@ class Project(db.Model):
     owner = db.Column(db.String(100))  # 负责人名称
     intro = db.Column(db.Text)  # 项目介绍语
     status = db.Column(db.String(20), default='published')  # published, unpublished
+    login_configs = db.Column(db.Text)  # 网站登录配置 JSON: [{"url": "...", "username": "...", "password": "..."}]
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
@@ -683,7 +738,7 @@ class Bug(db.Model):
     __tablename__ = 'bug'
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)  # Bug标题
-    description = db.Column(db.Text, nullable=False)  # Bug描述
+    description = db.Column(db.Text)  # Bug描述，改为可选
     steps_to_reproduce = db.Column(db.Text)  # 复现步骤
     expected_result = db.Column(db.Text)  # 期望结果
     actual_result = db.Column(db.Text)  # 实际结果
@@ -762,7 +817,7 @@ class PromptTemplate(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return db.session.get(User, int(user_id))
 
 # 邮件发送函数
 def send_email(to, subject, body):
@@ -1373,6 +1428,268 @@ def api_chat():
         "docs": docs
     })
 
+# ==================== Browser-use Agent API ==================== #
+
+@app.route('/api/agent/browser-use/test', methods=['POST'])
+@login_required
+def api_browser_use_test():
+    """测试用例自动执行"""
+    try:
+        from agents import BrowserUseAgent
+        from llm.factory import get_llm
+        
+        data = request.get_json()
+        test_case = data.get('test_case', {})
+        
+        agent = BrowserUseAgent()
+        llm = get_llm("qwen")
+        
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="test_execution",
+            llm=llm,
+            test_case=test_case
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"测试执行失败: {e}")
+        return jsonify({"error": f"测试执行失败: {str(e)}"}), 500
+
+@app.route('/api/agent/browser-use/badcase', methods=['POST'])
+@login_required
+def api_browser_use_badcase():
+    """BadCase 复现定位"""
+    try:
+        from agents import BrowserUseAgent
+        from llm.factory import get_llm
+        
+        data = request.get_json()
+        badcase = data.get('badcase', {})
+        
+        agent = BrowserUseAgent()
+        llm = get_llm("qwen")
+        
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="badcase_reproduction",
+            llm=llm,
+            badcase=badcase
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"BadCase 复现失败: {e}")
+        return jsonify({"error": f"BadCase 复现失败: {str(e)}"}), 500
+
+@app.route('/api/agent/browser-use/conversation', methods=['POST'])
+@login_required
+def api_browser_use_conversation():
+    """对话准确率测试"""
+    try:
+        from agents import BrowserUseAgent
+        from llm.factory import get_llm
+        
+        data = request.get_json()
+        conversation_test = data.get('conversation_test', {})
+        
+        agent = BrowserUseAgent()
+        llm = get_llm("qwen")
+        
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="conversation_test",
+            llm=llm,
+            conversation_test=conversation_test
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"对话测试失败: {e}")
+        return jsonify({"error": f"对话测试失败: {str(e)}"}), 500
+
+# ==================== Bug 管理 Agent API ==================== #
+# 注意：这是基于 Redis 的 Bug 管理 Agent，用于对话式操作
+# 不同于下方基于数据库的 Bug CRUD API
+
+@app.route('/api/agent/bugs/list', methods=['POST'])
+@login_required
+def api_agent_list_bugs():
+    """查询 Bug 列表（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        project_id = data.get('project_id')
+        status = data.get('status')
+        priority = data.get('priority')
+        assignee = data.get('assignee')
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="list",
+            project_id=project_id,
+            status=status,
+            priority=priority,
+            assignee=assignee
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"查询 Bug 列表失败: {e}")
+        return jsonify({"error": f"查询 Bug 列表失败: {str(e)}"}), 500
+
+@app.route('/api/agent/bugs/create', methods=['POST'])
+@login_required
+def api_agent_create_bug():
+    """创建新 Bug（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        project_id = data.get('project_id')
+        title = data.get('title')
+        description = data.get('description', '')
+        priority = data.get('priority', 'medium')
+        assignee = data.get('assignee')
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="create",
+            project_id=project_id,
+            title=title,
+            description=description,
+            priority=priority,
+            assignee=assignee
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"创建 Bug 失败: {e}")
+        return jsonify({"error": f"创建 Bug 失败: {str(e)}"}), 500
+
+@app.route('/api/agent/bugs/update', methods=['POST'])
+@login_required
+def api_agent_update_bug():
+    """更新 Bug 信息（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        bug_id = data.get('bug_id')
+        updates = data.get('updates', {})
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="update",
+            bug_id=bug_id,
+            updates=updates
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"更新 Bug 失败: {e}")
+        return jsonify({"error": f"更新 Bug 失败: {str(e)}"}), 500
+
+@app.route('/api/agent/bugs/delete', methods=['POST'])
+@login_required
+def api_agent_delete_bug():
+    """删除 Bug（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        bug_id = data.get('bug_id')
+        project_id = data.get('project_id')
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="delete",
+            bug_id=bug_id,
+            project_id=project_id
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"删除 Bug 失败: {e}")
+        return jsonify({"error": f"删除 Bug 失败: {str(e)}"}), 500
+
+@app.route('/api/agent/bugs/assign', methods=['POST'])
+@login_required
+def api_agent_assign_bug():
+    """分配 Bug（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        bug_id = data.get('bug_id')
+        assignee = data.get('assignee')
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="assign",
+            bug_id=bug_id,
+            assignee=assignee
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"分配 Bug 失败: {e}")
+        return jsonify({"error": f"分配 Bug 失败: {str(e)}"}), 500
+
+@app.route('/api/agent/bugs/change-status', methods=['POST'])
+@login_required
+def api_agent_change_bug_status():
+    """修改 Bug 状态（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        bug_id = data.get('bug_id')
+        status = data.get('status')
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="change_status",
+            bug_id=bug_id,
+            status=status
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"修改 Bug 状态失败: {e}")
+        return jsonify({"error": f"修改 Bug 状态失败: {str(e)}"}), 500
+
+@app.route('/api/agent/bugs/search', methods=['POST'])
+@login_required
+def api_agent_search_bugs():
+    """搜索 Bug（Agent）"""
+    try:
+        from agents import BugManagementAgent
+        
+        data = request.get_json()
+        project_id = data.get('project_id')
+        keyword = data.get('keyword')
+        
+        agent = BugManagementAgent()
+        result = agent.handle(
+            userId=str(current_user.id),
+            action="search",
+            project_id=project_id,
+            keyword=keyword
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"搜索 Bug 失败: {e}")
+        return jsonify({"error": f"搜索 Bug 失败: {str(e)}"}), 500
+
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload_file():
@@ -1623,48 +1940,23 @@ def api_get_avatar_image(file_path):
         return jsonify({'error': '服务器内部错误'}), 500
 
 @app.route('/api/avatar/base64/<path:file_path>', methods=['GET'])
-@login_required  # 需要登录才能获取头像
 def api_get_avatar_base64(file_path):
     """获取头像图片的base64数据，支持Redis缓存，10分钟有效期"""
-    print(f"\n=== 开始处理头像base64请求 ===")
-    print(f"请求路径: /api/avatar/base64/{file_path}")
-    print(f"用户ID: {current_user.id}")
-    print(f"用户邮箱: {current_user.email}")
-    
     try:
-        # 速率限制检查
-        print(f"检查访问频率限制...")
-        if not check_avatar_access_rate(current_user.id):
-            print(f"❌ 用户 {current_user.id} 访问频率过高")
-            return jsonify({'error': '访问过于频繁，请稍后再试'}), 429
-        print(f"✅ 访问频率检查通过")
+        # 移除速率限制检查，允许匿名访问
         
         # URL解码文件名
         decoded_path = unquote(file_path)
-        print(f"原始文件路径: {file_path}")
-        print(f"解码后文件路径: {decoded_path}")
         
         # 生成缓存键
         cache_key = get_image_cache_key(decoded_path)
-        print(f"生成的缓存键: {cache_key}")
-        
-        # 测试Redis连接
-        print(f"测试Redis连接...")
-        redis_client = get_redis_client()
-        if redis_client is None:
-            print("❌ Redis连接失败，跳过缓存")
-        else:
-            print("✅ Redis连接正常")
         
         # 尝试从Redis缓存获取图片数据
-        print(f"尝试从Redis缓存获取图片数据...")
+        redis_client = get_redis_client()
         cached_image_data = get_image_from_cache(cache_key)
         if cached_image_data:
-            print(f"✅ 从Redis缓存获取到图片数据，大小: {len(cached_image_data)} 字节")
             # 转换为base64
-            print(f"开始转换为base64...")
             base64_data = base64.b64encode(cached_image_data).decode('utf-8')
-            print(f"base64转换完成，长度: {len(base64_data)} 字符")
             
             # 确定MIME类型
             mime_type = 'image/jpeg'  # Default
@@ -1674,67 +1966,37 @@ def api_get_avatar_base64(file_path):
                 mime_type = 'image/gif'
             elif decoded_path.lower().endswith('.webp'):
                 mime_type = 'image/webp'
-            print(f"确定的MIME类型: {mime_type}")
             
-            print(f"✅ 成功从缓存返回头像base64数据")
             return jsonify({
                 'data': f'data:{mime_type};base64,{base64_data}',
                 'cached': True
             })
         
         # Cache miss, fetch from MinIO
-        print(f"❌ Redis缓存未命中，从MinIO获取头像")
         full_path = f"{MINIO_CONFIG['saas_file_path']}avatar/{decoded_path}"
-        print(f"MinIO完整路径: {full_path}")
-        print(f"MinIO配置: bucket={MINIO_CONFIG['bucket_name']}, endpoint={MINIO_CONFIG['endpoint']}")
         
-        print(f"获取MinIO客户端...")
         client = get_minio_client()
-        print(f"MinIO客户端类型: {type(client)}")
-        print(f"MinIO客户端内容: {client}")
-        if hasattr(client, 'get_object'):
-            print(f"✅ MinIO客户端获取成功，具有get_object方法")
-        else:
-            print(f"❌ MinIO客户端获取失败，缺少get_object方法")
-            raise Exception(f"MinIO客户端类型错误: {type(client)}")
-        
-        print(f"从MinIO获取对象...")
         response = client.get_object(Bucket=MINIO_CONFIG['bucket_name'], Key=full_path)
-        print(f"MinIO响应类型: {type(response)}")
         
         # 检查响应类型并获取正确的文件对象
         if isinstance(response, dict):
-            print(f"MinIO响应是字典类型，包含字段: {list(response.keys())}")
             if 'Body' in response:
                 file_obj = response['Body']
-                print(f"✅ 从响应字典中获取Body对象，类型: {type(file_obj)}")
             else:
-                print(f"❌ 响应字典中没有Body字段")
-                raise Exception(f"MinIO响应缺少Body字段: {response}")
+                raise Exception(f"MinIO响应缺少Body字段")
         elif hasattr(response, 'read'):
             file_obj = response
-            print(f"✅ MinIO响应直接是文件对象")
         else:
-            print(f"❌ MinIO响应类型不支持: {type(response)}")
             raise Exception(f"MinIO响应类型不支持: {type(response)}")
         
-        print(f"读取图片数据...")
         image_data = file_obj.read()
         file_obj.close()
-        print(f"✅ 图片数据读取完成，大小: {len(image_data)} 字节")
         
         # Cache image data to Redis, 10 minutes expiry
-        print(f"将图片数据缓存到Redis...")
-        cache_success = set_image_to_cache(cache_key, image_data, 600)
-        if cache_success:
-            print(f"✅ 图片数据成功缓存到Redis")
-        else:
-            print(f"❌ 图片数据缓存到Redis失败")
+        set_image_to_cache(cache_key, image_data, 600)
         
         # 转换为base64
-        print(f"开始转换为base64...")
         base64_data = base64.b64encode(image_data).decode('utf-8')
-        print(f"base64转换完成，长度: {len(base64_data)} 字符")
         
         # 确定MIME类型
         mime_type = 'image/jpeg'  # Default
@@ -1744,31 +2006,21 @@ def api_get_avatar_base64(file_path):
             mime_type = 'image/gif'
         elif decoded_path.lower().endswith('.webp'):
             mime_type = 'image/webp'
-        print(f"确定的MIME类型: {mime_type}")
         
-        print(f"✅ 成功从MinIO获取并返回头像base64数据")
         return jsonify({
             'data': f'data:{mime_type};base64,{base64_data}',
             'cached': False
         })
         
     except ClientError as e:
-        print(f"❌ MinIO客户端错误: {e}")
         if e.response['Error']['Code'] == 'NoSuchKey':
-            print(f"❌ 头像文件不存在: {decoded_path}")
-            print(f"❌ 请求的MinIO路径: {full_path}")
             return jsonify({'error': '头像文件不存在'}), 404
         else:
-            print(f"❌ MinIO其他错误: {e.response['Error']}")
+            print(f"MinIO错误: {e}")
             return jsonify({'error': '获取头像失败'}), 500
     except Exception as e:
-        import traceback
-        print(f"❌ 获取头像时发生未知错误: {e}")
-        print(f"❌ 错误类型: {type(e).__name__}")
-        print(f"❌ 错误详情: {traceback.format_exc()}")
+        print(f"获取头像时发生未知错误: {e}")
         return jsonify({'error': '服务器内部错误'}), 500
-    finally:
-        print(f"=== 头像base64请求处理完成 ===\n")
 
 # 测试MinIO连接
 @app.route('/api/test/minio', methods=['GET'])
@@ -1988,30 +2240,56 @@ def api_import_database():
 # API端点 - 用户认证
 @app.route('/api/login', methods=['POST'])
 def api_login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    
-    if not email or not password:
-        return jsonify({'success': False, 'error': '邮箱和密码不能为空'}), 400
-    
-    user = User.query.filter_by(email=email).first()
-    if user and check_password_hash(user.password_hash, password):
-        # 暂时允许未验证的用户登录，方便开发测试
-        # if not user.is_verified:
-        #     return jsonify({'success': False, 'error': '请先验证邮箱'}), 400
-        login_user(user)
-        return jsonify({
-            'success': True, 
-            'user': {
-                'id': user.id,
-                'email': user.email,
-                'name': user.name,
-                'role': user.role
-            }
-        })
-    else:
+    try:
+        start_time = time.time()
+        print(f"\n[LOGIN] === 开始处理登录请求 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+        
+        data = request.get_json()
+        email = data.get('email')
+        password = data.get('password')
+        print(f"[LOGIN] 收到请求: email={email}")
+        
+        if not email or not password:
+            print("[LOGIN] 错误: 邮箱或密码为空")
+            return jsonify({'success': False, 'error': '邮箱和密码不能为空'}), 400
+        
+        print("[LOGIN] 正在查询数据库...")
+        db_start = time.time()
+        user = User.query.filter_by(email=email).first()
+        print(f"[LOGIN] 数据库查询耗时: {time.time() - db_start:.4f}s")
+        
+        if user:
+            print("[LOGIN] 用户存在，正在校验密码...")
+            pwd_start = time.time()
+            is_valid = check_password_hash(user.password_hash, password)
+            print(f"[LOGIN] 密码校验耗时: {time.time() - pwd_start:.4f}s")
+            
+            if is_valid:
+                print(f"[LOGIN] 校验成功，正在执行 login_user(id={user.id})...")
+                login_user(user)
+                
+                print(f"[LOGIN] === 登录处理成功，总耗时: {time.time() - start_time:.4f}s ===\n")
+                return jsonify({
+                    'success': True, 
+                    'user': {
+                        'id': user.id,
+                        'email': user.email,
+                        'name': user.name,
+                        'role': user.role
+                    }
+                })
+            else:
+                print("[LOGIN] 错误: 密码校验失败")
+        else:
+            print(f"[LOGIN] 错误: 未找到该用户 ({email})")
+            
+        print(f"[LOGIN] === 登录处理结束 (401)，总耗时: {time.time() - start_time:.4f}s ===\n")
         return jsonify({'success': False, 'error': '邮箱或密码错误'}), 401
+    except Exception as e:
+        print(f"[LOGIN] !!! 发生异常: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return jsonify({'success': False, 'error': '服务器内部错误'}), 500
 
 @app.route('/api/register', methods=['POST'])
 def api_register():
@@ -2112,8 +2390,6 @@ def api_send_verification_code():
 @login_required
 def api_get_projects():
     try:
-        print(f"=== 开始获取项目列表，用户ID: {current_user.id} ===")
-        
         # 使用更简单的查询方式，避免复杂的UNION操作
         # 首先获取用户创建的项目，限制返回字段
         owned_projects = db.session.query(
@@ -2125,8 +2401,6 @@ def api_get_projects():
             Project.status,
             Project.created_at
         ).filter(Project.user_id == current_user.id).limit(100).all()  # 限制数量避免过多数据
-        
-        print(f"用户创建的项目数量: {len(owned_projects)}")
         
         # 获取用户参与的项目（通过权限表），限制数量
         permission_projects = db.session.query(
@@ -2144,8 +2418,6 @@ def api_get_projects():
             ProjectPermission.user_id == current_user.id,
             Project.user_id != current_user.id  # 排除用户自己创建的项目
         ).limit(100).all()  # 限制数量避免过多数据
-        
-        print(f"用户参与的项目数量: {len(permission_projects)}")
         
         # 合并项目列表
         user_projects = []
@@ -2179,8 +2451,6 @@ def api_get_projects():
         # 处理项目头像URL
         for project in user_projects:
             if project['avatar']:
-                print(f"处理项目 {project['id']} 的头像: {project['avatar']}")
-                
                 # 检查是否是预签名URL且可能已过期
                 if 'AWSAccessKeyId' in project['avatar'] and 'Expires=' in project['avatar']:
                     try:
@@ -2207,13 +2477,9 @@ def api_get_projects():
                                     ExpiresIn=86400  # 24小时有效期，支持浏览器缓存
                                 )
                                 project['avatar'] = new_presigned_url
-                                print(f"项目 {project['id']} 头像URL已更新")
                             except ClientError as e:
                                 if e.response['Error']['Code'] == '404':
-                                    print(f"项目 {project['id']} 头像文件不存在: {filename}")
                                     project['avatar'] = None
-                                else:
-                                    print(f"项目 {project['id']} 头像URL更新失败: {e}")
                     except Exception as e:
                         print(f"处理项目 {project['id']} 头像URL时出错: {e}")
                 else:
@@ -2243,42 +2509,28 @@ def api_get_projects():
                                         ExpiresIn=86400  # 24小时有效期，支持浏览器缓存
                                     )
                                     project['avatar'] = new_presigned_url
-                                    print(f"项目 {project['id']} 普通URL转换为预签名URL")
                                 except ClientError as e:
                                     if e.response['Error']['Code'] == '404':
-                                        print(f"项目 {project['id']} 头像文件不存在: {filename}")
                                         project['avatar'] = None
-                                    else:
-                                        print(f"项目 {project['id']} 头像URL转换失败: {e}")
                         except Exception as e:
                             print(f"处理项目 {project['id']} 普通URL时出错: {e}")
-                    else:
-                        print(f"项目 {project['id']} 头像格式不支持: {project['avatar']}")
         
         # 按创建时间排序
         user_projects.sort(key=lambda x: x['created_at'], reverse=True)
-        
-        print(f"返回项目总数: {len(user_projects)}")
-        print(f"=== 项目列表获取完成 ===")
         
         return jsonify({'success': True, 'projects': user_projects})
         
     except Exception as e:
         print(f"获取项目列表时发生错误: {str(e)}")
-        import traceback
-        print(f"错误堆栈: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': '获取项目列表失败'}), 500
 
 @app.route('/api/projects', methods=['POST'])
 @login_required
 def api_create_project():
     try:
-        print("=== 开始创建项目 ===")
         data = request.get_json()
-        print(f"接收到的数据: {data}")
         
         if not data:
-            print("错误: 请求数据为空")
             return jsonify({'success': False, 'error': '请求数据格式错误'}), 400
             
         name = data.get('name')
@@ -2287,13 +2539,8 @@ def api_create_project():
         owner = data.get('owner', '')
         intro = data.get('intro', '')
         
-        print(f"解析的字段 - name: {name}, description: {description}, avatar: {avatar}, owner: {owner}, intro: {intro}")
-        
         if not name:
-            print("错误: 项目名称为空")
             return jsonify({'success': False, 'error': '项目名称不能为空'}), 400
-        
-        print(f"当前用户ID: {current_user.id}")
         
         project = Project(
             name=name,
@@ -2303,7 +2550,6 @@ def api_create_project():
             intro=intro,
             user_id=current_user.id
         )
-        print(f"创建的项目对象: {project}")
         
         db.session.add(project)
         db.session.commit()
@@ -2377,6 +2623,7 @@ def api_get_project_detail(project_id):
                 'owner': project.owner,
                 'intro': project.intro,
                 'status': project.status,
+                'login_configs': json.loads(project.login_configs) if project.login_configs else [],
                 'created_at': project.created_at.isoformat(),
                 'badcase_stats': {
                     'total': badcase_stats.total or 0,
@@ -2428,6 +2675,7 @@ def api_update_project(project_id):
         print(f"  - 负责人: {project.owner}")
         print(f"  - 介绍: {project.intro}")
         print(f"  - 状态: {project.status}")
+        print(f"  - 登录配置: {project.login_configs}")
         
         # 更新项目信息
         print("开始更新项目字段...")
@@ -2455,6 +2703,14 @@ def api_update_project(project_id):
             old_intro = project.intro
             project.intro = data['intro']
             print(f"  更新介绍: {old_intro} -> {project.intro}")
+        if 'login_configs' in data:
+            old_login_configs = project.login_configs
+            # login_configs 是列表，需要序列化为 JSON 字符串
+            if isinstance(data['login_configs'], list):
+                project.login_configs = json.dumps(data['login_configs'], ensure_ascii=False)
+            else:
+                project.login_configs = data['login_configs']
+            print(f"  更新登录配置: {old_login_configs} -> {project.login_configs}")
         
         # 提交到数据库
         print("提交数据库更改...")
@@ -2472,7 +2728,8 @@ def api_update_project(project_id):
                 'avatar': project.avatar,
                 'owner': project.owner,
                 'intro': project.intro,
-                'status': project.status
+                'status': project.status,
+                'login_configs': json.loads(project.login_configs) if project.login_configs else []
             }
         }
         print(f"返回响应: {response_data}")
@@ -3362,772 +3619,818 @@ def create_performance_indexes():
         print(f"创建索引时发生错误: {e}")
         db.session.rollback()
 
-if __name__ == '__main__':
-    print(generate_password_hash("123456"))
-
-    with app.app_context():
-        # 使用新的数据库同步函数
-        if sync_database_schema():
-            print("数据库初始化成功")
-        else:
-            print("数据库初始化失败，请检查错误信息")
-    
-    # 初始化MinIO
-    print("正在初始化MinIO...")
-    ensure_bucket_exists()
-    
-    # 初始化Redis
-    print("正在初始化Redis...")
-    app.redis_client = get_redis_client()
-    if app.redis_client:
-        print("✅ Redis初始化成功")
-    else:
-        print("❌ Redis初始化失败，缓存功能将不可用")
-    
-    # 计划相关API接口
-    @app.route('/api/plans', methods=['POST'])
-    @login_required
-    def api_create_plan():
-        """创建计划"""
+# 计划相关API接口
+@app.route('/api/plans', methods=['POST'])
+@login_required
+def api_create_plan():
+    """创建计划"""
+    try:
+        print("=== 创建计划API被调用 ===")
+        data = request.get_json()
+        print(f"接收到的数据: {data}")
+        print(f"当前用户ID: {current_user.id}")
+            
+        # 验证必填字段
+        required_fields = ['name', 'cycle', 'start_date', 'end_date', 'project_id']
+        for field in required_fields:
+            if not data.get(field):
+                print(f"缺少必填字段: {field}")
+                return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
+            
+        # 验证计划周期
+        valid_cycles = ['one_week', 'two_weeks', 'one_month', 'custom']
+        if data.get('cycle') and data['cycle'] not in valid_cycles:
+            return jsonify({'success': False, 'error': '无效的计划周期'}), 400
+            
+        # 检查项目权限
+        print(f"检查项目权限: 用户ID={current_user.id}, 项目 ID={data['project_id']}")
+        if not has_project_permission(current_user.id, data['project_id']):
+            print("权限检查失败")
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        print("权限检查通过")
+            
+        # 检查父计划是否存在
+        if data.get('parent_id'):
+            parent_plan = Plan.query.get(data['parent_id'])
+            if not parent_plan:
+                return jsonify({'success': False, 'error': '父计划不存在'}), 404
+            
+        # 验证日期格式
         try:
-            print("=== 创建计划API被调用 ===")
-            data = request.get_json()
-            print(f"接收到的数据: {data}")
-            print(f"当前用户ID: {current_user.id}")
+            start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date() if data.get('start_date') else None
+            end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date() if data.get('end_date') else None
+        except ValueError:
+            return jsonify({'success': False, 'error': '日期格式错误，请使用 YYYY-MM-DD 格式'}), 400
             
-            # 验证必填字段
-            required_fields = ['name', 'cycle', 'start_date', 'end_date', 'project_id']
-            for field in required_fields:
-                if not data.get(field):
-                    print(f"缺少必填字段: {field}")
-                    return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
+        # 创建计划
+        plan = Plan(
+            name=data['name'],
+            description=data.get('description', ''),
+            plan_type=data.get('plan_type', 'badcase'),  # 默认为badcase类型
+            status=data.get('status', 'active'),
+            priority=data.get('priority', 'medium'),
+            start_date=start_date,
+            end_date=end_date,
+            cycle=data.get('cycle'),
+            plan_count=data.get('count', 1),
+            scope_notification=data.get('scope_notification', False),
+            parent_id=data.get('parent_id'),
+            project_id=data['project_id'],
+            creator_id=current_user.id,
+            assignee_id=data.get('assignee_id')
+        )
             
-            # 验证计划周期
-            valid_cycles = ['one_week', 'two_weeks', 'one_month', 'custom']
-            if data.get('cycle') and data['cycle'] not in valid_cycles:
-                return jsonify({'success': False, 'error': '无效的计划周期'}), 400
+        db.session.add(plan)
+        db.session.commit()
             
-            # 检查项目权限
-            print(f"检查项目权限: 用户ID={current_user.id}, 项目ID={data['project_id']}")
-            if not has_project_permission(current_user.id, data['project_id']):
-                print("权限检查失败")
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            print("权限检查通过")
+        return jsonify({
+            'success': True,
+            'message': '计划创建成功',
+            'plan': {
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'plan_type': plan.plan_type,
+                'status': plan.status,
+                'priority': plan.priority,
+                'start_date': plan.start_date.isoformat() if plan.start_date else None,
+                'end_date': plan.end_date.isoformat() if plan.end_date else None,
+                'progress': plan.progress,
+                'cycle': plan.cycle,
+                'plan_count': plan.plan_count,
+                'scope_notification': plan.scope_notification,
+                'parent_id': plan.parent_id,
+                'project_id': plan.project_id,
+                'creator_id': plan.creator_id,
+                'assignee_id': plan.assignee_id,
+                'created_at': plan.created_at.isoformat(),
+                'updated_at': plan.updated_at.isoformat()
+            }
+        })
             
-            # 检查父计划是否存在
-            if data.get('parent_id'):
-                parent_plan = Plan.query.get(data['parent_id'])
-                if not parent_plan:
-                    return jsonify({'success': False, 'error': '父计划不存在'}), 404
-            
-            # 验证日期格式
-            try:
-                start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date() if data.get('start_date') else None
-                end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date() if data.get('end_date') else None
-            except ValueError:
-                return jsonify({'success': False, 'error': '日期格式错误，请使用 YYYY-MM-DD 格式'}), 400
-            
-            # 创建计划
-            plan = Plan(
-                name=data['name'],
-                description=data.get('description', ''),
-                plan_type=data.get('plan_type', 'badcase'),  # 默认为badcase类型
-                status=data.get('status', 'active'),
-                priority=data.get('priority', 'medium'),
-                start_date=start_date,
-                end_date=end_date,
-                cycle=data.get('cycle'),
-                plan_count=data.get('count', 1),
-                scope_notification=data.get('scope_notification', False),
-                parent_id=data.get('parent_id'),
-                project_id=data['project_id'],
-                creator_id=current_user.id,
-                assignee_id=data.get('assignee_id')
-            )
-            
-            db.session.add(plan)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': '计划创建成功',
-                'plan': {
-                    'id': plan.id,
-                    'name': plan.name,
-                    'description': plan.description,
-                    'plan_type': plan.plan_type,
-                    'status': plan.status,
-                    'priority': plan.priority,
-                    'start_date': plan.start_date.isoformat() if plan.start_date else None,
-                    'end_date': plan.end_date.isoformat() if plan.end_date else None,
-                    'progress': plan.progress,
-                    'cycle': plan.cycle,
-                    'plan_count': plan.plan_count,
-                    'scope_notification': plan.scope_notification,
-                    'parent_id': plan.parent_id,
-                    'project_id': plan.project_id,
-                    'creator_id': plan.creator_id,
-                    'assignee_id': plan.assignee_id,
-                    'created_at': plan.created_at.isoformat(),
-                    'updated_at': plan.updated_at.isoformat()
-                }
+    except Exception as e:
+        db.session.rollback()
+        print(f"创建计划失败: {e}")
+        return jsonify({'success': False, 'error': '创建计划失败'}), 500
+
+@app.route('/api/plans/<int:plan_id>', methods=['GET'])
+@login_required
+def api_get_plan_detail(plan_id):
+    """获取计划详情"""
+    try:
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, plan.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 获取子计划
+        children = []
+        for child in plan.children:
+            children.append({
+                'id': child.id,
+                'name': child.name,
+                'plan_type': child.plan_type,
+                'status': child.status,
+                'progress': child.progress,
+                'created_at': child.created_at.isoformat()
             })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"创建计划失败: {e}")
-            return jsonify({'success': False, 'error': '创建计划失败'}), 500
+        
+        # 获取BadCase或Bug列表
+        items = []
+        if plan.plan_type == 'badcase':
+            for badcase in plan.badcases:
+                items.append({
+                    'id': badcase.id,
+                    'title': badcase.title,
+                    'case_category': badcase.case_category,
+                    'status': badcase.status,
+                    'priority': badcase.priority,
+                    'assignee': badcase.assignee,
+                    'created_at': badcase.created_at.isoformat(),
+                    'type': 'badcase'
+                })
+        else:  # bug类型
+            for bug in plan.bugs:
+                items.append({
+                    'id': bug.id,
+                    'title': bug.title,
+                    'bug_type': bug.bug_type,
+                    'status': bug.status,
+                    'priority': bug.priority,
+                    'severity': bug.severity,
+                    'assignee_id': bug.assignee_id,
+                    'created_at': bug.created_at.isoformat(),
+                    'type': 'bug'
+                })
+        
+        return jsonify({
+            'success': True,
+            'plan': {
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'plan_type': plan.plan_type,
+                'status': plan.status,
+                'priority': plan.priority,
+                'start_date': plan.start_date.isoformat() if plan.start_date else None,
+                'end_date': plan.end_date.isoformat() if plan.end_date else None,
+                'progress': plan.progress,
+                'parent_id': plan.parent_id,
+                'project_id': plan.project_id,
+                'creator_id': plan.creator_id,
+                'assignee_id': plan.assignee_id,
+                'created_at': plan.created_at.isoformat(),
+                'updated_at': plan.updated_at.isoformat(),
+                'children': children,
+                'items': items
+            }
+        })
+        
+    except Exception as e:
+        print(f"获取计划详情失败: {e}")
+        return jsonify({'success': False, 'error': '获取计划详情失败'}), 500
 
-    @app.route('/api/plans/<int:plan_id>', methods=['GET'])
-    @login_required
-    def api_get_plan_detail(plan_id):
-        """获取计划详情"""
-        try:
-            plan = Plan.query.get(plan_id)
-            if not plan:
-                return jsonify({'success': False, 'error': '计划不存在'}), 404
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, plan.project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 获取子计划
+@app.route('/api/plans/<int:plan_id>', methods=['PUT'])
+@login_required
+def api_update_plan(plan_id):
+    """更新计划"""
+    try:
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, plan.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        data = request.get_json()
+        
+        # 更新字段
+        if 'name' in data:
+            plan.name = data['name']
+        if 'description' in data:
+            plan.description = data['description']
+        if 'status' in data:
+            plan.status = data['status']
+        if 'priority' in data:
+            plan.priority = data['priority']
+        if 'start_date' in data:
+            plan.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date() if data['start_date'] else None
+        if 'end_date' in data:
+            plan.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date() if data['end_date'] else None
+        if 'progress' in data:
+            plan.progress = data['progress']
+        if 'assignee_id' in data:
+            plan.assignee_id = data['assignee_id']
+        
+        plan.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '计划更新成功',
+            'plan': {
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'plan_type': plan.plan_type,
+                'status': plan.status,
+                'priority': plan.priority,
+                'start_date': plan.start_date.isoformat() if plan.start_date else None,
+                'end_date': plan.end_date.isoformat() if plan.end_date else None,
+                'progress': plan.progress,
+                'parent_id': plan.parent_id,
+                'project_id': plan.project_id,
+                'creator_id': plan.creator_id,
+                'assignee_id': plan.assignee_id,
+                'created_at': plan.created_at.isoformat(),
+                'updated_at': plan.updated_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"更新计划失败: {e}")
+        return jsonify({'success': False, 'error': '更新计划失败'}), 500
+
+@app.route('/api/plans/<int:plan_id>', methods=['DELETE'])
+@login_required
+def api_delete_plan(plan_id):
+    """删除计划"""
+    try:
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, plan.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 检查是否有子计划
+        if plan.children:
+            return jsonify({'success': False, 'error': '无法删除包含子计划的计划'}), 400
+        
+        # 检查是否有关联的BadCase或Bug
+        if plan.plan_type == 'badcase' and plan.badcases:
+            return jsonify({'success': False, 'error': '无法删除包含BadCase的计划'}), 400
+        elif plan.plan_type == 'bug' and plan.bugs:
+            return jsonify({'success': False, 'error': '无法删除包含Bug的计划'}), 400
+        
+        db.session.delete(plan)
+        db.session.commit()
+        
+        return jsonify({'success': True, 'message': '计划删除成功'})
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"删除计划失败: {e}")
+        return jsonify({'success': False, 'error': '删除计划失败'}), 500
+
+@app.route('/api/plans/<int:plan_id>/pin', methods=['POST'])
+@login_required
+def api_pin_plan(plan_id):
+    """置顶/取消置顶计划"""
+    try:
+        print(f"=== 置顶计划API被调用 ===")
+        print(f"计划ID: {plan_id}")
+        print(f"当前用户ID: {current_user.id}")
+        
+        # 获取计划
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, plan.project_id):
+            return jsonify({'success': False, 'error': '没有权限'}), 403
+        
+        # 切换置顶状态
+        plan.is_pinned = not plan.is_pinned
+        db.session.commit()
+        
+        action = "置顶" if plan.is_pinned else "取消置顶"
+        print(f"计划 {plan.name} {action}成功")
+        
+        return jsonify({
+            'success': True,
+            'message': f'计划{action}成功',
+            'is_pinned': plan.is_pinned
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"置顶计划失败: {e}")
+        return jsonify({'success': False, 'error': '置顶计划失败'}), 500
+
+@app.route('/api/projects/<int:project_id>/plans', methods=['GET'])
+@login_required
+def api_get_project_plans(project_id):
+    """获取项目的计划树"""
+    try:
+        # 检查项目权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 获取顶级计划（没有父计划的计划），按置顶状态和创建时间排序
+        root_plans = Plan.query.filter_by(project_id=project_id, parent_id=None).order_by(
+            Plan.is_pinned.desc(),  # 置顶的在前
+            Plan.created_at.desc()  # 然后按创建时间倒序
+        ).all()
+        print(f"=== 获取项目 {project_id} 的计划 ===")
+        print(f"找到 {len(root_plans)} 个顶级计划")
+        for plan in root_plans:
+            print(f"计划: {plan.name} (ID: {plan.id}, 状态: {plan.status}, 置顶: {plan.is_pinned}, 创建时间: {plan.created_at})")
+        
+        def build_plan_tree(plan):
+            """递归构建计划树"""
             children = []
             for child in plan.children:
-                children.append({
-                    'id': child.id,
-                    'name': child.name,
-                    'plan_type': child.plan_type,
-                    'status': child.status,
-                    'progress': child.progress,
-                    'created_at': child.created_at.isoformat()
-                })
+                children.append(build_plan_tree(child))
             
-            # 获取BadCase或Bug列表
-            items = []
-            if plan.plan_type == 'badcase':
-                for badcase in plan.badcases:
-                    items.append({
-                        'id': badcase.id,
-                        'title': badcase.title,
-                        'case_category': badcase.case_category,
-                        'status': badcase.status,
-                        'priority': badcase.priority,
-                        'assignee': badcase.assignee,
-                        'created_at': badcase.created_at.isoformat(),
-                        'type': 'badcase'
-                    })
-            else:  # bug类型
-                for bug in plan.bugs:
-                    items.append({
-                        'id': bug.id,
-                        'title': bug.title,
-                        'bug_type': bug.bug_type,
-                        'status': bug.status,
-                        'priority': bug.priority,
-                        'severity': bug.severity,
-                        'assignee_id': bug.assignee_id,
-                        'created_at': bug.created_at.isoformat(),
-                        'type': 'bug'
-                    })
-            
-            return jsonify({
-                'success': True,
-                'plan': {
-                    'id': plan.id,
-                    'name': plan.name,
-                    'description': plan.description,
-                    'plan_type': plan.plan_type,
-                    'status': plan.status,
-                    'priority': plan.priority,
-                    'start_date': plan.start_date.isoformat() if plan.start_date else None,
-                    'end_date': plan.end_date.isoformat() if plan.end_date else None,
-                    'progress': plan.progress,
-                    'parent_id': plan.parent_id,
-                    'project_id': plan.project_id,
-                    'creator_id': plan.creator_id,
-                    'assignee_id': plan.assignee_id,
-                    'created_at': plan.created_at.isoformat(),
-                    'updated_at': plan.updated_at.isoformat(),
-                    'children': children,
-                    'items': items
-                }
-            })
-            
-        except Exception as e:
-            print(f"获取计划详情失败: {e}")
-            return jsonify({'success': False, 'error': '获取计划详情失败'}), 500
-
-    @app.route('/api/plans/<int:plan_id>', methods=['PUT'])
-    @login_required
-    def api_update_plan(plan_id):
-        """更新计划"""
-        try:
-            plan = Plan.query.get(plan_id)
-            if not plan:
-                return jsonify({'success': False, 'error': '计划不存在'}), 404
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, plan.project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            data = request.get_json()
-            
-            # 更新字段
-            if 'name' in data:
-                plan.name = data['name']
-            if 'description' in data:
-                plan.description = data['description']
-            if 'status' in data:
-                plan.status = data['status']
-            if 'priority' in data:
-                plan.priority = data['priority']
-            if 'start_date' in data:
-                plan.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date() if data['start_date'] else None
-            if 'end_date' in data:
-                plan.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date() if data['end_date'] else None
-            if 'progress' in data:
-                plan.progress = data['progress']
-            if 'assignee_id' in data:
-                plan.assignee_id = data['assignee_id']
-            
-            plan.updated_at = datetime.utcnow()
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': '计划更新成功',
-                'plan': {
-                    'id': plan.id,
-                    'name': plan.name,
-                    'description': plan.description,
-                    'plan_type': plan.plan_type,
-                    'status': plan.status,
-                    'priority': plan.priority,
-                    'start_date': plan.start_date.isoformat() if plan.start_date else None,
-                    'end_date': plan.end_date.isoformat() if plan.end_date else None,
-                    'progress': plan.progress,
-                    'parent_id': plan.parent_id,
-                    'project_id': plan.project_id,
-                    'creator_id': plan.creator_id,
-                    'assignee_id': plan.assignee_id,
-                    'created_at': plan.created_at.isoformat(),
-                    'updated_at': plan.updated_at.isoformat()
-                }
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"更新计划失败: {e}")
-            return jsonify({'success': False, 'error': '更新计划失败'}), 500
-
-    @app.route('/api/plans/<int:plan_id>', methods=['DELETE'])
-    @login_required
-    def api_delete_plan(plan_id):
-        """删除计划"""
-        try:
-            plan = Plan.query.get(plan_id)
-            if not plan:
-                return jsonify({'success': False, 'error': '计划不存在'}), 404
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, plan.project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 检查是否有子计划
-            if plan.children:
-                return jsonify({'success': False, 'error': '无法删除包含子计划的计划'}), 400
-            
-            # 检查是否有关联的BadCase或Bug
-            if plan.plan_type == 'badcase' and plan.badcases:
-                return jsonify({'success': False, 'error': '无法删除包含BadCase的计划'}), 400
-            elif plan.plan_type == 'bug' and plan.bugs:
-                return jsonify({'success': False, 'error': '无法删除包含Bug的计划'}), 400
-            
-            db.session.delete(plan)
-            db.session.commit()
-            
-            return jsonify({'success': True, 'message': '计划删除成功'})
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"删除计划失败: {e}")
-            return jsonify({'success': False, 'error': '删除计划失败'}), 500
-
-    @app.route('/api/plans/<int:plan_id>/pin', methods=['POST'])
-    @login_required
-    def api_pin_plan(plan_id):
-        """置顶/取消置顶计划"""
-        try:
-            print(f"=== 置顶计划API被调用 ===")
-            print(f"计划ID: {plan_id}")
-            print(f"当前用户ID: {current_user.id}")
-            
-            # 获取计划
-            plan = Plan.query.get(plan_id)
-            if not plan:
-                return jsonify({'success': False, 'error': '计划不存在'}), 404
-            
-            # 检查权限
-            if not has_project_permission(current_user.id, plan.project_id):
-                return jsonify({'success': False, 'error': '没有权限'}), 403
-            
-            # 切换置顶状态
-            plan.is_pinned = not plan.is_pinned
-            db.session.commit()
-            
-            action = "置顶" if plan.is_pinned else "取消置顶"
-            print(f"计划 {plan.name} {action}成功")
-            
-            return jsonify({
-                'success': True,
-                'message': f'计划{action}成功',
-                'is_pinned': plan.is_pinned
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"置顶计划失败: {e}")
-            return jsonify({'success': False, 'error': '置顶计划失败'}), 500
-
-    @app.route('/api/projects/<int:project_id>/plans', methods=['GET'])
-    @login_required
-    def api_get_project_plans(project_id):
-        """获取项目的计划树"""
-        try:
-            # 检查项目权限
-            if not has_project_permission(current_user.id, project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 获取顶级计划（没有父计划的计划），按置顶状态和创建时间排序
-            root_plans = Plan.query.filter_by(project_id=project_id, parent_id=None).order_by(
-                Plan.is_pinned.desc(),  # 置顶的在前
-                Plan.created_at.desc()  # 然后按创建时间倒序
-            ).all()
-            print(f"=== 获取项目 {project_id} 的计划 ===")
-            print(f"找到 {len(root_plans)} 个顶级计划")
-            for plan in root_plans:
-                print(f"计划: {plan.name} (ID: {plan.id}, 状态: {plan.status}, 置顶: {plan.is_pinned}, 创建时间: {plan.created_at})")
-            
-            def build_plan_tree(plan):
-                """递归构建计划树"""
-                children = []
-                for child in plan.children:
-                    children.append(build_plan_tree(child))
-                
-                return {
-                    'id': plan.id,
-                    'name': plan.name,
-                    'description': plan.description,
-                    'plan_type': plan.plan_type,
-                    'status': plan.status,
-                    'priority': plan.priority,
-                    'is_pinned': plan.is_pinned,
-                    'start_date': plan.start_date.isoformat() if plan.start_date else None,
-                    'end_date': plan.end_date.isoformat() if plan.end_date else None,
-                    'progress': plan.progress,
-                    'creator_id': plan.creator_id,
-                    'assignee_id': plan.assignee_id,
-                    'created_at': plan.created_at.isoformat(),
-                    'updated_at': plan.updated_at.isoformat(),
-                    'children': children,
-                    'badcase_count': BadCase.query.filter_by(plan_id=plan.id).count() if plan.plan_type == 'badcase' else 0,
-                    'bug_count': Bug.query.filter_by(plan_id=plan.id).count() if plan.plan_type == 'bug' else 0
-                }
-            
-            plans_tree = []
-            for plan in root_plans:
-                plans_tree.append(build_plan_tree(plan))
-            
-            return jsonify({
-                'success': True,
-                'plans': plans_tree
-            })
-            
-        except Exception as e:
-            print(f"获取项目计划失败: {e}")
-            return jsonify({'success': False, 'error': '获取项目计划失败'}), 500
+            plan_data = {
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'plan_type': plan.plan_type,
+                'status': plan.status,
+                'priority': plan.priority,
+                'is_pinned': plan.is_pinned,
+                'start_date': plan.start_date.isoformat() if plan.start_date else None,
+                'end_date': plan.end_date.isoformat() if plan.end_date else None,
+                'progress': plan.progress,
+                'creator_id': plan.creator_id,
+                'assignee_id': plan.assignee_id,
+                'created_at': plan.created_at.isoformat(),
+                'updated_at': plan.updated_at.isoformat(),
+                'children': children,
+                'badcase_count': BadCase.query.filter_by(plan_id=plan.id).count() if plan.plan_type == 'badcase' else 0,
+                'bug_count': Bug.query.filter_by(plan_id=plan.id).count() if plan.plan_type == 'bug' else 0
+            }
+            print(f"[DEBUG] Plan data: ID={plan.id}, name={plan.name}, plan_type={plan.plan_type}")
+            return plan_data
+        
+        plans_tree = []
+        for plan in root_plans:
+            plans_tree.append(build_plan_tree(plan))
+        
+        return jsonify({
+            'success': True,
+            'plans': plans_tree
+        })
+        
+    except Exception as e:
+        import traceback
+        print(f"获取项目计划失败: {e}")
+        print(f"错误详情: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': f'获取项目计划失败: {str(e)}'}), 500
 
     # 团队管理API接口
-    @app.route('/api/teams', methods=['POST'])
-    @login_required
-    def api_create_team():
-        """创建团队"""
-        try:
-            data = request.get_json()
-            
-            # 验证必填字段
-            required_fields = ['name', 'project_id']
-            for field in required_fields:
-                if not data.get(field):
-                    return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, data['project_id']):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 创建团队
-            team = Team(
-                name=data['name'],
-                description=data.get('description', ''),
-                project_id=data['project_id'],
-                creator_id=current_user.id
-            )
-            
-            db.session.add(team)
-            db.session.commit()
-            
-            # 创建者自动成为团队成员
-            team_member = TeamMember(
-                team_id=team.id,
-                user_id=current_user.id,
-                role='leader'
-            )
-            db.session.add(team_member)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'team': {
-                    'id': team.id,
-                    'name': team.name,
-                    'description': team.description,
-                    'project_id': team.project_id,
-                    'creator_id': team.creator_id,
-                    'created_at': team.created_at.isoformat()
-                }
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"创建团队失败: {e}")
-            return jsonify({'success': False, 'error': '创建团队失败'}), 500
+@app.route('/api/teams', methods=['POST'])
+@login_required
+def api_create_team():
+    """创建团队"""
+    try:
+        data = request.get_json()
+        
+        # 验证必填字段
+        required_fields = ['name', 'project_id']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, data['project_id']):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 创建团队
+        team = Team(
+            name=data['name'],
+            description=data.get('description', ''),
+            project_id=data['project_id'],
+            creator_id=current_user.id
+        )
+        
+        db.session.add(team)
+        db.session.commit()
+        
+        # 创建者自动成为团队成员
+        team_member = TeamMember(
+            team_id=team.id,
+            user_id=current_user.id,
+            role='leader'
+        )
+        db.session.add(team_member)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'team': {
+                'id': team.id,
+                'name': team.name,
+                'description': team.description,
+                'project_id': team.project_id,
+                'creator_id': team.creator_id,
+                'created_at': team.created_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"创建团队失败: {e}")
+        return jsonify({'success': False, 'error': '创建团队失败'}), 500
 
-    @app.route('/api/teams/<int:team_id>/members', methods=['POST'])
-    @login_required
-    def api_add_team_member(team_id):
-        """添加团队成员"""
-        try:
-            import json
-            data = request.get_json()
-            
-            # 验证必填字段
-            if not data.get('user_id'):
-                return jsonify({'success': False, 'error': '缺少用户ID'}), 400
-            
-            # 检查团队是否存在
-            team = Team.query.get(team_id)
-            if not team:
-                return jsonify({'success': False, 'error': '团队不存在'}), 404
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, team.project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 检查用户是否已经是团队成员
-            existing_member = TeamMember.query.filter_by(
-                team_id=team_id, 
-                user_id=data['user_id']
-            ).first()
-            
-            if existing_member:
-                return jsonify({'success': False, 'error': '用户已经是团队成员'}), 400
-            
-            # 添加团队成员
-            team_member = TeamMember(
-                team_id=team_id,
-                user_id=data['user_id'],
-                role=data.get('role', 'member'),
-                permissions=json.dumps(data.get('permissions', ['view_project']))
-            )
-            
-            db.session.add(team_member)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'member': {
-                    'id': team_member.id,
-                    'team_id': team_member.id,
-                    'user_id': team_member.user_id,
-                    'role': team_member.role,
-                    'permissions': json.loads(team_member.permissions) if team_member.permissions else ['view_project'],
-                    'joined_at': team_member.joined_at.isoformat()
-                }
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            import traceback
-            print(f"添加团队成员失败: {e}")
-            print(f"错误详情: {traceback.format_exc()}")
-            return jsonify({'success': False, 'error': f'添加团队成员失败: {str(e)}'}), 500
+@app.route('/api/teams/<int:team_id>/members', methods=['POST'])
+@login_required
+def api_add_team_member(team_id):
+    """添加团队成员"""
+    try:
+        import json
+        data = request.get_json()
+        
+        # 验证必填字段
+        if not data.get('user_id'):
+            return jsonify({'success': False, 'error': '缺少用户ID'}), 400
+        
+        # 检查团队是否存在
+        team = Team.query.get(team_id)
+        if not team:
+            return jsonify({'success': False, 'error': '团队不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, team.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 检查用户是否已经是团队成员
+        existing_member = TeamMember.query.filter_by(
+            team_id=team_id, 
+            user_id=data['user_id']
+        ).first()
+        
+        if existing_member:
+            return jsonify({'success': False, 'error': '用户已经是团队成员'}), 400
+        
+        # 添加团队成员
+        team_member = TeamMember(
+            team_id=team_id,
+            user_id=data['user_id'],
+            role=data.get('role', 'member'),
+            permissions=json.dumps(data.get('permissions', ['view_project']))
+        )
+        
+        db.session.add(team_member)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'member': {
+                'id': team_member.id,
+                'team_id': team_member.id,
+                'user_id': team_member.user_id,
+                'role': team_member.role,
+                'permissions': json.loads(team_member.permissions) if team_member.permissions else ['view_project'],
+                'joined_at': team_member.joined_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        print(f"添加团队成员失败: {e}")
+        print(f"错误详情: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': f'添加团队成员失败: {str(e)}'}), 500
 
-    @app.route('/api/projects/<int:project_id>/teams', methods=['GET'])
-    @login_required
-    def api_get_project_teams(project_id):
-        """获取项目的团队列表"""
-        try:
-            import json
-            # 检查项目权限
-            if not has_project_permission(current_user.id, project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+@app.route('/api/projects/<int:project_id>/teams', methods=['GET'])
+@login_required
+def api_get_project_teams(project_id):
+    """获取项目的团队列表"""
+    try:
+        import json
+        # 检查项目权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 获取项目下的所有团队
+        teams = Team.query.filter_by(project_id=project_id).all()
+        
+        teams_data = []
+        for team in teams:
+            # 获取团队成员
+            members = TeamMember.query.filter_by(team_id=team.id).all()
+            members_data = []
             
-            # 获取项目下的所有团队
-            teams = Team.query.filter_by(project_id=project_id).all()
-            
-            teams_data = []
-            for team in teams:
-                # 获取团队成员
-                members = TeamMember.query.filter_by(team_id=team.id).all()
-                members_data = []
-                
-                for member in members:
-                    user = User.query.get(member.user_id)
-                    if user:
-                        members_data.append({
-                            'id': member.id,
-                            'user_id': member.user_id,
-                            'user_name': user.name,
-                            'user_email': user.email,
-                            'role': member.role,
-                            'permissions': json.loads(member.permissions) if member.permissions else ['view_project'],
-                            'joined_at': member.joined_at.isoformat()
-                        })
-                
-                teams_data.append({
-                    'id': team.id,
-                    'name': team.name,
-                    'description': team.description,
-                    'project_id': team.project_id,
-                    'creator_id': team.creator_id,
-                    'created_at': team.created_at.isoformat(),
-                    'members': members_data
-                })
-            
-            return jsonify({
-                'success': True,
-                'teams': teams_data
-            })
-            
-        except Exception as e:
-            print(f"获取项目团队失败: {e}")
-            return jsonify({'success': False, 'error': '获取项目团队失败'}), 500
-
-    @app.route('/api/projects/<int:project_id>/members', methods=['GET'])
-    @login_required
-    def api_get_project_members(project_id):
-        """获取项目的所有成员（包括直接权限和团队成员）"""
-        try:
-            # 检查项目权限
-            if not has_project_permission(current_user.id, project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 获取直接项目权限的用户
-            direct_permissions = ProjectPermission.query.filter_by(project_id=project_id).all()
-            direct_members = []
-            
-            for perm in direct_permissions:
-                user = User.query.get(perm.user_id)
+            for member in members:
+                user = User.query.get(member.user_id)
                 if user:
-                    direct_members.append({
-                        'id': user.id,
-                        'name': user.name,
-                        'email': user.email,
-                        'role': perm.role,
-                        'source': 'direct_permission'
+                    members_data.append({
+                        'id': member.id,
+                        'user_id': member.user_id,
+                        'user_name': user.name,
+                        'user_email': user.email,
+                        'role': member.role,
+                        'permissions': json.loads(member.permissions) if member.permissions else ['view_project'],
+                        'joined_at': member.joined_at.isoformat()
                     })
             
-            # 获取团队成员
-            teams = Team.query.filter_by(project_id=project_id).all()
-            team_members = []
-            
-            for team in teams:
-                members = TeamMember.query.filter_by(team_id=team.id).all()
-                for member in members:
-                    user = User.query.get(member.user_id)
-                    if user:
-                        # 检查是否已经在直接成员列表中
-                        if not any(dm['id'] == user.id for dm in direct_members):
-                            team_members.append({
-                                'id': user.id,
-                                'name': user.name,
-                                'email': user.email,
-                                'role': member.role,
-                                'source': f'team_{team.name}'
-                            })
-            
-            # 合并所有成员
-            all_members = direct_members + team_members
-            
-            return jsonify({
-                'success': True,
-                'members': all_members
+            teams_data.append({
+                'id': team.id,
+                'name': team.name,
+                'description': team.description,
+                'project_id': team.project_id,
+                'creator_id': team.creator_id,
+                'created_at': team.created_at.isoformat(),
+                'members': members_data
             })
-            
-        except Exception as e:
-            print(f"获取项目成员失败: {e}")
-            return jsonify({'success': False, 'error': '获取项目成员失败'}), 500
+        
+        return jsonify({
+            'success': True,
+            'teams': teams_data
+        })
+        
+    except Exception as e:
+        print(f"获取项目团队失败: {e}")
+        return jsonify({'success': False, 'error': '获取项目团队失败'}), 500
 
-    @app.route('/api/users/available', methods=['GET'])
-    @login_required
-    def api_get_available_users():
-        """获取所有可用的注册用户（用于添加团队成员）"""
-        try:
-            # 获取所有已注册的用户
-            users = User.query.filter_by(is_verified=True).all()
-            
-            users_data = []
-            for user in users:
-                users_data.append({
+@app.route('/api/projects/<int:project_id>/members', methods=['GET'])
+@login_required
+def api_get_project_members(project_id):
+    """获取项目的所有成员（包括直接权限和团队成员）"""
+    try:
+        # 检查项目权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 获取直接项目权限的用户
+        direct_permissions = ProjectPermission.query.filter_by(project_id=project_id).all()
+        direct_members = []
+        
+        for perm in direct_permissions:
+            user = User.query.get(perm.user_id)
+            if user:
+                direct_members.append({
                     'id': user.id,
                     'name': user.name,
                     'email': user.email,
-                    'role': user.role if hasattr(user, 'role') else None
+                    'role': perm.role,
+                    'source': 'direct_permission'
                 })
-            
-            return jsonify({
-                'success': True,
-                'users': users_data
-            })
-            
-        except Exception as e:
-            print(f"获取可用用户失败: {e}")
-            return jsonify({'success': False, 'error': '获取可用用户失败'}), 500
+        
+        # 获取团队成员
+        teams = Team.query.filter_by(project_id=project_id).all()
+        team_members = []
+        
+        for team in teams:
+            members = TeamMember.query.filter_by(team_id=team.id).all()
+            for member in members:
+                user = User.query.get(member.user_id)
+                if user:
+                    # 检查是否已经在直接成员列表中
+                    if not any(dm['id'] == user.id for dm in direct_members):
+                        team_members.append({
+                            'id': user.id,
+                            'name': user.name,
+                            'email': user.email,
+                            'role': member.role,
+                            'source': f'team_{team.name}'
+                        })
+        
+        # 合并所有成员
+        all_members = direct_members + team_members
+        
+        return jsonify({
+            'success': True,
+            'members': all_members
+        })
+        
+    except Exception as e:
+        print(f"获取项目成员失败: {e}")
+        return jsonify({'success': False, 'error': '获取项目成员失败'}), 500
 
-    @app.route('/api/projects/<int:project_id>/add_user', methods=['POST'])
-    @login_required
-    def api_add_project_user(project_id):
-        """添加用户到项目（需要管理员权限）"""
-        try:
-            data = request.get_json()
-            
-            # 验证必填字段
-            if not data.get('user_id') or not data.get('role'):
-                return jsonify({'success': False, 'error': '缺少必填字段'}), 400
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, project_id, 'admin'):
-                return jsonify({'success': False, 'error': '需要管理员权限'}), 403
-            
-            # 检查用户是否存在
-            user = User.query.get(data['user_id'])
-            if not user:
-                return jsonify({'success': False, 'error': '用户不存在'}), 404
-            
-            # 检查是否已经有权限
-            existing_permission = ProjectPermission.query.filter_by(
-                project_id=project_id, 
-                user_id=data['user_id']
-            ).first()
-            
-            if existing_permission:
-                return jsonify({'success': False, 'error': '用户已有项目权限'}), 400
-            
-            # 添加权限
-            permission = ProjectPermission(
-                project_id=project_id,
-                user_id=data['user_id'],
-                role=data['role']
-            )
-            
-            db.session.add(permission)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'permission': {
-                    'id': permission.id,
-                    'project_id': permission.project_id,
-                    'user_id': permission.user_id,
-                    'role': permission.role,
-                    'created_at': permission.created_at.isoformat()
-                }
+@app.route('/api/users/available', methods=['GET'])
+@login_required
+def api_get_available_users():
+    """获取所有可用的注册用户（用于添加团队成员）"""
+    try:
+        # 获取所有已注册的用户
+        users = User.query.filter_by(is_verified=True).all()
+        
+        users_data = []
+        for user in users:
+            users_data.append({
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'role': user.role if hasattr(user, 'role') else None
             })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"添加项目用户失败: {e}")
-            return jsonify({'success': False, 'error': '添加项目用户失败'}), 500
+        
+        return jsonify({
+            'success': True,
+            'users': users_data
+        })
+        
+    except Exception as e:
+        print(f"获取可用用户失败: {e}")
+        return jsonify({'success': False, 'error': '获取可用用户失败'}), 500
+
+@app.route('/api/projects/<int:project_id>/add_user', methods=['POST'])
+@login_required
+def api_add_project_user(project_id):
+    """添加用户到项目（需要管理员权限）"""
+    try:
+        data = request.get_json()
+        
+        # 验证必填字段
+        if not data.get('user_id') or not data.get('role'):
+            return jsonify({'success': False, 'error': '缺少必填字段'}), 400
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, project_id, 'admin'):
+            return jsonify({'success': False, 'error': '需要管理员权限'}), 403
+        
+        # 检查用户是否存在
+        user = User.query.get(data['user_id'])
+        if not user:
+            return jsonify({'success': False, 'error': '用户不存在'}), 404
+        
+        # 检查是否已经有权限
+        existing_permission = ProjectPermission.query.filter_by(
+            project_id=project_id, 
+            user_id=data['user_id']
+        ).first()
+        
+        if existing_permission:
+            return jsonify({'success': False, 'error': '用户已有项目权限'}), 400
+        
+        # 添加权限
+        permission = ProjectPermission(
+            project_id=project_id,
+            user_id=data['user_id'],
+            role=data['role']
+        )
+        
+        db.session.add(permission)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'permission': {
+                'id': permission.id,
+                'project_id': permission.project_id,
+                'user_id': permission.user_id,
+                'role': permission.role,
+                'created_at': permission.created_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"添加项目用户失败: {e}")
+        return jsonify({'success': False, 'error': '添加项目用户失败'}), 500
 
     # Bug相关API接口
-    @app.route('/api/bugs', methods=['POST'])
-    @login_required
-    def api_create_bug():
-        """创建Bug"""
-        try:
-            data = request.get_json()
-            
-            # 验证必填字段
-            required_fields = ['title', 'description', 'plan_id', 'project_id']
-            for field in required_fields:
-                if not data.get(field):
-                    return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, data['project_id']):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 检查计划是否存在且为bug类型
-            plan = Plan.query.get(data['plan_id'])
-            if not plan:
-                return jsonify({'success': False, 'error': '计划不存在'}), 404
-            if plan.plan_type != 'bug':
-                return jsonify({'success': False, 'error': '只能在bug类型计划中创建bug'}), 400
-            
-            # 创建Bug
-            bug = Bug(
-                title=data['title'],
-                description=data['description'],
-                steps_to_reproduce=data.get('steps_to_reproduce', ''),
-                expected_result=data.get('expected_result', ''),
-                actual_result=data.get('actual_result', ''),
-                severity=data.get('severity', 'medium'),
-                priority=data.get('priority', 'p3'),
-                status=data.get('status', 'new'),
-                bug_type=data.get('bug_type', ''),
-                environment=data.get('environment', ''),
-                browser=data.get('browser', ''),
-                os=data.get('os', ''),
-                plan_id=data['plan_id'],
-                project_id=data['project_id'],
-                creator_id=current_user.id,
-                assignee_id=data.get('assignee_id'),
-                attachments=data.get('attachments', '')
-            )
-            
-            db.session.add(bug)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': 'Bug创建成功',
-                'bug': {
-                    'id': bug.id,
-                    'title': bug.title,
-                    'description': bug.description,
-                    'severity': bug.severity,
-                    'priority': bug.priority,
-                    'status': bug.status,
-                    'bug_type': bug.bug_type,
-                    'plan_id': bug.plan_id,
-                    'project_id': bug.project_id,
-                    'creator_id': bug.creator_id,
-                    'assignee_id': bug.assignee_id,
-                    'created_at': bug.created_at.isoformat(),
-                    'updated_at': bug.updated_at.isoformat()
-                }
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"创建Bug失败: {e}")
-            return jsonify({'success': False, 'error': '创建Bug失败'}), 500
+@app.route('/api/bugs', methods=['POST'])
+@login_required
+def api_create_bug():
+    """创建Bug"""
+    try:
+        data = request.get_json()
+        
+        # 验证必填字段
+        required_fields = ['title', 'plan_id', 'project_id']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, data['project_id']):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 检查计划是否存在且为bug类型
+        plan = Plan.query.get(data['plan_id'])
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        if plan.plan_type != 'bug':
+            return jsonify({'success': False, 'error': '只能在bug类型计划中创建bug'}), 400
+        
+        # 创建Bug
+        bug = Bug(
+            title=data['title'],
+            description=data.get('description', ''),
+            steps_to_reproduce=data.get('steps_to_reproduce', ''),
+            expected_result=data.get('expected_result', ''),
+            actual_result=data.get('actual_result', ''),
+            severity=data.get('severity', 'medium'),
+            priority=data.get('priority', 'p3'),
+            status=data.get('status', 'new'),
+            bug_type=data.get('bug_type', ''),
+            environment=data.get('environment', ''),
+            browser=data.get('browser', ''),
+            os=data.get('os', ''),
+            plan_id=data['plan_id'],
+            project_id=data['project_id'],
+            creator_id=current_user.id,
+            assignee_id=data.get('assignee_id'),
+            attachments=data.get('attachments', '')
+        )
+        
+        db.session.add(bug)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Bug创建成功',
+            'bug': {
+                'id': bug.id,
+                'title': bug.title,
+                'description': bug.description,
+                'severity': bug.severity,
+                'priority': bug.priority,
+                'status': bug.status,
+                'bug_type': bug.bug_type,
+                'plan_id': bug.plan_id,
+                'project_id': bug.project_id,
+                'creator_id': bug.creator_id,
+                'assignee_id': bug.assignee_id,
+                'created_at': bug.created_at.isoformat(),
+                'updated_at': bug.updated_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"创建Bug失败: {e}")
+        return jsonify({'success': False, 'error': '创建Bug失败'}), 500
 
-    @app.route('/api/bugs/<int:bug_id>', methods=['GET'])
-    @login_required
-    def api_get_bug_detail(bug_id):
-        """获取Bug详情"""
+@app.route('/api/projects/<int:project_id>/bugs', methods=['GET'])
+@login_required
+def api_get_project_bugs(project_id):
+    """获取项目的Bug列表（分页）"""
+    try:
+        # 检查权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        
+        # 获取计划ID参数
+        plan_id = request.args.get('plan_id', type=int)
+        
+        # 构建查询条件
+        query = Bug.query.filter_by(project_id=project_id)
+        
+        if plan_id is not None:
+            query = query.filter_by(plan_id=plan_id)
+        
+        # 分页查询Bug
+        pagination = query.order_by(Bug.created_at.desc())\
+            .paginate(page=page, per_page=per_page, error_out=False)
+        
+        bugs = []
+        for bug in pagination.items:
+            # 获取负责人姓名
+            assignee_name = '未指派'
+            if bug.assignee_id:
+                user = User.query.get(bug.assignee_id)
+                if user:
+                    assignee_name = user.name
+            
+            bugs.append({
+                'id': bug.id,
+                'title': bug.title,
+                'description': bug.description,
+                'bug_type': bug.bug_type,
+                'priority': bug.priority,
+                'status': bug.status,
+                'assignee': assignee_name,
+                'plan_id': bug.plan_id,
+                'created_at': bug.created_at.isoformat()
+            })
+        
+        return jsonify({
+            'success': True,
+            'badcases': bugs, # 为了兼容前端 filteredBadcases，这里暂时使用 badcases 键名
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': pagination.total,
+                'pages': pagination.pages,
+                'has_next': pagination.has_next,
+                'has_prev': pagination.has_prev
+            }
+        })
+    except Exception as e:
+        print(f"获取项目Bug列表失败: {e}")
+        return jsonify({'success': False, 'error': '获取Bug列表失败'}), 500
+
+@app.route('/api/bugs/<int:bug_id>', methods=['GET', 'PUT'])
+@login_required
+def api_bug_detail(bug_id):
+    """Bug详情接口：GET查询，PUT更新"""
+    if request.method == 'GET':
         try:
             bug = Bug.query.get(bug_id)
             if not bug:
@@ -4178,11 +4481,8 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"获取Bug详情失败: {e}")
             return jsonify({'success': False, 'error': '获取Bug详情失败'}), 500
-
-    @app.route('/api/bugs/<int:bug_id>/comment', methods=['POST'])
-    @login_required
-    def api_add_bug_comment(bug_id):
-        """为Bug添加评论"""
+    
+    elif request.method == 'PUT':
         try:
             bug = Bug.query.get(bug_id)
             if not bug:
@@ -4192,252 +4492,340 @@ if __name__ == '__main__':
             if not has_project_permission(current_user.id, bug.project_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
-            data = request.get_json()
-            if not data.get('content'):
-                return jsonify({'success': False, 'error': '评论内容不能为空'}), 400
+            data = request.json
             
-            comment = BugComment(
-                bug_id=bug_id,
-                user_id=current_user.id,
-                content=data['content']
-            )
+            # 更新字段
+            if 'title' in data:
+                bug.title = data['title']
+            if 'description' in data:
+                bug.description = data['description']
+            if 'steps_to_reproduce' in data:
+                bug.steps_to_reproduce = data['steps_to_reproduce']
+            if 'expected_result' in data:
+                bug.expected_result = data['expected_result']
+            if 'actual_result' in data:
+                bug.actual_result = data['actual_result']
+            if 'severity' in data:
+                bug.severity = data['severity']
+            if 'priority' in data:
+                bug.priority = data['priority']
+            if 'status' in data:
+                bug.status = data['status']
+            if 'bug_type' in data:
+                bug.bug_type = data['bug_type']
+            if 'environment' in data:
+                bug.environment = data['environment']
+            if 'browser' in data:
+                bug.browser = data['browser']
+            if 'os' in data:
+                bug.os = data['os']
+            if 'plan_id' in data:
+                bug.plan_id = data['plan_id']
+            if 'assignee_id' in data:
+                bug.assignee_id = data['assignee_id']
+            if 'attachments' in data:
+                bug.attachments = data['attachments']
             
-            db.session.add(comment)
+            bug.updated_at = datetime.now()
             db.session.commit()
             
             return jsonify({
                 'success': True,
-                'message': '评论添加成功',
-                'comment': {
-                    'id': comment.id,
-                    'content': comment.content,
-                    'user_id': comment.user_id,
-                    'user_name': comment.user.name,
-                    'created_at': comment.created_at.isoformat()
+                'message': 'Bug更新成功',
+                'bug': {
+                    'id': bug.id,
+                    'title': bug.title,
+                    'status': bug.status,
+                    'updated_at': bug.updated_at.isoformat()
                 }
             })
             
         except Exception as e:
             db.session.rollback()
-            print(f"添加Bug评论失败: {e}")
-            return jsonify({'success': False, 'error': '添加评论失败'}), 500
+            print(f"更新Bug失败: {e}")
+            return jsonify({'success': False, 'error': '更新Bug失败'}), 500
+
+@app.route('/api/bugs/<int:bug_id>/comment', methods=['POST'])
+@login_required
+def api_add_bug_comment(bug_id):
+    """为Bug添加评论"""
+    try:
+        bug = Bug.query.get(bug_id)
+        if not bug:
+            return jsonify({'success': False, 'error': 'Bug不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, bug.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        data = request.get_json()
+        if not data.get('content'):
+            return jsonify({'success': False, 'error': '评论内容不能为空'}), 400
+        
+        comment = BugComment(
+            bug_id=bug_id,
+            user_id=current_user.id,
+            content=data['content']
+        )
+        
+        db.session.add(comment)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '评论添加成功',
+            'comment': {
+                'id': comment.id,
+                'content': comment.content,
+                'user_id': comment.user_id,
+                'user_name': comment.user.name,
+                'created_at': comment.created_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"添加Bug评论失败: {e}")
+        return jsonify({'success': False, 'error': '添加评论失败'}), 500
 
     # ==================== Chat Session API ====================
     
-    @app.route('/api/projects/<int:project_id>/chat-sessions', methods=['GET'])
-    @login_required
-    def api_get_chat_sessions(project_id):
-        """获取项目的所有会话"""
-        try:
-            # 检查项目权限
-            if not has_project_permission(current_user.id, project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            sessions = ChatSession.query.filter_by(
-                project_id=project_id,
-                user_id=current_user.id
-            ).order_by(ChatSession.updated_at.desc()).all()
-            
-            return jsonify({
-                'success': True,
-                'sessions': [{
-                    'id': s.id,
-                    'title': s.title,
-                    'is_active': s.is_active,
-                    'memory_enabled': s.memory_enabled,
-                    'created_at': s.created_at.isoformat(),
-                    'updated_at': s.updated_at.isoformat()
-                } for s in sessions]
-            })
-            
-        except Exception as e:
-            print(f"获取会话列表失败: {e}")
-            return jsonify({'success': False, 'error': '获取会话列表失败'}), 500
+@app.route('/api/projects/<int:project_id>/chat-sessions', methods=['GET'])
+@login_required
+def api_get_chat_sessions(project_id):
+    """获取项目的所有会话"""
+    try:
+        # 检查项目权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        sessions = ChatSession.query.filter_by(
+            project_id=project_id,
+            user_id=current_user.id
+        ).order_by(ChatSession.updated_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'sessions': [{
+                'id': s.id,
+                'title': s.title,
+                'is_active': s.is_active,
+                'memory_enabled': s.memory_enabled,
+                'created_at': s.created_at.isoformat(),
+                'updated_at': s.updated_at.isoformat()
+            } for s in sessions]
+        })
+        
+    except Exception as e:
+        print(f"获取会话列表失败: {e}")
+        return jsonify({'success': False, 'error': '获取会话列表失败'}), 500
     
-    @app.route('/api/projects/<int:project_id>/chat-sessions', methods=['POST'])
-    @login_required
-    def api_create_chat_session(project_id):
-        """创建新会话"""
-        try:
-            # 检查项目权限
-            if not has_project_permission(current_user.id, project_id):
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            data = request.get_json()
-            title = data.get('title', '新建会话')
-            
-            session = ChatSession(
-                title=title,
-                project_id=project_id,
-                user_id=current_user.id,
-                memory_enabled=data.get('memory_enabled', True)
-            )
-            
-            db.session.add(session)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'session': {
-                    'id': session.id,
-                    'title': session.title,
-                    'is_active': session.is_active,
-                    'memory_enabled': session.memory_enabled,
-                    'created_at': session.created_at.isoformat(),
-                    'updated_at': session.updated_at.isoformat()
-                }
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"创建会话失败: {e}")
-            return jsonify({'success': False, 'error': '创建会话失败'}), 500
+@app.route('/api/projects/<int:project_id>/chat-sessions', methods=['POST'])
+@login_required
+def api_create_chat_session(project_id):
+    """创建新会话"""
+    try:
+        # 检查项目权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        data = request.get_json()
+        title = data.get('title', '新建会话')
+        
+        session = ChatSession(
+            title=title,
+            project_id=project_id,
+            user_id=current_user.id,
+            memory_enabled=data.get('memory_enabled', True)
+        )
+        
+        db.session.add(session)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'session': {
+                'id': session.id,
+                'title': session.title,
+                'is_active': session.is_active,
+                'memory_enabled': session.memory_enabled,
+                'created_at': session.created_at.isoformat(),
+                'updated_at': session.updated_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"创建会话失败: {e}")
+        return jsonify({'success': False, 'error': '创建会话失败'}), 500
     
-    @app.route('/api/chat-sessions/<int:session_id>', methods=['GET'])
-    @login_required
-    def api_get_chat_session(session_id):
-        """获取会话详情"""
-        try:
-            session = ChatSession.query.get(session_id)
-            if not session:
-                return jsonify({'success': False, 'error': '会话不存在'}), 404
-            
-            # 检查权限
-            if session.user_id != current_user.id:
-                return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
-            
-            # 获取消息
-            messages = []
-            for msg in session.messages:
-                messages.append({
-                    'id': msg.id,
-                    'is_user': msg.is_user,
-                    'content': msg.content,
-                    'understanding': msg.understanding,
-                    'steps': msg.steps,
-                    'final_response': msg.final_response,
-                    'created_at': msg.created_at.isoformat()
-                })
-            
-            return jsonify({
-                'success': True,
-                'session': {
-                    'id': session.id,
-                    'title': session.title,
-                    'is_active': session.is_active,
-                    'memory_enabled': session.memory_enabled,
-                    'memory_data': session.memory_data,
-                    'created_at': session.created_at.isoformat(),
-                    'updated_at': session.updated_at.isoformat(),
-                    'messages': messages
-                }
+@app.route('/api/chat-sessions/<int:session_id>', methods=['GET'])
+@login_required
+def api_get_chat_session(session_id):
+    """获取会话详情"""
+    try:
+        session = ChatSession.query.get(session_id)
+        if not session:
+            return jsonify({'success': False, 'error': '会话不存在'}), 404
+        
+        # 检查权限
+        if session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
+        
+        # 获取消息
+        messages = []
+        for msg in session.messages:
+            messages.append({
+                'id': msg.id,
+                'is_user': msg.is_user,
+                'content': msg.content,
+                'understanding': msg.understanding,
+                'steps': msg.steps,
+                'final_response': msg.final_response,
+                'created_at': msg.created_at.isoformat()
             })
-            
-        except Exception as e:
-            print(f"获取会话详情失败: {e}")
-            return jsonify({'success': False, 'error': '获取会话详情失败'}), 500
+        
+        return jsonify({
+            'success': True,
+            'session': {
+                'id': session.id,
+                'title': session.title,
+                'is_active': session.is_active,
+                'memory_enabled': session.memory_enabled,
+                'memory_data': session.memory_data,
+                'created_at': session.created_at.isoformat(),
+                'updated_at': session.updated_at.isoformat(),
+                'messages': messages
+            }
+        })
+        
+    except Exception as e:
+        print(f"获取会话详情失败: {e}")
+        return jsonify({'success': False, 'error': '获取会话详情失败'}), 500
     
-    @app.route('/api/chat-sessions/<int:session_id>', methods=['PUT'])
-    @login_required
-    def api_update_chat_session(session_id):
-        """更新会话"""
-        try:
-            session = ChatSession.query.get(session_id)
-            if not session:
-                return jsonify({'success': False, 'error': '会话不存在'}), 404
-            
-            # 检查权限
-            if session.user_id != current_user.id:
-                return jsonify({'success': False, 'error': '没有权限修改此会话'}), 403
-            
-            data = request.get_json()
-            if 'title' in data:
-                session.title = data['title']
-            if 'is_active' in data:
-                session.is_active = data['is_active']
-            if 'memory_enabled' in data:
-                session.memory_enabled = data['memory_enabled']
-            if 'memory_data' in data:
-                session.memory_data = data['memory_data']
-            
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': '会话更新成功'
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"更新会话失败: {e}")
-            return jsonify({'success': False, 'error': '更新会话失败'}), 500
+@app.route('/api/chat-sessions/<int:session_id>', methods=['PUT'])
+@login_required
+def api_update_chat_session(session_id):
+    """更新会话"""
+    try:
+        session = ChatSession.query.get(session_id)
+        if not session:
+            return jsonify({'success': False, 'error': '会话不存在'}), 404
+        
+        # 检查权限
+        if session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '没有权限修改此会话'}), 403
+        
+        data = request.get_json()
+        if 'title' in data:
+            session.title = data['title']
+        if 'is_active' in data:
+            session.is_active = data['is_active']
+        if 'memory_enabled' in data:
+            session.memory_enabled = data['memory_enabled']
+        if 'memory_data' in data:
+            session.memory_data = data['memory_data']
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '会话更新成功'
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"更新会话失败: {e}")
+        return jsonify({'success': False, 'error': '更新会话失败'}), 500
     
-    @app.route('/api/chat-sessions/<int:session_id>', methods=['DELETE'])
-    @login_required
-    def api_delete_chat_session(session_id):
-        """删除会话"""
-        try:
-            session = ChatSession.query.get(session_id)
-            if not session:
-                return jsonify({'success': False, 'error': '会话不存在'}), 404
-            
-            # 检查权限
-            if session.user_id != current_user.id:
-                return jsonify({'success': False, 'error': '没有权限删除此会话'}), 403
-            
-            # 删除会话及其所有消息
-            ChatMessage.query.filter_by(session_id=session_id).delete()
-            db.session.delete(session)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': '会话删除成功'
-            })
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"删除会话失败: {e}")
-            return jsonify({'success': False, 'error': '删除会话失败'}), 500
+@app.route('/api/chat-sessions/<int:session_id>', methods=['DELETE'])
+@login_required
+def api_delete_chat_session(session_id):
+    """删除会话"""
+    try:
+        session = ChatSession.query.get(session_id)
+        if not session:
+            return jsonify({'success': False, 'error': '会话不存在'}), 404
+        
+        # 检查权限
+        if session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '没有权限删除此会话'}), 403
+        
+        # 删除会话及其所有消息
+        ChatMessage.query.filter_by(session_id=session_id).delete()
+        db.session.delete(session)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '会话删除成功'
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"删除会话失败: {e}")
+        return jsonify({'success': False, 'error': '删除会话失败'}), 500
     
-    @app.route('/api/chat-sessions/<int:session_id>/messages', methods=['POST'])
-    @login_required
-    def api_add_chat_message(session_id):
-        """添加消息"""
-        try:
-            session = ChatSession.query.get(session_id)
-            if not session:
-                return jsonify({'success': False, 'error': '会话不存在'}), 404
+@app.route('/api/chat-sessions/<int:session_id>/messages', methods=['POST'])
+@login_required
+def api_add_chat_message(session_id):
+    """添加消息"""
+    try:
+        session = db.session.get(ChatSession, session_id)  # ✅ 使用 db.session.get() 替代旧 API
+        if not session:
+            return jsonify({'success': False, 'error': '会话不存在'}), 404
             
-            # 检查权限
-            if session.user_id != current_user.id:
-                return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
+        # 检查权限
+        if session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '没有权限访题此会话'}), 403
             
-            data = request.get_json()
+        data = request.get_json()
             
-            message = ChatMessage(
-                session_id=session_id,
-                user_id=current_user.id if data.get('is_user') else None,
-                is_user=data.get('is_user', True),
-                content=data.get('content'),
-                understanding=data.get('understanding'),
-                steps=data.get('steps'),
-                final_response=data.get('final_response')
-            )
+        message = ChatMessage(
+            session_id=session_id,
+            user_id=current_user.id if data.get('is_user') else None,
+            is_user=data.get('is_user', True),
+            content=data.get('content'),
+            understanding=data.get('understanding'),
+            steps=data.get('steps'),
+            final_response=data.get('final_response')
+        )
             
-            db.session.add(message)
-            session.updated_at = datetime.utcnow()
-            db.session.commit()
+        db.session.add(message)
+        session.updated_at = datetime.now(timezone.utc)  # ✅ 使用 timezone.utc 替代 utcnow()
+        db.session.commit()
             
-            return jsonify({
-                'success': True,
-                'message_id': message.id,
-                'created_at': message.created_at.isoformat()
-            })
+        return jsonify({
+            'success': True,
+            'message_id': message.id,
+            'created_at': message.created_at.isoformat()
+        })
             
-        except Exception as e:
-            db.session.rollback()
-            print(f"添加消息失败: {e}")
-            return jsonify({'success': False, 'error': '添加消息失败'}), 500
+    except Exception as e:
+        db.session.rollback()
+        print(f"添加消息失败: {e}")
+        return jsonify({'success': False, 'error': '添加消息失败'}), 500
 
-    app.run(debug=True, port=5000) 
+if __name__ == '__main__':
+    print(generate_password_hash("123456"))
+
+    with app.app_context():
+        # 使用新的数据库同步函数
+        if sync_database_schema():
+            print("数据库初始化成功")
+        else:
+            print("数据库初始化失败，请检查错误信息")
+    
+    # 初始化MinIO
+    print("正在初始化MinIO...")
+    ensure_bucket_exists()
+    
+    # 初始化Redis
+    print("正在初始化Redis...")
+    app.redis_client = get_redis_client()
+    if app.redis_client:
+        print("✅ Redis初始化成功")
+    else:
+        print("❌ Redis初始化失败，缓存功能将不可用")
+    
+    app.run(debug=False, port=5000)

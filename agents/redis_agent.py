@@ -1,7 +1,7 @@
 # agents/redis_agent.py
 import json
+from typing import Union, Optional, Dict, Any
 
-from django.db.models.expressions import result
 from flask import Response, current_app
 from langchain_core.language_models import BaseLLM
 
@@ -24,14 +24,14 @@ class RedisAgent(BaseAgent):
         )
 
 
-    def get_user_redis(self, userId: str) -> dict | None:
+    def get_user_redis(self, userId: str) -> Optional[dict]:
         key = f"redis:{userId}"
         data = self.client.hgetall(key)
         return data if data else None
 
 
 
-    def handle(self, userId: str,action:str,llm_intent: str,llm: BaseLLM,llm_script:str,info:dict) -> dict[str, int | str] | Response:
+    def handle(self, userId: str,action:str,llm_intent: str,llm: BaseLLM,llm_script:str,info:dict) -> Union[Dict[str, Union[int, str]], Response]:
         print("处理RedisAgent")
         redis_key="redis:"+userId
         redis_info=self.redis_client.get(redis_key)
@@ -70,7 +70,7 @@ class RedisAgent(BaseAgent):
             else :
                 print("请先配置Redis")
                 return Response("请先配置Redis", status=400)
-        if action is not "connect":
+        if action != "connect":
             redis_info = self.redis_client.get(redis_key)
             redis_info = json.loads(redis_info)
 

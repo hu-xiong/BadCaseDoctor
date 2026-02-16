@@ -605,7 +605,7 @@
 <script>
 import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { createBadcase, getBadcaseDetail, updateBadcase, getProjects, getProjectPlans, getProjectMembers } from '../api.js'
+import { createBadcase, getBadcaseDetail, updateBadcase, getProjects, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
 import user from '../store/user.js'
 
 
@@ -935,26 +935,32 @@ export default {
           const processPlans = (planList, level = 0) => {
             const processedPlans = []
             planList.forEach(plan => {
-              console.log(`处理计划: ${plan.name} (ID: ${plan.id}, 状态: ${plan.status})`)
-              // 只显示进行中的计划
+              console.log(`处理计划: ${plan.name} (ID: ${plan.id}, 状态: ${plan.status}, 类型: ${plan.plan_type})`)
+              // 只显示进行中的计划，且必须是 badcase 类型计划
               if (plan.status === 'active') {
-                const planOption = {
-                  value: plan.id.toString(),
-                  label: plan.name,
-                  level: level,
-                  is_pinned: plan.is_pinned || false,
-                  icon: plan.icon || '📁',
-                  badcase_count: plan.badcase_count || 0,
-                  bug_count: plan.bug_count || 0
-                }
+                // 如果是 badcase 类型计划，或者是包含 badcase 类型子计划的父计划
+                const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
                 
-                // 如果有子计划，递归处理
-                if (plan.children && plan.children.length > 0) {
-                  planOption.children = processPlans(plan.children, level + 1)
+                if (plan.plan_type === 'badcase' || children.length > 0) {
+                  const planOption = {
+                    value: plan.id.toString(),
+                    label: plan.name,
+                    level: level,
+                    is_pinned: plan.is_pinned || false,
+                    icon: plan.icon || '📁',
+                    plan_type: plan.plan_type,
+                    badcase_count: plan.badcase_count || 0
+                  }
+                  
+                  if (children.length > 0) {
+                    planOption.children = children
+                  }
+                  
+                  processedPlans.push(planOption)
+                  console.log(`添加计划: ${plan.name} (类型: ${plan.plan_type})`)
+                } else {
+                  console.log(`跳过计划: ${plan.name} (非badcase类型且无badcase子计划)`)
                 }
-                
-                processedPlans.push(planOption)
-                console.log(`添加计划: ${plan.name}`)
               }
             })
             return processedPlans
@@ -992,15 +998,16 @@ export default {
     
     // 初始化BadCase数据
     const initBadcase = async () => {
-      const query = route.query
-      console.log('=== 初始化BadCase开始 ===')
-      console.log('路由查询参数:', query)
-      
-      if (query.edit === 'true' && query.id) {
-        console.log('编辑模式，BadCase ID:', query.id)
-        isEdit.value = true
-        badcaseId.value = query.id
-        loading.value = true
+      try {
+        const query = route.query
+        console.log('=== 初始化BadCase开始 ===')
+        console.log('路由查询参数:', query)
+        
+        if (query.edit === 'true' && query.id) {
+          console.log('编辑模式，BadCase ID:', query.id)
+          isEdit.value = true
+          badcaseId.value = query.id
+          loading.value = true
         
         try {
           const response = await getBadcaseDetail(query.id)
@@ -1144,12 +1151,15 @@ export default {
             }
           } else {
             alert('获取BadCase信息失败')
-            router.go(-1)
+            goBack()
           }
         } catch (error) {
-          console.error('获取BadCase信息失败:', error)
-          alert('获取BadCase信息失败')
-          router.go(-1)
+          console.error('=== 获取BadCase信息失败 ===')
+          console.error('错误类型:', error.name)
+          console.error('错误消息:', error.message)
+          console.error('错误堆栈:', error.stack)
+          alert('获取BadCase信息失败: ' + error.message)
+          goBack()
         } finally {
           loading.value = false
         }
@@ -1202,7 +1212,15 @@ export default {
         console.log('availablePlans:', availablePlans.value)
         console.log('projectInfo:', projectInfo.value)
       }
+    } catch (initError) {
+      console.error('=== initBadcase函数执行失败 ===')
+      console.error('错误类型:', initError.name)
+      console.error('错误消息:', initError.message)
+      console.error('错误堆栈:', initError.stack)
+      alert('BadCase初始化失败: ' + initError.message)
+      loading.value = false
     }
+  }
 
     // 保存BadCase
     const saveBadcase = async () => {
@@ -1294,7 +1312,7 @@ export default {
           
           if (result.data.success) {
             alert('BadCase更新成功')
-            router.go(-1)
+            goBack()
           } else {
             alert(`更新失败: ${result.data.error || '未知错误'}`)
           }
@@ -1306,7 +1324,7 @@ export default {
           
           if (result.data.success) {
             alert('BadCase创建成功')
-            router.go(-1)
+            goBack()
           } else {
             const errorMsg = result.data.error || '未知错误'
             console.error('创建失败:', errorMsg)
@@ -1677,7 +1695,19 @@ export default {
 
     // 返回上一页
     const goBack = () => {
-      router.go(-1)
+      // 如果有项目ID和计划ID，返回到项目详情页并展开对应计划
+      if (badcase.project_id) {
+        const targetUrl = `/project-detail/${badcase.project_id}`
+        // 如果有计划ID，添加到URL参数中，让ProjectDetail自动展开
+        if (badcase.plan && badcase.plan !== 'unplanned') {
+          router.push(`${targetUrl}?expand_plan=${badcase.plan}`)
+        } else {
+          router.push(targetUrl)
+        }
+      } else {
+        // 如果没有项目ID，使用浏览器后退
+        router.go(-1)
+      }
     }
     
     onMounted(async () => {

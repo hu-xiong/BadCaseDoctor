@@ -57,7 +57,15 @@
                           <span class="message-name">{{ message.role === 'user' ? '您' : 'AI助手' }}</span>
                           <small class="message-time">{{ formatTime(message.timestamp) }}</small>
                         </div>
-                        <div class="message-text">
+                        <!-- 使用打字机效果显示内容 -->
+                        <div v-if="message.role === 'assistant'" class="message-text-typewriter">
+                          <TypewriterText 
+                            :text="message.content" 
+                            :speed="30"
+                            :autoPlay="true"
+                          />
+                        </div>
+                        <div v-else class="message-text">
                           <pre class="mb-0">{{ message.content }}</pre>
                         </div>
                       </div>
@@ -177,6 +185,7 @@ import { ref, reactive, onMounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getProjects } from '../api.js'
 import user, { logout } from '../store/user.js'
+import TypewriterText from './TypewriterText.vue'
 
 const router = useRouter()
 
@@ -219,23 +228,96 @@ async function sendMessage() {
   // 发送到AI
   sending.value = true
   try {
-    // 模拟AI响应
-    setTimeout(() => {
-      const aiMessage = {
-        id: ++messageId,
-        role: 'assistant',
-        content: generateAIResponse(currentMessage),
-        timestamp: new Date()
-      }
-      messages.value.push(aiMessage)
+    // 调用真实的后端 ReAct 接口
+    const response = await fetch('http://localhost:5000/api/agent/react', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        user_input: currentMessage,
+        stream: true
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let aiContent = '' // 收集最终响应
+    let findings = [] // 收集发现的信息
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
       
-      if (autoScroll.value) {
-        nextTick(() => scrollToBottom())
+      const chunkText = decoder.decode(value, { stream: true })
+      buffer += chunkText
+      
+      // 按行处理 SSE 数据
+      let lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmedLine = line.trim()
+        if (!trimmedLine || trimmedLine.startsWith(':')) continue
+        if (!trimmedLine.startsWith('data: ')) continue
+        
+        try {
+          const jsonStr = trimmedLine.replace('data: ', '').trim()
+          if (!jsonStr || jsonStr === '[DONE]') continue
+          
+          const chunk = JSON.parse(jsonStr)
+          
+          // 处理不同类型的事件
+          if (chunk.type === 'step' && chunk.data) {
+            const stepEvent = chunk.data
+            
+            // 收集发现的信息
+            if (stepEvent.event === 'finding' && stepEvent.data) {
+              findings.push(stepEvent.data)
+            } else if (stepEvent.event === 'done' && stepEvent.findings) {
+              findings = [...new Set([...findings, ...stepEvent.findings])]
+            }
+          }
+        } catch (e) {
+          // 解析错误，继续
+        }
       }
-    }, 1000)
+    }
+
+    // 构建最终回复
+    let finalContent = ''
+    if (findings.length > 0) {
+      finalContent = findings.join('\n\n')
+    } else {
+      finalContent = '已完成对 ' + currentMessage + ' 的分析，但未发现具体信息。'
+    }
+
+    const aiMessage = {
+      id: ++messageId,
+      role: 'assistant',
+      content: finalContent,
+      timestamp: new Date()
+    }
+    messages.value.push(aiMessage)
+    
+    if (autoScroll.value) {
+      nextTick(() => scrollToBottom())
+    }
   } catch (error) {
     console.error('发送消息失败:', error)
-    alert('发送消息失败')
+    const errorMessage = {
+      id: ++messageId,
+      role: 'assistant',
+      content: `错误: ${error.message || '未知错误'}`,
+      timestamp: new Date()
+    }
+    messages.value.push(errorMessage)
   } finally {
     sending.value = false
   }
@@ -420,6 +502,16 @@ onMounted(() => {
   border-radius: 0.375rem;
   padding: 0.75rem;
   word-wrap: break-word;
+}
+
+.message-text-typewriter {
+  background-color: #f8f9fa;
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  word-wrap: break-word;
+  min-height: 2.5rem;
+  display: flex;
+  align-items: flex-start;
 }
 
 .message-user .message-text {

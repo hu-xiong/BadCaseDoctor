@@ -23,6 +23,39 @@ class Config:
     QWEN_API_URL = os.getenv('QWEN_API_URL', None)
     QWEN_API_MODEL = os.getenv('QWEN_API_MODEL', 'qwen-plus')
     QWEN_API_TEMPERATURE = float(os.getenv('QWEN_API_TEMPERATURE', 0.7))
+    
+    # 百度千帆大模型配置
+    QIANFAN_API_KEY = os.getenv(
+        'QIANFAN_API_KEY',
+        'bce-v3/ALTAK-o11nAoKmuL7qDdZL3CQMD/62c7691269aa3fb33674cdb022f17a6f03280078'
+    )
+    QIANFAN_SECRET_KEY = os.getenv(
+        'QIANFAN_SECRET_KEY',
+        'ALTAKxhlfvE2A08OyAYx2xKieC'
+    )
+    QIANFAN_USE_BEARER_TOKEN = os.getenv('QIANFAN_USE_BEARER_TOKEN', 'True').lower() == 'true'
+    
+    # 千帆模型配置
+    QIANFAN_MODEL = os.getenv('QIANFAN_MODEL', 'ernie-4.5-turbo-128k')
+    QIANFAN_TEMPERATURE = float(os.getenv('QIANFAN_TEMPERATURE', '0.7'))
+    QIANFAN_TOP_P = float(os.getenv('QIANFAN_TOP_P', '0.8'))
+    QIANFAN_MAX_RETRIES = int(os.getenv('QIANFAN_MAX_RETRIES', '3'))
+    
+    # 默认 LLM 配置
+    DEFAULT_LLM = os.getenv('DEFAULT_LLM', 'qianfan')  # agent文本推理用文心4.5turbo
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+    
     REDIS_DATABASE=int(os.getenv('REDIS_DATABASE', 0))
     REDIS_USERNAME=os.getenv('REDIS_USERNAME', None)
 
+    # Stripe 支付配置
+    STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_xxx')  # 替换为真实密钥
+    STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', 'whsec_xxx')  # Webhook 签名密钥
+
+    # 智谱GLM配置
+    ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY', 'b6185f3bac97489da843602537da8cec.cFBNLM2wRxb8lBwJ')
+    ZHIPU_MODEL = os.getenv('ZHIPU_MODEL', 'glm-4-flash')  # 文本对话用 glm-4-flash
+    ZHIPU_MAX_TOKENS = int(os.getenv('ZHIPU_MAX_TOKENS', '65536'))
+    ZHIPU_TEMPERATURE = float(os.getenv('ZHIPU_TEMPERATURE', '0.7'))
+    ZHIPU_ENABLE_THINKING = os.getenv('ZHIPU_ENABLE_THINKING', 'true').lower() == 'true'

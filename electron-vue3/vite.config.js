@@ -8,7 +8,14 @@ export default defineConfig({
     port: 5173,
     host: 'localhost', // 只监听本地，不对外暴露
     strictPort: true, // 如果端口被占用则退出
-    open: false // 不自动打开浏览器
+    open: false, // 不自动打开浏览器
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:5000',
+        changeOrigin: true,
+        secure: false
+      }
+    }
   },
   optimizeDeps: {
     include: ['monaco-editor']

@@ -62,10 +62,7 @@
             <span class="sidebar-icon">📁</span>
             <span class="sidebar-text">项目管理</span>
           </button>
-          <button class="sidebar-item" :class="{active: currentView === 'chat'}" @click="currentView = 'chat'">
-            <span class="sidebar-icon">💬</span>
-            <span class="sidebar-text">AI对话</span>
-          </button>
+
         </div>
       </aside>
 
@@ -97,10 +94,7 @@
           <ProjectManage />
         </div>
 
-        <!-- AI对话内容 -->
-        <div v-else-if="currentView === 'chat'" class="chat-content">
-          <Chat />
-        </div>
+
 
         <!-- 浮动操作按钮 -->
         <!-- 删除以下浮动按钮 -->
@@ -119,6 +113,13 @@
         -->
       </main>
     </div>
+
+    <!-- 个人资料弹窗 -->
+    <UserProfile 
+      v-if="showProfileModal" 
+      :user="currentUser" 
+      @close="showProfileModal = false"
+    />
   </div>
 </template>
 
@@ -127,13 +128,15 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ProjectManage from './ProjectManage.vue'
 import Chat from './Chat.vue'
+import UserProfile from './UserProfile.vue'
 import userStore from '../store/user.js'
 
 export default {
   name: 'Dashboard',
   components: {
     ProjectManage,
-    Chat
+    Chat,
+    UserProfile
   },
   setup() {
     const router = useRouter()
@@ -143,6 +146,7 @@ export default {
     
     // 用户下拉菜单状态
     const showUserDropdown = ref(false)
+    const showProfileModal = ref(false)
     const currentUser = ref(null)
     
     // 获取当前用户信息
@@ -173,8 +177,7 @@ export default {
     
     const showUserProfile = () => {
       showUserDropdown.value = false
-      // TODO: 实现个人资料页面
-      alert('个人资料功能开发中...')
+      showProfileModal.value = true
     }
     
     const showTeamManagement = () => {
@@ -257,6 +260,7 @@ export default {
       currentUser,
       toggleUserDropdown,
       showUserProfile,
+      showProfileModal,
       showTeamManagement,
       showNotifications,
       showHelp,

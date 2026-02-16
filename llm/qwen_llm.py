@@ -1,6 +1,8 @@
 import json
 import re
-from typing import Any, Sequence
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Sequence, Dict, Union, Optional, List
 from urllib.parse import quote_plus
 
 import dashscope
@@ -17,70 +19,118 @@ from config import Config
 
 
 class QwenLLM:
-    def __init__(self):
-        self.model = Config.QWEN_API_MODEL
+    def __init__(self, model: str = None):
+        self.model = model or Config.QWEN_API_MODEL
         dashscope.api_key = Config.QWEN_API_KEY
         self.redis_agent = RedisAgent()
         self.conversation_history = []  # 存储对话历史
+        self.executor = ThreadPoolExecutor(max_workers=3)  # 线程池用于同步API调用
 
-    def parse_intent(self, user_input: str, history: list = None) -> dict | None:
-        example_json = '[{"agent": "", "planActions": "", "action": "", "script": ""}, {"agent": "", "planActions": "", "action": "", "script": ""}]'
-        print("#"*50)
-        # 构建包含历史对话的提示词
-        history_text = ""
-        if history:
-            history_text = "\n历史对话:\n"
-            for msg in history:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                history_text += f"{role}: {content}\n"
+    async def parse_intent(self, user_input: str, history: list = None) -> Optional[dict]:
+        """异步方法：在线程池中运行同步API调用"""
+        def _sync_parse():
+            # 增加检查：如果 user_input 已经包含了系统指令或特定格式，则不使用路由模板
+            if "<system>" in user_input or "<format>" in user_input or "必须返回" in user_input:
+                response = Generation.call(
+                    model=self.model,
+                    prompt=user_input,
+                    result_format='text'
+                )
+                if response.status_code == 200:
+                    text = response.output.text.strip()
+                    # 尝试解析为 JSON，如果失败则返回原字符串
+                    try:
+                        return json.loads(text)
+                    except:
+                        return text
+                return None
 
-        prompt = f"""
+            example_json = '[{"agent": "", "planActions": "", "action": "", "script": ""}, {"agent": "", "planActions": "", "action": "", "script": ""}]'
+            print("#"*50)
+            # 构建包含历史对话的提示词
+            history_text = ""
+            if history:
+                history_text = "\n历史对话:\n"
+                for msg in history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    history_text += f"{role}: {content}\n"
+    
+            prompt = f"""
         你是一个智能路由助手。请根据用户输入和历史对话，**严格输出一个 JSON 数组**，不要任何其他内容（不要解释、不要代码块、不要 Markdown）。
-
+    
         每个数组元素是一个任务对象，包含以下字段：
-        - "agent": 字符串，值必须是 ["redis_agent", "mysql_agent", "other","scriptAgent"] 之一。
-        - "planActions": 字符串，详细描述该任务的执行步骤（例如："连接 Redis，获取 key 'user:1001' 的值"）。
-        - "action": 字符串，表示操作类型。可选值包括：
-            "connect", "disconnect", "query", "delete", "update", "add",
-            "delete_table", "query_table", "query_column", "add_column", "delete_column",
-            "add_index", "delete_index", "add_foreign_key", "delete_foreign_key",
-            "add_trigger", "delete_trigger"
-        - "info": 对象，包含数据库/Redis 连接信息，字段包括:
-            "host" (字符串), "port" (整数), "username" (字符串), "password" (字符串),"database" (字符串),如果这些属性不存在，value值为“”
-          如果不需要连接，设为 null。
-        - "script": 字符串，是分配给子任务的具体指令（基于用户输入切分后的提示词）。
-        - "isflag": 布尔值，如果是判断类问题（如“是否存在？”、“是否成功？”），设为 true，否则 false。
-
+        - "agent": 字符串，值必须是 ["redis_agent", "mysql_agent", "bug_management_agent", "other", "scriptAgent"] 之一。
+        - "planActions": 字符串，详细描述该任务的执行步骤。
+        - "action": 字符串，表示操作类型。对于 bug_management_agent，可选值包括："list", "create", "update", "delete", "assign", "change_status", "search"。
+        - "info": 对象，包含数据库/Redis 连接信息或 Bug 相关参数（如 project_id, title, status 等）。
+        - "script": 字符串，是分配给子任务的具体指令。
+        - "isflag": 布尔值，如果是判断类问题（如"是否存在？"、"是否成功？"），设为 true，否则 false。
+    
         输出必须是合法 JSON，可被 Python json.loads() 解析。
         不要包含任何额外文本、注释、反引号或说明。
-
+    
         历史对话:
         {history_text}
-
+    
         当前用户输入: "{user_input}"
         """.strip()
+    
+            response = Generation.call(
+                model=self.model,
+                prompt=prompt,
+                result_format='text'
+            )
+            if response.status_code == 200:
+                try:
+                    print("=--=")
+                    print(response.output.text)
+                    print("----===0")
+                    return json.loads(response.output.text.strip())
+                except json.JSONDecodeError as e:
+                    print(f"JSON 解析错误: {e}")
+                    return {"agent": "other", "action": "other", "info": {}}
+            else:
+                print("error")
+                return {"agent": "other", "action": "other", "info": {}}
+            
+        # 在线程池中运行同步代码，协程等待
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(self.executor, _sync_parse)
+        return result
 
-        response = Generation.call(
+    def chat_stream(self, prompt: str, history: list = None):
+        """流式聊天方法 (同步生成器，方便 Flask 使用)"""
+        responses = Generation.call(
             model=self.model,
             prompt=prompt,
-            result_format='text'
+            result_format='text',
+            stream=True,
+            incremental_output=True
         )
-        if response.status_code == 200:
-            try:
-                print("=--=")
-                print(response.output.text)
-                print("----===0")
-                return json.loads(response.output.text.strip())
-            except json.JSONDecodeError as e:
-                print(f"JSON 解析错误: {e}")
-                return {"agent": "other", "action": "other", "info": {}}
-        else:
-            print("error")
-            return {"agent": "other", "action": "other", "info": {}}
+        for response in responses:
+            if response.status_code == 200:
+                yield response.output.text
+            else:
+                yield f"Error: {response.message}"
 
-    def dealMysql(self, user_input: str, info: str, history: list = None) -> dict[
-        str, int | str | Sequence[dict[str, Any]] | Result]:
+    async def chat(self, prompt: str, history: list = None) -> str:
+        """通用聊天方法，直接返回文本"""
+        def _sync_chat():
+            response = Generation.call(
+                model=self.model,
+                prompt=prompt,
+                result_format='text'
+            )
+            if response.status_code == 200:
+                return response.output.text
+            return f"Error: {response.message}"
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, _sync_chat)
+
+    def dealMysql(self, user_input: str, info: str, history: list = None) -> Dict[
+        str, Union[int, str, Sequence[Dict[str, Any]], Result]]:
         print("info=====", info)
         if isinstance(info, list):
             if len(info) != 5:

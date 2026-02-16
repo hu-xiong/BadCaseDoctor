@@ -45,6 +45,12 @@ const routes = [
     meta: { requiresAuth: true }
   },
   { 
+    path: '/new-bug', 
+    name: 'NewBug', 
+    component: () => import('../components/NewBug.vue'),
+    meta: { requiresAuth: true }
+  },
+  { 
     path: '/import-database', 
     name: 'ImportDatabase', 
     component: () => import('../components/ImportDatabase.vue'),
@@ -72,6 +78,24 @@ const routes = [
     path: '/terminal-test', 
     name: 'TerminalTest', 
     component: () => import('../components/TerminalTest.vue'),
+    meta: { requiresAuth: true }
+  },
+  { 
+    path: '/subscription', 
+    name: 'Subscription', 
+    component: () => import('../components/Subscription.vue'),
+    meta: { requiresAuth: true }
+  },
+  { 
+    path: '/payment/success', 
+    name: 'PaymentSuccess', 
+    component: () => import('../components/PaymentSuccess.vue'),
+    meta: { requiresAuth: true }
+  },
+  { 
+    path: '/payment/cancel', 
+    name: 'PaymentCancel', 
+    component: () => import('../components/PaymentCancel.vue'),
     meta: { requiresAuth: true }
   },
 ];

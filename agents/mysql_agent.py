@@ -2,6 +2,7 @@
 import json
 
 import redis
+from typing import Optional, List, Dict, Any
 from langchain_core.language_models import BaseLLM
 
 
@@ -17,7 +18,7 @@ class MySQLAgent(BaseAgent):
         )
 
     def handle(self, userId: str, action: str, llm_intent: str, llm_script: str, info: str, llm: BaseLLM,
-               user_input: str) -> dict | None:
+               user_input: str) -> Optional[dict]:
         userId = "124455"
 
         print("info type:", type(info))
