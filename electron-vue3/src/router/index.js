@@ -51,6 +51,12 @@ const routes = [
     meta: { requiresAuth: true }
   },
   { 
+    path: '/new-testcase', 
+    name: 'NewTestCase', 
+    component: () => import('../components/NewTestCase.vue'),
+    meta: { requiresAuth: true }
+  },
+  { 
     path: '/import-database', 
     name: 'ImportDatabase', 
     component: () => import('../components/ImportDatabase.vue'),

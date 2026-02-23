@@ -43,6 +43,10 @@ export function getProjectBadcases(projectId, page = 1, perPage = 10, additional
 export function getProjectPlans(projectId) {
   return api.get(`/api/projects/${projectId}/plans`)
 }
+// 获取计划下的Bug列表
+export function getPlanBugs(planId) {
+  return api.get(`/api/plans/${planId}/bugs`)
+}
 // 创建计划
 export function createPlan(data) {
   return api.post('/api/plans', data)
@@ -251,6 +255,33 @@ export function updateBugStatus(id, data) {
 // 删除 Bug
 export function deleteBug(id) {
   return api.delete(`/api/bugs/${id}`)
+}
+
+// ==================== TestCase API ====================
+
+// 创建TestCase
+export function createTestCase(data) {
+  return api.post('/api/testcases', data)
+}
+
+// 更新TestCase
+export function updateTestCase(id, data) {
+  return api.put(`/api/testcases/${id}`, data)
+}
+
+// 获取TestCase详情
+export function getTestCaseDetail(id) {
+  return api.get(`/api/testcases/${id}`)
+}
+
+// 删除TestCase
+export function deleteTestCase(id) {
+  return api.delete(`/api/testcases/${id}`)
+}
+
+// 获取计划下的TestCase列表
+export function getPlanTestCases(planId) {
+  return api.get(`/api/plans/${planId}/testcases`)
 }
 
 // ==================== Agent API ====================

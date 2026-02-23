@@ -763,6 +763,58 @@ class Bug(db.Model):
     creator = db.relationship('User', foreign_keys=[creator_id], backref='created_bugs')
     assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_bugs')
 
+class TestCase(db.Model):
+    __tablename__ = 'test_case'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)  # 用例标题
+    status = db.Column(db.String(20), default='draft')  # draft(草稿), review(规绩), active(生效), archived(归档)
+    case_type = db.Column(db.String(50))  # 用例类型：功能测试/接口测试/性能测试/安全测试
+    priority = db.Column(db.String(10), default='P3')  # P0/P1/P2/P3
+    test_type = db.Column(db.String(50))  # 测试类型：手动/自动/探索
+    
+    # 基本信息
+    preconditions = db.Column(db.Text)  # 前置条件
+    steps = db.Column(db.JSON)  # 用例步骤，JSON格式: [{"step": "步骤描述", "expected": "预期结果"}]
+    remark = db.Column(db.Text)  # 备注
+    
+    # 产品需求
+    requirement_id = db.Column(db.Integer)  # 关联需求ID
+    
+    # 工作项
+    related_defects = db.Column(db.JSON)  # 关联缺陷，JSON格式: [bug_id1, bug_id2]
+    
+    # 缺陷（执行信息）
+    last_executed = db.Column(db.DateTime)  # 最后执行时间
+    executed_by = db.Column(db.Integer, db.ForeignKey('user.id'))  # 执行人
+    execution_result = db.Column(db.String(20))  # 执行结果：pass/fail/blocked/skip
+    
+    # 执行（测试集）
+    baseline = db.Column(db.String(100))  # 基线管理
+    
+    # 工时
+    estimated_time = db.Column(db.Float)  # 预估工时（小时）
+    actual_time = db.Column(db.Float)  # 实际工时（小时）
+    remaining_time = db.Column(db.Float)  # 剩余工时（小时）
+    
+    # 关联信息
+    plan_id = db.Column(db.Integer, db.ForeignKey('plan.id'))  # 所属计划
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
+    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    assignee_id = db.Column(db.Integer, db.ForeignKey('user.id'))  # 维护人
+    
+    # 版本信息
+    version = db.Column(db.String(20), default='v1')  # 版本号
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # 关系
+    plan = db.relationship('Plan', backref='testcases')
+    project = db.relationship('Project', backref='testcases')
+    creator = db.relationship('User', foreign_keys=[creator_id], backref='created_testcases')
+    assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_testcases')
+    executor = db.relationship('User', foreign_keys=[executed_by], backref='executed_testcases')
+
 class ChatSession(db.Model):
     __tablename__ = 'chat_session'
     id = db.Column(db.Integer, primary_key=True)
@@ -788,6 +840,9 @@ class ChatMessage(db.Model):
     content = db.Column(db.Text)
     understanding = db.Column(db.Text)
     steps = db.Column(db.Text)  # JSON格式存储
+    execution_results = db.Column(db.Text)  # JSON格式存储executionResults
+    agent_result = db.Column(db.Text)  # JSON格式存储agentResult
+    evidences = db.Column(db.Text)  # JSON格式存储evidences
     final_response = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -1645,23 +1700,46 @@ def api_agent_assign_bug():
 @app.route('/api/agent/bugs/change-status', methods=['POST'])
 @login_required
 def api_agent_change_bug_status():
-    """修改 Bug 状态（Agent）"""
+    """修改 Bug 状态（Agent）- 使用 ModifyTool"""
+    import asyncio
+    from agents.tools.modify_tool import ModifyTool
+    
     try:
-        from agents import BugManagementAgent
-        
         data = request.get_json()
         bug_id = data.get('bug_id')
         status = data.get('status')
+        project_id = data.get('project_id')
         
-        agent = BugManagementAgent()
-        result = agent.handle(
-            userId=str(current_user.id),
-            action="change_status",
-            bug_id=bug_id,
-            status=status
-        )
+        if not bug_id or not status:
+            return jsonify({"error": "Bug ID 和状态不能为空"}), 400
         
-        return jsonify(result)
+        # 使用 ModifyTool 修改状态
+        modify_tool = ModifyTool(db.session)
+        
+        async def run_modify():
+            result = await modify_tool.execute(
+                target='bug',
+                target_id=bug_id,
+                modifications={'status': status},
+                project_id=project_id,
+                confirm=True  # 直接确认修改
+            )
+            return result
+        
+        result = asyncio.run(run_modify())
+        
+        if result.get('success'):
+            return jsonify({
+                "code": 200,
+                "message": f"Bug 状态已更新为: {status}",
+                "data": result.get('after')
+            })
+        else:
+            return jsonify({
+                "code": 500,
+                "error": result.get('error', '修改失败')
+            }), 500
+            
     except Exception as e:
         print(f"修改 Bug 状态失败: {e}")
         return jsonify({"error": f"修改 Bug 状态失败: {str(e)}"}), 500
@@ -3453,6 +3531,9 @@ def sync_database_schema():
                     'content TEXT NOT NULL',
                     'understanding TEXT',
                     'steps TEXT',
+                    'execution_results TEXT',
+                    'agent_result TEXT',
+                    'evidences TEXT',
                     'final_response TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
@@ -4588,6 +4669,295 @@ def api_add_bug_comment(bug_id):
         print(f"添加Bug评论失败: {e}")
         return jsonify({'success': False, 'error': '添加评论失败'}), 500
 
+# ==================== TestCase API ====================
+
+@app.route('/api/testcases', methods=['POST'])
+@login_required
+def api_create_testcase():
+    """创建TestCase"""
+    try:
+        data = request.get_json()
+        
+        # 验证必填字段
+        if not data.get('title'):
+            return jsonify({'success': False, 'error': '缺少必填字段: title'}), 400
+        if not data.get('project_id'):
+            return jsonify({'success': False, 'error': '缺少必填字段: project_id'}), 400
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, data['project_id']):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 如果指定了plan_id，检查计划是否为testcase类型
+        if data.get('plan_id'):
+            plan = Plan.query.get(data['plan_id'])
+            if not plan:
+                return jsonify({'success': False, 'error': '计划不存在'}), 404
+            if plan.plan_type != 'testcase':
+                return jsonify({'success': False, 'error': '只能在testcase类型计划中创建测试用例'}), 400
+        
+        # 创建TestCase
+        testcase = TestCase(
+            title=data['title'],
+            status=data.get('status', 'draft'),
+            case_type=data.get('case_type', '功能测试'),
+            priority=data.get('priority', 'P3'),
+            test_type=data.get('test_type', '手动'),
+            preconditions=data.get('preconditions', ''),
+            steps=data.get('steps', []),
+            remark=data.get('remark', ''),
+            requirement_id=data.get('requirement_id'),
+            related_defects=data.get('related_defects', []),
+            baseline=data.get('baseline', ''),
+            estimated_time=data.get('estimated_time', 0),
+            version=data.get('version', 'v1'),
+            plan_id=data.get('plan_id'),
+            project_id=data['project_id'],
+            creator_id=current_user.id,
+            assignee_id=data.get('assignee_id')
+        )
+        
+        db.session.add(testcase)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '测试用例创建成功',
+            'testcase': {
+                'id': testcase.id,
+                'title': testcase.title,
+                'status': testcase.status,
+                'priority': testcase.priority,
+                'created_at': testcase.created_at.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"创建TestCase失败: {e}")
+        return jsonify({'success': False, 'error': '创建TestCase失败'}), 500
+
+@app.route('/api/testcases/<int:testcase_id>', methods=['GET', 'PUT', 'DELETE'])
+@login_required
+def api_testcase_detail(testcase_id):
+    """测试用例详情接口：GET查询，PUT更新，DELETE删除"""
+    if request.method == 'GET':
+        try:
+            testcase = TestCase.query.get(testcase_id)
+            if not testcase:
+                return jsonify({'success': False, 'error': '测试用例不存在'}), 404
+            
+            # 检查项目权限
+            if not has_project_permission(current_user.id, testcase.project_id):
+                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+            
+            return jsonify({
+                'success': True,
+                'testcase': {
+                    'id': testcase.id,
+                    'title': testcase.title,
+                    'status': testcase.status,
+                    'case_type': testcase.case_type,
+                    'priority': testcase.priority,
+                    'test_type': testcase.test_type,
+                    'preconditions': testcase.preconditions,
+                    'steps': testcase.steps,
+                    'remark': testcase.remark,
+                    'requirement_id': testcase.requirement_id,
+                    'related_defects': testcase.related_defects,
+                    'baseline': testcase.baseline,
+                    'estimated_time': testcase.estimated_time,
+                    'actual_time': testcase.actual_time,
+                    'remaining_time': testcase.remaining_time,
+                    'last_executed': testcase.last_executed.isoformat() if testcase.last_executed else None,
+                    'executed_by': testcase.executed_by,
+                    'execution_result': testcase.execution_result,
+                    'version': testcase.version,
+                    'plan_id': testcase.plan_id,
+                    'project_id': testcase.project_id,
+                    'creator_id': testcase.creator_id,
+                    'assignee_id': testcase.assignee_id,
+                    'created_at': testcase.created_at.isoformat(),
+                    'updated_at': testcase.updated_at.isoformat()
+                }
+            })
+            
+        except Exception as e:
+            print(f"获取TestCase详情失败: {e}")
+            return jsonify({'success': False, 'error': '获取TestCase详情失败'}), 500
+    
+    elif request.method == 'PUT':
+        try:
+            testcase = TestCase.query.get(testcase_id)
+            if not testcase:
+                return jsonify({'success': False, 'error': '测试用例不存在'}), 404
+            
+            # 检查项目权限
+            if not has_project_permission(current_user.id, testcase.project_id):
+                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+            
+            data = request.json
+            
+            # 更新字段
+            if 'title' in data:
+                testcase.title = data['title']
+            if 'status' in data:
+                testcase.status = data['status']
+            if 'case_type' in data:
+                testcase.case_type = data['case_type']
+            if 'priority' in data:
+                testcase.priority = data['priority']
+            if 'test_type' in data:
+                testcase.test_type = data['test_type']
+            if 'preconditions' in data:
+                testcase.preconditions = data['preconditions']
+            if 'steps' in data:
+                testcase.steps = data['steps']
+            if 'remark' in data:
+                testcase.remark = data['remark']
+            if 'requirement_id' in data:
+                testcase.requirement_id = data['requirement_id']
+            if 'related_defects' in data:
+                testcase.related_defects = data['related_defects']
+            if 'baseline' in data:
+                testcase.baseline = data['baseline']
+            if 'estimated_time' in data:
+                testcase.estimated_time = data['estimated_time']
+            if 'actual_time' in data:
+                testcase.actual_time = data['actual_time']
+            if 'remaining_time' in data:
+                testcase.remaining_time = data['remaining_time']
+            if 'last_executed' in data:
+                testcase.last_executed = data['last_executed']
+            if 'executed_by' in data:
+                testcase.executed_by = data['executed_by']
+            if 'execution_result' in data:
+                testcase.execution_result = data['execution_result']
+            if 'version' in data:
+                testcase.version = data['version']
+            if 'plan_id' in data:
+                testcase.plan_id = data['plan_id']
+            if 'assignee_id' in data:
+                testcase.assignee_id = data['assignee_id']
+            
+            testcase.updated_at = datetime.now()
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '测试用例更新成功',
+                'testcase': {
+                    'id': testcase.id,
+                    'title': testcase.title,
+                    'status': testcase.status,
+                    'updated_at': testcase.updated_at.isoformat()
+                }
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"更新TestCase失败: {e}")
+            return jsonify({'success': False, 'error': '更新TestCase失败'}), 500
+    
+    elif request.method == 'DELETE':
+        try:
+            testcase = TestCase.query.get(testcase_id)
+            if not testcase:
+                return jsonify({'success': False, 'error': '测试用例不存在'}), 404
+            
+            # 检查项目权限
+            if not has_project_permission(current_user.id, testcase.project_id):
+                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+            
+            db.session.delete(testcase)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '测试用例删除成功'
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"删除TestCase失败: {e}")
+            return jsonify({'success': False, 'error': '删除TestCase失败'}), 500
+
+@app.route('/api/plans/<int:plan_id>/testcases', methods=['GET'])
+@login_required
+def api_get_plan_testcases(plan_id):
+    """获取计划下的所有测试用例"""
+    try:
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, plan.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        testcases = TestCase.query.filter_by(plan_id=plan_id).all()
+        
+        testcase_list = []
+        for tc in testcases:
+            testcase_list.append({
+                'id': tc.id,
+                'title': tc.title,
+                'status': tc.status,
+                'case_type': tc.case_type,
+                'priority': tc.priority,
+                'test_type': tc.test_type,
+                'version': tc.version,
+                'execution_result': tc.execution_result,
+                'created_at': tc.created_at.isoformat(),
+                'updated_at': tc.updated_at.isoformat()
+            })
+        
+        return jsonify({
+            'success': True,
+            'testcases': testcase_list
+        })
+        
+    except Exception as e:
+        print(f"获取计划TestCase列表失败: {e}")
+        return jsonify({'success': False, 'error': '获取TestCase列表失败'}), 500
+
+
+@app.route('/api/plans/<int:plan_id>/bugs', methods=['GET'])
+@login_required
+def api_get_plan_bugs(plan_id):
+    """获取计划下的所有Bug"""
+    try:
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查项目权限
+        if not has_project_permission(current_user.id, plan.project_id):
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        bugs = Bug.query.filter_by(plan_id=plan_id).all()
+        
+        bug_list = []
+        for bug in bugs:
+            bug_list.append({
+                'id': bug.id,
+                'title': bug.title,
+                'status': bug.status,
+                'priority': bug.priority,
+                'severity': bug.severity,
+                'created_at': bug.created_at.isoformat() if bug.created_at else None,
+                'updated_at': bug.updated_at.isoformat() if bug.updated_at else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'bugs': bug_list
+        })
+        
+    except Exception as e:
+        print(f"获取计划Bug列表失败: {e}")
+        return jsonify({'success': False, 'error': '获取Bug列表失败'}), 500
+
     # ==================== Chat Session API ====================
     
 @app.route('/api/projects/<int:project_id>/chat-sessions', methods=['GET'])
@@ -4681,6 +5051,9 @@ def api_get_chat_session(session_id):
                 'content': msg.content,
                 'understanding': msg.understanding,
                 'steps': msg.steps,
+                'execution_results': msg.execution_results,
+                'agent_result': msg.agent_result,
+                'evidences': msg.evidences,
                 'final_response': msg.final_response,
                 'created_at': msg.created_at.isoformat()
             })
@@ -4788,6 +5161,9 @@ def api_add_chat_message(session_id):
             content=data.get('content'),
             understanding=data.get('understanding'),
             steps=data.get('steps'),
+            execution_results=data.get('execution_results'),
+            agent_result=data.get('agent_result'),
+            evidences=data.get('evidences'),
             final_response=data.get('final_response')
         )
             

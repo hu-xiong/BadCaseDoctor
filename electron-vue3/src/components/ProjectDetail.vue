@@ -588,6 +588,7 @@
               v-else
               v-for="badcase in filteredBadcases" 
               :key="badcase.id"
+              :data-bug-id="badcase.id"
               class="table-row"
               :class="{ 'selected': selectedTasks.includes(badcase.id) }"
               @click="editBadcase(badcase.id)"
@@ -691,7 +692,7 @@
         </div>
         <!-- 聊天面板区域 -->
         <div class="chat-panel-container">
-          <SimpleChatPanel v-if="currentSession" :sessionId="currentSession" :projectId="projectId" />
+          <SimpleChatPanel v-if="currentSession" :sessionId="currentSession" :projectId="Number(projectId)" />
           <div v-else class="chat-empty-placeholder">
             <p>选择或创建一个会话开始聊天</p>
           </div>
@@ -1117,6 +1118,8 @@ export default {
 
     // 选择状态
     const selectedPlan = ref(null)
+    const highlightBugId = ref(null) // 用于高亮显示的bug ID
+    const urlContentType = ref(null) // URL参数传递的内容类型，优先级高于计划类型
     const currentPlan = computed(() => {
       if (!selectedPlan.value || selectedPlan.value === 'unplanned') {
         return null
@@ -1136,6 +1139,12 @@ export default {
     })
     
     const currentPlanType = computed(() => {
+      // 优先使用 URL 参数传递的内容类型
+      if (urlContentType.value) {
+        console.log('🐛 currentPlanType: 使用URL参数类型:', urlContentType.value)
+        return urlContentType.value
+      }
+      
       if (selectedPlan.value === 'unplanned') {
         console.log('🐛 currentPlanType: unplanned → badcase')
         return 'badcase'
@@ -2443,7 +2452,13 @@ export default {
     
     const createNewBadcase = () => {
       // 根据当前计划类型决定跳转到哪个路由
-      const basePath = currentPlanType.value === 'bug' ? '/new-bug' : '/new-badcase'
+      let basePath = '/new-badcase'
+      if (currentPlanType.value === 'bug') {
+        basePath = '/new-bug'
+      } else if (currentPlanType.value === 'test_case') {
+        basePath = '/new-testcase'
+      }
+      
       let url = `${basePath}?project_id=${projectId.value}`
       
       // 如果选中了具体计划，传递 plan_id
@@ -2457,12 +2472,18 @@ export default {
     // 编辑BadCase
     const editBadcase = (badcaseId) => {
       console.log('=== editBadcase函数被调用 ===')
-      console.log('BadCase/Bug ID:', badcaseId)
+      console.log('BadCase/Bug/TestCase ID:', badcaseId)
       console.log('项目ID:', projectId.value)
       console.log('当前路由:', route.path)
       
       try {
-        const basePath = currentPlanType.value === 'bug' ? '/new-bug' : '/new-badcase'
+        let basePath = '/new-badcase'
+        if (currentPlanType.value === 'bug') {
+          basePath = '/new-bug'
+        } else if (currentPlanType.value === 'test_case') {
+          basePath = '/new-testcase'
+        }
+        
         const targetUrl = `${basePath}?id=${badcaseId}&project_id=${projectId.value}&edit=true`
         console.log('目标URL:', targetUrl)
         router.push(targetUrl)
@@ -3492,29 +3513,66 @@ export default {
       }
     }, { immediate: true })
     
-    // 监听项目ID变化，确保在路由切换或刷新时同步加载数据
+    // 监听项目id变化，确保在路由切换或刷新时同步加载数据
     watch(() => route.params.id, async (newId) => {
       if (newId) {
         projectId.value = newId
-        console.log('项目ID发生变化:', newId)
+        console.log('项目id发生变化:', newId)
         await manualRefreshPlans()
         await fetchSessions()
+        console.log('[ProjectDetail] sessionHistory.length:', sessionHistory.value.length)
         if (sessionHistory.value.length > 0) {
           currentSession.value = sessionHistory.value[0].id
           sessions.value[currentSession.value] = sessionHistory.value[0]
+          console.log('[ProjectDetail] 已设置currentSession:', currentSession.value)
+        } else {
+          console.log('[ProjectDetail] sessionHistory为空，未设置currentSession')
         }
       }
     }, { immediate: true })
 
     onMounted(async () => {
       console.log('=== ProjectDetail onMounted ===')
-          
+                  
+      // 监听grep导航事件
+      window.addEventListener('grep-navigate', handleGrepNavigate)
+                  
       // 检查URL参数，如果有expand_plan参数，先设置选中的计划ID
       // 这样后续的manualRefreshPlans中的fetchBadcases就能带上正确的plan_id
       const expandPlanId = route.query.expand_plan
       if (expandPlanId) {
         console.log('检测到expand_plan参数，预设selectedPlan:', expandPlanId)
         selectedPlan.value = expandPlanId
+      }
+      
+      // 检查URL参数，如果有content_type参数，设置当前内容类型
+      const contentTypeParam = route.query.content_type
+      if (contentTypeParam) {
+        console.log('检测到content_type参数:', contentTypeParam)
+        urlContentType.value = contentTypeParam
+      }
+      
+      // 检查是否有bug_id参数，用于高亮显示
+      const bugIdParam = route.query.bug_id
+      if (bugIdParam) {
+        console.log('检测到bug_id参数:', bugIdParam)
+        // 稍后在加载bug列表后高亮该bug
+        highlightBugId.value = bugIdParam
+      }
+      
+      // 检查是否有 navigate_plan 和 navigate_bug 参数，用于触发 grep-navigate 事件
+      const navigatePlan = route.query.navigate_plan
+      const navigateBug = route.query.navigate_bug
+      if (navigatePlan && navigateBug) {
+        console.log('检测到导航参数，将触发 grep-navigate:', { navigatePlan, navigateBug })
+        // 等待页面完全加载后触发事件
+        setTimeout(() => {
+          const event = new CustomEvent('grep-navigate', {
+            detail: { planId: parseInt(navigatePlan), bugId: parseInt(navigateBug), target: 'bug' }
+          })
+          window.dispatchEvent(event)
+          console.log('已触发 grep-navigate 事件')
+        }, 1000)
       }
               
       // 获取当前用户信息
@@ -3584,6 +3642,63 @@ export default {
         waitForPlansAndExpand()
       }
     })
+    
+    // 处理grep导航事件
+    const handleGrepNavigate = async (event) => {
+      const { planId, bugId, target } = event.detail
+      console.log('[GREP-NAV] 收到导航指令:', { planId, bugId, target })
+      
+      if (!planId) return
+      
+      // 1. 展开计划树（展开目标计划和所有父级计划）
+      const expandPlanAndParents = (targetId) => {
+        const findAndExpand = (plans, targetId, parents = []) => {
+          for (const plan of plans) {
+            if (plan.id === targetId) {
+              // 找到目标计划，展开所有父级
+              parents.forEach(parentId => {
+                if (!expandedPlans.value.includes(parentId)) {
+                  expandedPlans.value.push(parentId)
+                }
+              })
+              return true
+            }
+            if (plan.children && plan.children.length > 0) {
+              if (findAndExpand(plan.children, targetId, [...parents, plan.id])) {
+                return true
+              }
+            }
+          }
+          return false
+        }
+        findAndExpand(projectPlans.value, targetId)
+      }
+      
+      expandPlanAndParents(planId)
+      
+      // 2. 选中计划（currentPlanType会自动根据计划类型计算）
+      selectedPlan.value = planId
+      
+      // 3. 手动触发Bug列表加载
+      await fetchBadcases()
+      
+      // 4. 等待渲染完成
+      await nextTick()
+      await new Promise(resolve => setTimeout(resolve, 500))
+      
+      // 5. 滚动到Bug并高亮
+      if (bugId) {
+        const bugElement = document.querySelector(`[data-bug-id="${bugId}"]`)
+        console.log('[GREP-NAV] 查找Bug元素:', bugElement)
+        if (bugElement) {
+          bugElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          bugElement.classList.add('highlight-flash')
+          setTimeout(() => bugElement.classList.remove('highlight-flash'), 2000)
+        } else {
+          console.log('[GREP-NAV] 未找到Bug元素，bugId:', bugId)
+        }
+      }
+    }
     
     return {
       projectName,
@@ -3742,7 +3857,9 @@ export default {
       createNewSession,
       closeSessionTab,
       // Terminal相关（保留工作目录用于Terminal组件）
-      currentWorkingDir
+      currentWorkingDir,
+      // Grep导航
+      handleGrepNavigate
     }
   }
 }
@@ -5313,6 +5430,28 @@ export default {
 
 .table-row.selected {
   background: #e3f2fd;
+}
+
+/* Bug导航高亮动画 */
+.table-row.highlight-flash {
+  animation: highlight-pulse 2s ease-in-out;
+}
+
+@keyframes highlight-pulse {
+  0%, 100% {
+    background: #f8f9fa;
+  }
+  25% {
+    background: #fff3cd;
+    box-shadow: 0 0 10px rgba(255, 193, 7, 0.5);
+  }
+  50% {
+    background: #ffc107;
+  }
+  75% {
+    background: #fff3cd;
+    box-shadow: 0 0 10px rgba(255, 193, 7, 0.5);
+  }
 }
 
 .row-checkbox, .header-checkbox {
