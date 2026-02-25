@@ -1,0 +1,9 @@
+node_modules
+.venv/
+tmp/
+__pycache__/
+*.pyc
+*.log
+.pnpm-store/
+electron-vue3/.pnpm-store/
+/electron-vue3/.npmrc

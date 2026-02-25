@@ -214,6 +214,11 @@ export function updateChatSession(sessionId, data) {
   return api.put(`/api/chat-sessions/${sessionId}`, data)
 }
 
+// 生成会话标题
+export function generateSessionTitle(sessionId, message) {
+  return api.post(`/api/chat-sessions/${sessionId}/generate-title`, { message })
+}
+
 // 删除会话
 export function deleteChatSession(sessionId) {
   return api.delete(`/api/chat-sessions/${sessionId}`)

@@ -843,6 +843,7 @@ class ChatMessage(db.Model):
     execution_results = db.Column(db.Text)  # JSON格式存储executionResults
     agent_result = db.Column(db.Text)  # JSON格式存储agentResult
     evidences = db.Column(db.Text)  # JSON格式存储evidences
+    navigation = db.Column(db.Text)  # JSON格式存储navigation（点击跳转Bug）
     final_response = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -5054,6 +5055,7 @@ def api_get_chat_session(session_id):
                 'execution_results': msg.execution_results,
                 'agent_result': msg.agent_result,
                 'evidences': msg.evidences,
+                'navigation': msg.navigation,
                 'final_response': msg.final_response,
                 'created_at': msg.created_at.isoformat()
             })
@@ -5110,7 +5112,57 @@ def api_update_chat_session(session_id):
         db.session.rollback()
         print(f"更新会话失败: {e}")
         return jsonify({'success': False, 'error': '更新会话失败'}), 500
-    
+
+@app.route('/api/chat-sessions/<int:session_id>/generate-title', methods=['POST'])
+@login_required
+def api_generate_session_title(session_id):
+    """根据用户消息生成会话标题"""
+    try:
+        session = ChatSession.query.get(session_id)
+        if not session:
+            return jsonify({'success': False, 'error': '会话不存在'}), 404
+        
+        # 检查权限
+        if session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '没有权限修改此会话'}), 403
+        
+        data = request.get_json()
+        user_message = data.get('message', '')
+        
+        if not user_message:
+            return jsonify({'success': False, 'error': '消息内容为空'}), 400
+        
+        # 调用 LLM 生成简短标题
+        from llm.factory import LLMFactory
+        llm = LLMFactory.create()
+        
+        prompt = f"""请根据以下用户消息生成一个简短的会话标题（不超过15个字），直接输出标题，不要加引号或其他符号：
+
+用户消息：{user_message[:200]}
+
+标题："""
+        
+        title = llm.chat(prompt)
+        title = title.strip().strip('"').strip("'")
+        
+        # 限制标题长度
+        if len(title) > 20:
+            title = title[:20] + '...'
+        
+        # 更新会话标题
+        session.title = title
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'title': title
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"生成会话标题失败: {e}")
+        return jsonify({'success': False, 'error': '生成标题失败'}), 500
+
 @app.route('/api/chat-sessions/<int:session_id>', methods=['DELETE'])
 @login_required
 def api_delete_chat_session(session_id):
@@ -5164,6 +5216,7 @@ def api_add_chat_message(session_id):
             execution_results=data.get('execution_results'),
             agent_result=data.get('agent_result'),
             evidences=data.get('evidences'),
+            navigation=data.get('navigation'),
             final_response=data.get('final_response')
         )
             

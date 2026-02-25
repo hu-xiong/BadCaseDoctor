@@ -692,7 +692,7 @@
         </div>
         <!-- 聊天面板区域 -->
         <div class="chat-panel-container">
-          <SimpleChatPanel v-if="currentSession" :sessionId="currentSession" :projectId="Number(projectId)" />
+          <SimpleChatPanel v-if="currentSession" :sessionId="currentSession" :projectId="Number(projectId)" @title-updated="handleTitleUpdated" />
           <div v-else class="chat-empty-placeholder">
             <p>选择或创建一个会话开始聊天</p>
           </div>
@@ -1605,6 +1605,20 @@ export default {
       showDropdown.value = false
       // 清空对话功能
       console.log('清空对话')
+    }
+
+    // 处理会话标题更新
+    const handleTitleUpdated = (newTitle) => {
+      console.log('[ProjectDetail] 收到标题更新:', newTitle)
+      // 更新当前会话的标题
+      if (currentSession.value && sessions.value[currentSession.value]) {
+        sessions.value[currentSession.value].title = newTitle
+      }
+      // 更新历史记录中的标题
+      const historyItem = sessionHistory.value.find(s => s.id === currentSession.value)
+      if (historyItem) {
+        historyItem.title = newTitle
+      }
     }
 
     // 会话管理方法
@@ -3856,6 +3870,7 @@ export default {
       switchSession,
       createNewSession,
       closeSessionTab,
+      handleTitleUpdated,
       // Terminal相关（保留工作目录用于Terminal组件）
       currentWorkingDir,
       // Grep导航
