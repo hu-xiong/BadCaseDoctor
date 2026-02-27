@@ -1,0 +1,60 @@
+name: create_bug
+description: 创建新的 Bug 记录
+trigger:
+  intents: [创建, 新建, 添加, 增加, 新增, 提Bug]
+  entities: [bug, 缺陷, 问题, 错误]
+  patterns:
+    - 创建 bug
+    - 新建缺陷
+    - 提一个bug
+    - 添加问题
+
+tools:
+  - name: create
+    purpose: 创建新的 Bug 记录
+    params:
+      target: bug
+      title: ${bug_title}
+      description: ${bug_description}
+      priority: ${priority}
+      severity: ${severity}
+      project_id: ${project_id}
+      plan_id: ${plan_id}
+      assignee_id: ${assignee_id}
+
+workflow:
+  - step: 1
+    tool: create
+    description: 使用 create 工具创建新的 Bug
+    depends_on: null
+
+examples:
+  - 创建一个登录失败的Bug
+  - 新建一个界面显示错误的问题
+  - 添加一个性能问题的Bug
+  - 创建一个优先级为Critical的缺陷
+
+metadata:
+  category: bug_management
+  priority: medium
+  version: 1.0.0
+  created_at: 2026-02-27
+  last_updated: 2026-02-27
+  author: BadCaseDoctor Team
+
+prompt_template: |
+  你正在执行 **Bug 创建** 操作。
+  
+  任务说明：用户想要创建一个新的 Bug 记录。
+  
+  请按照以下步骤执行：
+  1. 从用户输入中提取 Bug 标题和描述
+  2. 设置合适的优先级和严重程度（如未指定，可询问用户）
+  3. 使用 create 工具创建 Bug
+  
+  创建完成后，请确认创建成功并显示 Bug 的基本信息。
+  
+  注意：
+  - 确保标题简洁明了
+  - 描述应该包括 Bug 的现象、影响和复现步骤
+  - 可根据实际情况添加适当的标签和分类

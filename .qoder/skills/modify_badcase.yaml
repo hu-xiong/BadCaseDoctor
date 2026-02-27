@@ -1,0 +1,54 @@
+name: modify_badcase
+description: 修改 BadCase 信息，包括状态、优先级、解决方式等字段
+trigger:
+  intents: [修改, 更新, 调整, 修正, 变更]
+  entities: [badcase, 问题用例, 错误用例, 测试用例]
+  patterns:
+    - 修改 badcase
+    - 更新错误用例
+    - 调整测试用例
+    - badcase 编辑
+
+tools:
+  - name: grep
+    purpose: 定位目标 BadCase
+    params:
+      keywords: ${user_keywords}
+      target: badcase
+      mode: locate
+      project_id: ${project_id}
+  
+  - name: modify
+    purpose: 执行修改操作
+    params:
+      target: badcase
+      target_id: ${grep_result.first_badcase_id}
+      modifications: ${user_modifications}
+      project_id: ${project_id}
+      confirm: true
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具搜索和定位目标 BadCase
+    depends_on: null
+    
+  - step: 2
+    tool: modify
+    description: 使用 modify 工具执行修改操作
+    depends_on: step_1
+
+examples:
+  - 修改登录BadCase的状态为已解决
+  - 更新问题用例123的解决方案
+  - 将BadCase456分配给开发人员
+  - 调整测试用例的优先级
+  - 修正BadCase的描述信息
+
+metadata:
+  category: badcase_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-02-27
+  last_updated: 2026-02-27
+  author: BadCaseDoctor Team

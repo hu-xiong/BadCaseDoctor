@@ -72,6 +72,14 @@ class DatabaseTool(BaseTool):
             'find_bugs': 'find_similar',
             'find_known_bugs': 'find_similar',
             'find_all': 'list_bugs',
+            'find_by_name': 'search_pattern',
+            'find_by_title': 'search_pattern',
+            'find_by_id': 'find_similar',
+            'get_by_id': 'find_similar',
+            'find_by_keyword': 'search_pattern',
+            'search_by_keyword': 'search_pattern',
+            'keyword_search': 'search_pattern',
+            'search_bugs': 'search_pattern',
             'search': 'search_pattern',
             'list': 'list_bugs',
             'history': 'get_history'
@@ -278,16 +286,18 @@ class DatabaseTool(BaseTool):
             print(f"[DB_QUERY] ❌ 查询失败: {str(e)}")
             return {'error': str(e), 'success': False}
     
-    async def _search_pattern(self, keywords: str, limit: int = 10) -> Dict[str, Any]:
+    async def _search_pattern(self, keywords: str = None, limit: int = 10, name: str = None, title: str = None, **kwargs) -> Dict[str, Any]:
         """按模式搜索 Bug"""
-        print(f"[DB_QUERY] 🔎 按模式搜索: {keywords}")
+        # 支持多种参数名
+        search_term = keywords or name or title or kwargs.get('query', '')
+        print(f"[DB_QUERY] 🔎 按模式搜索: {search_term}")
         
         try:
             from app import db, Bug
             
             bugs = db.session.query(Bug).filter(
-                (Bug.title.ilike(f'%{keywords}%')) |
-                (Bug.description.ilike(f'%{keywords}%'))
+                (Bug.title.ilike(f'%{search_term}%')) |
+                (Bug.description.ilike(f'%{search_term}%'))
             ).limit(limit).all()
             
             bugs_data = [

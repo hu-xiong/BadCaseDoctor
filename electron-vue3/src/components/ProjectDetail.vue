@@ -575,6 +575,7 @@
             <div class="header-status">状态</div>
             <div class="header-assignee">负责人</div>
             <div class="header-date">创建时间</div>
+            <div class="header-actions">操作</div>
           </div>
           
           <div class="table-body">
@@ -590,7 +591,10 @@
               :key="badcase.id"
               :data-bug-id="badcase.id"
               class="table-row"
-              :class="{ 'selected': selectedTasks.includes(badcase.id) }"
+              :class="{ 
+                'selected': selectedTasks.includes(badcase.id),
+                'pending-modify': pendingModifications[badcase.id]
+              }"
               @click="editBadcase(badcase.id)"
               style="cursor: pointer;"
             >
@@ -609,13 +613,29 @@
                 <span class="type-badge" :class="currentPlanType">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</span>
               </div>
               <div class="row-status">
-                <span class="status-badge" :class="badcase.status">{{ getBadcaseStatusText(badcase.status) }}</span>
+                <!-- 如果有待修改的数据，显示对比 -->
+                <div v-if="pendingModifications[badcase.id]" class="field-diff-inline">
+                  <span class="old-value-inline">{{ pendingModifications[badcase.id].status?.old || badcase.status }}</span>
+                  <span class="new-value-inline">{{ pendingModifications[badcase.id].status?.new || badcase.status }}</span>
+                </div>
+                <span v-else class="status-badge" :class="badcase.status">{{ getBadcaseStatusText(badcase.status) }}</span>
               </div>
               <div class="row-assignee">
-                <span class="assignee-text">{{ getAssigneeDisplayText(badcase.assignee) }}</span>
+                <!-- 如果有待修改的数据，显示对比 -->
+                <div v-if="pendingModifications[badcase.id]?.assignee" class="field-diff-inline">
+                  <span class="old-value-inline">{{ getAssigneeDisplayText(pendingModifications[badcase.id].assignee.old) }}</span>
+                  <span class="new-value-inline">{{ getAssigneeDisplayText(pendingModifications[badcase.id].assignee.new) }}</span>
+                </div>
+                <span v-else class="assignee-text">{{ getAssigneeDisplayText(badcase.assignee) }}</span>
               </div>
               <div class="row-date">
                 <span class="date-text">{{ new Date(badcase.created_at).toLocaleDateString() }}</span>
+              </div>
+              
+              <!-- 确认/取消按钮 -->
+              <div v-if="pendingModifications[badcase.id]" class="row-actions" @click.stop>
+                <button @click="confirmModify(badcase.id)" class="btn-icon-approve" title="确认">✓</button>
+                <button @click="cancelModify(badcase.id)" class="btn-icon-reject" title="取消">✗</button>
               </div>
             </div>
           </div>
@@ -1056,6 +1076,7 @@
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
+import { getBadCaseStatusText } from '../constants/status.js'
 import TeamManagement from './TeamManagement.vue'
 import XTerminal from './XTerminal.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
@@ -1262,6 +1283,7 @@ export default {
     const badcasePage = ref(1)
     const badcasePerPage = ref(20)
     const totalBadcases = ref(0)
+    const pendingModifications = ref({}) // 存储待确认的修改
     
     // 计算属性
     const selectedBaselinePlanName = computed(() => {
@@ -1469,20 +1491,8 @@ export default {
       return statusMap[status] || status
     }
 
-    // 获取BadCase状态文本
-    const getBadcaseStatusText = (status) => {
-      const statusMap = {
-        'new': '新建',
-        'unpublished': '未发布',
-        'pending': '待处理',
-        'resolved': '已解决',
-        'close': '已关闭',
-        'hold': 'hold',
-        'reopen': '重新打开',
-        'not_badcase': 'not a badcase'
-      }
-      return statusMap[status] || status
-    }
+    // 获取BadCase状态文本 - 使用枚举
+    const getBadcaseStatusText = getBadCaseStatusText
 
     // 获取BadCase背景样式类
     const getBadcaseBackgroundClass = (badcase) => {
@@ -2509,6 +2519,57 @@ export default {
     
     const goToDashboard = () => {
       router.push('/dashboard')
+    }
+    
+    // 确认修改
+    const confirmModify = async (bugId) => {
+      console.log('[MODIFY] 确认修改 Bug:', bugId)
+      const modifyData = pendingModifications.value[bugId]
+      if (!modifyData) return
+      
+      try {
+        // 调用后端API执行修改
+        const response = await fetch('/api/agent/modify_confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target: currentPlanType.value === 'bug' ? 'bug' : (currentPlanType.value === 'test_case' ? 'test_case' : 'badcase'),
+            target_id: bugId,
+            modifications: modifyData,
+            project_id: projectId.value
+          })
+        })
+        
+        const result = await response.json()
+        if (result.success) {
+          // 更新本地数据
+          const item = badcases.value.find(b => b.id === bugId)
+          if (item && modifyData.status) {
+            item.status = modifyData.status.new
+          }
+          if (item && modifyData.assignee) {
+            item.assignee = modifyData.assignee.new
+          }
+          
+          // 清除待修改标记（创建新对象触发响应式更新）
+          const newPending = { ...pendingModifications.value }
+          delete newPending[bugId]
+          pendingModifications.value = newPending
+          
+          console.log('[MODIFY] 修改成功')
+        }
+      } catch (error) {
+        console.error('[MODIFY] 修改失败:', error)
+      }
+    }
+    
+    // 取消修改
+    const cancelModify = (bugId) => {
+      console.log('[MODIFY] 取消修改 Bug:', bugId)
+      // 创建新对象触发响应式更新
+      const newPending = { ...pendingModifications.value }
+      delete newPending[bugId]
+      pendingModifications.value = newPending
     }
     
     // 显示/隐藏计划操作按钮
@@ -3550,6 +3611,9 @@ export default {
                   
       // 监听grep导航事件
       window.addEventListener('grep-navigate', handleGrepNavigate)
+      
+      // 监听modify显示事件
+      window.addEventListener('show-modify-in-list', handleShowModifyInList)
                   
       // 检查URL参数，如果有expand_plan参数，先设置选中的计划ID
       // 这样后续的manualRefreshPlans中的fetchBadcases就能带上正确的plan_id
@@ -3658,7 +3722,92 @@ export default {
     })
     
     // 处理grep导航事件
-    const handleGrepNavigate = async (event) => {
+    const handleShowModifyInList = async (event) => {
+          const { targetId, target, diff, modifications, plan_id } = event.detail
+          // 确保 targetId 是整数
+          const intTargetId = parseInt(targetId)
+          console.log('[MODIFY] 收到列表显示指令:', { targetId, intTargetId, target, diff, plan_id })
+          
+          // 构造待修改数据结构
+          const modifyData = {}
+          diff.forEach(fieldDiff => {
+            const field = fieldDiff.field
+            const oldLine = fieldDiff.lines.find(l => l.type === 'delete')
+            const newLine = fieldDiff.lines.find(l => l.type === 'add')
+            
+            if (oldLine && newLine) {
+              modifyData[field] = {
+                old: oldLine.content,
+                new: newLine.content
+              }
+            }
+          })
+          
+          // 存储到 pendingModifications（使用整数 key）
+          pendingModifications.value[intTargetId] = modifyData
+          console.log('[MODIFY] 已设置待修改项:', pendingModifications.value)
+          
+          // 切换到正确的内容类型
+          if (target === 'bug') {
+            urlContentType.value = 'bug'
+          } else if (target === 'badcase') {
+            urlContentType.value = 'badcase'
+          }
+          
+          // 获取 plan_id（优先使用传递过来的，其次从 diff 或列表中查找）
+          let targetPlanId = plan_id ? parseInt(plan_id) : null
+          
+          // 方式2: 从 diff 中查找 plan_id 字段
+          if (!targetPlanId) {
+            const planIdDiff = diff.find(d => d.field === 'plan_id')
+            if (planIdDiff) {
+              const newLine = planIdDiff.lines.find(l => l.type === 'add')
+              if (newLine) {
+                targetPlanId = parseInt(newLine.content)
+              }
+            }
+          }
+          
+          // 方式3: 从当前列表中查找
+          if (!targetPlanId) {
+            const item = badcases.value.find(b => b.id == intTargetId)
+            if (item) {
+              targetPlanId = item.plan_id
+            }
+          }
+          
+          // 如果找到了计划，选中并展开
+          if (targetPlanId) {
+            selectedPlan.value = targetPlanId
+            // 确保计划树展开
+            if (!expandedPlans.value.includes(targetPlanId)) {
+              expandedPlans.value.push(targetPlanId)
+            }
+          }
+          
+          // 重新加载数据（会使用 selectedPlan 和 urlContentType）
+          await fetchBadcases()
+          
+          // 重新设置 pendingModifications（使用新对象触发响应式更新）
+          pendingModifications.value = {
+            ...pendingModifications.value,
+            [intTargetId]: modifyData
+          }
+          console.log('[MODIFY] fetchBadcases 后重新设置 pendingModifications:', pendingModifications.value)
+          
+          // 滚动到目标行并高亮
+          await nextTick()
+          await new Promise(resolve => setTimeout(resolve, 200)) // 等待DOM更新
+          const targetRow = document.querySelector(`[data-bug-id="${intTargetId}"]`)
+          console.log('[MODIFY] 查找目标行:', `[data-bug-id="${intTargetId}"]`, targetRow)
+          if (targetRow) {
+            targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            targetRow.classList.add('highlight-row')
+            setTimeout(() => targetRow.classList.remove('highlight-row'), 3000)
+          }
+        }
+        
+        const handleGrepNavigate = async (event) => {
       const { planId, bugId, target } = event.detail
       console.log('[GREP-NAV] 收到导航指令:', { planId, bugId, target })
       
@@ -3754,6 +3903,7 @@ export default {
       isFormValid,
       currentPlan,  // 新增：当前选中的计划
       currentPlanType,  // 新增：当前计划类型
+      pendingModifications,  // 新增：待确认的修改
       toggleSection,
       toggleUnplannedBadcaseSection,
       selectPlan,
@@ -3815,6 +3965,8 @@ export default {
       ensureUnplannedBadcasePlan,
       createUnplannedBadcasePlan,
       getAssigneeDisplayText,
+      confirmModify,  // 新增：确认修改
+      cancelModify,   // 新增：取消修改
       // 新增搜索和筛选相关
       searchText,
       selectedAssignee,
@@ -5413,7 +5565,7 @@ export default {
 
 .table-header {
   display: grid;
-  grid-template-columns: 40px 2fr 1fr 1fr 1fr 1fr;
+  grid-template-columns: 40px 2fr 1fr 1fr 1fr 1fr 120px;
   gap: 16px;
   padding: 12px 24px;
   background: #f8f9fa;
@@ -5430,7 +5582,7 @@ export default {
 
 .table-row {
   display: grid;
-  grid-template-columns: 40px 2fr 1fr 1fr 1fr 1fr;
+  grid-template-columns: 40px 2fr 1fr 1fr 1fr 1fr 120px;
   gap: 16px;
   padding: 12px 24px;
   border-bottom: 1px solid #f0f0f0;
@@ -5445,6 +5597,11 @@ export default {
 
 .table-row.selected {
   background: #e3f2fd;
+}
+
+.table-row.pending-modify {
+  background: #fffbeb;
+  border-left: 3px solid #f59e0b;
 }
 
 /* Bug导航高亮动画 */
@@ -5582,6 +5739,95 @@ export default {
 .status-badge.reopen {
   background: #d4edda;
   color: #155724;
+}
+
+/* 字段对比样式 - 类似Qoder/Cursor的diff效果 */
+.field-diff-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.old-value-inline {
+  background: #fef2f2;
+  color: #991b1b;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  text-decoration: line-through;
+  border: 1px solid #fecaca;
+}
+
+.new-value-inline {
+  background: #f0fdf4;
+  color: #166534;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid #bbf7d0;
+}
+
+/* 高亮行样式 */
+.highlight-row {
+  animation: highlight-pulse 2s ease-out;
+  background-color: #fef3c7 !important;
+}
+
+@keyframes highlight-pulse {
+  0% {
+    background-color: #fbbf24;
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+/* 待修改行样式 */
+.pending-modify {
+  background-color: #fffbeb !important;
+  border-left: 3px solid #f59e0b;
+}
+
+/* 行内操作按钮 */
+.row-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.btn-icon-approve,
+.btn-icon-reject {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-approve {
+  background: #10b981;
+  color: white;
+}
+
+.btn-icon-approve:hover {
+  background: #059669;
+  transform: scale(1.1);
+}
+
+.btn-icon-reject {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-icon-reject:hover {
+  background: #dc2626;
+  transform: scale(1.1);
 }
 
 .status-badge.not_badcase {

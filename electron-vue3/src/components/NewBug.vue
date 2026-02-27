@@ -618,9 +618,9 @@ export default {
       { value: 'new', label: '新建' },
       { value: 'not_a_bug', label: 'not_a_bug' },
       { value: 'new_feature', label: 'new_feature' },
-      { value: 'close', label: 'close' },
+      { value: 'closed', label: 'closed' },
       { value: 'hold', label: 'hold' },
-      { value: 'reopen', label: 'reopen' },
+      { value: 'reopened', label: 'reopened' },
       { value: 'resolved', label: 'resolved' }
     ])
     
@@ -706,15 +706,9 @@ export default {
     // 获取状态文本
     const getStatusText = (status) => {
       const statusMap = {
-        'new': '新建',
-        'not_a_bug': 'not_a_bug',
-        'new_feature': 'new_feature',
-        'close': 'close',
-        'hold': 'hold',
-        'reopen': 'reopen',
-        'resolved': 'resolved'
+        'new': '新建'
       }
-      return statusMap[status] || '新建'
+      return statusMap[status] || status
     }
 
     // 获取项目成员列表

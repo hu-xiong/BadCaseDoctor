@@ -137,7 +137,10 @@ class ModifyTool(BaseTool):
         
         # 🔧 状态值映射：将中文状态描述映射到数据库定义的英文状态值
         if 'status' in modifications:
-            modifications['status'] = self._normalize_status(modifications['status'], target)
+            original_status = modifications['status']
+            normalized_status = self._normalize_status(modifications['status'], target)
+            modifications['status'] = normalized_status
+            print(f"[MODIFY] 状态映射: '{original_status}' -> '{normalized_status}' (target={target})")
         
         try:
             # 使用 Flask 应用上下文
@@ -208,6 +211,7 @@ class ModifyTool(BaseTool):
                 'priority': bug.priority,
                 'severity': bug.severity or '',
                 'assignee_id': bug.assignee_id,
+                'plan_id': bug.plan_id,  # 添加 plan_id
                 'steps_to_reproduce': bug.steps_to_reproduce or '',
                 'expected_result': bug.expected_result or '',
                 'actual_result': bug.actual_result or ''
@@ -229,6 +233,7 @@ class ModifyTool(BaseTool):
                 'status': badcase.status,
                 'priority': badcase.priority,
                 'assignee': badcase.assignee or '',
+                'plan_id': badcase.plan_id,  # 添加 plan_id
                 'reproduction_steps': badcase.reproduction_steps or '',
                 'correct_answer': badcase.correct_answer or '',
                 'badcase_result': badcase.badcase_result or ''
@@ -331,7 +336,9 @@ class ModifyTool(BaseTool):
                 
                 for field, value in modifications.items():
                     if hasattr(bug, field):
-                        setattr(bug, field, value)
+                        # modifications 格式为 {field: {old: xxx, new: xxx}}
+                        actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+                        setattr(bug, field, actual_value)
                 
                 self.db.commit()
                 return True
@@ -348,7 +355,9 @@ class ModifyTool(BaseTool):
                 
                 for field, value in modifications.items():
                     if hasattr(badcase, field):
-                        setattr(badcase, field, value)
+                        # modifications 格式为 {field: {old: xxx, new: xxx}}
+                        actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+                        setattr(badcase, field, actual_value)
                 
                 self.db.commit()
                 return True

@@ -633,9 +633,9 @@ export default {
       { value: 'new', label: '新建' },
       { value: 'pending', label: '待处理' },
       { value: 'resolved', label: '已解决' },
-      { value: 'close', label: '已关闭' },
+      { value: 'closed', label: '已关闭' },
       { value: 'hold', label: 'hold' },
-      { value: 'reopen', label: '重新打开' },
+      { value: 'reopened', label: '重新打开' },
       { value: 'not_badcase', label: 'not a badcase' }
     ])
     
@@ -722,15 +722,9 @@ export default {
     // 获取状态文本
     const getStatusText = (status) => {
       const statusMap = {
-        'new': '新建',
-        'pending': '待处理',
-        'resolved': '已解决',
-        'close': '已关闭',
-        'hold': 'hold',
-        'reopen': '重新打开',
-        'not_badcase': 'not a badcase'
+        'new': '新建'
       }
-      return statusMap[status] || '新建'
+      return statusMap[status] || status
     }
 
     // 获取项目成员列表

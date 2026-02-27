@@ -57,10 +57,9 @@ class GrepTool(BaseTool):
         Returns:
             定位分析结果（包含思考过程）
         """
-        print(f"[GREP] 🔍 开始缺陷定位分析 (mode={mode}, keywords={keywords}, project_id={project_id})")
+        print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target})")
         
         try:
-            # 使用Flask app context
             from app import app, db, BadCase, Bug, Plan
             
             result = {
@@ -72,11 +71,9 @@ class GrepTool(BaseTool):
             
             with app.app_context():
                 if mode == "locate":
-                    # 【阶段1】data_query：结构化数据打底
-                    print(f"[GREP-PHASE1] 📊 数据库查询打底（target={target}）...")
+                    # 【阶段1】数据库查询
                     plan_tree = await self._get_plan_tree(project_id)
                     
-                    # 根据target参数决定查询哪些类型
                     badcase_list = []
                     bug_list = []
                     if target in ['all', 'badcase']:
@@ -84,8 +81,7 @@ class GrepTool(BaseTool):
                     if target in ['all', 'bug']:
                         bug_list = await self._get_bug_list(project_id, keywords)
                     
-                    # 【阶段2】grep：逐行文本精细化分析
-                    print(f"[GREP-PHASE2] 🔍 逐行文本分析...")
+                    # 【阶段2】分析关联
                     analysis_result = await self._analyze_associations(
                         keywords=keywords,
                         plan_tree=plan_tree,
@@ -94,15 +90,12 @@ class GrepTool(BaseTool):
                         evidence=evidence
                     )
                     
-                    # 【阶段3】可视化对比：生成对比报告
-                    print(f"[GREP-PHASE3] 📈 生成可视化对比...")
+                    # 【阶段3】生成对比报告
                     comparison = await self._generate_comparison(project_id, keywords)
                     
-                    # 生成导航指令（如果找到Bug）
+                    # 生成导航指令
                     navigation = None
-                    print(f"[GREP-NAV] bug_list长度: {len(bug_list) if bug_list else 0}")
-                    if bug_list and len(bug_list) > 0:
-                        # 生成多个Bug的导航列表
+                    if bug_list:
                         navigation_list = []
                         for bug in bug_list:
                             if bug.get('plan_id'):
@@ -120,25 +113,15 @@ class GrepTool(BaseTool):
                                     'bug_id': bug['id'],
                                     'plan_id': bug['plan_id'],
                                     'bug_title': bug['title'],
-                                    'plan_name': plan_name,  # 添加计划名称
-                                    'message': f"定位Bug：{bug['title']}，所在计划ID: {bug['plan_id']}"
+                                    'plan_name': plan_name
                                 })
                         
                         if navigation_list:
-                            # 如果只有一个Bug，直接返回单个导航对象
-                            if len(navigation_list) == 1:
-                                navigation = navigation_list[0]
-                            else:
-                                # 多个Bug，返回列表
-                                navigation = {
-                                    'type': 'multiple',
-                                    'items': navigation_list
-                                }
-                            print(f"[GREP-NAV] 生成导航指令: {navigation}")
-                        else:
-                            print(f"[GREP-NAV] 所有Bug都没有plan_id")
-                    else:
-                        print(f"[GREP-NAV] bug_list为空，无法生成导航指令")
+                            navigation = navigation_list[0] if len(navigation_list) == 1 else {
+                                'type': 'multiple',
+                                'items': navigation_list
+                            }
+                            print(f"[GREP] ✅ 定位完成: {len(bug_list)}条Bug, {len(badcase_list)}条BadCase")
                     
                     result['data'] = {
                         'plan_tree': plan_tree,
@@ -147,7 +130,7 @@ class GrepTool(BaseTool):
                         'plan_attribution': analysis_result['plan_attribution'],
                         'comparison_report': comparison['markdown'],
                         'summary': analysis_result['summary'],
-                        'navigation': navigation  # 导航指令
+                        'navigation': navigation
                     }
                     
                 elif mode == "associate":
@@ -182,36 +165,28 @@ class GrepTool(BaseTool):
     
     async def _get_plan_tree(self, project_id: str) -> Dict[str, Any]:
         """
-        计划阅读器：解析迭代计划结构
-        
-        核心能力：
-        1. 读取所有计划节点
-        2. 构建层级关系
-        3. 识别计划类型（功能/bug/测试）
-        4. 提取业务语义关键词
+        计划阅读器：解析迭代计划结构（优化版）
         """
         from app import db, Plan
         
-        print(f"[GREP-READER] 📖 开始阅读计划结构...")
-        
-        # 查询项目下所有计划
+        # 查询项目下所有计划（单次查询）
         plans = db.session.query(Plan).filter_by(project_id=project_id).all()
         
         # 构建树形结构
-        plan_map = {}  # id -> plan
-        root_plans = []  # 根计划
+        plan_map = {}
+        root_plans = []
         
         for plan in plans:
             plan_data = {
                 'id': plan.id,
                 'name': plan.name,
-                'type': plan.plan_type,  # 使用plan_type字段
+                'type': plan.plan_type,
                 'status': plan.status,
                 'parent_id': plan.parent_id,
                 'description': getattr(plan, 'description', ''),
                 'children': [],
-                'keywords': self._extract_keywords(plan.name),  # 提取关键词
-                'business_domain': self._infer_business_domain(plan.name)  # 推断业务域
+                'keywords': self._extract_keywords(plan.name),
+                'business_domain': self._infer_business_domain(plan.name)
             }
             plan_map[plan.id] = plan_data
             
@@ -219,16 +194,14 @@ class GrepTool(BaseTool):
                 root_plans.append(plan_data)
         
         # 构建父子关系
-        for plan_id, plan_data in plan_map.items():
+        for plan_data in plan_map.values():
             if plan_data['parent_id'] and plan_data['parent_id'] in plan_map:
-                parent = plan_map[plan_data['parent_id']]
-                parent['children'].append(plan_data)
-        
-        print(f"[GREP-READER] ✅ 读取完成: {len(plans)}个计划, {len(root_plans)}个根节点")
+                plan_map[plan_data['parent_id']]['children'].append(plan_data)
         
         return {
             'total_plans': len(plans),
             'root_plans': root_plans,
+            'plans': list(plan_map.values()),  # 扁平列表便于查找
             'plan_map': plan_map,
             'business_domains': list(set(p['business_domain'] for p in plan_map.values()))
         }
@@ -268,100 +241,61 @@ class GrepTool(BaseTool):
         return '通用'
     
     async def _get_badcase_list(self, project_id: str, keywords: str = None) -> List[Dict[str, Any]]:
-        """
-        逐行定位引擎: 逐个读取BadCase并定位归属
-        
-        核心能力：
-        1. 逐行读取每个BadCase
-        2. 提取关键信息（标题/描述/优先级）
-        3. 分析业务场景
-        4. 匹配关键词
-        5. 推断归属计划
-        """
+        """逐行定位引擎（优化版）"""
         from app import db, BadCase
-        
-        print(f"[GREP-LOCATOR] 🔍 启动逐行定位引擎...")
         
         query = db.session.query(BadCase).filter_by(project_id=project_id)
         
         if keywords:
             query = query.filter(BadCase.title.ilike(f'%{keywords}%'))
         
-        badcases = query.order_by(BadCase.created_at.desc()).limit(50).all()
-        
-        print(f"[GREP-LOCATOR] 📝 逐行读取 {len(badcases)} 条BadCase...")
+        # 限制返回数量，避免处理过多数据
+        badcases = query.order_by(BadCase.created_at.desc()).limit(20).all()
         
         result = []
-        for idx, bc in enumerate(badcases, 1):
-            print(f"[GREP-LOCATOR]   第{idx}行: {bc.title}")
-            
-            # 提取关键信息
-            badcase_data = {
+        for bc in badcases:
+            result.append({
                 'id': bc.id,
                 'title': bc.title,
-                'status': bc.status,
+                'status': bc.status.value if hasattr(bc.status, 'value') else bc.status,
                 'priority': bc.priority,
                 'assignee_id': bc.assignee_id,
                 'plan_id': bc.plan_id,
                 'created_at': bc.created_at.isoformat() if bc.created_at else None,
-                # 逐行定位特有字段
-                'business_scenario': self._infer_business_scenario(bc.title),  # 业务场景
-                'extracted_keywords': self._extract_keywords(bc.title),       # 提取关键词
-                'keyword_match': keywords and keywords in bc.title,           # 关键词匹配
-                'line_number': idx                                             # 行号
-            }
-            result.append(badcase_data)
+                'business_scenario': self._infer_business_scenario(bc.title, keywords),
+                'extracted_keywords': self._extract_keywords(bc.title),
+                'keyword_match': keywords and keywords in bc.title
+            })
         
-        print(f"[GREP-LOCATOR] ✅ 定位完成: {len(result)} 条BadCase")
         return result
     
     async def _get_bug_list(self, project_id: str, keywords: str = None) -> List[Dict[str, Any]]:
-        """
-        逐行定位Bug引擎: 逐个读取Bug并定位归属
-        
-        核心能力：
-        1. 逐行读取每个Bug
-        2. 提取关键信息（标题/严重程度/状态）
-        3. 分析业务场景
-        4. 匹配关键词
-        5. 推断归属计划
-        """
+        """Bug定位引擎（优化版）"""
         from app import db, Bug
-        
-        print(f"[GREP-BUG-LOCATOR] 🐛 启动Bug逐行定位引擎...")
         
         query = db.session.query(Bug).filter_by(project_id=project_id)
         
         if keywords:
             query = query.filter(Bug.title.ilike(f'%{keywords}%'))
         
-        bugs = query.order_by(Bug.created_at.desc()).limit(50).all()
-        
-        print(f"[GREP-BUG-LOCATOR] 📝 逐行读取 {len(bugs)} 条Bug...")
+        bugs = query.order_by(Bug.created_at.desc()).limit(20).all()
         
         result = []
-        for idx, bug in enumerate(bugs, 1):
-            print(f"[GREP-BUG-LOCATOR]   第{idx}行: {bug.title}")
-            
-            # 提取关键信息
-            bug_data = {
+        for bug in bugs:
+            result.append({
                 'id': bug.id,
                 'title': bug.title,
-                'status': bug.status,
+                'status': bug.status.value if hasattr(bug.status, 'value') else bug.status,
                 'severity': bug.severity,
                 'priority': getattr(bug, 'priority', 'medium'),
                 'assignee_id': bug.assignee_id,
                 'plan_id': bug.plan_id,
                 'created_at': bug.created_at.isoformat() if bug.created_at else None,
-                # 逐行定位特有字段
                 'business_scenario': self._infer_business_scenario(bug.title, keywords),
                 'extracted_keywords': self._extract_keywords(bug.title),
-                'keyword_match': keywords and keywords in bug.title,
-                'line_number': idx
-            }
-            result.append(bug_data)
+                'keyword_match': keywords and keywords in bug.title
+            })
         
-        print(f"[GREP-BUG-LOCATOR] ✅ 定位Bug完成: {len(result)} 条")
         return result
     
     async def _analyze_associations(
@@ -372,87 +306,45 @@ class GrepTool(BaseTool):
         bug_list: List[Dict[str, Any]],
         evidence: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """分析关联关系"""
+        """分析关联关系（优化版）"""
         
-        # 分析结果结构
         badcase_analysis = []
         bug_location = []
         plan_attribution = []
         
-        # 分析每个BadCase
+        # 构建 plan_id -> plan_name 映射
+        plan_map = plan_tree.get('plan_map', {})
+        
+        # 分析 BadCase
         for bc in badcase_list:
-            # 判断是否与keywords相关
-            is_related = self._is_related_to_keywords(bc['title'], keywords)
-            
-            # 推断业务场景
-            business_scenario = self._infer_business_scenario(bc['title'], keywords)
-            
-            # 提取关键词
-            extracted_keywords = self._extract_keywords(bc['title'])
-            
-            # 评估严重程度
-            severity = self._assess_severity(bc)
-            
+            is_related = keywords and keywords.lower() in bc['title'].lower()
             badcase_analysis.append({
                 'id': bc['id'],
                 'title': bc['title'],
-                'business_scenario': business_scenario,
-                'keywords': extracted_keywords,
-                'severity': severity,
+                'business_scenario': bc.get('business_scenario', ''),
+                'keywords': bc.get('extracted_keywords', []),
+                'severity': self._assess_severity(bc),
                 'related_to_evidence': is_related,
                 'current_plan_id': bc.get('plan_id')
             })
         
-        # 分析每个Bug
+        # 分析 Bug
         for bug in bug_list:
-            is_related = self._is_related_to_keywords(bug['title'], keywords)
-            business_scenario = self._infer_business_scenario(bug['title'], keywords)
-            
-            # 查找关联的BadCase
-            related_badcases = [
-                bc['title'] for bc in badcase_list
-                if self._are_related(bc['title'], bug['title'])
-            ]
-            
-            # 查询计划名称
-            plan_name = ''
+            is_related = keywords and keywords.lower() in bug['title'].lower()
             plan_id = bug.get('plan_id')
-            if plan_id and plan_tree and 'plans' in plan_tree:
-                for plan in plan_tree['plans']:
-                    if plan['id'] == plan_id:
-                        plan_name = plan['name']
-                        break
+            plan_name = plan_map.get(plan_id, {}).get('name', '') if plan_id else ''
             
             bug_location.append({
                 'id': bug['id'],
                 'title': bug['title'],
-                'business_scenario': business_scenario,
-                'related_badcases': related_badcases,
+                'business_scenario': bug.get('business_scenario', ''),
+                'related_badcases': [],
                 'related_to_evidence': is_related,
                 'current_plan_id': plan_id,
-                'plan_name': plan_name  # 新增：计划名称
+                'plan_name': plan_name
             })
         
-        # 分析计划归属
-        for bc_analysis in badcase_analysis:
-            # 根据业务场景推荐计划
-            recommended_plan = self._recommend_plan(
-                bc_analysis['business_scenario'],
-                plan_tree,
-                keywords
-            )
-            
-            if recommended_plan and recommended_plan['id'] != bc_analysis['current_plan_id']:
-                plan_attribution.append({
-                    'badcase_id': bc_analysis['id'],
-                    'badcase_title': bc_analysis['title'],
-                    'from_plan': bc_analysis['current_plan_id'],
-                    'to_plan': recommended_plan['id'],
-                    'to_plan_name': recommended_plan['name'],
-                    'reason': f"属于{bc_analysis['business_scenario']}场景，应归属到{recommended_plan['name']}"
-                })
-        
-        # 生成总结（传入Bug信息以显示计划名）
+        # 生成总结
         summary = self._generate_summary(
             keywords=keywords,
             badcase_count=len(badcase_list),
@@ -460,7 +352,7 @@ class GrepTool(BaseTool):
             related_badcase_count=sum(1 for bc in badcase_analysis if bc['related_to_evidence']),
             related_bug_count=sum(1 for bug in bug_location if bug['related_to_evidence']),
             attribution_count=len(plan_attribution),
-            bug_location=bug_location  # 新增：传入Bug位置信息
+            bug_location=bug_location
         )
         
         return {

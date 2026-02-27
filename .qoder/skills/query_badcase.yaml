@@ -1,0 +1,41 @@
+name: query_badcase
+description: 查询和搜索 BadCase，支持按关键词、分类、状态等条件筛选
+trigger:
+  intents: [查询, 搜索, 查找, 查看, 列出]
+  entities: [badcase, 问题用例, 错误用例]
+  patterns:
+    - 查询 badcase
+    - 搜索问题用例
+    - 查看错误用例
+    - badcase 列表
+
+tools:
+  - name: grep
+    purpose: 搜索和筛选 BadCase
+    params:
+      keywords: ${user_keywords}
+      target: badcase
+      mode: locate
+      project_id: ${project_id}
+      additional_filters: ${additional_filters}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具进行 BadCase 搜索和查询
+    depends_on: null
+
+examples:
+  - 查询登录相关的BadCase
+  - 搜索高优先级的问题用例
+  - 查看项目中所有的BadCase
+  - 列出未处理的错误用例
+  - 筛选分类为UI的BadCase
+
+metadata:
+  category: badcase_management
+  priority: medium
+  version: 1.0.0
+  created_at: 2026-02-27
+  last_updated: 2026-02-27
+  author: BadCaseDoctor Team

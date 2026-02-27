@@ -17,7 +17,7 @@ from flask_cors import CORS
 import boto3
 from botocore.exceptions import ClientError
 import mimetypes
-from sqlalchemy import text, inspect
+from sqlalchemy import text, inspect, Enum
 from PIL import Image
 import io
 import time
@@ -30,6 +30,7 @@ import threading
 import time
 import signal
 import os
+import enum
 
 from routers.chat import chat_bp
 from routers.agent import agent_bp
@@ -39,6 +40,37 @@ from routers.payment import payment_bp
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 load_dotenv()
+
+# 定义状态枚举
+class BugStatus(enum.Enum):
+    NEW = 'new'
+    REOPENED = 'reopened'
+    CLOSED = 'closed'
+    RESOLVED = 'resolved'
+    HOLD = 'hold'
+    NOT_A_BUG = 'not_a_bug'
+    NEW_FEATURE = 'new_feature'
+
+class BadCaseStatus(enum.Enum):
+    NEW = 'new'
+    PENDING = 'pending'
+    REOPENED = 'reopened'
+    CLOSED = 'closed'
+    RESOLVED = 'resolved'
+    HOLD = 'hold'
+    NOT_BADCASE = 'not_badcase'
+
+class TestCaseStatus(enum.Enum):
+    DRAFT = 'draft'        # 草稿
+    REVIEW = 'review'      # 规绩
+    ACTIVE = 'active'      # 生效
+    ARCHIVED = 'archived'  # 归档
+
+class ExecutionResult(enum.Enum):
+    PASS = 'pass'
+    FAIL = 'fail'
+    BLOCKED = 'blocked'
+    SKIP = 'skip'
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -684,7 +716,7 @@ class BadCase(db.Model):
     solution = db.Column(db.Text)  # 解决方式
     is_verified = db.Column(db.Boolean, default=False)  # 是否验证
     priority = db.Column(db.String(10), default='p3')  # p1, p2, p3
-    status = db.Column(db.String(20), default='new')  # new, pending, resolved, hold, reopen, close
+    status = db.Column(Enum(BadCaseStatus, values_callable=lambda obj: [e.value for e in obj]), default=BadCaseStatus.NEW, nullable=False)
     assignee = db.Column(db.String(100))  # 负责人
     plan = db.Column(db.String(100))  # 所属计划（保留字段，用于向后兼容）
     document_type = db.Column(db.String(100))  # 文档类型
@@ -697,6 +729,35 @@ class BadCase(db.Model):
     project = db.relationship('Project', backref='badcases')
     plan_relation = db.relationship('Plan', backref='badcases')
     creator = db.relationship('User', backref='created_badcases')
+    
+    def to_dict(self):
+        """序列化为字典，处理枚举值"""
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'plan_id': self.plan_id,
+            'creator_id': self.creator_id,
+            'title': self.title,
+            'case_category': self.case_category,
+            'base_problem': self.base_problem,
+            'reproduction_steps': self.reproduction_steps,
+            'badcase_result': self.badcase_result,
+            'correct_answer': self.correct_answer,
+            'correct_answer_final': self.correct_answer_final,
+            'problem_reason': self.problem_reason,
+            'needs_processing': self.needs_processing,
+            'solution': self.solution,
+            'is_verified': self.is_verified,
+            'priority': self.priority,
+            'status': self.status.value if isinstance(self.status, BadCaseStatus) else self.status,
+            'assignee': self.assignee,
+            'plan': self.plan,
+            'document_type': self.document_type,
+            'attachments': self.attachments,
+            'assigned_users': self.assigned_users,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
 
 class Comment(db.Model):
     __tablename__ = 'comment'
@@ -767,7 +828,7 @@ class TestCase(db.Model):
     __tablename__ = 'test_case'
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)  # 用例标题
-    status = db.Column(db.String(20), default='draft')  # draft(草稿), review(规绩), active(生效), archived(归档)
+    status = db.Column(Enum(TestCaseStatus, values_callable=lambda obj: [e.value for e in obj]), default=TestCaseStatus.DRAFT, nullable=False)
     case_type = db.Column(db.String(50))  # 用例类型：功能测试/接口测试/性能测试/安全测试
     priority = db.Column(db.String(10), default='P3')  # P0/P1/P2/P3
     test_type = db.Column(db.String(50))  # 测试类型：手动/自动/探索
@@ -786,7 +847,7 @@ class TestCase(db.Model):
     # 缺陷（执行信息）
     last_executed = db.Column(db.DateTime)  # 最后执行时间
     executed_by = db.Column(db.Integer, db.ForeignKey('user.id'))  # 执行人
-    execution_result = db.Column(db.String(20))  # 执行结果：pass/fail/blocked/skip
+    execution_result = db.Column(Enum(ExecutionResult, values_callable=lambda obj: [e.value for e in obj]))  # 执行结果
     
     # 执行（测试集）
     baseline = db.Column(db.String(100))  # 基线管理
@@ -814,6 +875,36 @@ class TestCase(db.Model):
     creator = db.relationship('User', foreign_keys=[creator_id], backref='created_testcases')
     assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_testcases')
     executor = db.relationship('User', foreign_keys=[executed_by], backref='executed_testcases')
+    
+    def to_dict(self):
+        """序列化为字典，处理枚举值"""
+        return {
+            'id': self.id,
+            'title': self.title,
+            'status': self.status.value if isinstance(self.status, TestCaseStatus) else self.status,
+            'case_type': self.case_type,
+            'priority': self.priority,
+            'test_type': self.test_type,
+            'preconditions': self.preconditions,
+            'steps': self.steps,
+            'remark': self.remark,
+            'requirement_id': self.requirement_id,
+            'related_defects': self.related_defects,
+            'last_executed': self.last_executed.isoformat() if self.last_executed else None,
+            'executed_by': self.executed_by,
+            'execution_result': self.execution_result.value if self.execution_result and isinstance(self.execution_result, ExecutionResult) else self.execution_result,
+            'baseline': self.baseline,
+            'estimated_time': self.estimated_time,
+            'actual_time': self.actual_time,
+            'remaining_time': self.remaining_time,
+            'plan_id': self.plan_id,
+            'project_id': self.project_id,
+            'creator_id': self.creator_id,
+            'assignee_id': self.assignee_id,
+            'version': self.version,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
 
 class ChatSession(db.Model):
     __tablename__ = 'chat_session'
@@ -844,6 +935,7 @@ class ChatMessage(db.Model):
     agent_result = db.Column(db.Text)  # JSON格式存储agentResult
     evidences = db.Column(db.Text)  # JSON格式存储evidences
     navigation = db.Column(db.Text)  # JSON格式存储navigation（点击跳转Bug）
+    modify_navigation = db.Column(db.Text)  # JSON格式存储modifyNavigation（修改预览导航）
     final_response = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -5056,6 +5148,7 @@ def api_get_chat_session(session_id):
                 'agent_result': msg.agent_result,
                 'evidences': msg.evidences,
                 'navigation': msg.navigation,
+                'modify_navigation': msg.modify_navigation,  # 添加 modify_navigation
                 'final_response': msg.final_response,
                 'created_at': msg.created_at.isoformat()
             })
@@ -5217,6 +5310,7 @@ def api_add_chat_message(session_id):
             agent_result=data.get('agent_result'),
             evidences=data.get('evidences'),
             navigation=data.get('navigation'),
+            modify_navigation=data.get('modify_navigation'),  # 添加 modify_navigation
             final_response=data.get('final_response')
         )
             

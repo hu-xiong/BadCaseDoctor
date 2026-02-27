@@ -42,26 +42,36 @@ class ReactPromptTemplates:
 <system>
 你的角色：分析用户请求，拆分成可执行的任务步骤
 约束条件：
-1. 最多 5 项 Todo（保持简洁）
-2. 每项 Todo 必须对应一个可用工具或明确的分析动作
-3. Todo 应按逻辑顺序排列
-4. 避免无效的重复调用：仔细判断是否真的需要用不同参数多次调用同一工具
-5. 使用明确的、可测量的语言
+1. 最多 3 项 Todo（保持简洁）
+2. 每项 Todo 必须对应一个可用工具
+3. 使用明确的、可测量的语言
 
-关键判断规则：
-- 用户请求"查询/搜索/查找Bug"时：使用database_query或grep工具查询已有数据，禁止使用browser_test
-- 用户请求"测试/验证/检查功能"时：使用browser_test工具执行实际测试
-- browser_test工具仅用于功能测试，不用于Bug查询
+【核心规则 - 简化工具流程】：
 
-意图识别（先判断，再规划）：
-1. 关键词匹配：
-   - 提到"Bug/缺陷/问题/故障" → 目标是Bug，使用database_query(query_type="bug_list")
-   - 提到"BadCase/测试用例/场景" → 目标是BadCase，使用database_query(query_type="badcase_list")
-2. 精准定位：
-   - database_query先查，找到粗粒度结果
-   - grep再定位，逐行分析归属计划
+1. **查询操作（单步流程）**：
+   任何查询/搜索 Bug/BadCase/测试用例 的操作，只需一步：
+   - 使用 grep 工具搜索关键词
+   
+   查询意图关键词：查询、搜索、查看、找、列出、显示、单个关键字
 
-重要：browser_test 工具执行一次即可完成浏览器测试，包括登录、导航、操作等所有步骤，绝对不要在一个任务中多次调用。
+2. **修改操作（两步流程）**：
+   任何修改 Bug/BadCase/测试用例 的操作，必须按顺序执行：
+   - 第1步：使用 grep 工具搜索定位目标
+   - 第2步：使用 modify 工具执行修改
+   
+   修改意图关键词：修改、改、更新、设为、改成、调整
+
+3. **创建操作（单步流程）**：
+   - 使用 create 工具创建新的 Bug/BadCase/测试用例
+   
+   创建意图关键词：创建、新建、添加、增加
+
+【grep 工具参数规范】：
+- keywords: 搜索关键词（必填）
+- target: 分析目标 - bug/badcase/all（必填）
+- project_id: 项目ID（可选）
+
+示例：使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug
 </system>
 
 <user_request>
@@ -79,47 +89,47 @@ class ReactPromptTemplates:
 
 <examples>
 好的 Todo 列表：
-<good_example>
-<request>帮我测试登录功能并生成 Bug 列表</request>
-<todo_list>
-[
-  "使用 browser_test 工具执行登录功能测试",
-  "分析测试结果中的错误和异常",
-  "使用 database_query 查询相似的已知 Bug"
-]
-</todo_list>
-</good_example>
 
 <good_example>
-<request>搜索刘亦菲</request>
+<request>界面</request>
 <todo_list>
 [
-  "使用 search 工具搜索'刘亦菲'相关信息"
+  "使用 grep 工具搜索界面相关的Bug，keywords=界面，target=bug"
 ]
 </todo_list>
-说明：搜索任务通常一次即可获取足够信息，无需重复调用
+说明：单关键字按查询意图处理，只需一步
 </good_example>
 
 <good_example>
 <request>查询登录相关的Bug</request>
 <todo_list>
 [
-  "使用 database_query 工具查询Bug列表，query_type=bug_list，keywords=登录",
-  "使用 grep 工具精准定位登录Bug所在计划，target=bug"
+  "使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug"
 ]
 </todo_list>
-说明：用户提到“Bug”，应查询bug_list且grep时设置target=bug
+说明：查询操作只需一步
 </good_example>
 
 <good_example>
-<request>修改这个Bug的优先级为高</request>
+<request>修改登录Bug的状态为关闭</request>
 <todo_list>
 [
-  "使用 database_query 工具查找当前上下文中的Bug ID",
-  "使用 modify 工具修改Bug的priority字段为'高'"
+  "使用 grep 工具搜索定位登录Bug，keywords=登录，target=bug",
+  "使用 modify 工具将Bug状态修改为closed"
 ]
 </todo_list>
-说明：修改意图需要先定位目标，然后用modify工具生成预览
+说明：修改操作必须两步：grep -> modify
+</good_example>
+
+<good_example>
+<request>把高优先级的Bug都改成P1</request>
+<todo_list>
+[
+  "使用 grep 工具搜索高优先级Bug，keywords=高优先级，target=bug",
+  "使用 modify 工具批量修改优先级为P1"
+]
+</todo_list>
+说明：批量修改也是两步流程
 </good_example>
 
 <good_example>
@@ -129,27 +139,38 @@ class ReactPromptTemplates:
   "使用 create 工具创建Bug，标题=登录失败，优先级=高"
 ]
 </todo_list>
-说明：创建新Bug使用create工具，不需要预先查询
+说明：创建操作只需一步
+</good_example>
+
+<good_example>
+<request>帮我测试登录功能</request>
+<todo_list>
+[
+  "使用 browser_test 工具执行登录功能测试"
+]
+</todo_list>
+说明：browser_test 一次调用即可完成所有测试步骤
 </good_example>
 
 不好的 Todo 列表（避免这样）：
 <bad_example>
-<request>帮我测试登录功能</request>
+<request>界面</request>
 <todo_list>
 [
-  "思考应该测试什么",
-  "打开浏览器",
-  "输入用户名",
-  "输入密码",
-  "点击登录",
-  "等待页面加载",
-  "检查是否成功",
-  "分析结果",
-  "生成报告",
-  "保存到数据库"
+  "界面"
 ]
 </todo_list>
-原因：太细碎，超过 5 项，没有按工具组织
+原因：单关键字应生成 grep 查询步骤
+</bad_example>
+
+<bad_example>
+<request>修改这个Bug的状态</request>
+<todo_list>
+[
+  "使用 modify 工具修改Bug状态"
+]
+</todo_list>
+原因：修改操作必须先 grep 定位，再 modify
 </bad_example>
 </examples>
 

@@ -95,15 +95,6 @@
                   <span class="finding-text">{{ finding }}</span>
                 </div>
                 
-                <!-- 如果有modify预览，显示Diff对比 -->
-                <DiffViewer 
-                  v-if="message.modifyPreview && message.modifyPreview.diff" 
-                  :diffData="message.modifyPreview.diff"
-                  :modifyData="message.modifyPreview"
-                  @confirm="handleConfirmModify"
-                  @cancel="handleCancelModify"
-                />
-                
                 <!-- 如果有create预览，显示创建表单 -->
                 <CreatePreview 
                   v-if="message.createPreview && message.createPreview.preview" 
@@ -111,6 +102,30 @@
                   @confirm="handleConfirmCreate"
                   @cancel="handleCancelCreate"
                 />
+              </div>
+            </div>
+          </div>
+          
+          <!-- 修改预览导航区域 - 类似grep的跳转链接 -->
+          <div v-if="message.modifyNavigation" class="modify-navigation-section">
+            <div class="findings-card">
+              <div class="findings-header">
+                <span class="findings-icon">📝</span>
+                <span class="findings-title">点击查看修改</span>
+                <span class="findings-count">{{ message.modifyNavigation.diff?.length || 1 }} 项</span>
+              </div>
+              <div class="modify-navigation-content">
+                <!-- 显示修改字段对比 -->
+                <div v-for="(fieldDiff, idx) in message.modifyNavigation.diff" :key="idx" class="modify-field-preview">
+                  <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                  <span class="old-value">{{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || '-' }}</span>
+                  <span class="arrow">→</span>
+                  <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
+                </div>
+                <!-- 简化的确认按钮 - 触发列表显示 -->
+                <div class="modify-actions">
+                  <button @click="handleShowModifyInList(message.modifyNavigation)" class="btn-primary">在列表中显示</button>
+                </div>
               </div>
             </div>
           </div>
@@ -231,7 +246,6 @@ import TypewriterText from './TypewriterText.vue'
 import StreamingMessage from './StreamingMessage.vue'
 import TodoTimeline from './TodoTimeline.vue'
 import ExecutionResult from './ExecutionResult.vue'
-import DiffViewer from './DiffViewer.vue'
 import CreatePreview from './CreatePreview.vue'
 
 // Props
@@ -376,17 +390,29 @@ const formatTodosForTimeline = (steps, message) => {
   
   return steps.map((step, index) => {
     // 提取工具名称
-    const toolName = step.toolCall?.name || extractToolName(step.title)
+    let toolName = step.toolCall?.name || step.title || extractToolName(step.originalTodo || step.title)
     
     // 生成友好的步骤描述（参考图2风格：简洁直接）
     let friendlyText = ''
     let resultSummary = ''
     
+    // 判断步骤是否已完成
+    const isCompleted = step.status === 'completed' || step.status === 'done'
+    const isSkipped = step.status === 'skipped'
+    const isRunning = step.status === 'running'
+    
+    // 优先使用步骤标题（已经是工具名称）
+    if (step.title && ['database_query', 'grep', 'modify', 'create', 'browser_test', 'search'].includes(step.title)) {
+      toolName = step.title
+    }
+    
     if (toolName === 'database_query') {
       friendlyText = '🔍 使用 database_query 工具查询数据库'
-      // 提取查询结果摘要
-      const output = step.toolCall?.output
-      if (output) {
+      // 只有完成时才显示结果摘要
+      if (isSkipped) {
+        resultSummary = '已跳过'
+      } else if (isCompleted && step.toolCall?.output) {
+        const output = step.toolCall.output
         try {
           const data = typeof output === 'string' ? JSON.parse(output) : output
           if (data.bugs && Array.isArray(data.bugs)) {
@@ -401,13 +427,16 @@ const formatTodosForTimeline = (steps, message) => {
         } catch {
           resultSummary = '查询完成'
         }
-      } else {
-        resultSummary = '查询完成'
+      } else if (isRunning) {
+        resultSummary = '查询中...'
       }
     } else if (toolName === 'grep') {
       friendlyText = '🎯 使用 grep 工具进行精准定位分析'
-      const output = step.toolCall?.output
-      if (output) {
+      // 只有完成时才显示结果摘要
+      if (isSkipped) {
+        resultSummary = '已跳过'
+      } else if (isCompleted && step.toolCall?.output) {
+        const output = step.toolCall.output
         try {
           const data = typeof output === 'string' ? JSON.parse(output) : output
           // 优先使用后端生成的summary（已包含计划名和意图分析）
@@ -425,19 +454,19 @@ const formatTodosForTimeline = (steps, message) => {
         } catch {
           resultSummary = '分析完成'
         }
-      } else {
-        resultSummary = '分析完成'
+      } else if (isRunning) {
+        resultSummary = '分析中...'
       }
     } else if (toolName === 'browser_test') {
       friendlyText = '🌐 使用 browser_test 工具执行浏览器自动化测试'
-      resultSummary = '测试执行完成'
+      resultSummary = isSkipped ? '已跳过' : (isCompleted ? '测试执行完成' : (isRunning ? '测试执行中...' : ''))
     } else if (toolName === 'log_analyzer') {
       friendlyText = '📋 使用 log_analyzer 工具分析日志'
-      resultSummary = '日志分析完成'
+      resultSummary = isSkipped ? '已跳过' : (isCompleted ? '日志分析完成' : (isRunning ? '日志分析中...' : ''))
     } else {
       // 其他工具，使用原始title
       friendlyText = step.title || step.description || '未知任务'
-      resultSummary = '执行完成'
+      resultSummary = isSkipped ? '已跳过' : (isCompleted ? '执行完成' : (isRunning ? '执行中...' : ''))
     }
     
     // 关联对应的evidence卡片
@@ -461,8 +490,11 @@ const extractToolName = (title) => {
   if (!title) return ''
   if (title.includes('database_query')) return 'database_query'
   if (title.includes('grep')) return 'grep'
+  if (title.includes('modify')) return 'modify'
+  if (title.includes('create')) return 'create'
   if (title.includes('browser_test')) return 'browser_test'
   if (title.includes('log_analyzer')) return 'log_analyzer'
+  if (title.includes('search')) return 'search'
   return ''
 }
 
@@ -517,6 +549,12 @@ const handleNavigation = (navigation) => {
 const handleConfirmModify = async (modifyData) => {
   console.log('[MODIFY] 用户确认修改:', modifyData)
   
+  // 清除modifyNavigation
+  const currentMessage = messages.value[messages.value.length - 1]
+  if (currentMessage) {
+    currentMessage.modifyNavigation = null
+  }
+  
   // 调用modify工具，confirm=true
   try {
     const response = await fetch('/api/devops/chat_stream', {
@@ -537,10 +575,104 @@ const handleConfirmModify = async (modifyData) => {
   }
 }
 
+// 在列表中显示修改
+const handleShowModifyInList = (modifyData) => {
+  console.log('[MODIFY] 在列表中显示修改:', modifyData)
+  
+  // 发送自定义事件给父组件 ProjectDetail
+  const event = new CustomEvent('show-modify-in-list', {
+    detail: {
+      targetId: modifyData.target_id,
+      target: modifyData.target,
+      diff: modifyData.diff,
+      modifications: modifyData.modifications,
+      plan_id: modifyData.plan_id || modifyData.before?.plan_id  // 添加 plan_id
+    },
+    bubbles: true
+  })
+  window.dispatchEvent(event)
+  
+  // 不清除 modifyNavigation，保留在历史消息中作为导航入口
+}
+
 // 取消修改
 const handleCancelModify = () => {
   console.log('[MODIFY] 用户取消修改')
-  // 只需记录日志，不做处理
+  // 清除modifyNavigation
+  const currentMessage = messages.value[messages.value.length - 1]
+  if (currentMessage) {
+    currentMessage.modifyNavigation = null
+  }
+}
+
+// 审核单个修改项 - 采纳
+const handleApproveItem = async (item) => {
+  console.log('[MODIFY] 用户采纳单项修改:', item)
+  // 修改已经执行，这里只是记录用户确认
+  // 可以发送通知或更新UI状态
+}
+
+// 审核单个修改项 - 拒绝
+const handleRejectItem = async (item) => {
+  console.log('[MODIFY] 用户拒绝单项修改:', item)
+  // 需要回滚该修改
+  if (item.result?.before) {
+    try {
+      const response = await fetch('/api/devops/chat_stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_input: `回滚修改，恢复原状态`,
+          project_id: props.projectId,
+          model: selectedModel.value,
+          session_id: props.sessionId,
+          rollback_modify: {
+            target: 'bug',
+            target_id: item.bug_id,
+            modifications: item.result.before
+          }
+        })
+      })
+      console.log('[MODIFY] 回滚请求已发送')
+    } catch (error) {
+      console.error('[MODIFY] 回滚失败:', error)
+    }
+  }
+}
+
+// 全部采纳
+const handleApproveAll = async (results) => {
+  console.log('[MODIFY] 用户采纳全部修改:', results)
+  // 所有修改已执行，记录确认
+}
+
+// 全部拒绝
+const handleRejectAll = async (results) => {
+  console.log('[MODIFY] 用户拒绝全部修改:', results)
+  // 需要回滚所有修改
+  for (const item of results) {
+    if (item.result?.before) {
+      try {
+        await fetch('/api/devops/chat_stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_input: `回滚修改`,
+            project_id: props.projectId,
+            model: selectedModel.value,
+            session_id: props.sessionId,
+            rollback_modify: {
+              target: 'bug',
+              target_id: item.bug_id,
+              modifications: item.result.before
+            }
+          })
+        })
+      } catch (error) {
+        console.error('[MODIFY] 回滚失败:', error)
+      }
+    }
+  }
 }
 
 // 确认创建
@@ -615,6 +747,7 @@ const loadSessionMessages = async () => {
             agentResult: msg.agent_result ? JSON.parse(msg.agent_result) : { findings: [], recommendations: [], status: 'success' },
             evidences: msg.evidences ? JSON.parse(msg.evidences) : [],
             navigation: msg.navigation ? JSON.parse(msg.navigation) : null,
+            modifyNavigation: msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null,  // 加载 modifyNavigation
             finalResponse: msg.final_response,
             time: new Date(msg.created_at).toLocaleTimeString(),
             isHistorical: true  // 标记为历史消息
@@ -811,8 +944,29 @@ const handleReactAgentMode = async (userMessage) => {
                 aiMessage.steps = (stepEvent.data || []).map((todo, idx) => {
                   const todoText = typeof todo === 'string' ? todo : (todo.title || todo.text || todo.content || `任务${idx+1}`)
                   console.log('[CHAT-STREAM] Todo项', idx, ':', todoText)
+                  
+                  // 提取工具名称，生成友好的标题
+                  let friendlyTitle = todoText
+                  const toolMatch = todoText.match(/使用\s*(\w+)\s*工具/)
+                  if (toolMatch) {
+                    friendlyTitle = toolMatch[1] // 提取工具名称
+                  } else if (todoText.includes('database_query') || todoText.includes('查询')) {
+                    friendlyTitle = 'database_query'
+                  } else if (todoText.includes('grep') || todoText.includes('定位')) {
+                    friendlyTitle = 'grep'
+                  } else if (todoText.includes('modify') || todoText.includes('修改')) {
+                    friendlyTitle = 'modify'
+                  } else if (todoText.includes('create') || todoText.includes('创建')) {
+                    friendlyTitle = 'create'
+                  } else if (todoText.includes('browser_test') || todoText.includes('测试')) {
+                    friendlyTitle = 'browser_test'
+                  } else if (todoText.includes('search') || todoText.includes('搜索')) {
+                    friendlyTitle = 'search'
+                  }
+                  
                   return {
-                    title: todoText,
+                    title: friendlyTitle,
+                    originalTodo: todoText, // 保存原始 todo 文本
                     status: 'pending',
                     description: ''
                   }
@@ -837,6 +991,11 @@ const handleReactAgentMode = async (userMessage) => {
                   runningStep.toolCall.output = typeof outputData === 'string' 
                     ? outputData 
                     : JSON.stringify(outputData, null, 2)
+                  
+                  // 收到结果后立即更新步骤状态为 completed
+                  runningStep.status = 'completed'
+                  runningStep.description = '已完成'
+                  
                   aiMessage.allObservations.push(outputData)
                   
                   // 提取搜索结果 - 执行辅揥器可能会调用搜索工具
@@ -859,8 +1018,9 @@ const handleReactAgentMode = async (userMessage) => {
                   
                   // 只有非搜索结果才添加到 executionResults（避免显示原始 JSON）
                   if (!isSearchResult && runningStep.title) {
-                    // 从title中提取工具名（title格式如：“使用 grep 工具进行精准定位分析”）
+                    // 从title中提取工具名（title格式如："使用 grep 工具进行精准定位分析"）
                     const toolName = extractToolName(runningStep.title)
+                    console.log('[TOOL-DEBUG] runningStep.title:', runningStep.title)
                     console.log('[TOOL-DEBUG] toolName:', toolName)
                     console.log('[TOOL-DEBUG] outputData:', outputData)
                                       
@@ -869,17 +1029,44 @@ const handleReactAgentMode = async (userMessage) => {
                     // 但流式传输时可能直接返回 data 部分
                     const toolData = outputData.data || outputData
                                       
-                    // 处理modify工具输出
+                    // 处理modify工具输出 - 使用modifyNavigation替代modifyPreview
                     if (toolName === 'modify' && toolData && typeof toolData === 'object') {
+                      // 情况1: 需要确认的预览模式
                       if (toolData.confirmation_required && toolData.diff) {
-                        // 存储modify预览数据
-                        aiMessage.modifyPreview = {
+                        aiMessage.modifyNavigation = {
                           target: toolData.target,
                           target_id: toolData.target_id,
                           diff: toolData.diff,
                           modifications: toolData.modifications
                         }
-                        console.log('[MODIFY] 存储modify预览:', aiMessage.modifyPreview)
+                        console.log('[MODIFY] 存储modify导航:', aiMessage.modifyNavigation)
+                      }
+                      // 情况2: 已执行的批量修改结果
+                      else if (toolData.results && toolData.results.length > 0) {
+                        // 从第一个结果中提取diff
+                        const firstResult = toolData.results[0]?.result
+                        aiMessage.modifyNavigation = {
+                          target: 'bug',
+                          diff: firstResult?.diff || [],
+                          results: toolData.results,
+                          success: toolData.success,
+                          message: toolData.message
+                        }
+                        console.log('[MODIFY] 存储批量修改导航:', aiMessage.modifyNavigation)
+                      }
+                      // 情况3: 单个已执行的修改结果
+                      else if (toolData.diff && toolData.before && toolData.after) {
+                        aiMessage.modifyNavigation = {
+                          target: toolData.target || 'bug',
+                          target_id: toolData.target_id,
+                          diff: toolData.diff,
+                          before: toolData.before,
+                          after: toolData.after,
+                          plan_id: toolData.before?.plan_id,  // 添加 plan_id
+                          success: toolData.success,
+                          message: toolData.message
+                        }
+                        console.log('[MODIFY] 存储单个修改导航:', aiMessage.modifyNavigation)
                       }
                     }
                     
@@ -897,12 +1084,18 @@ const handleReactAgentMode = async (userMessage) => {
                                       
                     // 处理grep工具输出
                     if (toolName === 'grep' && toolData && typeof toolData === 'object') {
+                      console.log('[GREP-DEBUG] 进入grep处理分支')
+                      console.log('[GREP-DEBUG] outputData:', outputData)
+                      console.log('[GREP-DEBUG] toolData:', toolData)
+                      console.log('[GREP-DEBUG] toolData keys:', Object.keys(toolData))
+                      
                       // grep工具返回的是结构化数据，提取关键信息
                       let summaryText = ''
                       
-                      // 提取总结信息
-                      if (toolData.summary) {
-                        summaryText = toolData.summary
+                      // 提取总结信息 - 支持两种数据结构
+                      const summary = toolData.summary || toolData.data?.summary
+                      if (summary) {
+                        summaryText = summary
                       } else {
                         // 构造简要总结
                         const parts = []
@@ -925,18 +1118,22 @@ const handleReactAgentMode = async (userMessage) => {
                       })
                       
                       // 处理导航指令（如果存在）
+                      console.log('[GREP-NAV] outputData:', outputData)
                       console.log('[GREP-NAV] toolData:', toolData)
-                      console.log('[GREP-NAV] toolData.navigation:', toolData.navigation)
-                      if (toolData.navigation) {
-                        console.log('[GREP-NAV] 收到导航指令:', toolData.navigation)
+                      
+                      // navigation 可能在不同层级
+                      const navigationData = outputData.navigation || toolData.navigation || toolData.data?.navigation
+                      console.log('[GREP-NAV] navigationData:', navigationData)
+                      
+                      if (navigationData) {
+                        console.log('[GREP-NAV] 收到导航指令:', navigationData)
                         
-                        // 存储navigation信息到message对象，供“关键发现”使用
-                        if (!aiMessage.navigation) {
-                          aiMessage.navigation = toolData.navigation
-                        }
+                        // 存储navigation信息到message对象，供"关键发现"使用
+                        aiMessage.navigation = navigationData
+                        console.log('[GREP-NAV] 已存储navigation到aiMessage:', aiMessage.navigation)
                         
                         // 单个Bug直接跳转，多个Bug等待用户点击
-                        handleNavigation(toolData.navigation)
+                        handleNavigation(navigationData)
                       } else {
                         console.log('[GREP-NAV] 未找到navigation字段')
                       }
@@ -994,10 +1191,25 @@ const handleReactAgentMode = async (userMessage) => {
                   aiMessage.steps[stepEvent.index].status = 'completed'
                   aiMessage.steps[stepEvent.index].description = '已完成'
                 }
+              } else if (stepEvent.event === 'skip') {
+                // 跳过的步骤标记为 skipped 状态
+                const runningStep = aiMessage.steps.find(s => s.status === 'running')
+                if (runningStep) {
+                  runningStep.status = 'skipped'
+                  runningStep.description = '已跳过'
+                }
               } else if (stepEvent.event === 'done') {
                 aiMessage.agentResult.status = 'success'
                 aiMessage.agentResult.execution_time = stepEvent.duration
                 aiMessage.agentResult.steps_count = stepEvent.steps_count || 0
+                
+                // 确保所有步骤状态都更新为 completed
+                aiMessage.steps.forEach((step, idx) => {
+                  if (step.status !== 'completed') {
+                    step.status = 'completed'
+                    step.description = '已完成'
+                  }
+                })
                 
                 // 构建最终输出摘要
                 let finalResp = ''
@@ -1104,6 +1316,7 @@ const handleReactAgentMode = async (userMessage) => {
     agent_result: JSON.stringify(aiMessage.agentResult || {}),
     evidences: JSON.stringify(aiMessage.evidences || []),
     navigation: JSON.stringify(aiMessage.navigation || null),
+    modify_navigation: JSON.stringify(aiMessage.modifyNavigation || null),  // 保存 modifyNavigation
     final_response: aiMessage.finalResponse
   })
 }
@@ -2057,6 +2270,102 @@ watch(() => props.sessionId, (newSessionId) => {
   padding: 2px 8px;
   border-radius: 4px;
   margin-left: 8px;
+}
+
+/* 修改导航区域 */
+.modify-navigation-section {
+  margin: 12px 0;
+}
+
+.modify-navigation-content {
+  padding: 12px 16px;
+}
+
+.modify-field-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 14px;
+}
+
+.modify-field-preview .field-label {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.modify-field-preview .old-value {
+  color: #ef4444;
+  text-decoration: line-through;
+  background: #fef2f2;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.modify-field-preview .arrow {
+  color: #9ca3af;
+}
+
+.modify-field-preview .new-value {
+  color: #059669;
+  background: #ecfdf5;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.modify-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #e5e7eb;
+}
+
+.btn-primary {
+  padding: 8px 16px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-primary:hover {
+  background: #2563eb;
+}
+
+.btn-icon-approve,
+.btn-icon-reject {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-icon-approve {
+  background: #10b981;
+  color: white;
+}
+
+.btn-icon-approve:hover {
+  background: #059669;
+  transform: scale(1.1);
+}
+
+.btn-icon-reject {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-icon-reject:hover {
+  background: #dc2626;
+  transform: scale(1.1);
 }
 
 .evidence-title {

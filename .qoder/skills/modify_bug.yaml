@@ -1,0 +1,54 @@
+name: modify_bug
+description: 修改 Bug 信息，包括状态、优先级、负责人等字段
+trigger:
+  intents: [修改, 更新, 编辑, 改, 调整, 设为, 改成, 修正, 变更]
+  entities: [bug, 缺陷, 问题, 错误]
+  patterns:
+    - 修改 bug
+    - 缺陷更新
+    - 问题编辑
+    - 调整 bug
+
+tools:
+  - name: grep
+    purpose: 定位目标 Bug
+    params:
+      keywords: ${user_keywords}
+      target: bug
+      mode: locate
+      project_id: ${project_id}
+  
+  - name: modify
+    purpose: 执行修改操作
+    params:
+      target: bug
+      target_id: ${grep_result.first_bug_id}
+      modifications: ${user_modifications}
+      project_id: ${project_id}
+      confirm: true
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具搜索和定位目标 Bug
+    depends_on: null
+    
+  - step: 2
+    tool: modify
+    description: 使用 modify 工具执行修改操作
+    depends_on: step_1
+
+examples:
+  - 修改登录Bug的状态为已解决
+  - 把优先级P2的Bug都改成P1
+  - 更新Bug123的描述信息
+  - 修改登录相关的Bug状态
+  - 将缺陷123分配给我的团队成员
+
+metadata:
+  category: bug_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-02-27
+  last_updated: 2026-02-27
+  author: BadCaseDoctor Team

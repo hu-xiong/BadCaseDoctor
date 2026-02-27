@@ -78,7 +78,8 @@ class SimplifiedReActEngine:
                 
                 if not decision['execute']:
                     print(f"[REACT-STREAM] 跳过任务（execute=False）")
-                    yield {'event': 'skip', 'todo': todo}
+                    yield {'event': 'skip', 'todo': todo, 'index': i}
+                    yield {'event': 'todo_end', 'index': i}
                     continue
                 
                 print(f"[REACT-STREAM] 执行工具: {decision['tool']}")

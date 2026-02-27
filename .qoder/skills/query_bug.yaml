@@ -1,0 +1,59 @@
+name: query_bug
+description: 查询和搜索 Bug，支持按关键词、状态、优先级等条件筛选
+trigger:
+  intents: [查询, 搜索, 查找, 查看, 找, 列出, 显示, 筛选]
+  entities: [bug, 缺陷, 问题, 错误]
+  patterns:
+    - 查询 bug
+    - 搜索缺陷
+    - 有哪些问题
+    - 查看 bug 列表
+    - bug 搜索
+
+tools:
+  - name: grep
+    purpose: 搜索和筛选 Bug
+    params:
+      keywords: ${user_keywords}
+      target: bug
+      mode: locate
+      project_id: ${project_id}
+      additional_filters: ${additional_filters}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具进行 Bug 搜索和查询
+    depends_on: null
+
+examples:
+  - 查询登录相关的Bug
+  - 搜索高优先级的Bug
+  - 查看我的项目中的所有Bug
+  - 列出未解决的Bug
+  - 筛选优先级为P1的缺陷
+
+metadata:
+  category: bug_management
+  priority: medium
+  version: 1.0.0
+  created_at: 2026-02-27
+  last_updated: 2026-02-27
+  author: BadCaseDoctor Team
+
+prompt_template: |
+  你正在执行 **Bug 查询** 操作。
+  
+  任务说明：用户想要查询一些 Bug 信息，需要你使用 grep 工具进行搜索。
+  
+  请按照以下步骤执行：
+  1. 分析用户输入，提取搜索关键词
+  2. 设置合适的搜索参数（target=bug, mode=locate）
+  3. 如果有其他筛选条件（如状态、优先级），请一并设置
+  
+  查询完成后，请整理结果并以清晰的方式呈现给用户。
+  
+  注意：
+  - 查询是只读操作，不会修改任何数据
+  - 可以支持多种搜索条件和过滤器
+  - 结果应该包括 Bug 的基本信息和统计

@@ -528,3 +528,74 @@ def react_agent():
         
     except Exception as e:
         return jsonify({'code': 500, 'message': str(e)}), 500
+
+
+@agent_bp.route('/modify_confirm', methods=['POST'])
+@login_required
+def modify_confirm():
+    """
+    确认修改接口
+    
+    请求格式：
+    {
+        "target": "bug" 或 "badcase",
+        "target_id": 目标ID,
+        "modifications": {field: {old: xxx, new: xxx}},
+        "project_id": 项目ID
+    }
+    """
+    try:
+        data = request.get_json()
+        target = data.get('target')
+        target_id = data.get('target_id')
+        modifications = data.get('modifications', {})
+        project_id = data.get('project_id')
+        
+        if not target or not target_id:
+            return jsonify({'success': False, 'error': '缺少必要参数'}), 400
+        
+        from app import db, Bug, BadCase
+        
+        if target == 'bug':
+            bug = db.session.query(Bug).filter(
+                Bug.id == target_id,
+                Bug.project_id == project_id
+            ).first()
+            
+            if not bug:
+                return jsonify({'success': False, 'error': 'Bug不存在'}), 404
+            
+            for field, value in modifications.items():
+                if hasattr(bug, field):
+                    actual_value = value.get('new') if isinstance(value, dict) else value
+                    setattr(bug, field, actual_value)
+            
+            db.session.commit()
+            return jsonify({'success': True, 'message': '修改成功'})
+        
+        elif target == 'badcase':
+            badcase = db.session.query(BadCase).filter(
+                BadCase.id == target_id,
+                BadCase.project_id == project_id
+            ).first()
+            
+            if not badcase:
+                return jsonify({'success': False, 'error': 'BadCase不存在'}), 404
+            
+            for field, value in modifications.items():
+                if hasattr(badcase, field):
+                    actual_value = value.get('new') if isinstance(value, dict) else value
+                    setattr(badcase, field, actual_value)
+            
+            db.session.commit()
+            return jsonify({'success': True, 'message': '修改成功'})
+        
+        else:
+            return jsonify({'success': False, 'error': '不支持的target类型'}), 400
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"[MODIFY_CONFIRM] 修改失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
