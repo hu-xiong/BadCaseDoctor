@@ -1,30 +1,58 @@
 # agents/react_simplified.py
 """
-极简 ReAct 引擎 - 结合 Claude Code 强约束 Prompt + 自我修正
-核心：单主循环 + Agent 自管理 Todo + 强约束提示词 + 自动修正
+极简 ReAct 引擎 - 结合 Claude Code 强约束 Prompt + 自我修正 + Skill动态加载 + Text2SQL
+核心：单主循环 + Agent 自管理 Todo +强约束提示词 + 自动修正 +技能匹配 + 自然语言SQL
 """
 
 import json
 import time
 from typing import Dict, Any, List
+
+#原依赖
 from .prompts import ReactPromptTemplates, format_tools_for_prompt
 from .prompts import parse_xml_todos, parse_xml_decision, parse_xml_findings
 from .self_correction import SelfCorrectionEngine
 from .evidence_extractor import EvidenceExtractor
 
+# Skill 动态加载
+from .skill_loader import SkillLoader
+from .skill_registry import skill_registry
+from .skill import Skill
+
+# Text2SQL
+try:
+    from .tools.vanna_text2sql import get_vanna_text2sql, VANNA_AVAILABLE
+    TEXT2SQL_AVAILABLE = VANNA_AVAILABLE
+except ImportError:
+    TEXT2SQL_AVAILABLE = False
+    print("[REACT]⚠  Vanna Text2SQL 未安装")
+
 
 class SimplifiedReActEngine:
-    """极简 ReAct 引擎 - Claude Code 风格 + 自我修正"""
+    """增强版极简 ReAct 引擎 -集 Skill + Text2SQL"""
     
-    def __init__(self, llm, tool_registry):
+    def __init__(self, llm, tool_registry, skill_dir=".qoder/skills"):
         """初始化"""
         self.llm = llm
         self.tools = tool_registry
         self.correction_engine = SelfCorrectionEngine(llm)  # 自我修正引擎
         self.project_id = None  # 当前项目 ID
+        
+        # Skill动态加载
+        self.skill_loader = SkillLoader(skill_dir)
+        self.skill_registry = skill_registry
+        print(f"[REACT]💡引擎已初始化，Skill目录: {skill_dir}")
+        
+        # Text2SQL
+        if TEXT2SQL_AVAILABLE:
+            self.text2sql_tool = get_vanna_text2sql("instance/badcase_doctor.db")
+            print("[REACT] ✅ Text2SQL已启用")
+        else:
+            self.text2sql_tool = None
+            print("[REACT] ⚠️  Text2SQL 不可用")
     
     async def run_stream(self, user_input: str, project_id: int = None):
-        """流式执行 ReAct 循环"""
+        """流式执行 ReAct循环（使用Skill工具）"""
         print(f"\n[REACT] ReAct Stream Loop Start")
         self.project_id = project_id  # 保存项目ID
         start_time = time.time()
@@ -60,6 +88,33 @@ class SimplifiedReActEngine:
             for i, todo in enumerate(todos):
                 yield {'event': 'todo_start', 'index': i, 'todo': todo}
                 
+                #决：LLM决定使用哪个工具
+                decision_prompt = ReactPromptTemplates.decide_prompt(
+                    todo, user_input, tools_info, result_context
+                )
+                decision_response = await self.llm.parse_intent(decision_prompt)
+                print(f"[REACT-STREAM] LLM决策原始响应: {decision_response}")
+                decision = parse_xml_decision(decision_response)
+                
+                print(f"[REACT-STREAM]决结果: {decision}")
+                
+                #🔧兜底逻辑：当 LLM 返回空响应但 Todo包含 modify 关键词时
+                if not decision['execute'] and 'modify' in todo.lower():
+                    print(f"[REACT-STREAM] 检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...")
+                    decision = self._infer_modify_params(todo, result_context)
+                    print(f"[REACT-STREAM] 自动推断的决策: {decision}")
+                
+                #🎯Skill工具优化：智能任务处理
+                if decision['execute']:
+                    decision = await self._optimize_with_skill_tool(decision, user_input, result_context, project_id)
+                
+                if not decision['execute']:
+                    print(f"[REACT-STREAM] 跳过任务（execute=False）")
+                    yield {'event': 'skip', 'todo': todo, 'index': i}
+                    yield {'event': 'todo_end', 'index': i}
+                    continue
+                yield {'event': 'todo_start', 'index': i, 'todo': todo}
+                
                 # 决策
                 decision_prompt = ReactPromptTemplates.decide_prompt(
                     todo, user_input, tools_info, result_context
@@ -70,11 +125,18 @@ class SimplifiedReActEngine:
                 
                 print(f"[REACT-STREAM] 决策结果: {decision}")
                 
-                # 🔧 兜底逻辑：当 LLM 返回空响应但 Todo 包含 modify 关键词时
+                #🔧兜逻辑：当 LLM 返回空响应但 Todo包含 modify 关键词时
                 if not decision['execute'] and 'modify' in todo.lower():
-                    print(f"[REACT-STREAM] 检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...")
+                    print(f"[REACT-STREAM]检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...")
                     decision = self._infer_modify_params(todo, result_context)
                     print(f"[REACT-STREAM] 自动推断的决策: {decision}")
+                                
+                # Text2SQL 优化：数据库查询优先使用自然语言
+                if decision['execute'] and decision['tool'] == 'database_query':
+                    natural_query = self._extract_natural_query(todo, user_input)
+                    if natural_query and self.text2sql_tool:
+                        print(f"[REACT-STREAM] 优先使用 Text2SQL执行: {natural_query}")
+                        decision['params']['natural_query'] = natural_query
                 
                 if not decision['execute']:
                     print(f"[REACT-STREAM] 跳过任务（execute=False）")
@@ -351,10 +413,111 @@ class SimplifiedReActEngine:
         print(f"\n[REACT] Done | Steps: {len(result['steps'])} | Findings: {len(result['findings'])} | Duration: {result['duration']:.2f}s\n")
         return result
     
+    async def _optimize_with_skill_tool(self, decision: Dict[str, Any], user_input: str, context: Dict[str, Any], project_id: int = None) -> Dict[str, Any]:
+        """
+        使用Skill工具优化决策
+        当检测到复杂任务时，建议使用skill_executor工具
+        """
+        tool_name = decision['tool']
+        
+        # 识别需要Skill处理的复杂任务
+        complex_task_keywords = [
+            '修改缺陷', '创建缺陷', '查询缺陷',
+            '修改badcase', '创建badcase', '查询badcase',
+            '批量处理', '多步骤操作', '完整流程'
+        ]
+        
+        #检查是否为复杂任务
+        is_complex_task = any(keyword in user_input.lower() or keyword in decision.get('reason', '').lower() 
+                            for keyword in complex_task_keywords)
+        
+        if is_complex_task and tool_name in ['grep', 'modify', 'create']:
+            print(f"[REACT-STREAM] 🎯检测到复杂任务，建议使用Skill工具优化")
+            
+            # 重定向到skill_executor工具
+            return {
+                'execute': True,
+                'tool': 'skill_executor',
+                'params': {
+                    'user_input': user_input,
+                    'context': context,
+                    'project_id': project_id
+                },
+                'reason': f'检测到复杂任务"{user_input}"，使用Skill工具进行智能处理'
+            }
+        
+        # Text2SQL优化：数据库查询优先使用自然语言
+        if tool_name == 'database_query':
+            natural_query = self._extract_natural_query(user_input, user_input)
+            if natural_query and self.text2sql_tool:
+                print(f"[REACT-STREAM]📊优先使用 Text2SQL执行: {natural_query}")
+                decision['params']['natural_query'] = natural_query
+        
+        return decision
+        """传统 THINK - 生成 Todo列表"""
+        tools_info = format_tools_for_prompt(self.tools)
+        prompt = ReactPromptTemplates.think_prompt(
+            user_input,
+            tools_info,
+            context,
+            []
+        )
+        
+        response = await self.llm.parse_intent(prompt)
+        todos = parse_xml_todos(response)
+        print(f"[REACT-STREAM] 传统模式生成的Todos: {todos}")
+        return todos
+    
+    def _generate_todos_from_skill_workflow(self, skill: Skill, user_input: str) -> List[str]:
+        """根据技能工作流生成 Todo列表"""
+        todos = []
+        for workflow_step in skill.workflow:
+            # 生成人性化的 Todo描述
+            if workflow_step.description and workflow_step.description != workflow_step.tool:
+                todo_desc = workflow_step.description
+            else:
+                # 使用默认描述
+                todo_desc = f"执行 {workflow_step.tool} 操作"
+            
+            todos.append(todo_desc)
+        
+        return todos
+    
+    async def _execute_tool_with_text2sql(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """使用 Text2SQL执行数据库工具"""
+        if tool_name == 'database_query' and self.text2sql_tool:
+            natural_query = params.get('natural_query')
+            if natural_query:
+                print(f"[REACT] Text2SQL执行: {natural_query}")
+                return self.text2sql_tool.query(natural_query, params)
+        
+        #回到传统工具执行
+        return await self._execute_tool(tool_name, params)
+    
+    def _extract_natural_query(self, todo: str, user_input: str) -> str:
+        """从 Todo中提取自然语言查询"""
+        # 关键词匹配
+        query_keywords = ['查询', '搜索', '查找', '显示', '列出', '统计']
+        
+        for keyword in query_keywords:
+            if keyword in todo or keyword in user_input:
+                #构造自然语言查询
+                if '登录' in todo or '登录' in user_input:
+                    return "查询登录相关的缺陷"
+                elif '未解决' in todo or '未解决' in user_input:
+                    return "查询所有未解决的缺陷"
+                elif '统计' in todo or '统计' in user_input:
+                    return "统计缺陷数量"
+                else:
+                    return user_input  # 使用原始用户输入
+        
+        return ""
+
     def _infer_modify_params(self, todo: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        从 Todo 和 Context 中推断 modify 工具参数
+        从 Todo 和 Context 中推断 modify工具参数
         当 LLM 返回空响应时作为兜底逻辑
+        优先使用技能匹配，回退到标准逻辑
         """
         import re
         
@@ -369,6 +532,47 @@ class SimplifiedReActEngine:
         if 'modify' not in todo.lower():
             return result
         
+        #检查是否包含 modify 关键词
+        if 'modify' not in todo.lower():
+            return result
+        
+        #先尝匹配技能
+        from .skill_integration import skill_integration
+        matched_skill, score = skill_integration.match_skill(todo, context)
+        
+        if matched_skill and score >= 0.3:
+            #使用技能工作流参数
+            for workflow_step in matched_skill.workflow:
+                if workflow_step.tool == 'modify':
+                    # 从技能配置中提取参数模板
+                    tool_def = next((t for t in matched_skill.tools if t.name == 'modify'), None)
+                    if tool_def:
+                        params = tool_def.params.copy()
+                        # 解析参数变量
+                        for key, value in params.items():
+                            if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
+                                var_name = value[2:-1]  #去除${}
+                                if var_name == 'user_modifications':
+                                    #从 todo中提取修改内容
+                                    modifications = self._extract_modifications_from_todo(todo)
+                                    params[key] = modifications
+                                elif var_name == 'target_id':
+                                    #从 context 中获取 target_id
+                                    target_id = context.get('first_bug_id') or context.get('first_badcase_id')
+                                    if target_id:
+                                        params[key] = target_id
+                                elif var_name == 'project_id':
+                                    params[key] = context.get('project_id', '1')
+                        
+                        result = {
+                            'execute': True,
+                            'tool': 'modify',
+                            'params': params,
+                            'reason': f'基于匹配技能 {matched_skill.name} 的工作流参数'
+                        }
+                        return result
+        
+        # 如果技能匹配失败，回到标准流程
         # 从 context 中获取 bug_list
         bug_list = context.get('bug_list', [])
         if not bug_list and 'bug_location' in context:
@@ -419,10 +623,34 @@ class SimplifiedReActEngine:
                 'project_id': project_id,
                 'confirm': True
             },
-            'reason': f'自动推断：从 context 的 bug_list 中获取 target_id={target_id}，修改 {list(modifications.keys())} 字段'
+            'reason': f'基于 todo内容和 context推断的 modify 参数'
         }
         
         return result
+    
+    def _extract_modifications_from_todo(self, todo: str) -> Dict[str, Any]:
+        """
+        从 todo描述中提取修改内容
+        """
+        import re
+        modifications = {}
+        
+        #状态修改
+        status_match = re.search(r"状态.*?['\"](\w+)['\"]|status.*?['\"](\w+)['\"]|设为(\w+)", todo, re.IGNORECASE)
+        if status_match:
+            status_value = status_match.group(1) or status_match.group(2) or status_match.group(3)
+            modifications['status'] = status_value
+        
+        # 优先级修改
+        priority_match = re.search(r"优先级.*?(\w+)", todo, re.IGNORECASE)
+        if priority_match:
+            modifications['priority'] = priority_match.group(1)
+        
+        # 如果没有提取到任何内容，返回默认值
+        if not modifications:
+            modifications['status'] = 'resolved'
+            
+        return modifications
     
     async def _execute_tool(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         """执行工具"""

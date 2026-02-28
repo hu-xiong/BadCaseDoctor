@@ -21,4 +21,4 @@ Werkzeug
 Jinja2 
 boto3
 Pillow
-prometheus-client
+prometheus-clienttext2sql

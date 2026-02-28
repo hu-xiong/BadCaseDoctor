@@ -85,7 +85,7 @@ class IntelligentDevOpsAgent:
         self.memory = ConversationMemory()
     
     def _register_tools(self):
-        """注册所有工具 - 包含分层工具"""
+        """注册所有工具 - 包含分层工具和Skill工具"""
         # 注册业务工具
         self.tool_registry.register(BrowserTestTool(self.llm))
         self.tool_registry.register(DatabaseTool(self.llm, self.db))
@@ -93,30 +93,40 @@ class IntelligentDevOpsAgent:
         self.tool_registry.register(AccuracyTesterTool(self.llm))
         self.tool_registry.register(SearchTool(self.llm))
         self.tool_registry.register(LoginStateTool())  # 登录状态管理工具
-        
+            
         # 注册grep工具
         from agents.tools.grep_tool import GrepTool
         self.tool_registry.register(GrepTool())
-        
+            
         # 注册modify工具
         from agents.tools.modify_tool import ModifyTool
         self.tool_registry.register(ModifyTool(self.db))
-        
+            
         # 注册create工具
         from agents.tools.create_tool import CreateTool
         self.tool_registry.register(CreateTool(self.db))
-        
+            
         # 注册分层工具（L1/L2/L3）
         layered_tools = LayeredToolFactory.create_all_tools()
         for tool_name, tool in layered_tools.items():
             self.tool_registry.register(tool)
-        
-        print(f"[AGENT] 工具注册完成，共 {len(self.tool_registry)} 个工具")
+            
+        #🎯 注册Skill工具
+        from agents.tools.skill_tool import SkillExecutorTool
+        skill_tool = SkillExecutorTool(
+            skill_loader=self.react_engine.skill_loader,
+            skill_registry=self.react_engine.skill_registry,
+            tool_registry=self.tool_registry  #传递工具注册表引用
+        )
+        self.tool_registry.register(skill_tool)
+            
+        print(f"[AGENT]工具注册完成，共 {len(self.tool_registry)} 个工具")
         print(f"[AGENT]   - 业务工具: 6 (browser_test, database_query, log_analyzer, accuracy_tester, search, grep)")
         print(f"[AGENT]   - 分层工具: {len(layered_tools)}")
         print(f"[AGENT]      - L1 (原子操作): 4 个")
-        print(f"[AGENT]      - L2 (复合操作): 2 个")
+        print(f"[AGENT]      - L2 (复合操作): 2 个") 
         print(f"[AGENT]      - L3 (完整流程): 2 个")
+        print(f"[AGENT]   - 🎯 Skill工具: 1 个 (skill_executor)")
     
     async def handle_user_request_stream(self, user_input: str, project_id: int = None):
         """流式处理用户请求"""
