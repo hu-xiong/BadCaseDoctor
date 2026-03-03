@@ -21,4 +21,12 @@ Werkzeug
 Jinja2 
 boto3
 Pillow
-prometheus-clienttext2sql
+prometheus-client
+
+# Text2SQL 依赖
+langchain-experimental
+langchain-openai
+sqlalchemy
+
+# 沙箱执行依赖（可选）
+# pip install llm-sandbox  # Docker 沙箱执行（推荐）

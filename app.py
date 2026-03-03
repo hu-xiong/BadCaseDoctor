@@ -1837,6 +1837,76 @@ def api_agent_change_bug_status():
         print(f"修改 Bug 状态失败: {e}")
         return jsonify({"error": f"修改 Bug 状态失败: {str(e)}"}), 500
 
+@app.route('/api/projects/<int:project_id>/modify', methods=['POST'])
+@login_required
+def api_project_modify(project_id):
+    """沙箱确认后应用修改 - 使用 ModifyTool"""
+    import asyncio
+    import json
+    from agents.tools.modify_tool import ModifyTool
+    
+    try:
+        data = request.get_json()
+        target = data.get('target', 'bug')
+        target_id = data.get('target_id')
+        modifications = data.get('modifications', {})
+        confirm = data.get('confirm', True)
+        message_id = data.get('message_id')  # 获取消息 ID
+        
+        if not target_id or not modifications:
+            return jsonify({"success": False, "error": "target_id 和 modifications 不能为空"}), 400
+        
+        print(f"[MODIFY-API] 收到确认修改请求: target={target}, target_id={target_id}, modifications={modifications}")
+        
+        # 使用 ModifyTool 修改
+        modify_tool = ModifyTool(db.session)
+        
+        async def run_modify():
+            result = await modify_tool.execute(
+                target=target,
+                target_id=target_id,
+                modifications=modifications,
+                project_id=project_id,
+                confirm=confirm
+            )
+            return result
+        
+        result = asyncio.run(run_modify())
+        
+        print(f"[MODIFY-API] 修改结果: success={result.get('success')}")
+        
+        if result.get('success'):
+            # 更新数据库中消息的 modify_navigation 字段
+            if message_id:
+                try:
+                    message = ChatMessage.query.get(message_id)
+                    if message and message.modify_navigation:
+                        modify_nav = json.loads(message.modify_navigation) if isinstance(message.modify_navigation, str) else message.modify_navigation
+                        modify_nav['success'] = True
+                        modify_nav['confirmation_required'] = False
+                        message.modify_navigation = json.dumps(modify_nav, ensure_ascii=False)
+                        db.session.commit()
+                        print(f"[MODIFY-API] 已更新消息 {message_id} 的 modify_navigation 状态")
+                except Exception as e:
+                    print(f"[MODIFY-API] 更新消息状态失败: {e}")
+            
+            return jsonify({
+                "success": True,
+                "message": result.get('message', '修改成功'),
+                "before": result.get('before'),
+                "after": result.get('after'),
+                "diff": result.get('diff')
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get('error', '修改失败')
+            }), 500
+            
+    except Exception as e:
+        print(f"[MODIFY-API] 修改失败: {e}")
+        return jsonify({"success": False, "error": f"修改失败: {str(e)}"}), 500
+
 @app.route('/api/agent/bugs/search', methods=['POST'])
 @login_required
 def api_agent_search_bugs():
@@ -3036,6 +3106,9 @@ def api_get_project_badcases(project_id):
                         user = User.query.get(user_id)
                         if user:
                             assignee_display = user.name
+                        else:
+                            # 用户不存在，显示原始值
+                            assignee_display = str(bc.assignee)
                 except (ValueError, AttributeError):
                     # 如果转换失败，直接使用原值
                     assignee_display = str(bc.assignee) if bc.assignee else '未指派'
@@ -3044,9 +3117,9 @@ def api_get_project_badcases(project_id):
                 'id': bc.id,
                 'title': bc.title,
                 'case_category': bc.case_category,
-                'base_problem': bc.base_problem[:100] + '...' if len(bc.base_problem) > 100 else bc.base_problem,
+                'base_problem': (bc.base_problem[:100] + '...') if bc.base_problem and len(bc.base_problem) > 100 else (bc.base_problem or ''),
                 'priority': bc.priority,
-                'status': bc.status,
+                'status': bc.status.value if hasattr(bc.status, 'value') else bc.status,  # 枚举类型转换为值
                 'assignee': assignee_display,
                 'plan_id': bc.plan_id,  # 添加计划ID字段
                 'created_at': bc.created_at.isoformat()
@@ -3067,7 +3140,9 @@ def api_get_project_badcases(project_id):
             }
         })
     except Exception as e:
+        import traceback
         print(f"获取项目BadCase列表失败: {e}")
+        print(f"错误详情: {traceback.format_exc()}")
         db.session.rollback()
         return jsonify({'success': False, 'error': '获取BadCase列表失败'}), 500
 
@@ -3245,6 +3320,20 @@ def api_get_badcase_detail(badcase_id):
         except:
             attachments = []
     
+    # 解析负责人字段（将用户ID字符串转换为用户ID和用户名）
+    assignee_id = None
+    assignee_name = ''
+    if badcase.assignee:
+        try:
+            assignee_id = int(badcase.assignee)
+            user = User.query.get(assignee_id)
+            if user:
+                assignee_name = user.name
+            else:
+                assignee_name = str(badcase.assignee)  # 用户不存在，显示原始值
+        except (ValueError, TypeError):
+            assignee_name = str(badcase.assignee)
+    
     return jsonify({
         'success': True,
         'badcase': {
@@ -3260,8 +3349,9 @@ def api_get_badcase_detail(badcase_id):
             'problem_reason': badcase.problem_reason,
             'solution': badcase.solution,
             'priority': badcase.priority,
-            'status': badcase.status,
-            'assignee': badcase.assignee,
+            'status': badcase.status.value if hasattr(badcase.status, 'value') else badcase.status,  # 枚举类型转换为值
+            'assignee': assignee_name,  # 用户名用于显示
+            'assignee_id': assignee_id,  # 用户ID用于下拉框选中
             'plan': badcase.plan,
             'document_type': badcase.document_type,
             'attachments': attachments,
@@ -4140,8 +4230,9 @@ def api_get_project_plans(project_id):
                 'created_at': plan.created_at.isoformat(),
                 'updated_at': plan.updated_at.isoformat(),
                 'children': children,
-                'badcase_count': BadCase.query.filter_by(plan_id=plan.id).count() if plan.plan_type == 'badcase' else 0,
-                'bug_count': Bug.query.filter_by(plan_id=plan.id).count() if plan.plan_type == 'bug' else 0
+                # 始终计算两种类型的数量，不再根据 plan_type 过滤
+                'badcase_count': BadCase.query.filter_by(plan_id=plan.id).count(),
+                'bug_count': Bug.query.filter_by(plan_id=plan.id).count()
             }
             print(f"[DEBUG] Plan data: ID={plan.id}, name={plan.name}, plan_type={plan.plan_type}")
             return plan_data

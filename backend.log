@@ -1,4 +1,6 @@
-scrypt:32768:8:1$TBqLMIU2ZvpBOfm3$2ba7d36ac31cd1ae5fd421f2f8a29eac23ac5ace08c9783705b797d948ab277d1615186032b2f769745c77022331169e3373252da5760bbf48c0f051d6a162d0
+[SKILL_REGISTRY] 🪧 技能注册中心已初始化
+[REACT]⚠  Vanna Text2SQL 未安装
+scrypt:32768:8:1$6BbWHVLckFKH3W6i$e0d97c0b958942cdd7c55d0ff7df63ff5ba8a1cddebdadcf41ce709f6ff33119b4a6852a327bda33db8517dfa6df5adffb5edfa5b4ceffda0389be87ab440565
 开始同步数据库表结构...
 数据库表结构同步完成
 开始创建性能优化索引...
@@ -49,7 +51,590 @@ scrypt:32768:8:1$TBqLMIU2ZvpBOfm3$2ba7d36ac31cd1ae5fd421f2f8a29eac23ac5ace08c978
 ✅ Redis连接成功
 ✅ Redis初始化成功
  * Serving Flask app 'app'
- * Debug mode: on
-Address already in use
-Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.
-On macOS, try searching for and disabling 'AirPlay Receiver' in System Settings.
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [03/Mar/2026 15:11:52] "GET /api/user HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:989: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  project = Project.query.get(project_id)
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:4435: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(perm.user_id)
+127.0.0.1 - - [03/Mar/2026 15:11:52] "GET /api/projects/1 HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:3106: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(user_id)
+127.0.0.1 - - [03/Mar/2026 15:11:52] "GET /api/projects/1/badcases?page=1&per_page=20&content_type=badcase HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:4452: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(member.user_id)
+127.0.0.1 - - [03/Mar/2026 15:11:52] "GET /api/projects/1/members HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:11:52] "GET /api/projects/1/plans HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:11:52] "GET /api/projects/1/chat-sessions HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:5221: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  session = ChatSession.query.get(session_id)
+127.0.0.1 - - [03/Mar/2026 15:11:53] "GET /api/chat-sessions/17 HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:3329: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(assignee_id)
+127.0.0.1 - - [03/Mar/2026 15:11:54] "GET /api/badcases/3 HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:12:00] "OPTIONS /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:12:00] "POST /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:12:00] "OPTIONS /api/agent/react HTTP/1.1" 200 -
+=== 获取项目详情 1 ===
+当前用户ID: 3
+=== 获取项目BadCase列表 1 ===
+项目信息获取成功: A计划项目
+不进行计划过滤，显示所有BadCase
+=== 获取项目 1 的计划 ===
+找到 31 个顶级计划
+计划: 一个测试用例的计划 (ID: 34, 状态: active, 置顶: False, 创建时间: 2026-02-21 08:26:03.361785)
+计划: 未计划BadCase (ID: 32, 状态: unplanned, 置顶: False, 创建时间: 2026-02-02 00:59:27.180906)
+计划: 一个bug类型计划 (ID: 31, 状态: active, 置顶: False, 创建时间: 2026-01-23 11:43:16.994773)
+计划: 未计划BadCase (ID: 30, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:41:34.691098)
+计划: 未计划BadCase (ID: 29, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:39:18.773093)
+计划: 未计划BadCase (ID: 28, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:38:26.331889)
+计划: 未计划BadCase (ID: 27, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:37:42.468889)
+计划: 未计划BadCase (ID: 26, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:36:29.858808)
+计划: 未计划BadCase (ID: 25, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:35:06.309240)
+计划: 未计划BadCase (ID: 24, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:34:58.241006)
+计划: 未计划BadCase (ID: 23, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:33:03.485637)
+计划: 未计划BadCase (ID: 22, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:31:26.307550)
+计划: 未计划BadCase (ID: 21, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:31:12.044896)
+计划: 计划1 (ID: 19, 状态: active, 置顶: False, 创建时间: 2026-01-18 14:10:32.902704)
+计划: 未计划BadCase (ID: 18, 状态: unplanned, 置顶: False, 创建时间: 2025-10-01 03:35:33.076570)
+计划: 未计划BadCase (ID: 17, 状态: unplanned, 置顶: False, 创建时间: 2025-10-01 03:26:26.149081)
+计划: 未计划BadCase (ID: 16, 状态: unplanned, 置顶: False, 创建时间: 2025-09-29 04:23:29.032527)
+计划: 未计划BadCase (ID: 15, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:29.978525)
+计划: 未计划BadCase (ID: 14, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:19.498868)
+计划: 未计划BadCase (ID: 13, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:15.578958)
+计划: 未计划BadCase (ID: 12, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:08.878785)
+计划: 未计划BadCase (ID: 11, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.972505)
+计划: 未计划BadCase (ID: 10, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.937431)
+计划: 未计划BadCase (ID: 9, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.135600)
+计划: 未计划BadCase (ID: 8, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:32.453701)
+计划: 未计划BadCase (ID: 7, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:32.424705)
+计划: 未计划BadCase (ID: 6, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:39:57.075158)
+计划: 未计划BadCase (ID: 5, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:39:57.053792)
+计划: 未计划BadCase (ID: 4, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:37:49.936428)
+计划: 未计划BadCase (ID: 3, 状态: unplanned, 置顶: False, 创建时间: 2025-08-30 03:33:13.852049)
+计划: 计划一 (ID: 1, 状态: active, 置顶: False, 创建时间: 2025-08-13 04:59:07.685554)
+BadCase统计完成: 总计=3, 待处理=2, 已解决=0, 已关闭=0
+BadCase列表获取成功: 第1页，共20条，总计3条
+[DEBUG] Plan data: ID=34, name=一个测试用例的计划, plan_type=test_case
+[DEBUG] Plan data: ID=32, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=33, name=一个bug类型子计划, plan_type=bug
+[DEBUG] Plan data: ID=31, name=一个bug类型计划, plan_type=bug
+[DEBUG] Plan data: ID=30, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=29, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=28, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=27, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=26, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=25, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=24, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=23, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=22, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=21, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=19, name=计划1, plan_type=badcase
+[DEBUG] Plan data: ID=18, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=17, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=16, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=15, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=14, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=13, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=12, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=11, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=10, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=9, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=8, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=7, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=6, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=5, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=4, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=3, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=2, name=子计划, plan_type=badcase
+[DEBUG] Plan data: ID=1, name=计划一, plan_type=badcase
+
+[REACT] ReAct Agent Request (Stream)
+[SKILL_LOADER] 📁 技能目录: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/.qoder/skills
+[REACT]💡引擎已初始化，Skill目录: .qoder/skills
+[REACT] ⚠️  Text2SQL 不可用
+[REGISTRY] ✅ 工具已注册: browser_test
+[Text2SQLAgent] ✅ LLM初始化成功: glm-4-flash
+[Text2SQLAgent] ✅ 数据库连接成功
+[Text2SQLAgent] 初始化完成
+[Text2SQLAgent] LLM后端: glm-4-flash
+[Text2SQLAgent] 数据库: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/instance/badcase_doctor.db
+[Text2SQLAgent] 执行模式: direct
+[Text2SQLAgent] 已加载表数量: 12
+[DB_TOOL] ✅ Text2SQL Agent 已启用 (执行模式: direct)
+[REGISTRY] ✅ 工具已注册: database_query
+[REGISTRY] ✅ 工具已注册: log_analyzer
+[REGISTRY] ✅ 工具已注册: accuracy_tester
+[REGISTRY] ✅ 工具已注册: search
+[REGISTRY] ✅ 工具已注册: login_state
+[REGISTRY] ✅ 工具已注册: grep
+[Text2SQLAgent] ✅ LLM初始化成功: glm-4-flash
+[Text2SQLAgent] ✅ 数据库连接成功
+[Text2SQLAgent] 初始化完成
+[Text2SQLAgent] LLM后端: glm-4-flash
+[Text2SQLAgent] 数据库: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/instance/badcase_doctor.db
+[Text2SQLAgent] 执行模式: direct
+[Text2SQLAgent] 已加载表数量: 12
+[REGISTRY] ✅ 工具已注册: modify
+[Text2SQLAgent] ✅ LLM初始化成功: glm-4-flash
+[Text2SQLAgent] ✅ 数据库连接成功
+[Text2SQLAgent] 初始化完成
+[Text2SQLAgent] LLM后端: glm-4-flash
+[Text2SQLAgent] 数据库: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/instance/badcase_doctor.db
+[Text2SQLAgent] 执行模式: direct
+[Text2SQLAgent] 已加载表数量: 12
+[REGISTRY] ✅ 工具已注册: create
+[REGISTRY] ✅ 工具已注册: browser_click
+[REGISTRY] ✅ 工具已注册: browser_input
+[REGISTRY] ✅ 工具已注册: browser_wait
+[REGISTRY] ✅ 工具已注册: browser_assert
+[REGISTRY] ✅ 工具已注册: form_fill
+[REGISTRY] ✅ 工具已注册: form_submit
+[REGISTRY] ✅ 工具已注册: complete_login
+[REGISTRY] ✅ 工具已注册: test_scenario
+[REGISTRY] ✅ 工具已注册: skill_executor
+[AGENT]工具注册完成，共 18 个工具
+[AGENT]   - 业务工具: 6 (browser_test, database_query, log_analyzer, accuracy_tester, search, grep)127.0.0.1 - - [03/Mar/2026 15:12:01] "POST /api/agent/react HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:12:24] "OPTIONS /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:12:24] "POST /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:06] "GET /api/user HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:989: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  project = Project.query.get(project_id)
+127.0.0.1 - - [03/Mar/2026 15:26:07] "GET /api/projects/1 HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:4435: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(perm.user_id)
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:3106: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(user_id)
+127.0.0.1 - - [03/Mar/2026 15:26:07] "GET /api/projects/1/badcases?page=1&per_page=20&content_type=badcase HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:4452: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(member.user_id)
+127.0.0.1 - - [03/Mar/2026 15:26:07] "GET /api/projects/1/members HTTP/1.1" 200 -
+
+[AGENT]   - 分层工具: 8
+[AGENT]      - L1 (原子操作): 4 个
+[AGENT]      - L2 (复合操作): 2 个
+[AGENT]      - L3 (完整流程): 2 个
+[AGENT]   - 🎯 Skill工具: 1 个 (skill_executor)
+[REACT-STREAM] 开始异步任务循环
+
+[AGENT] User Request (Stream): 修改所有badcase状态为已关闭的状态
+[AGENT] Project ID: 1
+[REACT-STREAM] 产出 chunk: status
+[QIANFAN-LLM] 原始响应: ```json
+{
+"type_number": "None"
+}
+```...
+[QIANFAN-LLM] 提取解析成功: {'type_number': 'None'}
+[REACT-STREAM] 产出 chunk: intent
+
+[REACT] ReAct Stream Loop Start
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: <todo_list>
+[
+  "使用 grep 工具查询所有BadCase，keywords=\"\"，target=badcase",
+  "使用 modify 工具批量修改所有BadCase的状态为closed"
+]
+</todo_list>...
+[QIANFAN-LLM] 检测到XML格式，返回原始字符串
+[REACT-STREAM] 生成的Todos: ['使用 grep 工具查询所有BadCase，keywords=""，target=badcase', '使用 modify 工具批量修改所有BadCase的状态为closed']
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: <decision>
+<execute>false</execute>
+<tool>grep</tool>
+<params>
+{
+  "keywords": "",
+  "project_id": "",
+  "target": "badcase"
+}
+</params>
+<reason>当前Todo是使用grep工具查询BadCase，但用户请求是修改BadCase状态，直接执行查询不符合用户意图，且缺少必要参数如project_id，应先获取BadCase列表再修改状态，故跳过当前查询操作</reason>
+</decision>...
+[QIANFAN-LLM] 提取解析成功: {'keywords': '', 'project_id': '', 'target': 'badcase'}
+[REACT-STREAM] LLM决策原始响应: {'keywords': '', 'project_id': '', 'target': 'badcase'}
+[REACT-STREAM] 决策结果: {'execute': True, 'tool': 'grep', 'params': {'keywords': '', 'project_id': '', 'target': 'badcase'}, 'reason': '检测到grep参数，自动执行grep工具'}
+[REACT-STREAM] 执行工具: grep
+[REACT-STREAM] 产出 chunk: step
+[REACT] 正在执行工具: grep -> grep
+[REACT] 工具参数: {'keywords': '', 'project_id': '', 'target': 'badcase', 'userId': 'system_agent'}
+[REACT] 正在执行工具: grep
+[GREP] 🔍 开始定位 (keywords=, target=badcase)
+[GREP] 查询所有 BadCase，project_id=
+[REACT] ✅ 工具执行完成: grep
+[REACT] 工具返回数据类型: dict
+[REACT-STREAM] 工具执行结果:
+[REACT-STREAM]   成功: True
+[REACT-STREAM]   完整结果: {'success': True, 'mode': 'locate', 'thinking_process': [], 'data': {'plan_tree': {'total_plans': 0, 'root_plans': [], 'plans': [], 'plan_map': {}, 'business_domains': []}, 'badcase_analysis': [], 'bug_location': [], 'plan_attribution': [], 'comparison_report': '# 缺陷修改前后对比\n**生成时间**: 2026-03-03T15:12:12.623030\n**关键词**: \n\n---\n\n', 'summary': '未找到相关缺陷', 'navigation': None}}
+[REACT-STREAM] 产出 chunk: step
+[REACT-DEBUG] Observation: {'success': True, 'mode': 'locate', 'thinking_process': [], 'data': {'plan_tree': {'total_plans': 0, 'root_plans': [], 'plans': [], 'plan_map': {}, 'business_domains': []}, 'badcase_analysis': [], 'bug_location': [], 'plan_attribution': [], 'comparison_report': '# 缺陷修改前后对比\n**生成时间**: 2026-03-03T15:12:12.623030\n**关键词**: \n\n---\n\n', 'summary': '未找到相关缺陷', 'navigation': None}}
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: ```json
+<result>
+<key_findings>
+  <finding type="info">未找到相关缺陷</finding>
+</key_findings>
+<context_update>
+{
+  "bugs_found": 0,
+  "badcase_list": []
+}
+</context_update>
+<next_step>已完成搜索，未发现BadCase，无需后续步骤</next_step>
+</result>
+```...
+[QIANFAN-LLM] 提取解析成功: {'bugs_found': 0, 'badcase_list': []}
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: <decision>
+<execute>false</execute>
+<tool>modify</tool>
+<params>
+{}
+</params>
+<reason>Todo要求批量修改所有BadCase状态，但current_context中未提供bug_list或badcase_list信息，无法获取target_id，因此无法执行modify工具</reason>
+</decision>...
+[QIANFAN-LLM] 提取解析成功: {}
+[REACT-STREAM] LLM决策原始响应: {}
+[REACT-STREAM] 决策结果: {'execute': False, 'tool': '', 'params': {}, 'reason': ''}
+[REACT-STREAM] 检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...
+[SKILL_LOADER] 📁 技能目录: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/.qoder/skills
+[SKILL_LOADER] 🔍 扫描技能文件...
+[SKILL_LOADER] ✅ 加载技能: query_badcase (query_badcase.yaml)
+[SKILL_LOADER] ✅ 加载技能: modify_badcase (modify_badcase.yaml)
+[SKILL_LOADER] ✅ 加载技能: query_bug (query_bug.yaml)
+[SKILL_LOADER] ✅ 加载技能: create_bug (create_bug.yaml)
+[SKILL_LOADER] ✅ 加载技能: modify_bug (modify_bug.yaml)
+[SKILL_LOADER] 📊 加载完成: 5 个技能，0 个失败
+[SKILL_REGISTRY] ✅ 注册技能: query_badcase
+[SKILL_REGISTRY] ✅ 注册技能: modify_badcase
+[SKILL_REGISTRY] ✅ 注册技能: query_bug
+[SKILL_REGISTRY] ✅ 注册技能: create_bug
+[SKILL_REGISTRY] ✅ 注册技能: modify_bug
+[SKILL_INTEGRATION] 🚀 技能集成管理器已初始化
+[SKILL_INTEGRATION] 📊 共加载 5 个技能
+[SKILL_MATCHER] 🎯 用户输入: '使用 modify 工具批量修改所有BadCase的状态为closed'
+[SKILL_MATCHER] 📊 匹配结果:
+  - modify_badcase: 0.70
+  - modify_bug: 0.40
+  - query_badcase: 0.30
+[SKILL_MATCHER] ✅ 选择技能: modify_badcase (分数: 0.70)
+[REACT-STREAM] ⚠️ 无法解析变量: grep_result.first_badcase_id
+[REACT-STREAM] ❌ 缺少有效的 target_id，跳过执行
+[REACT-STREAM] 自动推断的决策: {'execute': False, 'tool': '', 'params': {}, 'reason': ''}
+[REACT-STREAM] 跳过任务（execute=False）
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 产出 chunk: step
+[REACT] 开始总结 3 条原始发现...
+[REACT] LLM总结完成: 4 条
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 任务结束
+=== 获取项目详情 1 ===
+当前用户ID: 3
+项目信息获取成功: A计划项目
+=== 获取项目BadCase列表 1 ===
+BadCase统计完成: 总计=3, 待处理=2, 已解决=0, 已关闭=0
+不进行计划过滤，显示所有BadCase
+BadCase列表获取成功: 第1页，共20条，总计3条
+=== 获取项目 1 的计划 ===
+找到 31 个顶级计划
+计划: 一个测试用例的计划 (ID: 34, 状态: active, 置顶: False, 创建时间: 2026-02-21 08:26:03.361785)
+计划: 未计划BadCase (ID: 32, 状态: unplanned, 置顶: False, 创建时间: 2026-02-02 00:59:27.180906)
+计划: 一个bug类型计划 (ID: 31, 状态: active, 置顶: False, 创建时间: 2026-01-23 11:43:16.994773)
+计划: 未计划BadCase (ID: 30, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:41:34.691098)
+计划: 未计划BadCase (ID: 29, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:39:18.773093)
+计划: 未计划BadCase (ID: 28, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:38:26.331889)
+计划: 未计划BadCase (ID: 27, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:37:42.468889)
+计划: 未计划BadCase (ID: 26, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:36:29.858808)
+计划: 未计划BadCase (ID: 25, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:35:06.309240)
+计划: 未计划BadCase (ID: 24, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:34:58.241006)
+计划: 未计划BadCase (ID: 23, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:33:03.485637)
+计划: 未计划BadCase (ID: 22, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:31:26.307550)
+计划: 未计划BadCase (ID: 21, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:31:12.044896)
+计划: 计划1 (ID: 19, 状态: active, 置顶: False, 创建时间: 2026-01-18 14:10:32.902704)
+计划: 未计划BadCase (ID: 18, 状态: unplanned, 置顶: False, 创建时间: 2025-10-01 03:35:33.076570)
+计划: 未计划BadCase (ID: 17, 状态: unplanned, 置顶: False, 创建时间: 2025-10-01 03:26:26.149081)
+计划: 未计划BadCase (ID: 16, 状态: unplanned, 置顶: False, 创建时间: 2025-09-29 04:23:29.032527)127.0.0.1 - - [03/Mar/2026 15:26:07] "GET /api/projects/1/plans HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:07] "GET /api/projects/1/chat-sessions HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:5221: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  session = ChatSession.query.get(session_id)
+127.0.0.1 - - [03/Mar/2026 15:26:08] "GET /api/chat-sessions/17 HTTP/1.1" 200 -
+/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/app.py:3329: LegacyAPIWarning: The Query.get() method is considered legacy as of the 1.x series of SQLAlchemy and becomes a legacy construct in 2.0. The method is now available as Session.get() (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+  user = User.query.get(assignee_id)
+127.0.0.1 - - [03/Mar/2026 15:26:08] "GET /api/badcases/3 HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:16] "OPTIONS /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:16] "POST /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:16] "OPTIONS /api/agent/react HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:16] "POST /api/agent/react HTTP/1.1" 200 -
+
+计划: 未计划BadCase (ID: 15, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:29.978525)
+计划: 未计划BadCase (ID: 14, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:19.498868)
+计划: 未计划BadCase (ID: 13, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:15.578958)
+计划: 未计划BadCase (ID: 12, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:08.878785)
+计划: 未计划BadCase (ID: 11, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.972505)
+计划: 未计划BadCase (ID: 10, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.937431)
+计划: 未计划BadCase (ID: 9, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.135600)
+计划: 未计划BadCase (ID: 8, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:32.453701)
+计划: 未计划BadCase (ID: 7, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:32.424705)
+计划: 未计划BadCase (ID: 6, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:39:57.075158)
+计划: 未计划BadCase (ID: 5, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:39:57.053792)
+计划: 未计划BadCase (ID: 4, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:37:49.936428)
+计划: 未计划BadCase (ID: 3, 状态: unplanned, 置顶: False, 创建时间: 2025-08-30 03:33:13.852049)
+计划: 计划一 (ID: 1, 状态: active, 置顶: False, 创建时间: 2025-08-13 04:59:07.685554)
+[DEBUG] Plan data: ID=34, name=一个测试用例的计划, plan_type=test_case
+[DEBUG] Plan data: ID=32, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=33, name=一个bug类型子计划, plan_type=bug
+[DEBUG] Plan data: ID=31, name=一个bug类型计划, plan_type=bug
+[DEBUG] Plan data: ID=30, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=29, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=28, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=27, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=26, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=25, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=24, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=23, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=22, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=21, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=19, name=计划1, plan_type=badcase
+[DEBUG] Plan data: ID=18, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=17, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=16, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=15, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=14, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=13, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=12, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=11, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=10, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=9, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=8, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=7, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=6, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=5, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=4, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=3, name=未计划BadCase, plan_type=badcase
+[DEBUG] Plan data: ID=2, name=子计划, plan_type=badcase
+[DEBUG] Plan data: ID=1, name=计划一, plan_type=badcase
+
+[REACT] ReAct Agent Request (Stream)
+[SKILL_LOADER] 📁 技能目录: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/.qoder/skills
+[REACT]💡引擎已初始化，Skill目录: .qoder/skills
+[REACT] ⚠️  Text2SQL 不可用
+[REGISTRY] ✅ 工具已注册: browser_test
+[Text2SQLAgent] ✅ LLM初始化成功: glm-4-flash
+[Text2SQLAgent] ✅ 数据库连接成功
+[Text2SQLAgent] 初始化完成
+[Text2SQLAgent] LLM后端: glm-4-flash
+[Text2SQLAgent] 数据库: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/instance/badcase_doctor.db
+[Text2SQLAgent] 执行模式: direct
+[Text2SQLAgent] 已加载表数量: 12
+[DB_TOOL] ✅ Text2SQL Agent 已启用 (执行模式: direct)
+[REGISTRY] ✅ 工具已注册: database_query
+[REGISTRY] ✅ 工具已注册: log_analyzer
+[REGISTRY] ✅ 工具已注册: accuracy_tester
+[REGISTRY] ✅ 工具已注册: search
+[REGISTRY] ✅ 工具已注册: login_state
+[REGISTRY] ✅ 工具已注册: grep
+[Text2SQLAgent] ✅ LLM初始化成功: glm-4-flash
+[Text2SQLAgent] ✅ 数据库连接成功
+[Text2SQLAgent] 初始化完成
+[Text2SQLAgent] LLM后端: glm-4-flash
+[Text2SQLAgent] 数据库: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/instance/badcase_doctor.db
+[Text2SQLAgent] 执行模式: direct
+[Text2SQLAgent] 已加载表数量: 12
+[REGISTRY] ✅ 工具已注册: modify
+[Text2SQLAgent] ✅ LLM初始化成功: glm-4-flash
+[Text2SQLAgent] ✅ 数据库连接成功
+[Text2SQLAgent] 初始化完成
+[Text2SQLAgent] LLM后端: glm-4-flash
+[Text2SQLAgent] 数据库: /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/instance/badcase_doctor.db
+[Text2SQLAgent] 执行模式: direct
+[Text2SQLAgent] 已加载表数量: 12
+[REGISTRY] ✅ 工具已注册: create
+[REGISTRY] ✅ 工具已注册: browser_click
+[REGISTRY] ✅ 工具已注册: browser_input
+[REGISTRY] ✅ 工具已注册: browser_wait
+[REGISTRY] ✅ 工具已注册: browser_assert
+[REGISTRY] ✅ 工具已注册: form_fill
+[REGISTRY] ✅ 工具已注册: form_submit
+[REGISTRY] ✅ 工具已注册: complete_login
+[REGISTRY] ✅ 工具已注册: test_scenario
+[REGISTRY] ✅ 工具已注册: skill_executor
+[AGENT]工具注册完成，共 18 个工具
+[AGENT]   - 业务工具: 6 (browser_test, database_query, log_analyzer, accuracy_tester, search, grep)
+[AGENT]   - 分层工具: 8
+[AGENT]      - L1 (原子操作): 4 个
+[AGENT]      - L2 (复合操作): 2 个
+[AGENT]      - L3 (完整流程): 2 个
+[AGENT]   - 🎯 Skill工具: 1 个 (skill_executor)
+[REACT-STREAM] 开始异步任务循环
+
+[AGENT] User Request (Stream): 修改所有badcase状态为已关闭的状态
+[AGENT] Project ID: 1
+[REACT-STREAM] 产出 chunk: status
+[QIANFAN-LLM] 原始响应: ```json
+{
+"category": "none_of_above"
+}
+```...
+[QIANFAN-LLM] 提取解析成功: {'category': 'none_of_above'}
+[REACT-STREAM] 产出 chunk: intent
+
+[REACT] ReAct Stream Loop Start
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: <todo_list>
+[
+  "使用 grep 工具查询所有BadCase，keywords=\"\"，target=badcase",
+  "使用 modify 工具批量修改所有BadCase的状态为closed"
+]
+</todo_list>...
+[QIANFAN-LLM] 检测到XML格式，返回原始字符串
+[REACT-STREAM] 生成的Todos: ['使用 grep 工具查询所有BadCase，keywords=""，target=badcase', '使用 modify 工具批量修改所有BadCase的状态为closed']
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: <decision>
+<execute>false</execute>
+<tool>none</tool>
+<params>
+{}
+</params>
+<reason>当前Todo要求使用grep工具查询BadCase，但用户请求是修改BadCase状态，需先获取BadCase列表再使用modify工具修改，当前Todo不完整且未提供足够信息直接执行修改，故不执行</reason>
+</decision>...
+[QIANFAN-LLM] 提取解析成功: {}
+[REACT-STREAM] LLM决策原始响应: {}
+[REACT-STREAM] 决策结果: {'execute': False, 'tool': '', 'params': {}, 'reason': ''}
+[REACT-STREAM] 跳过任务（execute=False）
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: <decision>
+<execute>true</execute>
+<tool>modify</tool>
+<params>
+{
+  "target": "badcase",
+  "modifications": {"status": "close"},
+  "project_id": "1",
+  "confirm": false
+}
+</params>
+<reason>Todo要求批量修改BadCase状态为closed，使用modify工具，但current_context中无bug_list信息，无法获取target_id，根据规则假设批量操作且确认参数设置</reason>
+</decision>...127.0.0.1 - - [03/Mar/2026 15:26:50] "OPTIONS /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 15:26:50] "POST /api/chat-sessions/17/messages HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 18:11:36] "GET /api/user HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 18:11:36] "GET /api/projects/1/members HTTP/1.1" 200 -
+
+[QIANFAN-LLM] 提取解析成功: {'target': 'badcase', 'modifications': {'status': 'close'}, 'project_id': '1', 'confirm': False}
+[REACT-STREAM] LLM决策原始响应: {'target': 'badcase', 'modifications': {'status': 'close'}, 'project_id': '1', 'confirm': False}
+[REACT-STREAM] 决策结果: {'execute': True, 'tool': 'modify', 'params': {'target': 'badcase', 'modifications': {'status': 'close'}, 'project_id': '1', 'confirm': False}, 'reason': '检测到修改参数，自动执行modify工具（沙箱预览模式）'}
+[REACT-STREAM] 执行工具: modify
+[REACT-STREAM] 产出 chunk: step
+[REACT] 正在执行工具: modify -> modify
+[REACT] 工具参数: {'target': 'badcase', 'modifications': {'status': 'close'}, 'project_id': '1', 'confirm': False, 'userId': 'system_agent'}
+[REACT] 正在执行工具: modify
+[MODIFY] 开始处理修改请求: target=badcase, target_id=None, modifications={'status': 'close'}, confirm=False
+[REACT] ✅ 工具执行完成: modify
+[REACT] 工具返回数据类型: dict
+[REACT-STREAM] 工具执行结果:
+[REACT-STREAM]   成功: False
+[REACT-STREAM]   错误: 缺少必要参数：target_id=None或modifications={'status': 'close'}
+[REACT-STREAM]   完整结果: {'success': False, 'error': "缺少必要参数：target_id=None或modifications={'status': 'close'}", 'hint': '可以提供natural_query参数来查找目标记录'}
+[REACT-STREAM] 产出 chunk: step
+
+[CORRECT] 🔄 自我修正流程启动
+
+[CORRECT] ❌ 校验失败: [{'type': 'execution_failed', 'message': "缺少必要参数：target_id=None或modifications={'status': 'close'}", 'error_details': "缺少必要参数：target_id=None或modifications={'status': 'close'}"}, {'type': 'type_mismatch', 'message': '返回类型不匹配：期望 dict，得到 NoneType'}]
+[CORRECT] 🔍 分析失败原因
+[QIANFAN-LLM] 原始响应: ```json
+{
+    "root_cause": "参数target_id缺失且modifications中的status值拼写错误（应为closed而非close）",
+    "error_category": "logic_error",
+    "is_recoverable": true,
+    "suggested_fix": "修正参数：添加target_id字段，并将status值改为closed，例如{\"target\": \"badcase\", \"target_id\": \"<具体ID>\", \"modifications\": {\"status\": \"closed\"}, \"project_id\": \"1\", \"confirm\": false, \"userId\": \"system_agent\"}"
+}
+```...
+[QIANFAN-LLM] 提取解析成功: {'root_cause': '参数target_id缺失且modifications中的status值拼写错误（应为closed而非close）', 'error_category': 'logic_error', 'is_recoverable': True, 'suggested_fix': '修正参数：添加target_id字段，并将status值改为closed，例如{"target": "badcase", "target_id": "<具体ID>", "modifications": {"status": "closed"}, "project_id": "1", "confirm": false, "userId": "system_agent"}'}
+[CORRECT]   根因: 参数target_id缺失且modifications中的status值拼写错误（应为closed而非close）
+[CORRECT]   类型: logic_error
+[CORRECT]   可恢复: True
+[CORRECT] 💡 生成修正策略
+[QIANFAN-LLM] 原始响应: ```json
+{
+"tool_name": "skill_executor"
+}
+```...
+[QIANFAN-LLM] 提取解析成功: {'tool_name': 'skill_executor'}
+[CORRECT] 📋 修正策略: change_tool
+[CORRECT]    描述: 切换工具重试
+[CORRECT]    原因: 切换到工具: skill_executor
+[CORRECT] 🔁 重试执行
+[REACT] 正在执行工具: modify -> modify
+[REACT] 工具参数: {'target': 'badcase', 'modifications': {'status': 'close'}, 'project_id': '1', 'confirm': False, 'userId': 'system_agent'}
+[REACT] 正在执行工具: modify
+[MODIFY] 开始处理修改请求: target=badcase, target_id=None, modifications={'status': 'close'}, confirm=False
+[REACT] ✅ 工具执行完成: modify
+[REACT] 工具返回数据类型: dict
+[CORRECT] ❌ 修正失败，再次失败
+[REACT-STREAM] 产出 chunk: step
+[REACT-DEBUG] Observation: {'success': False, 'error': "缺少必要参数：target_id=None或modifications={'status': 'close'}", 'hint': '可以提供natural_query参数来查找目标记录', 'corrected': False, 'correction_attempts': 1}
+[REACT-STREAM] 产出 chunk: step
+[QIANFAN-LLM] 原始响应: ```json
+<result>
+<key_findings>
+  <finding type="bug" severity="high">modify工具执行失败，缺少必要参数target_id或modifications格式错误</finding>
+  <finding type="info">错误提示建议使用natural_query参数来查找目标记录</finding>
+</key_findings>
+<context_update>
+  {
+    "last_error": "缺少必要参数：target_id=None或modifications={'status': 'close'}",
+    "correction_attempts": 1
+  }
+</context_update>
+<next_step>需要修正参数后重新执行modify工具，建议先使用搜索工具获取target_id</next_step>
+</result>
+```...
+[QIANFAN-LLM] 提取解析成功: {'last_error': "缺少必要参数：target_id=None或modifications={'status': 'close'}", 'correction_attempts': 1}
+[REACT-STREAM] 产出 chunk: step
+[REACT] 开始总结 2 条原始发现...
+[REACT] LLM总结完成: 3 条
+[REACT-STREAM] 产出 chunk: step
+[REACT-STREAM] 任务结束
+=== 获取项目BadCase列表 1 ===
+不进行计划过滤，显示所有BadCase
+=== 获取项目 1 的计划 ===
+找到 31 个顶级计划
+计划: 一个测试用例的计划 (ID: 34, 状态: active, 置顶: False, 创建时间: 2026-02-21 08:26:03.361785)
+计划: 未计划BadCase (ID: 32, 状态: unplanned, 置顶: False, 创建时间: 2026-02-02 00:59:27.180906)
+计划: 一个bug类型计划 (ID: 31, 状态: active, 置顶: False, 创建时间: 2026-01-23 11:43:16.994773)
+计划: 未计划BadCase (ID: 30, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:41:34.691098)
+计划: 未计划BadCase (ID: 29, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:39:18.773093)
+计划: 未计划BadCase (ID: 28, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:38:26.331889)
+计划: 未计划BadCase (ID: 27, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:37:42.468889)
+计划: 未计划BadCase (ID: 26, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:36:29.858808)
+计划: 未计划BadCase (ID: 25, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:35:06.309240)
+计划: 未计划BadCase (ID: 24, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:34:58.241006)
+计划: 未计划BadCase (ID: 23, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:33:03.485637)
+计划: 未计划BadCase (ID: 22, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:31:26.307550)
+计划: 未计划BadCase (ID: 21, 状态: unplanned, 置顶: False, 创建时间: 2026-01-23 11:31:12.044896)
+计划: 计划1 (ID: 19, 状态: active, 置顶: False, 创建时间: 2026-01-18 14:10:32.902704)
+计划: 未计划BadCase (ID: 18, 状态: unplanned, 置顶: False, 创建时间: 2025-10-01 03:35:33.076570)
+计划: 未计划BadCase (ID: 17, 状态: unplanned, 置顶: False, 创建时间: 2025-10-01 03:26:26.149081)
+计划: 未计划BadCase (ID: 16, 状态: unplanned, 置顶: False, 创建时间: 2025-09-29 04:23:29.032527)
+计划: 未计划BadCase (ID: 15, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:29.978525)
+计划: 未计划BadCase (ID: 14, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:19.498868)
+计划: 未计划BadCase (ID: 13, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:15.578958)
+计划: 未计划BadCase (ID: 12, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:44:08.878785)
+计划: 未计划BadCase (ID: 11, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.972505)
+计划: 未计划BadCase (ID: 10, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.937431)
+计划: 未计划BadCase (ID: 9, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:37.135600)
+计划: 未计划BadCase (ID: 8, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:32.453701)
+计划: 未计划BadCase (ID: 7, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:41:32.424705)
+计划: 未计划BadCase (ID: 6, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:39:57.075158)
+计划: 未计划BadCase (ID: 5, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:39:57.053792)
+计划: 未计划BadCase (ID: 4, 状态: unplanned, 置顶: False, 创建时间: 2025-09-08 13:37:49.936428)127.0.0.1 - - [03/Mar/2026 18:11:36] "GET /api/projects/1/badcases?page=1&per_page=20&content_type=badcase HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 18:11:36] "GET /api/projects/1 HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 18:11:36] "GET /api/projects/1/plans HTTP/1.1" 200 -
+127.0.0.1 - - [03/Mar/2026 18:11:36] "GET /api/projects/1/chat-sessions HTTP/1.1" 200 -

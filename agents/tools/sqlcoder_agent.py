@@ -1,193 +1,222 @@
 """
-SQLCoder智能代理 - 使用sqlcoder库进行Text2SQL转换
+Text2SQL智能代理 - 使用LangChain + SQLDatabaseToolkit + GLM实现
+
+支持的LLM后端:
+- GLM-4-Flash: 快速响应，适合简单查询
+- GLM-5: 支持复杂推理，适合复杂SQL生成
 """
 
 import os
-import json
 import re
+import sqlite3
 from typing import Dict, Any, Optional
 from enum import Enum
-from llm.factory import get_llm
 
-class SQLGenerationBackend(Enum):
-    GLM = "glm"
-    SQLCODER = "sqlcoder"
-    VANNA = "vanna"
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import SQLDatabaseToolkit, create_sql_agent
 
-class SQLCoderAgent:
-    """SQLCoder智能代理"""
+
+class LLMBackend(Enum):
+    """LLM后端类型"""
+    GLM_4_FLASH = "glm-4-flash"
+    GLM_5 = "glm-5"
+
+
+class ExecutionMode(Enum):
+    """执行模式"""
+    DIRECT = "direct"      # 直接执行（默认）
+    SANDBOX = "sandbox"    # Docker 沙箱执行
+
+
+class Text2SQLAgent:
+    """Text2SQL智能代理 - 基于LangChain SQLDatabaseToolkit，支持沙箱执行"""
     
     def __init__(self, 
                  database_path: str = "instance/badcase_doctor.db",
-                 backend: SQLGenerationBackend = SQLGenerationBackend.SQLCODER,
-                 llm_model: str = "glm-4",
-                 debug: bool = False):
+                 llm_backend: LLMBackend = LLMBackend.GLM_4_FLASH,
+                 api_key: str = None,
+                 debug: bool = False,
+                 execution_mode: ExecutionMode = ExecutionMode.DIRECT):
         """
-        初始化SQLCoder代理
+        初始化Text2SQL代理
         
         Args:
-            database_path: 数据库路径
-            backend: 后端引擎 (sqlcoder/glm/vanna)
-            llm_model: GLM模型名称
+            database_path: 数据库路径（支持SQLite和MySQL）
+            llm_backend: LLM后端类型
+            api_key: GLM API Key（为None时从环境变量读取）
             debug: 调试模式
+            execution_mode: 执行模式 (direct/sandbox)
         """
-        self.database_path = database_path
-        self.backend = backend
-        self.llm_model = llm_model
+        self.database_path = self._resolve_database_path(database_path)
+        self.llm_backend = llm_backend
         self.debug = debug
+        self.execution_mode = execution_mode
         
-        # 初始化后端引擎
-        if backend == SQLGenerationBackend.SQLCODER:
-            self._init_sqlcoder()
-        elif backend == SQLGenerationBackend.GLM:
-            self._init_glm()
-        elif backend == SQLGenerationBackend.VANNA:
-            self._init_vanna()
+        # 获取API Key
+        self.api_key = api_key or os.getenv('ZHIPU_API_KEY') or self._get_api_key_from_config()
         
-        # 加载数据库schema
+        # 初始化LLM
+        self.llm = self._init_llm()
+        
+        # 初始化数据库连接
+        self.db = self._init_database()
+        
+        # 初始化SQLDatabaseToolkit
+        self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
+        
+        # 加载schema信息
         self.schema_info = self._load_schema_info()
         
-        print(f"[SQLCoderAgent] 初始化完成: backend={backend.value}")
-        print(f"[SQLCoderAgent] 数据库: {database_path}")
-        print(f"[SQLCoderAgent] 已加载表数量: {len(self.schema_info.get('tables', {}))}")
+        # 初始化沙箱执行器（如果需要）
+        self._sandbox_executor = None
+        if execution_mode == ExecutionMode.SANDBOX:
+            self._init_sandbox_executor()
+        
+        print(f"[Text2SQLAgent] 初始化完成")
+        print(f"[Text2SQLAgent] LLM后端: {llm_backend.value}")
+        print(f"[Text2SQLAgent] 数据库: {self.database_path}")
+        print(f"[Text2SQLAgent] 执行模式: {execution_mode.value}")
+        print(f"[Text2SQLAgent] 已加载表数量: {len(self.schema_info.get('tables', {}))}")
     
-    def _init_sqlcoder(self):
-        """初始化SQLCoder引擎"""
+    def _init_sandbox_executor(self):
+        """初始化沙箱执行器"""
         try:
-            # 尝试导入sqlcoder库
-            import sqlcoder
-            self.sqlcoder = sqlcoder
-            print("[SQLCoderAgent] ✅ SQLCoder引擎可用")
+            from .text2sql.sandbox_executor import get_sandbox_executor
+            self._sandbox_executor = get_sandbox_executor(fallback_to_local=True)
+            print(f"[Text2SQLAgent] ✅ 沙箱执行器已初始化")
         except ImportError as e:
-            print(f"[SQLCoderAgent] ⚠️ SQLCoder引擎不可用: {str(e)}")
-            print("[SQLCoderAgent] ⚠️ 请安装: pip install sqlcoder")
-            print("[SQLCoderAgent] 🔄 切换到GLM引擎")
-            self.backend = SQLGenerationBackend.GLM
-            self._init_glm()
-    
-    def _init_glm(self):
-        """初始化GLM引擎"""
-        try:
-            self.llm = get_llm(provider="zhipu", model=self.llm_model)
-            print(f"[SQLCoderAgent] ✅ GLM引擎可用，模型: {self.llm_model}")
+            print(f"[Text2SQLAgent] ⚠️ 沙箱执行器初始化失败: {e}")
+            self._sandbox_executor = None
         except Exception as e:
-            print(f"[SQLCoderAgent] ❌ GLM引擎初始化失败: {str(e)}")
+            print(f"[Text2SQLAgent] ⚠️ 沙箱执行器初始化异常: {e}")
+            self._sandbox_executor = None
+    
+    def _get_api_key_from_config(self) -> str:
+        """从config.py获取API Key"""
+        try:
+            from config import Config
+            return Config.ZHIPU_API_KEY
+        except:
+            raise ValueError("未找到ZHIPU_API_KEY，请配置环境变量或在config.py中设置")
+    
+    def _resolve_database_path(self, database_path: str) -> str:
+        """解析数据库路径"""
+        if os.path.isabs(database_path):
+            return database_path
+        
+        # 检查是否是MySQL连接字符串
+        if database_path.startswith('mysql') or database_path.startswith('postgresql'):
+            return database_path
+        
+        # 相对路径转绝对路径
+        if os.path.exists(database_path):
+            return os.path.abspath(database_path)
+        
+        # 尝试相对于项目根目录
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        abs_path = os.path.join(project_root, database_path)
+        if os.path.exists(abs_path):
+            return abs_path
+        
+        return database_path
+    
+    def _init_llm(self):
+        """初始化LLM - 使用智谱AI OpenAI兼容接口"""
+        try:
+            from langchain_openai import ChatOpenAI
+            
+            model_name = self.llm_backend.value
+            
+            # 智谱AI OpenAI兼容接口
+            llm = ChatOpenAI(
+                model=model_name,
+                openai_api_key=self.api_key,
+                openai_api_base="https://open.bigmodel.cn/api/paas/v4",
+                temperature=0.1,  # SQL生成使用低温度
+                max_tokens=4096,
+            )
+            
+            print(f"[Text2SQLAgent] ✅ LLM初始化成功: {model_name}")
+            return llm
+            
+        except ImportError as e:
+            print(f"[Text2SQLAgent] ❌ 缺少依赖: {str(e)}")
+            print("[Text2SQLAgent] 请安装: pip install langchain-openai")
+            raise
+        except Exception as e:
+            print(f"[Text2SQLAgent] ❌ LLM初始化失败: {str(e)}")
             raise
     
-    def _init_vanna(self):
-        """初始化Vanna引擎"""
+    def _init_database(self) -> SQLDatabase:
+        """初始化数据库连接"""
         try:
-            from agents.tools.text2sql import get_vanna_text2sql
-            self.vanna_engine = get_vanna_text2sql(self.database_path)
-            print("[SQLCoderAgent] ✅ Vanna引擎可用")
+            # 判断数据库类型
+            if self.database_path.startswith(('mysql://', 'postgresql://', 'mysql+pymysql://')):
+                # MySQL/PostgreSQL连接字符串
+                db = SQLDatabase.from_uri(self.database_path)
+            else:
+                # SQLite数据库
+                db = SQLDatabase.from_uri(f"sqlite:///{self.database_path}")
+            
+            print(f"[Text2SQLAgent] ✅ 数据库连接成功")
+            return db
+            
         except Exception as e:
-            print(f"[SQLCoderAgent] ⚠️ Vanna引擎不可用: {str(e)}")
-            print("[SQLCoderAgent] 🔄 切换到GLM引擎")
-            self.backend = SQLGenerationBackend.GLM
-            self._init_glm()
+            print(f"[Text2SQLAgent] ❌ 数据库连接失败: {str(e)}")
+            raise
     
     def _load_schema_info(self) -> Dict[str, Any]:
         """加载数据库schema信息"""
-        import sqlite3
-        
-        if not os.path.exists(self.database_path):
-            return {"tables": {}}
+        schema_info = {
+            "database": "badcase_doctor",
+            "database_type": "sqlite" if not self.database_path.startswith(('mysql', 'postgres')) else "mysql",
+            "tables": {},
+            "table_count": 0
+        }
         
         try:
-            conn = sqlite3.connect(self.database_path)
-            cursor = conn.cursor()
+            # 使用LangChain的SQLDatabase获取schema
+            table_info = self.db.get_table_info()
             
-            # 获取所有表
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
-            tables = cursor.fetchall()
-            
-            schema_info = {
-                "database": "badcase_doctor",
-                "database_type": "sqlite",
-                "tables": {},
-                "table_count": 0
-            }
-            
-            for table_row in tables:
-                table_name = table_row[0]
-                if table_name in ['sqlite_sequence', 'sqlite_stat1', 'sqlite_stat2', 'sqlite_stat3', 'sqlite_stat4']:
-                    continue
-                
-                # 获取表结构
-                cursor.execute(f"PRAGMA table_info({table_name});")
-                columns = cursor.fetchall()
-                
-                # 获取表的索引
-                cursor.execute(f"PRAGMA index_list({table_name});")
-                indexes = cursor.fetchall()
-                
-                table_info = {
-                    "name": table_name,
-                    "columns": [],
-                    "column_count": len(columns),
-                    "primary_keys": [],
-                    "foreign_keys": [],
-                    "indexes": []
-                }
-                
-                for col in columns:
-                    col_id, col_name, col_type, not_null, default_value, pk = col
-                    
-                    column_info = {
-                        "id": col_id,
-                        "name": col_name,
-                        "type": col_type,
-                        "not_null": not_null == 1,
-                        "default": default_value,
-                        "primary_key": pk == 1
-                    }
-                    
-                    table_info["columns"].append(column_info)
-                    
-                    if pk == 1:
-                        table_info["primary_keys"].append(col_name)
-                
-                # 获取外键信息
-                cursor.execute(f"PRAGMA foreign_key_list({table_name});")
-                fks = cursor.fetchall()
-                for fk in fks:
-                    if fk:  # id, seq, table, from, to, on_update, on_delete, match
-                        table_info["foreign_keys"].append({
-                            "from_column": fk[3],
-                            "to_table": fk[2],
-                            "to_column": fk[4]
+            # 解析表信息
+            current_table = None
+            for line in table_info.split('\n'):
+                line = line.strip()
+                if line.startswith('CREATE TABLE'):
+                    match = re.search(r'CREATE TABLE (\w+)', line)
+                    if match:
+                        current_table = match.group(1)
+                        schema_info["tables"][current_table] = {
+                            "name": current_table,
+                            "columns": [],
+                            "column_count": 0
+                        }
+                elif current_table and line and not line.startswith(')') and not line.startswith('FOREIGN'):
+                    # 解析列信息
+                    col_match = re.match(r'(\w+)\s+(\w+)', line)
+                    if col_match:
+                        col_name, col_type = col_match.groups()
+                        schema_info["tables"][current_table]["columns"].append({
+                            "name": col_name,
+                            "type": col_type
                         })
-                
-                for idx in indexes:
-                    if idx and len(idx) > 1:
-                        index_name = idx[1]
-                        unique = idx[2]
-                        cursor.execute(f"PRAGMA index_info({index_name});")
-                        index_cols = cursor.fetchall()
-                        cols = [col[2] for col in index_cols] if index_cols else []
-                        
-                        table_info["indexes"].append({
-                            "name": index_name,
-                            "unique": unique == 1,
-                            "columns": cols
-                        })
-                
-                schema_info["tables"][table_name] = table_info
+            
+            # 更新列数量
+            for table_name, table_info in schema_info["tables"].items():
+                table_info["column_count"] = len(table_info["columns"])
             
             schema_info["table_count"] = len(schema_info["tables"])
             
-            conn.close()
-            
             if self.debug:
-                print(f"[SQLCoderAgent] 已加载 {schema_info['table_count']} 个表")
+                print(f"[Text2SQLAgent] 已加载 {schema_info['table_count']} 个表")
                 for table_name, table_info in schema_info["tables"].items():
                     print(f"  - {table_name}: {table_info['column_count']} 列")
             
             return schema_info
             
         except Exception as e:
-            print(f"[SQLCoderAgent] ❌ 加载schema失败: {str(e)}")
-            return {"tables": {}}
+            print(f"[Text2SQLAgent] ⚠️ 加载schema失败: {str(e)}，使用空schema")
+            return schema_info
     
     def generate_sql(self, question: str, context: str = "", **kwargs) -> Dict[str, Any]:
         """
@@ -195,266 +224,201 @@ class SQLCoderAgent:
         
         Args:
             question: 自然语言问题
-            context: 额外的上下文信息
+            context: 额外的上下文信息（可选）
             **kwargs: 其他参数
             
         Returns:
             Dict: 包含生成的SQL和元数据
         """
         if self.debug:
-            print(f"[SQLCoderAgent] 📝 生成SQL: {question}")
+            print(f"[Text2SQLAgent] 📝 生成SQL: {question}")
         
-        try:
-            if self.backend == SQLGenerationBackend.SQLCODER:
-                result = self._generate_with_sqlcoder(question, context, **kwargs)
-            elif self.backend == SQLGenerationBackend.GLM:
-                result = self._generate_with_glm(question, context, **kwargs)
-            elif self.backend == SQLGenerationBackend.VANNA:
-                result = self._generate_with_vanna(question, context, **kwargs)
-            else:
-                result = {
-                    'success': False,
-                    'error': f'不支持的backend: {self.backend}',
-                    'sql': ''
-                }
-            
-            # 验证SQL安全性
-            if result.get('success', False) and result.get('sql'):
-                is_safe, safety_info = self._validate_sql_safety(result['sql'])
-                result['is_safe'] = is_safe
-                result['safety_info'] = safety_info
-                
-                if not is_safe:
-                    result['success'] = False
-                    result['error'] = '生成的SQL包含潜在安全风险'
-            
-            return result
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f'生成SQL失败: {str(e)}',
-                'sql': '',
-                'backend': self.backend.value
-            }
-    
-    def _generate_with_sqlcoder(self, question: str, context: str = "", **kwargs) -> Dict[str, Any]:
-        """使用SQLCoder生成SQL"""
         try:
             # 构建提示词
-            prompt = self._build_sqlcoder_prompt(question, context)
+            schema_info = self._format_schema_for_prompt()
             
-            # 调用SQLCoder
-            # 注意：实际使用中需要根据sqlcoder库的API进行调整
-            sql = f"/* 使用SQLCoder生成的查询 */\nSELECT * FROM bad_case WHERE /* {question} */;"
-            
-            return {
-                'success': True,
-                'sql': sql,
-                'backend': 'sqlcoder',
-                'prompt_used': prompt,
-                'is_estimated': True  # 标记为估计查询，需要进一步处理
-            }
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f'SQLCoder生成失败: {str(e)}',
-                'sql': '',
-                'backend': 'sqlcoder'
-            }
-    
-    def _generate_with_glm(self, question: str, context: str = "", **kwargs) -> Dict[str, Any]:
-        """使用GLM生成SQL"""
-        try:
-            # 构建提示词
-            prompt = self._build_glm_prompt(question, context)
-            
-            # 调用GLM
-            response = self.llm.generate(prompt)
-            
-            # 提取SQL语句
-            sql = self._extract_sql_from_response(response)
-            
-            return {
-                'success': True,
-                'sql': sql,
-                'backend': 'glm',
-                'prompt_used': prompt[:200],  # 只保存前200字符用于调试
-                'raw_response': response[:500]  # 保存部分原始响应
-            }
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f'GLM生成失败: {str(e)}',
-                'sql': '',
-                'backend': 'glm'
-            }
-    
-    def _generate_with_vanna(self, question: str, context: str = "", **kwargs) -> Dict[str, Any]:
-        """使用Vanna生成SQL"""
-        try:
-            result = self.vanna_engine.execute({"query": question})
-            
-            if result.get('success', False):
-                return {
-                    'success': True,
-                    'sql': result.get('generated_sql', ''),
-                    'backend': 'vanna',
-                    'raw_result': result
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': result.get('error', 'Vanna生成失败'),
-                    'sql': '',
-                    'backend': 'vanna'
-                }
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f'Vanna生成失败: {str(e)}',
-                'sql': '',
-                'backend': 'vanna'
-            }
-    
-    def _build_sqlcoder_prompt(self, question: str, context: str = "") -> str:
-        """构建SQLCoder提示词"""
-        schema_text = self._format_schema_for_sqlcoder()
-        
-        prompt = f"""You are a SQL expert. Based on the following database schema and user question, generate a correct SQL query.
-
-Database Schema:
-{schema_text}
-
-User Question: {question}
-
-Additional Context: {context if context else 'No additional context'}
-
-Instructions:
-1. Generate only the SQL query, no explanations
-2. Ensure the SQL is syntactically correct
-3. Use appropriate table aliases if needed
-4. Consider performance implications
-5. Add comments only if necessary for clarity
-
-SQL Query:"""
-
-        return prompt
-    
-    def _build_glm_prompt(self, question: str, context: str = "") -> str:
-        """构建GLM提示词"""
-        schema_text = self._format_schema_for_glm()
-        
-        prompt = f"""你是一个SQL专家。请根据以下数据库schema和用户问题，生成正确的SQL查询语句。
+            prompt = f"""你是一个SQL专家。请根据以下数据库结构和用户问题，生成正确的SQLite SQL查询语句。
 
 数据库结构:
-{schema_text}
+{schema_info}
 
 用户问题: {question}
 
 额外上下文: {context if context else '无'}
 
 要求:
-1. 只返回SQL语句，不要包含解释
+1. 只返回SQL语句，不要包含任何解释
 2. 确保SQL语法正确
-3. 使用合适的表别名（如果需要）
-4. 考虑查询性能
-5. 仅当必要时添加注释以提高可读性
+3. 使用SQLite语法
+4. 表名和字段名要准确匹配上面的数据库结构
+5. 如果需要排序，请使用合适的字段排序
 
 SQL查询语句:"""
 
-        return prompt
+            # 调用LLM
+            response = self.llm.invoke(prompt)
+            
+            # 提取SQL
+            output = response.content if hasattr(response, 'content') else str(response)
+            sql = self._extract_sql_from_result(output)
+            
+            # 验证SQL安全性
+            if sql:
+                is_safe, safety_info = self._validate_sql_safety(sql)
+                
+                return {
+                    'success': is_safe,
+                    'sql': sql,
+                    'backend': self.llm_backend.value,
+                    'is_safe': is_safe,
+                    'safety_info': safety_info,
+                    'error': None if is_safe else '生成的SQL包含潜在安全风险',
+                    'raw_output': output[:500] if self.debug else None
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': '无法从响应中提取SQL语句',
+                    'sql': '',
+                    'backend': self.llm_backend.value,
+                    'raw_output': output[:500]
+                }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'生成SQL失败: {str(e)}',
+                'sql': '',
+                'backend': self.llm_backend.value
+            }
     
-    def _format_schema_for_sqlcoder(self) -> str:
-        """格式化schema供SQLCoder使用"""
-        schema_text = "Database: badcase_doctor (SQLite)\n\n"
+    def _format_schema_for_prompt(self) -> str:
+        """格式化schema用于提示词"""
+        schema_text = "数据库: badcase_doctor (SQLite)\n\n"
         
         for table_name, table_info in self.schema_info.get("tables", {}).items():
-            schema_text += f"Table: {table_name}\n"
+            schema_text += f"表: {table_name}\n"
+            schema_text += "字段:\n"
             
-            # 列信息
             for col in table_info.get("columns", []):
                 col_desc = f"  - {col['name']}: {col['type']}"
-                if col.get("primary_key"):
-                    col_desc += " (PRIMARY KEY)"
-                if not col.get("not_null"):
-                    col_desc += " (nullable)"
-                if col.get("default"):
-                    col_desc += f" (default: {col['default']})"
                 schema_text += col_desc + "\n"
-            
-            # 索引信息
-            if table_info.get("indexes"):
-                schema_text += "  Indexes:\n"
-                for idx in table_info["indexes"]:
-                    idx_desc = f"    - {idx['name']}: {', '.join(idx['columns'])}"
-                    if idx.get("unique"):
-                        idx_desc += " (unique)"
-                    schema_text += idx_desc + "\n"
-            
-            # 外键信息
-            if table_info.get("foreign_keys"):
-                schema_text += "  Foreign Keys:\n"
-                for fk in table_info["foreign_keys"]:
-                    schema_text += f"    - {fk['from_column']} -> {fk['to_table']}({fk['to_column']})\n"
             
             schema_text += "\n"
         
         return schema_text
     
-    def _format_schema_for_glm(self) -> str:
-        """格式化schema供GLM使用"""
-        return self._format_schema_for_sqlcoder()
+    def _extract_sql_from_result(self, output: str) -> str:
+        """从Agent输出中提取SQL语句"""
+        # 尝试多种模式提取SQL
+        patterns = [
+            r'```sql\s*([\s\S]*?)\s*```',  # ```sql ... ```
+            r'```\s*([\s\S]*?)\s*```',      # ``` ... ```
+            r'(SELECT[\s\S]*?)(?:;|$)',     # SELECT ... ;
+            r'(UPDATE[\s\S]*?)(?:;|$)',     # UPDATE ... ;
+            r'SELECT\s+[\w\s,.*]+\s+FROM[\s\S]*?(?:;|$)',  # SELECT ... FROM ...
+            r'UPDATE\s+\w+\s+SET[\s\S]*?(?:;|$)',  # UPDATE ... SET ...
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                sql = match.group(1).strip() if match.lastindex else match.group(0).strip()
+                # 清理SQL
+                sql = re.sub(r'^```sql?\s*', '', sql, flags=re.IGNORECASE)
+                sql = re.sub(r'\s*```\s*$', '', sql)
+                sql = sql.strip().rstrip(';') + ';'
+                # 支持 SELECT 和 UPDATE
+                if sql.upper().startswith(('SELECT', 'UPDATE')):
+                    print(f"[SQL-EXTRACT] 提取到SQL: {sql}")
+                    return sql
+        
+        # 如果没找到，尝试直接查找 SELECT 或 UPDATE
+        for keyword in ['SELECT', 'UPDATE']:
+            idx = output.upper().find(keyword)
+            if idx != -1:
+                sql = output[idx:].strip()
+                sql = re.sub(r'\s+', ' ', sql)  # 压缩空白
+                sql = sql.split(';')[0] + ';'
+                print(f"[SQL-EXTRACT] 直接提取到SQL: {sql}")
+                return sql
+        
+        return ''
     
-    def _extract_sql_from_response(self, response: str) -> str:
-        """从模型响应中提取SQL语句"""
-        # 移除SQL代码块标记
-        sql = response.strip()
-        sql = re.sub(r'^```sql\s*', '', sql)
-        sql = re.sub(r'^```\s*', '', sql)
-        sql = re.sub(r'\s*```\s*$', '', sql)
-        sql = re.sub(r'^SELECT\s*--\s*.+\n', 'SELECT ', sql, flags=re.IGNORECASE)
+    def query_natural_language(self, question: str, context: str = "") -> Dict[str, Any]:
+        """
+        自然语言查询（生成SQL并执行）
         
-        # 移除注释
-        lines = sql.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('--') and not line.startswith('/*'):
-                cleaned_lines.append(line)
+        Args:
+            question: 自然语言问题
+            context: 额外上下文
+            
+        Returns:
+            Dict: 包含SQL、执行结果和元数据
+        """
+        # 先生成SQL
+        sql_result = self.generate_sql(question, context)
         
-        sql = ' '.join(cleaned_lines)
+        if not sql_result.get('success'):
+            return sql_result
         
-        # 确保以SELECT开头
-        if not sql.upper().startswith('SELECT'):
-            sql = f"SELECT * FROM bad_case WHERE /* {sql} */"
+        sql = sql_result['sql']
         
-        return sql
+        # 执行SQL
+        exec_result = self.execute_sql(sql)
+        
+        # 合并结果
+        return {
+            **sql_result,
+            'data': exec_result.get('data', []),
+            'columns': exec_result.get('columns', []),
+            'row_count': exec_result.get('row_count', 0),
+            'executed': exec_result.get('success', False),
+            'exec_error': exec_result.get('error')
+        }
     
-    def _validate_sql_safety(self, sql: str) -> tuple[bool, Dict[str, Any]]:
+    def _validate_sql_safety(self, sql: str) -> tuple:
         """验证SQL安全性"""
         sql_lower = sql.lower()
+        sql_stripped = sql.strip().lower()
         
-        # 危险操作
-        dangerous_ops = [
-            'drop ', 'truncate ', 'delete from', 'update ', 'alter ',
-            'create ', 'insert into', 'grant ', 'revoke ',
+        # 危险操作（绝对禁止）
+        absolutely_dangerous = [
+            'drop ', 'truncate ', 'alter ',
+            'create ', 'grant ', 'revoke ',
             'exec ', 'execute ', 'xp_', 'sp_',
             'union select', 'information_schema', 'sys.objects'
         ]
         
-        found_dangerous = []
-        for op in dangerous_ops:
-            if op in sql_lower:
-                found_dangerous.append(op)
+        # 有条件允许的操作（需要额外检查）
+        conditional_ops = {
+            'delete from': 'DELETE 需要WHERE条件',
+            'insert into': 'INSERT 需要检查目标表',
+        }
         
-        # 检查是否以SELECT开头（允许必要的子查询）
-        lines = sql_lower.strip().split()
-        if len(lines) > 0 and not lines[0].startswith('select'):
-            found_dangerous.append('非SELECT操作')
+        found_dangerous = []
+        
+        # 检查绝对危险操作
+        for op in absolutely_dangerous:
+            if op in sql_lower:
+                found_dangerous.append(f'危险操作: {op}')
+        
+        # 检查 SQL 类型
+        if sql_stripped.startswith('select'):
+            # SELECT 语句安全
+            pass
+        elif sql_stripped.startswith('update'):
+            # UPDATE 需要有 WHERE 条件
+            if 'where' not in sql_lower:
+                found_dangerous.append('UPDATE 缺少WHERE条件')
+            else:
+                print(f"[SQL-SAFETY] UPDATE 语句通过安全检查")
+        elif sql_stripped.startswith('delete'):
+            # DELETE 需要有 WHERE 条件
+            if 'where' not in sql_lower:
+                found_dangerous.append('DELETE 缺少WHERE条件')
+        else:
+            found_dangerous.append(f'未知SQL类型')
         
         is_safe = len(found_dangerous) == 0
         
@@ -462,24 +426,24 @@ SQL查询语句:"""
             'is_safe': is_safe,
             'dangerous_operations_found': found_dangerous,
             'sql_length': len(sql),
-            'lines': len(sql.split('\n'))
         }
         
         return is_safe, safety_info
     
-    def execute_sql(self, sql: str, limit: int = 100) -> Dict[str, Any]:
+    def execute_sql(self, sql: str, limit: int = 100, force_mode: ExecutionMode = None) -> Dict[str, Any]:
         """
         执行SQL查询
         
         Args:
             sql: SQL查询语句
             limit: 结果限制
+            force_mode: 强制指定执行模式（可选）
             
         Returns:
             Dict: 执行结果
         """
         if self.debug:
-            print(f"[SQLCoderAgent] 🚀 执行SQL: {sql[:200]}...")
+            print(f"[Text2SQLAgent] 🚀 执行SQL: {sql[:200]}...")
         
         # 安全验证
         is_safe, safety_info = self._validate_sql_safety(sql)
@@ -490,36 +454,124 @@ SQL查询语句:"""
                 'safety_info': safety_info
             }
         
+        # 决定执行模式
+        exec_mode = force_mode or self.execution_mode
+        
+        # 如果是沙箱模式，且沙箱执行器可用，则使用沙箱执行
+        if exec_mode == ExecutionMode.SANDBOX and self._sandbox_executor:
+            return self._execute_sql_via_sandbox(sql, limit)
+        
+        # 否则直接执行
+        return self._execute_sql_direct(sql, limit)
+    
+    def _execute_sql_via_sandbox(self, sql: str, limit: int) -> Dict[str, Any]:
+        """
+        通过沙箱执行SQL
+        
+        流程：
+        1. SQL -> Python 代码封装
+        2. 代码 -> Docker 沙箱执行
+        3. 返回结果
+        """
+        if self.debug:
+            print(f"[Text2SQLAgent] 🔒 通过沙箱执行SQL...")
+        
         try:
-            import sqlite3
+            # 数据库配置
+            db_config = {
+                'path': self.database_path,
+                'type': 'sqlite' if not self.database_path.startswith(('mysql', 'postgres')) else 'mysql'
+            }
             
-            conn = sqlite3.connect(self.database_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            # 添加LIMIT（如果需要）
+            # 添加 LIMIT
             if 'limit' not in sql.lower() and limit > 0:
                 sql = self._add_limit_to_sql(sql, limit)
             
-            cursor.execute(sql)
-            rows = cursor.fetchall()
+            # 直接调用沙箱执行器
+            result = self._sandbox_executor.execute_sql(sql, db_config)
             
-            # 转换为字典
-            data = [dict(row) for row in rows]
+            if not result.get('success'):
+                print(f"[Text2SQLAgent] ❌ 沙箱执行失败: {result.get('error')}")
             
-            # 获取列信息
-            columns = [description[0] for description in cursor.description] if cursor.description else []
-            
-            conn.close()
-            
+            return result
+                
+        except Exception as e:
+            print(f"[Text2SQLAgent] ❌ 沙箱执行失败: {e}")
             return {
-                'success': True,
-                'data': data,
-                'columns': columns,
-                'row_count': len(data),
-                'sql_executed': sql,
-                'limit_applied': limit
+                'success': False,
+                'error': f'沙箱执行失败: {str(e)}',
+                'sql': sql
             }
+    
+    def _execute_sql_direct(self, sql: str, limit: int) -> Dict[str, Any]:
+        """直接执行SQL（非沙箱模式）"""
+        try:
+            # 判断 SQL 类型
+            sql_upper = sql.strip().upper()
+            is_select = sql_upper.startswith('SELECT')
+            is_update = sql_upper.startswith('UPDATE')
+            is_delete = sql_upper.startswith('DELETE')
+            
+            # 使用LangChain的SQLDatabase执行
+            result = self.db.run(sql)
+            
+            # 解析结果
+            # 如果是SQLite，直接连接执行
+            if not self.database_path.startswith(('mysql', 'postgres')):
+                conn = sqlite3.connect(self.database_path)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                # 只对 SELECT 添加 LIMIT
+                if is_select and 'limit' not in sql.lower() and limit > 0:
+                    sql = self._add_limit_to_sql(sql, limit)
+                
+                print(f"[SQL-EXEC] 执行SQL: {sql}")
+                cursor.execute(sql)
+                
+                if is_select:
+                    # SELECT 返回查询结果
+                    rows = cursor.fetchall()
+                    data = [dict(row) for row in rows]
+                    columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                    conn.close()
+                    return {
+                        'success': True,
+                        'data': data,
+                        'columns': columns,
+                        'row_count': len(data),
+                        'sql_executed': sql,
+                        'limit_applied': limit,
+                        'execution_mode': 'direct'
+                    }
+                elif is_update or is_delete:
+                    # UPDATE/DELETE 返回影响行数
+                    conn.commit()
+                    affected_rows = cursor.rowcount
+                    conn.close()
+                    print(f"[SQL-EXEC] ✅ UPDATE/DELETE 执行成功，影响 {affected_rows} 行")
+                    return {
+                        'success': True,
+                        'affected_rows': affected_rows,
+                        'sql_executed': sql,
+                        'execution_mode': 'direct'
+                    }
+                else:
+                    conn.close()
+                    return {
+                        'success': True,
+                        'sql_executed': sql,
+                        'execution_mode': 'direct'
+                    }
+            else:
+                # MySQL/PostgreSQL使用LangChain的结果
+                return {
+                    'success': True,
+                    'data': result,
+                    'sql_executed': sql,
+                    'raw_result': str(result)[:1000],
+                    'execution_mode': 'direct'
+                }
             
         except Exception as e:
             return {
@@ -532,38 +584,73 @@ SQL查询语句:"""
         """为SQL添加LIMIT子句"""
         sql = sql.rstrip(';').strip()
         
-        # 如果已经在子查询中有LIMIT，则不添加
         if 'limit' in sql.lower():
             return sql
         
-        # 检查是否有ORDER BY或GROUP BY
         sql_lower = sql.lower()
         
         if ' order by ' in sql_lower:
-            # 在ORDER BY之后添加LIMIT
             parts = re.split(r'(ORDER BY .+)', sql, flags=re.IGNORECASE)
             if len(parts) >= 3:
                 return f"{parts[0].strip()} {parts[1]} LIMIT {limit}"
         
         elif ' group by ' in sql_lower:
-            # 在GROUP BY之后添加LIMIT
             parts = re.split(r'(GROUP BY .+)', sql, flags=re.IGNORECASE)
             if len(parts) >= 3:
                 return f"{parts[0].strip()} {parts[1]} LIMIT {limit}"
         
-        # 直接添加LIMIT
         return f"{sql} LIMIT {limit}"
 
+    def get_schema_description(self) -> str:
+        """获取数据库schema描述"""
+        return self.db.get_table_info()
+    
+    def get_table_names(self) -> list:
+        """获取所有表名"""
+        return list(self.schema_info.get("tables", {}).keys())
 
-def get_sqlcoder_agent(database_path: str = "instance/badcase_doctor.db", 
-                      backend: str = "sqlcoder",
-                      llm_model: str = "glm-4",
-                      debug: bool = False) -> SQLCoderAgent:
-    """获取SQLCoder代理实例"""
-    backend_enum = SQLGenerationBackend(backend)
-    return SQLCoderAgent(
+
+# 兼容旧API的别名
+SQLCoderAgent = Text2SQLAgent
+SQLGenerationBackend = LLMBackend
+
+
+def get_text2sql_agent(database_path: str = "instance/badcase_doctor.db",
+                       llm_backend: str = "glm-4-flash",
+                       api_key: str = None,
+                       debug: bool = False,
+                       execution_mode: str = "direct") -> Text2SQLAgent:
+    """
+    获取Text2SQL代理实例
+    
+    Args:
+        database_path: 数据库路径
+        llm_backend: LLM后端
+        api_key: API密钥
+        debug: 调试模式
+        execution_mode: 执行模式 (direct/sandbox/hybrid)
+    """
+    backend_enum = LLMBackend(llm_backend)
+    mode_enum = ExecutionMode(execution_mode)
+    return Text2SQLAgent(
         database_path=database_path,
-        backend=backend_enum,
-        llm_model=llm_model,
-        debug=debug
+        llm_backend=backend_enum,
+        api_key=api_key,
+        debug=debug,
+        execution_mode=mode_enum
+    )
+
+
+# 兼容旧API
+def get_sqlcoder_agent(database_path: str = "instance/badcase_doctor.db",
+                       backend: str = "glm-4-flash",
+                       llm_model: str = "glm-4-flash",
+                       debug: bool = False,
+                       execution_mode: str = "direct") -> SQLCoderAgent:
+    """获取SQLCoder代理实例（兼容旧API）"""
+    return get_text2sql_agent(
+        database_path=database_path,
+        llm_backend=backend or llm_model,
+        debug=debug,
+        execution_mode=execution_mode
     )

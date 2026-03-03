@@ -527,6 +527,9 @@ def react_agent():
         return response
         
     except Exception as e:
+        import traceback
+        print(f"[REACT] ❌ 错误: {str(e)}")
+        traceback.print_exc()
         return jsonify({'code': 500, 'message': str(e)}), 500
 
 

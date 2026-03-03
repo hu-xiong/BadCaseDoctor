@@ -1,10 +1,17 @@
 """
 对话新增Bug/BadCase/计划工具
-支持预览和确认流程
+支持预览和确认流程，集成Text2SQL智能查询
 """
 from typing import Dict, Any
 from agents.tool_registry import BaseTool
 from config import Config
+
+# Text2SQL Agent
+try:
+    from .sqlcoder_agent import Text2SQLAgent, LLMBackend
+    TEXT2SQL_AVAILABLE = True
+except ImportError:
+    TEXT2SQL_AVAILABLE = False
 
 
 class CreateTool(BaseTool):
@@ -26,31 +33,56 @@ class CreateTool(BaseTool):
 - fields: 字段内容字典，如 {"title": "登录失败", "priority": "高"}
 - project_id: 项目ID（必需）
 - confirm: 是否直接确认创建（默认false，先预览）
+- natural_query: 自然语言描述（可选，用于智能填充字段）
 
 返回：
 - preview: 预览数据（confirm=false时）
 - created_id: 创建成功的ID（confirm=true时）
 - confirmation_required: 是否需要用户确认
 """
+        
+        # 初始化 Text2SQL Agent
+        if TEXT2SQL_AVAILABLE:
+            try:
+                self.text2sql = Text2SQLAgent(
+                    database_path='instance/badcase_doctor.db',
+                    llm_backend=LLMBackend.GLM_4_FLASH,
+                    debug=False
+                )
+            except Exception as e:
+                self.text2sql = None
+                print(f"[CREATE] Text2SQL初始化失败: {e}")
+        else:
+            self.text2sql = None
     
     async def execute(
         self,
-        target: str = "bug",  # bug/badcase/plan/testcase
+        target: str = "bug",
         fields: Dict[str, Any] = None,
         project_id: int = None,
         confirm: bool = False,
+        natural_query: str = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         执行创建操作
         
         Args:
-            target: 创建目标类型（bug/badcase/plan）
+            target: 创建目标类型（bug/badcase/plan/testcase）
             fields: 字段内容
             project_id: 项目ID
             confirm: 是否直接创建
+            natural_query: 自然语言描述
         """
         print(f"[CREATE] 开始处理创建请求: target={target}, confirm={confirm}")
+        
+        # 如果提供了自然语言描述，尝试智能填充字段
+        if natural_query and self.text2sql:
+            smart_fields = await self._smart_fill_fields(target, natural_query, project_id)
+            if smart_fields:
+                if fields:
+                    smart_fields.update(fields)  # 用户提供的字段优先
+                fields = smart_fields
         
         if not fields or not project_id:
             return {
@@ -59,10 +91,13 @@ class CreateTool(BaseTool):
             }
         
         try:
-            # 1. 验证和补全字段
+            # 1. 查询相似记录（避免重复创建）
+            similar_records = await self._check_similar_records(target, fields, project_id)
+            
+            # 2. 验证和补全字段
             validated_fields = self._validate_and_complete_fields(target, fields, project_id)
             
-            # 2. 如果用户确认，执行创建
+            # 3. 如果用户确认，执行创建
             if confirm:
                 created_id = await self._create_record(target, validated_fields, project_id)
                 if created_id:
@@ -71,7 +106,8 @@ class CreateTool(BaseTool):
                         'message': f'已成功创建{self._get_target_label(target)}',
                         'target': target,
                         'created_id': created_id,
-                        'fields': validated_fields
+                        'fields': validated_fields,
+                        'similar_records': similar_records if similar_records else None
                     }
                 else:
                     return {
@@ -79,13 +115,14 @@ class CreateTool(BaseTool):
                         'error': f'创建{self._get_target_label(target)}失败'
                     }
             
-            # 3. 返回预览（需要用户确认）
+            # 4. 返回预览（需要用户确认）
             return {
                 'success': True,
                 'confirmation_required': True,
                 'message': f'请确认以下{self._get_target_label(target)}信息：',
                 'target': target,
-                'preview': validated_fields
+                'preview': validated_fields,
+                'similar_records': similar_records if similar_records else None
             }
             
         except Exception as e:
@@ -94,6 +131,65 @@ class CreateTool(BaseTool):
                 'success': False,
                 'error': f'创建失败: {str(e)}'
             }
+    
+    async def _smart_fill_fields(self, target: str, natural_query: str, project_id: int) -> Dict[str, Any]:
+        """使用Text2SQL智能填充字段"""
+        try:
+            # 构建查询提示
+            prompt = f"根据以下描述提取{target}的字段信息: {natural_query}"
+            
+            # 使用LLM提取字段（简化实现）
+            if self.text2sql:
+                # 查询相似记录作为参考
+                sql_result = self.text2sql.generate_sql(
+                    f"查询{target}表中与'{natural_query}'相关的记录",
+                    f"项目ID: {project_id}"
+                )
+                if sql_result.get('success'):
+                    exec_result = self.text2sql.execute_sql(sql_result['sql'])
+                    if exec_result.get('success') and exec_result.get('data'):
+                        # 参考相似记录的字段
+                        ref = exec_result['data'][0]
+                        return {
+                            'title': natural_query,
+                            'priority': ref.get('priority', '中'),
+                        }
+            
+            return {'title': natural_query}
+            
+        except Exception as e:
+            print(f"[CREATE] 智能填充失败: {e}")
+            return {'title': natural_query}
+    
+    async def _check_similar_records(self, target: str, fields: Dict, project_id: int) -> list:
+        """检查相似记录，避免重复创建"""
+        if not self.text2sql:
+            return []
+        
+        try:
+            title = fields.get('title', '')
+            if not title:
+                return []
+            
+            table_name = 'bug' if target == 'bug' else 'bad_case' if target == 'badcase' else None
+            if not table_name:
+                return []
+            
+            sql_result = self.text2sql.generate_sql(
+                f"查询{table_name}表中标题包含'{title}'的记录",
+                f"项目ID: {project_id}"
+            )
+            
+            if sql_result.get('success'):
+                exec_result = self.text2sql.execute_sql(sql_result['sql'])
+                if exec_result.get('success'):
+                    return exec_result.get('data', [])[:3]  # 返回最多3条
+            
+            return []
+            
+        except Exception as e:
+            print(f"[CREATE] 检查相似记录失败: {e}")
+            return []
     
     def _get_target_label(self, target: str) -> str:
         """获取目标类型的中文标签"""
@@ -127,14 +223,13 @@ class CreateTool(BaseTool):
             'severity': fields.get('severity', 'medium'),
             'status': fields.get('status', 'new'),
             'project_id': project_id,
-            'plan_id': fields.get('plan_id'),  # 可选
-            'assignee_id': fields.get('assignee_id'),  # 可选
+            'plan_id': fields.get('plan_id'),
+            'assignee_id': fields.get('assignee_id'),
             'reproduce_steps': fields.get('reproduce_steps', ''),
             'expected_result': fields.get('expected_result', ''),
             'actual_result': fields.get('actual_result', '')
         }
         
-        # 必填字段验证
         if not validated['title']:
             raise ValueError('Bug标题不能为空')
         
@@ -148,14 +243,13 @@ class CreateTool(BaseTool):
             'priority': fields.get('priority', '中'),
             'status': fields.get('status', '待处理'),
             'project_id': project_id,
-            'plan_id': fields.get('plan_id'),  # 可选
-            'assignee_id': fields.get('assignee_id'),  # 可选
+            'plan_id': fields.get('plan_id'),
+            'assignee_id': fields.get('assignee_id'),
             'reproduce_steps': fields.get('reproduce_steps', ''),
             'expected_result': fields.get('expected_result', ''),
             'actual_result': fields.get('actual_result', '')
         }
         
-        # 必填字段验证
         if not validated['title']:
             raise ValueError('BadCase标题不能为空')
         
@@ -166,16 +260,15 @@ class CreateTool(BaseTool):
         validated = {
             'name': fields.get('name', ''),
             'description': fields.get('description', ''),
-            'plan_type': fields.get('plan_type', 'bug'),  # bug/badcase
+            'plan_type': fields.get('plan_type', 'bug'),
             'status': fields.get('status', 'active'),
             'project_id': project_id,
-            'parent_id': fields.get('parent_id'),  # 可选：父计划ID
-            'assignee_id': fields.get('assignee_id'),  # 可选
-            'start_date': fields.get('start_date'),  # 可选
-            'end_date': fields.get('end_date')  # 可选
+            'parent_id': fields.get('parent_id'),
+            'assignee_id': fields.get('assignee_id'),
+            'start_date': fields.get('start_date'),
+            'end_date': fields.get('end_date')
         }
         
-        # 必填字段验证
         if not validated['name']:
             raise ValueError('计划名称不能为空')
         

@@ -81,6 +81,8 @@ class SQLGenerator:
                 sql_result = self._generate_select_all_sql(table_name)
             elif intent['type'] == 'count':
                 sql_result = self._generate_count_sql(query, table_name)
+            elif intent['type'] == 'update':
+                sql_result = self._generate_update_sql(query, table_name)
             else:
                 sql_result = self._generate_basic_select_sql(table_name)
             
@@ -109,19 +111,23 @@ class SQLGenerator:
     def _identify_intent(self, query: str) -> Dict[str, Any]:
         """识别查询意图"""
         query_lower = query.lower()
-        
-        #检查查询关键词
+            
+        # 检查更新关键词（优先级最高）
+        if any(keyword in query_lower for keyword in ['更新', '修改', '改', 'update', 'set', '改为']):
+            return {'success': True, 'type': 'update', 'confidence': 0.95}
+            
+        # 检查查询关键词
         if any(keyword in query_lower for keyword in ['查询', '搜索', '查找', 'search', 'find']):
             return {'success': True, 'type': 'select', 'confidence': 0.9}
-        
+            
         # 检查列表关键词
         if any(keyword in query_lower for keyword in ['列出', '显示', '所有', 'list', 'show', 'all']):
             return {'success': True, 'type': 'select_all', 'confidence': 0.8}
-        
+            
         # 检查统计关键词
         if any(keyword in query_lower for keyword in ['统计', '数量', '多少', 'count', 'total']):
             return {'success': True, 'type': 'count', 'confidence': 0.85}
-        
+            
         # 默认为基本查询
         return {'success': True, 'type': 'select', 'confidence': 0.7}
     
@@ -187,6 +193,74 @@ class SQLGenerator:
         
         return {'success': True, 'sql': sql}
     
+    def _generate_update_sql(self, query: str, table_name: str) -> Dict[str, Any]:
+        """
+        生成 UPDATE SQL
+        
+        输入示例: "更新bug表中ID为3的记录，将assignee_id改为33"
+        输出示例: "UPDATE bug SET assignee_id = 33 WHERE id = 3"
+        """
+        import re
+        
+        try:
+            # 提取 WHERE 条件（ID）
+            id_match = re.search(r'ID[为等于:]\s*(\d+)', query, re.IGNORECASE)
+            record_id = id_match.group(1) if id_match else None
+            
+            if not record_id:
+                # 尝试其他ID提取模式
+                id_match = re.search(r'id\s*[=为]\s*(\d+)', query, re.IGNORECASE)
+                record_id = id_match.group(1) if id_match else None
+            
+            # 提取 SET 子句
+            # 模式："字段名改为值" 或 "将字段名改为值"
+            set_matches = re.findall(r'(\w+)\s*改为\s*[\'"]?([^，。、\s\'"]+)[\'"]?', query)
+            
+            if not set_matches:
+                # 尝试其他模式
+                set_matches = re.findall(r'(\w+)\s*[=设置]\s*[\'"]?([^，。、\s\'"]+)[\'"]?', query)
+            
+            if not record_id or not set_matches:
+                return {
+                    'success': False,
+                    'error': f'无法解析UPDATE语句，ID={record_id}, SET={set_matches}',
+                    'sql': None
+                }
+            
+            # 构建 SET 子句
+            set_clauses = []
+            for field, value in set_matches:
+                # 判断值类型
+                try:
+                    # 尝试解析为数字
+                    num_value = int(value)
+                    set_clauses.append(f"{field} = {num_value}")
+                except ValueError:
+                    # 字符串值
+                    set_clauses.append(f"{field} = '{value}'")
+            
+            set_clause = ", ".join(set_clauses)
+            
+            # 构建 UPDATE SQL
+            sql = f"UPDATE {table_name} SET {set_clause} WHERE id = {record_id}"
+            
+            print(f"[SQL-GEN] 生成 UPDATE SQL: {sql}")
+            
+            return {
+                'success': True,
+                'sql': sql,
+                'table': table_name,
+                'record_id': record_id,
+                'changes': dict(set_matches)
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'UPDATE SQL生成失败: {str(e)}',
+                'sql': None
+            }
+    
     def _generate_basic_select_sql(self, table_name: str) -> Dict[str, Any]:
         """生成基本 SELECT SQL"""
         sql = f"SELECT * FROM {table_name} LIMIT 20"
@@ -219,7 +293,8 @@ class SQLGenerator:
         intent_desc = {
             'select': '查询符合条件的记录',
             'select_all': '查询所有记录',
-            'count': '统计记录数量'
+            'count': '统计记录数量',
+            'update': '更新记录'
         }
         
         intent_text = intent_desc.get(intent['type'], '执行查询')

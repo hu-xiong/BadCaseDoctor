@@ -3,8 +3,35 @@ Text2SQL SQL验证器
 使用 sqlglot进行 SQL语法验证和安全检查
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass
 import re
+
+
+@dataclass
+class ValidationResult:
+    """SQL验证结果"""
+    valid: bool
+    safe: bool = True
+    error: Optional[str] = None
+    warnings: List[str] = None
+    normalized_sql: Optional[str] = None
+    security_violation: bool = False
+    
+    def __post_init__(self):
+        if self.warnings is None:
+            self.warnings = []
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            'valid': self.valid,
+            'safe': self.safe,
+            'error': self.error,
+            'warnings': self.warnings,
+            'normalized_sql': self.normalized_sql,
+            'security_violation': self.security_violation
+        }
 
 
 class SQLValidator:
@@ -219,5 +246,10 @@ class SQLValidator:
         return sql.strip()
 
 
-#全局实例
+# 全局实例
 sql_validator = SQLValidator()
+
+
+def get_sql_validator() -> SQLValidator:
+    """获取全局 SQL 验证器实例"""
+    return sql_validator

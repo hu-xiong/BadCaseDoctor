@@ -106,25 +106,27 @@
             </div>
           </div>
           
-          <!-- 修改预览导航区域 - 类似grep的跳转链接 -->
+          <!-- 修改预览导航区域 - 沙箱预览模式需要用户确认 -->
           <div v-if="message.modifyNavigation" class="modify-navigation-section">
             <div class="findings-card">
               <div class="findings-header">
                 <span class="findings-icon">📝</span>
-                <span class="findings-title">点击查看修改</span>
+                <span class="findings-title">沙箱预览</span>
                 <span class="findings-count">{{ message.modifyNavigation.diff?.length || 1 }} 项</span>
               </div>
               <div class="modify-navigation-content">
                 <!-- 显示修改字段对比 -->
                 <div v-for="(fieldDiff, idx) in message.modifyNavigation.diff" :key="idx" class="modify-field-preview">
                   <span class="field-label">{{ fieldDiff.field_label }}:</span>
-                  <span class="old-value">{{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || '-' }}</span>
+                  <span :class="['old-value', { 'empty-value': !fieldDiff.lines?.find(l => l.type === 'delete')?.content }]">
+                    {{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || '未设置' }}
+                  </span>
                   <span class="arrow">→</span>
                   <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
                 </div>
-                <!-- 简化的确认按钮 - 触发列表显示 -->
+                <!-- 只有在列表中显示按钮，跳转到左侧列表进行二次确认 -->
                 <div class="modify-actions">
-                  <button @click="handleShowModifyInList(message.modifyNavigation)" class="btn-primary">在列表中显示</button>
+                  <button @click="handleShowModifyInList(message.modifyNavigation, message.id)" class="btn-primary">在列表中显示</button>
                 </div>
               </div>
             </div>
@@ -238,7 +240,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted, watch } from 'vue'
+import { ref, reactive, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
@@ -435,24 +437,32 @@ const formatTodosForTimeline = (steps, message) => {
       // 只有完成时才显示结果摘要
       if (isSkipped) {
         resultSummary = '已跳过'
-      } else if (isCompleted && step.toolCall?.output) {
-        const output = step.toolCall.output
-        try {
-          const data = typeof output === 'string' ? JSON.parse(output) : output
-          // 优先使用后端生成的summary（已包含计划名和意图分析）
-          if (data.data?.summary) {
-            resultSummary = data.data.summary
-          } else if (data.data?.badcase_analysis) {
-            resultSummary = `分析完成，定位 ${data.data.badcase_analysis.length} 条BadCase`
-          } else if (data.data?.plan_tree) {
-            const planCount = data.data.plan_tree.total_plans || 0
-            const badcaseCount = data.data.badcase_analysis?.length || 0
-            resultSummary = `分析完成，解析 ${planCount} 个计划，定位 ${badcaseCount} 条BadCase`
-          } else {
+      } else if (isCompleted) {
+        const output = step.toolCall?.output
+        if (output) {
+          try {
+            const data = typeof output === 'string' ? JSON.parse(output) : output
+            // 优先使用后端生成的summary（已包含计划名和意图分析）
+            if (data.data?.summary) {
+              resultSummary = data.data.summary
+            } else if (data.data?.badcase_analysis) {
+              const count = data.data.badcase_analysis.length || 0
+              resultSummary = count > 0 ? `分析完成，定位 ${count} 条BadCase` : '分析完成，未找到BadCase'
+            } else if (data.data?.plan_tree) {
+              const planCount = data.data.plan_tree.total_plans || 0
+              const badcaseCount = data.data.badcase_analysis?.length || 0
+              resultSummary = badcaseCount > 0 
+                ? `分析完成，解析 ${planCount} 个计划，定位 ${badcaseCount} 条BadCase`
+                : `分析完成，解析 ${planCount} 个计划，未找到BadCase`
+            } else {
+              resultSummary = '分析完成，未找到匹配项'
+            }
+          } catch {
             resultSummary = '分析完成'
           }
-        } catch {
-          resultSummary = '分析完成'
+        } else {
+          // 没有输出时也显示结果
+          resultSummary = '分析完成，无结果返回'
         }
       } else if (isRunning) {
         resultSummary = '分析中...'
@@ -463,6 +473,36 @@ const formatTodosForTimeline = (steps, message) => {
     } else if (toolName === 'log_analyzer') {
       friendlyText = '📋 使用 log_analyzer 工具分析日志'
       resultSummary = isSkipped ? '已跳过' : (isCompleted ? '日志分析完成' : (isRunning ? '日志分析中...' : ''))
+    } else if (toolName === 'modify') {
+      friendlyText = '✏️ 使用 modify 工具修改数据'
+      if (isSkipped) {
+        resultSummary = '已跳过'
+      } else if (isCompleted) {
+        const output = step.toolCall?.output
+        if (output) {
+          try {
+            const data = typeof output === 'string' ? JSON.parse(output) : output
+            if (data.batch_modify && data.results) {
+              const successCount = data.results.filter(r => r.result?.success).length
+              resultSummary = `批量修改完成，成功 ${successCount}/${data.results.length} 条`
+            } else if (data.success && data.diff) {
+              resultSummary = '修改预览完成，等待确认'
+            } else if (data.success) {
+              resultSummary = '修改执行成功'
+            } else if (data.error) {
+              resultSummary = `修改失败: ${data.error}`
+            } else {
+              resultSummary = '修改完成'
+            }
+          } catch {
+            resultSummary = '修改完成'
+          }
+        } else {
+          resultSummary = '修改完成，无结果返回'
+        }
+      } else if (isRunning) {
+        resultSummary = '修改中...'
+      }
     } else {
       // 其他工具，使用原始title
       friendlyText = step.title || step.description || '未知任务'
@@ -576,23 +616,50 @@ const handleConfirmModify = async (modifyData) => {
 }
 
 // 在列表中显示修改
-const handleShowModifyInList = (modifyData) => {
-  console.log('[MODIFY] 在列表中显示修改:', modifyData)
+const handleShowModifyInList = (modifyData, messageId) => {
+  console.log('[MODIFY] 在列表中显示修改:', modifyData, 'messageId:', messageId)  
   
-  // 发送自定义事件给父组件 ProjectDetail
+  // 批量修改：为每个记录发送单独的事件
+  if (modifyData.batch_modify && modifyData.batch_results && modifyData.batch_results.length > 0) {
+    console.log('[MODIFY] 批量修改，发送多个事件')
+    modifyData.batch_results.forEach((result, index) => {
+      const alreadyProcessed = result.confirmation_required === false
+      
+      const event = new CustomEvent('show-modify-in-list', {
+        detail: {
+          targetId: result.target_id,
+          target: result.target,
+          diff: result.diff,
+          modifications: result.modifications,
+          executed: alreadyProcessed,
+          messageId: messageId,
+          batchIndex: index  // 标记批量索引
+        },
+        bubbles: true
+      })
+      window.dispatchEvent(event)
+    })
+    return
+  }
+  
+  // 单个修改
+  const alreadyProcessed = modifyData.success === true || 
+                          modifyData.cancelled === true || 
+                          modifyData.confirmation_required === false
+  
   const event = new CustomEvent('show-modify-in-list', {
     detail: {
       targetId: modifyData.target_id,
       target: modifyData.target,
       diff: modifyData.diff,
       modifications: modifyData.modifications,
-      plan_id: modifyData.plan_id || modifyData.before?.plan_id  // 添加 plan_id
+      plan_id: modifyData.plan_id || modifyData.before?.plan_id,
+      executed: alreadyProcessed,
+      messageId: messageId
     },
     bubbles: true
   })
   window.dispatchEvent(event)
-  
-  // 不清除 modifyNavigation，保留在历史消息中作为导航入口
 }
 
 // 取消修改
@@ -603,6 +670,17 @@ const handleCancelModify = () => {
   if (currentMessage) {
     currentMessage.modifyNavigation = null
   }
+}
+
+// 确认应用沙箱预览的修改（已废弃，现在统一跳转到左侧列表确认）
+const handleConfirmModification = async (modifyData) => {
+  console.log('[MODIFY] 此方法已废弃，请使用 handleShowModifyInList')
+}
+
+// 取消沙箱预览的修改
+const handleCancelModification = (message) => {
+  console.log('[MODIFY] 用户取消沙箱预览')
+  message.modifyNavigation = null
 }
 
 // 审核单个修改项 - 采纳
@@ -738,6 +816,12 @@ const loadSessionMessages = async () => {
             isHistorical: true  // 标记为历史消息
           }
         } else {
+          const modifyNav = msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null
+          
+          // 检查历史消息中的 modifyNavigation 是否已执行
+          // 如果 confirmation_required=true 但数据库中的记录已被修改，标记为已执行
+          // 这里先保留原始状态，后续通过API检查
+          
           return {
             id: msg.id,
             isUser: false,
@@ -747,17 +831,97 @@ const loadSessionMessages = async () => {
             agentResult: msg.agent_result ? JSON.parse(msg.agent_result) : { findings: [], recommendations: [], status: 'success' },
             evidences: msg.evidences ? JSON.parse(msg.evidences) : [],
             navigation: msg.navigation ? JSON.parse(msg.navigation) : null,
-            modifyNavigation: msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null,  // 加载 modifyNavigation
+            modifyNavigation: modifyNav,  // 加载 modifyNavigation
             finalResponse: msg.final_response,
             time: new Date(msg.created_at).toLocaleTimeString(),
             isHistorical: true  // 标记为历史消息
           }
         }
       })
+      
+      // 检查历史 modifyNavigation 的执行状态
+      checkModifyNavigationStatus()
+      
       scrollToBottom()
     }
   } catch (error) {
     console.error('加载会话消息失败:', error)
+  }
+}
+
+// 检查历史 modifyNavigation 的执行状态
+const checkModifyNavigationStatus = async () => {
+  // 遍历所有消息，检查 modifyNavigation 是否需要验证执行状态
+  for (const msg of messages.value) {
+    if (msg.modifyNavigation && msg.modifyNavigation.confirmation_required && !msg.modifyNavigation.success) {
+      const { target, target_id, modifications } = msg.modifyNavigation
+      
+      if (!target || !target_id || !modifications) continue
+      
+      try {
+        // 调用后端 API 检查当前记录状态
+        let detailUrl = ''
+        if (target === 'badcase') {
+          detailUrl = `/api/badcases/${target_id}`
+        } else if (target === 'bug') {
+          detailUrl = `/api/bugs/${target_id}`
+        } else if (target === 'testcase') {
+          detailUrl = `/api/testcases/${target_id}`
+        }
+        
+        if (!detailUrl) continue
+        
+        const response = await fetch(detailUrl, { credentials: 'include' })
+        if (response.ok) {
+          const result = await response.json()
+          // 检查是否有错误（如未登录）
+          if (result.error) {
+            console.warn('[MODIFY] API 返回错误:', result.error)
+            continue
+          }
+          const currentData = result[target] || result.badcase || result.bug || result.testcase
+          
+          if (currentData) {
+            // 检查修改是否已生效
+            let isApplied = true
+            for (const [field, newValue] of Object.entries(modifications)) {
+              const currentValue = currentData[field]
+              
+              // 比较 assignee 字段时需要特殊处理
+              if (field === 'assignee') {
+                // newValue 可能是用户名或用户ID字符串
+                // 需要检查：1. assignee_id (数字) 与 newValue (可能是数字字符串)
+                //         2. assignee (用户名) 与 newValue (可能是用户名)
+                
+                const currentAssigneeId = currentData.assignee_id
+                const currentAssigneeName = currentData.assignee
+                
+                // 检查是否匹配（用户ID或用户名）
+                const matchesById = currentAssigneeId && currentAssigneeId.toString() === newValue.toString()
+                const matchesByName = currentAssigneeName && currentAssigneeName.toString() === newValue.toString()
+                
+                if (!matchesById && !matchesByName) {
+                  isApplied = false
+                  break
+                }
+              } else if (currentValue?.toString() !== newValue?.toString()) {
+                isApplied = false
+                break
+              }
+            }
+            
+            if (isApplied) {
+              // 修改已生效，标记为已执行
+              msg.modifyNavigation.success = true
+              msg.modifyNavigation.confirmation_required = false
+              console.log('[MODIFY] 历史消息检测到修改已生效:', msg.id)
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[MODIFY] 检查执行状态失败:', error)
+      }
+    }
   }
 }
 
@@ -1031,28 +1195,47 @@ const handleReactAgentMode = async (userMessage) => {
                                       
                     // 处理modify工具输出 - 使用modifyNavigation替代modifyPreview
                     if (toolName === 'modify' && toolData && typeof toolData === 'object') {
-                      // 情况1: 需要确认的预览模式
-                      if (toolData.confirmation_required && toolData.diff) {
+                      // 情况1: 批量修改结果
+                      if (toolData.batch_modify && toolData.results && toolData.results.length > 0) {
+                        // 批量修改：为每个结果生成单独的消息或合并显示
+                        const allDiffs = []
+                        toolData.results.forEach(r => {
+                          if (r.result?.diff) {
+                            allDiffs.push({
+                              target_id: r.id,
+                              target: toolData.target,
+                              diff: r.result.diff,
+                              confirmation_required: r.result.confirmation_required
+                            })
+                          }
+                        })
+                        
+                        // 显示第一个需要确认的结果
+                        const firstPending = allDiffs.find(d => d.confirmation_required) || allDiffs[0]
+                        if (firstPending) {
+                          aiMessage.modifyNavigation = {
+                            target: firstPending.target || toolData.target,
+                            target_id: firstPending.target_id,
+                            diff: firstPending.diff,
+                            modifications: toolData.results.find(r => r.id === firstPending.target_id)?.result?.modifications,
+                            confirmation_required: firstPending.confirmation_required,
+                            batch_modify: true,
+                            batch_results: allDiffs,
+                            batch_count: toolData.results.length
+                          }
+                          console.log('[MODIFY] 存储批量修改导航:', aiMessage.modifyNavigation)
+                        }
+                      }
+                      // 情况2: 单个需要确认的预览模式
+                      else if (toolData.confirmation_required && toolData.diff) {
                         aiMessage.modifyNavigation = {
                           target: toolData.target,
                           target_id: toolData.target_id,
                           diff: toolData.diff,
-                          modifications: toolData.modifications
+                          modifications: toolData.modifications,
+                          confirmation_required: true
                         }
-                        console.log('[MODIFY] 存储modify导航:', aiMessage.modifyNavigation)
-                      }
-                      // 情况2: 已执行的批量修改结果
-                      else if (toolData.results && toolData.results.length > 0) {
-                        // 从第一个结果中提取diff
-                        const firstResult = toolData.results[0]?.result
-                        aiMessage.modifyNavigation = {
-                          target: 'bug',
-                          diff: firstResult?.diff || [],
-                          results: toolData.results,
-                          success: toolData.success,
-                          message: toolData.message
-                        }
-                        console.log('[MODIFY] 存储批量修改导航:', aiMessage.modifyNavigation)
+                        console.log('[MODIFY] 存储沙箱预览导航:', aiMessage.modifyNavigation)
                       }
                       // 情况3: 单个已执行的修改结果
                       else if (toolData.diff && toolData.before && toolData.after) {
@@ -1062,7 +1245,7 @@ const handleReactAgentMode = async (userMessage) => {
                           diff: toolData.diff,
                           before: toolData.before,
                           after: toolData.after,
-                          plan_id: toolData.before?.plan_id,  // 添加 plan_id
+                          plan_id: toolData.before?.plan_id,
                           success: toolData.success,
                           message: toolData.message
                         }
@@ -1581,6 +1764,46 @@ onMounted(() => {
   })
   // 加载会话消息
   loadSessionMessages()
+  
+  // 监听修改取消/确认事件
+  window.addEventListener('modify-cancelled', handleModifyCancelled)
+  window.addEventListener('modify-confirmed', handleModifyConfirmed)
+})
+
+// 处理修改取消事件
+const handleModifyCancelled = (event) => {
+  const { targetId } = event.detail
+  console.log('[MODIFY] 收到取消事件，targetId:', targetId)
+  
+  // 找到对应的 modifyNavigation 并标记为已处理
+  messages.value.forEach(msg => {
+    if (msg.modifyNavigation && msg.modifyNavigation.target_id === targetId) {
+      msg.modifyNavigation.cancelled = true
+      msg.modifyNavigation.success = true  // 标记为已处理，再次点击只定位
+      console.log('[MODIFY] 已标记消息为已取消:', msg.id)
+    }
+  })
+}
+
+// 处理修改确认事件
+const handleModifyConfirmed = (event) => {
+  const { targetId } = event.detail
+  console.log('[MODIFY] 收到确认事件，targetId:', targetId)
+  
+  // 找到对应的 modifyNavigation 并标记为已执行
+  messages.value.forEach(msg => {
+    if (msg.modifyNavigation && msg.modifyNavigation.target_id === targetId) {
+      msg.modifyNavigation.success = true  // 标记为已执行，再次点击只定位
+      msg.modifyNavigation.confirmation_required = false
+      console.log('[MODIFY] 已标记消息为已执行:', msg.id)
+    }
+  })
+}
+
+// 组件销毁时移除事件监听
+onUnmounted(() => {
+  window.removeEventListener('modify-cancelled', handleModifyCancelled)
+  window.removeEventListener('modify-confirmed', handleModifyConfirmed)
 })
 
 // 监听 sessionId 变化，重新加载消息
@@ -2302,6 +2525,13 @@ watch(() => props.sessionId, (newSessionId) => {
   border-radius: 4px;
 }
 
+.modify-field-preview .old-value.empty-value {
+  color: #9ca3af;
+  text-decoration: none;
+  background: #f3f4f6;
+  font-style: italic;
+}
+
 .modify-field-preview .arrow {
   color: #9ca3af;
 }
@@ -2335,6 +2565,22 @@ watch(() => props.sessionId, (newSessionId) => {
 
 .btn-primary:hover {
   background: #2563eb;
+}
+
+.btn-secondary {
+  padding: 8px 16px;
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  background: #e5e7eb;
+  border-color: #9ca3af;
 }
 
 .btn-icon-approve,

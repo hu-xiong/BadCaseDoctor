@@ -193,7 +193,13 @@ class SkillIntegration:
         for key, value_template in tool_def.params.items():
             if isinstance(value_template, str):
                 # 处理模板参数
-                params[key] = self._resolve_template(value_template, context, results)
+                resolved = self._resolve_template(value_template, context, results)
+                # 检查是否解析成功（避免未解析的模板变量传入工具）
+                if resolved == value_template and '${' in value_template:
+                    print(f"[SKILL] ⚠️ 模板变量未解析: {key}={value_template}")
+                    # 跳过未解析的参数
+                    continue
+                params[key] = resolved
             else:
                 params[key] = value_template
         

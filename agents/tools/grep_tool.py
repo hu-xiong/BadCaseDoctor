@@ -246,11 +246,17 @@ class GrepTool(BaseTool):
         
         query = db.session.query(BadCase).filter_by(project_id=project_id)
         
-        if keywords:
+        # keywords 为空或 "*" 表示查询全部
+        is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
+        if not is_query_all and keywords:
             query = query.filter(BadCase.title.ilike(f'%{keywords}%'))
         
-        # 限制返回数量，避免处理过多数据
-        badcases = query.order_by(BadCase.created_at.desc()).limit(20).all()
+        # 查询全部时不限制数量，否则限制20条
+        if is_query_all:
+            print(f"[GREP] 查询所有 BadCase，project_id={project_id}")
+            badcases = query.order_by(BadCase.created_at.desc()).limit(100).all()
+        else:
+            badcases = query.order_by(BadCase.created_at.desc()).limit(20).all()
         
         result = []
         for bc in badcases:
@@ -259,7 +265,7 @@ class GrepTool(BaseTool):
                 'title': bc.title,
                 'status': bc.status.value if hasattr(bc.status, 'value') else bc.status,
                 'priority': bc.priority,
-                'assignee_id': bc.assignee_id,
+                'assignee': bc.assignee,  # BadCase 使用 assignee（字符串），不是 assignee_id
                 'plan_id': bc.plan_id,
                 'created_at': bc.created_at.isoformat() if bc.created_at else None,
                 'business_scenario': self._infer_business_scenario(bc.title, keywords),
@@ -273,12 +279,29 @@ class GrepTool(BaseTool):
         """Bug定位引擎（优化版）"""
         from app import db, Bug
         
-        query = db.session.query(Bug).filter_by(project_id=project_id)
+        # 确保 project_id 是整数
+        try:
+            project_id_int = int(project_id)
+        except (ValueError, TypeError):
+            project_id_int = 1
         
-        if keywords:
+        print(f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}")
+        
+        query = db.session.query(Bug).filter_by(project_id=project_id_int)
+        
+        # keywords 为空或 "*" 表示查询全部
+        is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
+        if not is_query_all and keywords:
             query = query.filter(Bug.title.ilike(f'%{keywords}%'))
         
-        bugs = query.order_by(Bug.created_at.desc()).limit(20).all()
+        # 查询全部时不限制数量，否则限制20条
+        if is_query_all:
+            print(f"[GREP] 查询所有 Bug，project_id={project_id_int}")
+            bugs = query.order_by(Bug.created_at.desc()).limit(100).all()
+        else:
+            bugs = query.order_by(Bug.created_at.desc()).limit(20).all()
+        
+        print(f"[GREP] 找到 {len(bugs)} 个 Bug")
         
         result = []
         for bug in bugs:

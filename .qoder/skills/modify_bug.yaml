@@ -22,7 +22,7 @@ tools:
     purpose: 执行修改操作
     params:
       target: bug
-      target_id: ${grep_result.first_bug_id}
+      target_id: ${target_id}
       modifications: ${user_modifications}
       project_id: ${project_id}
       confirm: true

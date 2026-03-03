@@ -73,13 +73,15 @@ class IntelligentDevOpsAgent:
         
         # 初始化工具注册表
         self.tool_registry = ToolRegistry()
-        self._register_tools()
         
-        # 初始化 ReAct 引擎（极简设计）
+        # 初始化 ReAct 引擎（极简设计）- 必须在 _register_tools 之前
         self.react_engine = SimplifiedReActEngine(
             llm=llm,
             tool_registry=self.tool_registry
         )
+        
+        # 注册工具（在 react_engine 之后，因为 skill_tool 需要 react_engine）
+        self._register_tools()
         
         # 记忆系统
         self.memory = ConversationMemory()

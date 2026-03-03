@@ -88,34 +88,7 @@ class SimplifiedReActEngine:
             for i, todo in enumerate(todos):
                 yield {'event': 'todo_start', 'index': i, 'todo': todo}
                 
-                #决：LLM决定使用哪个工具
-                decision_prompt = ReactPromptTemplates.decide_prompt(
-                    todo, user_input, tools_info, result_context
-                )
-                decision_response = await self.llm.parse_intent(decision_prompt)
-                print(f"[REACT-STREAM] LLM决策原始响应: {decision_response}")
-                decision = parse_xml_decision(decision_response)
-                
-                print(f"[REACT-STREAM]决结果: {decision}")
-                
-                #🔧兜底逻辑：当 LLM 返回空响应但 Todo包含 modify 关键词时
-                if not decision['execute'] and 'modify' in todo.lower():
-                    print(f"[REACT-STREAM] 检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...")
-                    decision = self._infer_modify_params(todo, result_context)
-                    print(f"[REACT-STREAM] 自动推断的决策: {decision}")
-                
-                #🎯Skill工具优化：智能任务处理
-                if decision['execute']:
-                    decision = await self._optimize_with_skill_tool(decision, user_input, result_context, project_id)
-                
-                if not decision['execute']:
-                    print(f"[REACT-STREAM] 跳过任务（execute=False）")
-                    yield {'event': 'skip', 'todo': todo, 'index': i}
-                    yield {'event': 'todo_end', 'index': i}
-                    continue
-                yield {'event': 'todo_start', 'index': i, 'todo': todo}
-                
-                # 决策
+                # 决策：LLM决定使用哪个工具
                 decision_prompt = ReactPromptTemplates.decide_prompt(
                     todo, user_input, tools_info, result_context
                 )
@@ -125,18 +98,15 @@ class SimplifiedReActEngine:
                 
                 print(f"[REACT-STREAM] 决策结果: {decision}")
                 
-                #🔧兜逻辑：当 LLM 返回空响应但 Todo包含 modify 关键词时
+                # 兜底逻辑：当 LLM 返回空响应但 Todo包含 modify 关键词时
                 if not decision['execute'] and 'modify' in todo.lower():
-                    print(f"[REACT-STREAM]检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...")
+                    print(f"[REACT-STREAM] 检测到 modify 任务但 LLM 返回空响应，尝试自动推断参数...")
                     decision = self._infer_modify_params(todo, result_context)
                     print(f"[REACT-STREAM] 自动推断的决策: {decision}")
-                                
-                # Text2SQL 优化：数据库查询优先使用自然语言
-                if decision['execute'] and decision['tool'] == 'database_query':
-                    natural_query = self._extract_natural_query(todo, user_input)
-                    if natural_query and self.text2sql_tool:
-                        print(f"[REACT-STREAM] 优先使用 Text2SQL执行: {natural_query}")
-                        decision['params']['natural_query'] = natural_query
+                
+                # Skill工具优化：智能任务处理
+                if decision['execute']:
+                    decision = await self._optimize_with_skill_tool(decision, user_input, result_context, project_id)
                 
                 if not decision['execute']:
                     print(f"[REACT-STREAM] 跳过任务（execute=False）")
@@ -144,29 +114,44 @@ class SimplifiedReActEngine:
                     yield {'event': 'todo_end', 'index': i}
                     continue
                 
-                print(f"[REACT-STREAM] 执行工具: {decision['tool']}")
-                yield {'event': 'executing', 'tool': decision['tool'], 'reason': decision['reason']}
+                # Text2SQL 优化：数据库查询优先使用自然语言
+                if decision['execute'] and decision['tool'] == 'database_query':
+                    natural_query = self._extract_natural_query(todo, user_input)
+                    if natural_query and self.text2sql_tool:
+                        print(f"[REACT-STREAM] 优先使用 Text2SQL执行: {natural_query}")
+                        decision['params']['natural_query'] = natural_query
                 
-                # 🔧 批量修改逻辑：如果是 modify 工具，检查是否需要修改多个 Bug
+                print(f"[REACT-STREAM] 执行工具: {decision['tool']}")
+                yield {'event': 'executing', 'tool': decision['tool'], 'reason': decision.get('reason', '')}
+                
+                # 批量修改逻辑：如果是 modify 工具，检查是否需要修改多个记录
                 if decision['tool'] == 'modify':
+                    # 检查是否有 badcase_list 或 bug_list
+                    badcase_list = result_context.get('badcase_list', [])
                     bug_list = result_context.get('bug_list', [])
-                    if bug_list and len(bug_list) > 1:
-                        # 批量修改所有 Bug
+                    target_list = badcase_list if badcase_list else bug_list
+                    
+                    if target_list and len(target_list) > 1:
+                        # 批量修改所有记录
                         all_results = []
-                        for bug in bug_list:
-                            bug_id = bug.get('id')
-                            if bug_id:
+                        target_type = 'badcase' if badcase_list else 'bug'
+                        for item in target_list:
+                            item_id = item.get('id')
+                            if item_id:
                                 modify_decision = decision.copy()
-                                modify_decision['params']['target_id'] = bug_id
-                                print(f"[REACT-STREAM] 批量修改 Bug ID={bug_id}")
+                                modify_decision['params']['target_id'] = item_id
+                                modify_decision['params']['target'] = target_type
+                                print(f"[REACT-STREAM] 批量修改 {target_type} ID={item_id}")
                                 observation = await self._execute_tool(modify_decision)
-                                all_results.append({'bug_id': bug_id, 'result': observation})
+                                all_results.append({'id': item_id, 'result': observation})
                         
                         # 合并结果
                         observation = {
                             'success': all(r['result'].get('success') for r in all_results),
-                            'message': f'已批量修改 {len(all_results)} 个 Bug',
-                            'results': all_results
+                            'message': f'已批量修改 {len(all_results)} 个 {target_type}',
+                            'results': all_results,
+                            'batch_modify': True,
+                            'target': target_type
                         }
                     else:
                         # 单个修改
@@ -235,14 +220,33 @@ class SimplifiedReActEngine:
                 # 更新状态
                 result_context.update(analysis.get('context_update', {}))
                 
-                # 🔧 兜底逻辑：如果 context 中没有 bug_list 但 observation 中有 bug_location，自动添加
-                if 'bug_list' not in result_context and decision['tool'] == 'grep':
-                    if isinstance(observation, dict) and 'data' in observation:
-                        obs_data = observation.get('data', {})
+                # 兜底逻辑：如果 context 中没有 bug_list/badcase_list 但 observation 中有，自动添加
+                if decision['tool'] == 'grep' and isinstance(observation, dict) and 'data' in observation:
+                    obs_data = observation.get('data', {})
+                    
+                    # Bug 列表
+                    if 'bug_list' not in result_context:
                         bug_location = obs_data.get('bug_location', [])
                         if bug_location:
                             result_context['bug_list'] = bug_location
                             print(f"[REACT-STREAM] 自动将 bug_location 添加到 context: {bug_location}")
+                    
+                    # BadCase 列表：从 badcase_analysis 提取
+                    if 'badcase_list' not in result_context:
+                        badcase_analysis = obs_data.get('badcase_analysis', [])
+                        if badcase_analysis:
+                            # 提取为简化列表格式
+                            badcase_list = []
+                            for bc in badcase_analysis:
+                                badcase_list.append({
+                                    'id': bc.get('id'),
+                                    'title': bc.get('title'),
+                                    'status': bc.get('status'),
+                                    'plan_id': bc.get('plan_id')
+                                })
+                            result_context['badcase_list'] = badcase_list
+                            result_context['badcase_analysis'] = badcase_analysis  # 保留原始数据
+                            print(f"[REACT-STREAM] 自动将 badcase_list 添加到 context: {badcase_list}")
                 
                 if analysis.get('findings'):
                     findings.extend(analysis['findings'])
@@ -256,6 +260,31 @@ class SimplifiedReActEngine:
                     'observation': observation,
                     'analysis': analysis
                 })
+                
+                # 动态添加批量修改任务（仅当没有已有的modify任务时）
+                if decision['tool'] == 'grep':
+                    # 支持 BadCase 和 Bug 批量修改
+                    target_list = result_context.get('badcase_list', []) or result_context.get('bug_list', [])
+                    target_type = 'badcase' if result_context.get('badcase_list') else 'bug'
+                    
+                    # 检测用户是否有批量修改意图
+                    modify_keywords = ['修改', '改成', '更新', '设为', '状态', '关闭', 'closed', 'resolved']
+                    has_modify_intent = any(kw in user_input for kw in modify_keywords)
+                    
+                    # 检查是否已有 modify 任务（避免重复添加）
+                    existing_modify_count = sum(1 for t in todos if 'modify' in t.lower())
+                    
+                    if has_modify_intent and target_list and len(target_list) > 1 and existing_modify_count == 0:
+                        print(f"[REACT-STREAM] 检测到批量修改意图，{len(target_list)} 个 {target_type}，使用批量模式")
+                        
+                        # 只添加一个批量修改任务（后端会处理全部）
+                        ids_str = ', '.join([str(item['id']) for item in target_list])
+                        new_todo = f"使用 modify 工具批量修改 {len(target_list)} 个 {target_type} (ID: {ids_str}) 的状态"
+                        todos.append(new_todo)
+                        print(f"[REACT-STREAM] 添加批量修改任务: {new_todo}")
+                        
+                        # 通知前端任务列表已更新
+                        yield {'event': 'todos', 'data': todos}
                 
                 yield {'event': 'todo_end', 'index': i}
 
@@ -549,20 +578,66 @@ class SimplifiedReActEngine:
                     if tool_def:
                         params = tool_def.params.copy()
                         # 解析参数变量
-                        for key, value in params.items():
+                        for key, value in list(params.items()):  # 使用 list 避免迭代时修改
                             if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
                                 var_name = value[2:-1]  #去除${}
-                                if var_name == 'user_modifications':
-                                    #从 todo中提取修改内容
-                                    modifications = self._extract_modifications_from_todo(todo)
-                                    params[key] = modifications
-                                elif var_name == 'target_id':
-                                    #从 context 中获取 target_id
-                                    target_id = context.get('first_bug_id') or context.get('first_badcase_id')
-                                    if target_id:
-                                        params[key] = target_id
-                                elif var_name == 'project_id':
-                                    params[key] = context.get('project_id', '1')
+                                
+                                # 支持嵌套变量：grep_result.first_bug_id
+                                resolved_value = None
+                                
+                                if '.' in var_name:
+                                    # 嵌套变量解析
+                                    parts = var_name.split('.')
+                                    base_var = parts[0]  # grep_result
+                                    field_path = parts[1:]  # ['first_bug_id']
+                                    
+                                    # 从 context 中获取基础变量
+                                    base_value = context.get(base_var)
+                                    if base_value and isinstance(base_value, dict):
+                                        # 递归获取嵌套字段
+                                        current = base_value
+                                        for field in field_path:
+                                            if isinstance(current, dict) and field in current:
+                                                current = current[field]
+                                            else:
+                                                current = None
+                                                break
+                                        resolved_value = current
+                                else:
+                                    # 简单变量解析
+                                    if var_name == 'user_modifications':
+                                        resolved_value = self._extract_modifications_from_todo(todo)
+                                    elif var_name == 'target_id':
+                                        resolved_value = context.get('first_bug_id') or context.get('first_badcase_id')
+                                    elif var_name == 'project_id':
+                                        resolved_value = context.get('project_id', '1')
+                                    elif var_name in context:
+                                        resolved_value = context[var_name]
+                                
+                                # 更新参数或删除无法解析的变量
+                                if resolved_value is not None:
+                                    params[key] = resolved_value
+                                else:
+                                    # 无法解析，删除该参数或跳过
+                                    print(f"[REACT-STREAM] ⚠️ 无法解析变量: {var_name}")
+                                    # 如果是 target_id，尝试从其他来源获取
+                                    if key == 'target_id':
+                                        target_id = (context.get('first_bug_id') or 
+                                                    context.get('first_badcase_id') or
+                                                    context.get('target_id'))
+                                        if target_id:
+                                            params[key] = target_id
+                                        else:
+                                            # 没有有效的 target_id，不执行
+                                            print(f"[REACT-STREAM] ❌ 缺少有效的 target_id，跳过执行")
+                                            return result
+                                    else:
+                                        del params[key]  # 删除无法解析的参数
+                        
+                        # 检查必要参数是否完整
+                        if 'target_id' not in params or params.get('target_id') is None:
+                            print(f"[REACT-STREAM] ❌ 缺少 target_id，无法执行 modify")
+                            return result
                         
                         result = {
                             'execute': True,
@@ -573,14 +648,22 @@ class SimplifiedReActEngine:
                         return result
         
         # 如果技能匹配失败，回到标准流程
-        # 从 context 中获取 bug_list
+        # 从 context 中获取 bug_list 或 badcase_analysis
         bug_list = context.get('bug_list', [])
         if not bug_list and 'bug_location' in context:
             # 尝试从 grep 结果中提取
             bug_list = context.get('bug_location', [])
         
+        # 支持从 badcase_analysis 中获取 BadCase ID
+        if not bug_list and 'badcase_analysis' in context:
+            badcase_analysis = context.get('badcase_analysis', [])
+            if badcase_analysis and isinstance(badcase_analysis, list):
+                # 将 badcase_analysis 转换为 bug_list 格式
+                bug_list = badcase_analysis
+                print(f"[REACT-STREAM] 从 badcase_analysis 中获取到 {len(bug_list)} 条记录")
+        
         if not bug_list:
-            print(f"[REACT-STREAM] 无法从 context 中获取 bug_list")
+            print(f"[REACT-STREAM] 无法从 context 中获取 bug_list 或 badcase_analysis")
             return result
         
         # 获取第一个 Bug 的 ID
@@ -621,9 +704,9 @@ class SimplifiedReActEngine:
                 'target_id': target_id,
                 'modifications': modifications,
                 'project_id': project_id,
-                'confirm': True
+                'confirm': False  # 默认使用沙箱预览模式，需要用户确认后才执行
             },
-            'reason': f'基于 todo内容和 context推断的 modify 参数'
+            'reason': f'基于 todo内容和 context推断的 modify 参数（沙箱预览模式）'
         }
         
         return result

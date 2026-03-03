@@ -607,16 +607,21 @@
                 />
               </div>
               <div class="row-title">
-                <span class="badcase-title">{{ badcase.title }}</span>
+                <!-- 如果有待修改的标题，显示对比 -->
+                <div v-if="pendingModifications[badcase.id]?.title" class="field-diff-inline">
+                  <span class="old-value-inline">{{ pendingModifications[badcase.id].title.old }}</span>
+                  <span class="new-value-inline">{{ pendingModifications[badcase.id].title.new }}</span>
+                </div>
+                <span v-else class="badcase-title">{{ badcase.title }}</span>
               </div>
               <div class="row-type">
                 <span class="type-badge" :class="currentPlanType">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</span>
               </div>
               <div class="row-status">
-                <!-- 如果有待修改的数据，显示对比 -->
-                <div v-if="pendingModifications[badcase.id]" class="field-diff-inline">
-                  <span class="old-value-inline">{{ pendingModifications[badcase.id].status?.old || badcase.status }}</span>
-                  <span class="new-value-inline">{{ pendingModifications[badcase.id].status?.new || badcase.status }}</span>
+                <!-- 如果有待修改的状态，显示对比 -->
+                <div v-if="pendingModifications[badcase.id]?.status" class="field-diff-inline">
+                  <span class="old-value-inline">{{ pendingModifications[badcase.id].status.old }}</span>
+                  <span class="new-value-inline">{{ pendingModifications[badcase.id].status.new }}</span>
                 </div>
                 <span v-else class="status-badge" :class="badcase.status">{{ getBadcaseStatusText(badcase.status) }}</span>
               </div>
@@ -634,8 +639,12 @@
               
               <!-- 确认/取消按钮 -->
               <div v-if="pendingModifications[badcase.id]" class="row-actions" @click.stop>
-                <button @click="confirmModify(badcase.id)" class="btn-icon-approve" title="确认">✓</button>
-                <button @click="cancelModify(badcase.id)" class="btn-icon-reject" title="取消">✗</button>
+                <!-- 如果是连续组的最后一个，显示批量按钮 -->
+                <template v-if="isLastInConsecutiveGroup(badcase.id)">
+                  <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ getConsecutiveGroupSize(badcase.id) }}条</span>
+                  <button @click="confirmConsecutiveGroup(badcase.id)" class="btn-icon-approve" title="确认">✓</button>
+                  <button @click="cancelConsecutiveGroup(badcase.id)" class="btn-icon-reject" title="取消">✗</button>
+                </template>
               </div>
             </div>
           </div>
@@ -2525,42 +2534,97 @@ export default {
     const confirmModify = async (bugId) => {
       console.log('[MODIFY] 确认修改 Bug:', bugId)
       const modifyData = pendingModifications.value[bugId]
-      if (!modifyData) return
-      
-      try {
-        // 调用后端API执行修改
-        const response = await fetch('/api/agent/modify_confirm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            target: currentPlanType.value === 'bug' ? 'bug' : (currentPlanType.value === 'test_case' ? 'test_case' : 'badcase'),
-            target_id: bugId,
-            modifications: modifyData,
-            project_id: projectId.value
-          })
-        })
-        
-        const result = await response.json()
-        if (result.success) {
-          // 更新本地数据
-          const item = badcases.value.find(b => b.id === bugId)
-          if (item && modifyData.status) {
-            item.status = modifyData.status.new
-          }
-          if (item && modifyData.assignee) {
-            item.assignee = modifyData.assignee.new
-          }
-          
-          // 清除待修改标记（创建新对象触发响应式更新）
-          const newPending = { ...pendingModifications.value }
-          delete newPending[bugId]
-          pendingModifications.value = newPending
-          
-          console.log('[MODIFY] 修改成功')
-        }
-      } catch (error) {
-        console.error('[MODIFY] 修改失败:', error)
+      if (!modifyData) {
+        console.log('[MODIFY] 没有待修改数据')
+        return
       }
+      
+      // 获取目标类型（优先使用保存的类型，其次根据当前计划类型推断）
+      const targetType = modifyData._target || (currentPlanType.value === 'bug' ? 'bug' : (currentPlanType.value === 'test_case' ? 'testcase' : 'badcase'))
+      console.log('[MODIFY] 目标类型:', targetType, '_target:', modifyData._target, 'currentPlanType:', currentPlanType.value)
+      
+      // 转换 modifyData 格式: { field: { old, new } } -> { field: new_value }
+      const modifications = {}
+      const oldValues = {}  // 保存旧值用于回滚
+      for (const [field, value] of Object.entries(modifyData)) {
+        if (field === '_target' || field === '_messageId') continue  // 跳过内部字段
+        if (typeof value === 'object' && 'new' in value) {
+          modifications[field] = value.new
+          oldValues[field] = value.old
+        } else {
+          modifications[field] = value
+        }
+      }
+      
+      // ======== 乐观更新：立即更新 UI ========
+      // 1. 立即更新本地数据
+      const item = badcases.value.find(b => b.id === bugId)
+      if (item) {
+        for (const [field, value] of Object.entries(modifications)) {
+          if (item.hasOwnProperty(field)) {
+            item[field] = value
+          }
+        }
+      }
+      
+      // 2. 立即清除待修改标记
+      const newPending = { ...pendingModifications.value }
+      delete newPending[bugId]
+      pendingModifications.value = newPending
+      
+      // 3. 立即通知对话区更新状态
+      const event = new CustomEvent('modify-confirmed', {
+        detail: { targetId: bugId },
+        bubbles: true
+      })
+      window.dispatchEvent(event)
+      
+      console.log('[MODIFY] UI 已乐观更新')
+      
+      // ======== 异步发送后端请求（不阻塞 UI）========
+      fetch(`/api/projects/${projectId.value}/modify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target: targetType,
+          target_id: bugId,
+          modifications: modifications,
+          confirm: true,
+          message_id: modifyData._messageId
+        })
+      })
+      .then(response => response.json())
+      .then(result => {
+        console.log('[MODIFY] 后端修改结果:', result)
+        if (result.success) {
+          // 成功后刷新列表确保一致性
+          fetchBadcases()
+        } else {
+          // 失败时回滚 UI
+          console.error('[MODIFY] 后端修改失败，回滚 UI:', result.error)
+          if (item) {
+            for (const [field, value] of Object.entries(oldValues)) {
+              if (item.hasOwnProperty(field)) {
+                item[field] = value
+              }
+            }
+          }
+          // 恢复待修改标记
+          pendingModifications.value[bugId] = modifyData
+        }
+      })
+      .catch(error => {
+        console.error('[MODIFY] 后端请求失败，回滚 UI:', error)
+        if (item) {
+          for (const [field, value] of Object.entries(oldValues)) {
+            if (item.hasOwnProperty(field)) {
+              item[field] = value
+            }
+          }
+        }
+        // 恢复待修改标记
+        pendingModifications.value[bugId] = modifyData
+      })
     }
     
     // 取消修改
@@ -2570,6 +2634,113 @@ export default {
       const newPending = { ...pendingModifications.value }
       delete newPending[bugId]
       pendingModifications.value = newPending
+      
+      // 通知对话区更新状态（标记为已取消）
+      const event = new CustomEvent('modify-cancelled', {
+        detail: { targetId: bugId },
+        bubbles: true
+      })
+      window.dispatchEvent(event)
+    }
+    
+    
+    // 获取连续相邻的待修改记录组
+    const getConsecutiveGroups = () => {
+      const pendingIds = Object.keys(pendingModifications.value).map(Number)
+      const result = []
+      let currentGroup = []
+      
+      // 遍历 filteredBadcases 找出连续的待修改记录
+      filteredBadcases.value.forEach((badcase, index) => {
+        if (pendingIds.includes(badcase.id)) {
+          currentGroup.push(badcase.id)
+        } else {
+          if (currentGroup.length > 0) {
+            result.push([...currentGroup])
+            currentGroup = []
+          }
+        }
+      })
+      
+      // 处理最后一组
+      if (currentGroup.length > 0) {
+        result.push(currentGroup)
+      }
+      
+      return result
+    }
+    
+    // 判断是否是连续组的最后一个
+    const isLastInConsecutiveGroup = (id) => {
+      const groups = getConsecutiveGroups()
+      for (const group of groups) {
+        if (group[group.length - 1] === id) {
+          return true
+        }
+      }
+      return false
+    }
+    
+    // 获取连续组的大小
+    const getConsecutiveGroupSize = (id) => {
+      const groups = getConsecutiveGroups()
+      for (const group of groups) {
+        if (group.includes(id)) {
+          return group.length
+        }
+      }
+      return 1
+    }
+    
+    // 获取记录所在的连续组
+    const getConsecutiveGroup = (id) => {
+      const groups = getConsecutiveGroups()
+      for (const group of groups) {
+        if (group.includes(id)) {
+          return group
+        }
+      }
+      return [id]
+    }
+    
+    // 批量确认所有修改
+    const confirmAllModify = async () => {
+      const pendingIds = Object.keys(pendingModifications.value)
+      console.log('[MODIFY] 批量确认修改:', pendingIds)
+      
+      for (const id of pendingIds) {
+        await confirmModify(parseInt(id))
+      }
+    }
+    
+    // 批量取消所有修改
+    const cancelAllModify = () => {
+      const pendingIds = Object.keys(pendingModifications.value)
+      console.log('[MODIFY] 批量取消修改:', pendingIds)
+      
+      for (const id of pendingIds) {
+        cancelModify(parseInt(id))
+      }
+    }
+    
+    // 确认连续组
+    const confirmConsecutiveGroup = async (id) => {
+      const group = getConsecutiveGroup(id)
+      console.log('[MODIFY] 确认连续组:', group)
+      
+      for (const groupId of group) {
+        await confirmModify(groupId)
+      }
+    }
+    
+    // 取消连续组
+    const cancelConsecutiveGroup = (id) => {
+      const group = getConsecutiveGroup(id)
+      console.log('[MODIFY] 取消连续组:', group)
+      
+      for (const groupId of group) {
+        cancelModify(groupId)
+      }
     }
     
     // 显示/隐藏计划操作按钮
@@ -3723,42 +3894,64 @@ export default {
     
     // 处理grep导航事件
     const handleShowModifyInList = async (event) => {
-          const { targetId, target, diff, modifications, plan_id } = event.detail
+          const { targetId, target, diff, modifications, plan_id, executed, messageId, batchIndex } = event.detail
           // 确保 targetId 是整数
           const intTargetId = parseInt(targetId)
-          console.log('[MODIFY] 收到列表显示指令:', { targetId, intTargetId, target, diff, plan_id })
+          console.log('[MODIFY] 收到列表显示指令:', { targetId, intTargetId, target, diff, plan_id, executed, messageId, batchIndex })
           
-          // 构造待修改数据结构
-          const modifyData = {}
-          diff.forEach(fieldDiff => {
-            const field = fieldDiff.field
-            const oldLine = fieldDiff.lines.find(l => l.type === 'delete')
-            const newLine = fieldDiff.lines.find(l => l.type === 'add')
+          // 只有未执行时才设置 pendingModifications（显示对号和X）
+          if (!executed) {
+            // 构造待修改数据结构
+            const modifyData = {}
             
-            if (oldLine && newLine) {
-              modifyData[field] = {
-                old: oldLine.content,
-                new: newLine.content
+            // 优先使用 diff，如果没有 diff 则从 modifications 生成
+            if (diff && Array.isArray(diff)) {
+              diff.forEach(fieldDiff => {
+                const field = fieldDiff.field
+                const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
+                const newLine = fieldDiff.lines?.find(l => l.type === 'add')
+                
+                if (oldLine && newLine) {
+                  modifyData[field] = {
+                    old: oldLine.content,
+                    new: newLine.content
+                  }
+                }
+              })
+            } else if (modifications && typeof modifications === 'object') {
+              // 从 modifications 生成 modifyData
+              for (const [field, value] of Object.entries(modifications)) {
+                modifyData[field] = {
+                  old: '',
+                  new: value
+                }
               }
             }
-          })
-          
-          // 存储到 pendingModifications（使用整数 key）
-          pendingModifications.value[intTargetId] = modifyData
-          console.log('[MODIFY] 已设置待修改项:', pendingModifications.value)
+            
+            // 存储到 pendingModifications（使用整数 key）
+            if (Object.keys(modifyData).length > 0) {
+              modifyData._target = target  // 保存目标类型
+              modifyData._messageId = messageId  // 保存消息 ID
+              modifyData._batchIndex = batchIndex  // 批量索引
+              pendingModifications.value[intTargetId] = modifyData
+              console.log('[MODIFY] 已设置待修改项:', intTargetId, pendingModifications.value)
+            }
+          }
           
           // 切换到正确的内容类型
           if (target === 'bug') {
             urlContentType.value = 'bug'
           } else if (target === 'badcase') {
             urlContentType.value = 'badcase'
+          } else if (target === 'testcase') {
+            urlContentType.value = 'test_case'
           }
           
           // 获取 plan_id（优先使用传递过来的，其次从 diff 或列表中查找）
           let targetPlanId = plan_id ? parseInt(plan_id) : null
           
           // 方式2: 从 diff 中查找 plan_id 字段
-          if (!targetPlanId) {
+          if (!targetPlanId && diff) {
             const planIdDiff = diff.find(d => d.field === 'plan_id')
             if (planIdDiff) {
               const newLine = planIdDiff.lines.find(l => l.type === 'add')
@@ -3788,12 +3981,44 @@ export default {
           // 重新加载数据（会使用 selectedPlan 和 urlContentType）
           await fetchBadcases()
           
-          // 重新设置 pendingModifications（使用新对象触发响应式更新）
-          pendingModifications.value = {
-            ...pendingModifications.value,
-            [intTargetId]: modifyData
+          // 只有未执行时才重新设置 pendingModifications
+          if (!executed) {
+            // 重新设置 pendingModifications（使用新对象触发响应式更新）
+            const modifyData = {}
+            
+            // 优先使用 diff，如果没有 diff 则从 modifications 生成
+            if (diff && Array.isArray(diff)) {
+              diff.forEach(fieldDiff => {
+                const field = fieldDiff.field
+                const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
+                const newLine = fieldDiff.lines?.find(l => l.type === 'add')
+                
+                if (oldLine && newLine) {
+                  modifyData[field] = {
+                    old: oldLine.content,
+                    new: newLine.content
+                  }
+                }
+              })
+            } else if (modifications && typeof modifications === 'object') {
+              // 从 modifications 生成 modifyData
+              for (const [field, value] of Object.entries(modifications)) {
+                modifyData[field] = {
+                  old: '',
+                  new: value
+                }
+              }
+            }
+            
+            if (Object.keys(modifyData).length > 0) {
+              modifyData._target = target  // 保存目标类型
+              pendingModifications.value = {
+                ...pendingModifications.value,
+                [intTargetId]: modifyData
+              }
+              console.log('[MODIFY] fetchBadcases 后重新设置 pendingModifications:', pendingModifications.value)
+            }
           }
-          console.log('[MODIFY] fetchBadcases 后重新设置 pendingModifications:', pendingModifications.value)
           
           // 滚动到目标行并高亮
           await nextTick()
@@ -3967,6 +4192,10 @@ export default {
       getAssigneeDisplayText,
       confirmModify,  // 新增：确认修改
       cancelModify,   // 新增：取消修改
+      isLastInConsecutiveGroup,  // 新增：判断是否是连续组的最后一个
+      getConsecutiveGroupSize,   // 新增：获取连续组大小
+      confirmConsecutiveGroup,   // 新增：确认连续组
+      cancelConsecutiveGroup,    // 新增：取消连续组
       // 新增搜索和筛选相关
       searchText,
       selectedAssignee,
@@ -5828,6 +6057,17 @@ export default {
 .btn-icon-reject:hover {
   background: #dc2626;
   transform: scale(1.1);
+}
+
+/* 连续组批量操作数量标签 */
+.batch-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+  background: #fef3c7;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-right: 8px;
 }
 
 .status-badge.not_badcase {

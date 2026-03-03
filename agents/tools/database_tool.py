@@ -1,48 +1,61 @@
 # agents/tools/database_tool.py
 """
 数据库查询工具
-查询已有的 Bug、历史记录、相似 Bug等
+查询已有的 Bug、BadCase、历史记录等
 支持 Text2SQL 自然语言查询
+支持 Docker 沙箱执行模式
 """
 
 import json
 from typing import Dict, Any, List
 from ..tool_registry import BaseTool
 
-# Text2SQL
+# Text2SQL Agent
 try:
-    from .vanna_text2sql import get_vanna_text2sql, VANNA_AVAILABLE
-    TEXT2SQL_AVAILABLE = VANNA_AVAILABLE
+    from .sqlcoder_agent import Text2SQLAgent, LLMBackend, ExecutionMode
+    TEXT2SQL_AVAILABLE = True
 except ImportError:
     TEXT2SQL_AVAILABLE = False
-    print("[DB_TOOL]⚠️  Vanna Text2SQL 未安装，使用传统查询模式")
+    print("[DB_TOOL] ⚠️ Text2SQLAgent 未安装，使用传统查询模式")
 
 
 class DatabaseTool(BaseTool):
     """数据库查询工具"""
     
-    def __init__(self, llm, db_session):
+    def __init__(self, llm, db_session, execution_mode: str = "direct"):
         """
         初始化数据库工具
         
         Args:
             llm: 语言模型实例
             db_session: SQLAlchemy 数据库会话
+            execution_mode: 执行模式 (direct/sandbox/hybrid)
         """
         super().__init__(
             name='database_query',
-            description='查询数据库获取 Bug列表、历史记录、相似 Bug等，支持自然语言查询'
+            description='查询数据库获取 Bug列表、BadCase、历史记录等，支持自然语言查询和沙箱执行'
         )
         self.llm = llm
         self.db = db_session
+        self.execution_mode = execution_mode
         
-        # 初始化 Text2SQL工具
+        # 初始化 Text2SQL Agent
         if TEXT2SQL_AVAILABLE:
-            self.text2sql_tool = get_vanna_text2sql("instance/badcase_doctor.db")
-            print("[DB_TOOL]✅ Vanna Text2SQL已启用")
+            try:
+                mode_enum = ExecutionMode(execution_mode)
+                self.text2sql_agent = Text2SQLAgent(
+                    database_path='instance/badcase_doctor.db',
+                    llm_backend=LLMBackend.GLM_4_FLASH,
+                    debug=False,
+                    execution_mode=mode_enum
+                )
+                print(f"[DB_TOOL] ✅ Text2SQL Agent 已启用 (执行模式: {execution_mode})")
+            except Exception as e:
+                self.text2sql_agent = None
+                print(f"[DB_TOOL] ⚠️ Text2SQL Agent 初始化失败: {str(e)}")
         else:
-            self.text2sql_tool = None
-            print("[DB_TOOL]⚠️  Vanna Text2SQL 不可用，使用传统查询模式")
+            self.text2sql_agent = None
+            print("[DB_TOOL] ⚠️ Text2SQL Agent 不可用，使用传统查询模式")
     
     async def execute(
         self,
@@ -52,133 +65,8 @@ class DatabaseTool(BaseTool):
         keywords: str = None,
         plan_id: str = None,
         limit: int = 10,
-        natural_query: str = None,  # 新增自然语言查询参数
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-       执行数据库查询
-        
-        Args:
-            query_type: 查询类型 (list_bugs/find_similar/get_history/search_pattern)
-            project_id: 项目 ID
-            bug_id: Bug ID
-            keywords:搜索关键词
-            limit: 返回数量限制
-            natural_query: 自然语言查询（如："查询所有未解决的登录bug"）
-            **kwargs:其他参数
-            
-        Returns:
-            查询结果
-        """
-        # 优先处理自然语言查询
-        if natural_query and self.text2sql_tool:
-            print(f"[DB_QUERY]🗣  自然语言查询: {natural_query}")
-            return self._execute_natural_query(natural_query, project_id)
-        
-        # 传统查询逻辑
-        if not query_type:
-            #尝从 kwargs 中获取，兼容 LLM可能没写对参数名的情况
-            query_type = kwargs.get('type') or kwargs.get('action') or kwargs.get('operation') or kwargs.get('query')
-            
-        if not query_type:
-            # 最终兜底：如果是在 bug_management场下，可能是搜索
-            if 'keyword' in kwargs or 'project_id' in kwargs:
-                query_type = 'search'
-            else:
-                return {'error': '缺少必需参数: query_type', 'success': False}
-                
-        print(f"[DB_QUERY]🔎执行数据库查询: {query_type}")
-        
-        #支持别名
-        query_type_map = {
-            'similar_bugs': 'find_similar',
-            'bug_history': 'get_history',
-            'bug_list': 'list_bugs',
-            'find_bugs': 'find_similar',
-            'find_known_bugs': 'find_similar',
-            'find_all': 'list_bugs',
-            'find_by_name': 'search_pattern',
-            'find_by_title': 'search_pattern',
-            'find_by_id': 'find_similar',
-            'get_by_id': 'find_similar',
-            'find_by_keyword': 'search_pattern',
-            'search_by_keyword': 'search_pattern',
-            'keyword_search': 'search_pattern',
-            'search_bugs': 'search_pattern',
-            'search': 'search_pattern',
-            'list': 'list_bugs',
-            'history': 'get_history'
-        }
-        query_type = query_type_map.get(query_type, query_type)
-        
-        # 使用Flask app context包装数据库操作
-        from app import app
-        with app.app_context():
-            if query_type == 'list_bugs':
-                return await self._list_bugs(project_id, plan_id, limit, **kwargs)
-            elif query_type == 'find_similar':
-                return await self._find_similar(bug_id, keywords, limit, **kwargs)
-            elif query_type == 'get_history':
-                return await self._get_history(project_id, limit, **kwargs)
-            elif query_type == 'search_pattern':
-                return await self._search_pattern(keywords, limit, **kwargs)
-            else:
-                return {'error': f'未知查询类型: {query_type}，支持的类型: list_bugs, find_similar, get_history, search_pattern', 'success': False}
-    
-    def _execute_natural_query(self, natural_query: str, project_id: str = None) -> Dict[str, Any]:
-        """
-       执行自然语言查询
-        
-        Args:
-            natural_query: 自然语言查询语句
-            project_id: 项目ID（可选上下文）
-            
-        Returns:
-            查询结果
-        """
-        try:
-            # 添加上下文信息
-            context = {}
-            if project_id:
-                context['project_id'] = project_id
-            
-            #调用 Text2SQL工具
-            result = self.text2sql_tool.query(natural_query, context)
-            
-            if result['success']:
-                return {
-                    'query_type': 'natural_language',
-                    'natural_query': natural_query,
-                    'generated_sql': result['generated_sql'],
-                    'explanation': result['explanation'],
-                    'results': result['results'],
-                    'row_count': result['row_count'],
-                    'execution_time': result['execution_time'],
-                    'success': True
-                }
-            else:
-                return {
-                    'error': result['error'],
-                    'natural_query': natural_query,
-                    'success': False
-                }
-                
-        except Exception as e:
-            print(f"[DB_QUERY]❌ 自然语言查询失败: {str(e)}")
-            return {
-                'error': f'自然语言查询执行失败: {str(e)}',
-                'natural_query': natural_query,
-                'success': False
-            }
-    
-    async def execute(
-        self,
-        query_type: str = None,
-        project_id: str = None,
-        bug_id: str = None,
-        keywords: str = None,
-        plan_id: str = None,  # 增加plan_id参数
-        limit: int = 10,
+        natural_query: str = None,
+        sandbox_mode: str = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -189,23 +77,34 @@ class DatabaseTool(BaseTool):
             project_id: 项目 ID
             bug_id: Bug ID
             keywords: 搜索关键词
+            plan_id: 计划 ID
             limit: 返回数量限制
+            natural_query: 自然语言查询（如："查询所有未解决的登录bug"）
+            sandbox_mode: 沙箱执行模式 (direct/sandbox/hybrid)，覆盖默认设置
             **kwargs: 其他参数
             
         Returns:
             查询结果
         """
+        # 决定执行模式
+        exec_mode = sandbox_mode or self.execution_mode
+        
+        # 优先处理自然语言查询
+        if natural_query and self.text2sql_agent:
+            print(f"[DB_QUERY] 🗣️ 自然语言查询: {natural_query}")
+            print(f"[DB_QUERY] 🔒 执行模式: {exec_mode}")
+            return self._execute_natural_query(natural_query, project_id, exec_mode)
+        
+        # 传统查询逻辑
         if not query_type:
-            # 尝试从 kwargs 中获取，兼容 LLM 可能没写对参数名的情况
             query_type = kwargs.get('type') or kwargs.get('action') or kwargs.get('operation') or kwargs.get('query')
             
         if not query_type:
-            # 最终兜底：如果是在 bug_management 场景下，可能是搜索
             if 'keyword' in kwargs or 'project_id' in kwargs:
                 query_type = 'search'
             else:
                 return {'error': '缺少必需参数: query_type', 'success': False}
-            
+                
         print(f"[DB_QUERY] 🔎 执行数据库查询: {query_type}")
         
         # 支持别名
@@ -244,12 +143,70 @@ class DatabaseTool(BaseTool):
             else:
                 return {'error': f'未知查询类型: {query_type}，支持的类型: list_bugs, find_similar, get_history, search_pattern', 'success': False}
     
+    def _execute_natural_query(self, natural_query: str, project_id: str = None, execution_mode: str = None) -> Dict[str, Any]:
+        """
+        执行自然语言查询
+        
+        Args:
+            natural_query: 自然语言查询语句
+            project_id: 项目ID（可选上下文）
+            execution_mode: 执行模式 (direct/sandbox/hybrid)
+            
+        Returns:
+            查询结果
+        """
+        try:
+            # 添加上下文信息
+            context = f"项目ID: {project_id}" if project_id else ""
+            
+            # 调用 Text2SQL Agent
+            result = self.text2sql_agent.generate_sql(natural_query, context)
+            
+            if result['success']:
+                # 决定执行模式
+                exec_mode_enum = None
+                if execution_mode:
+                    try:
+                        from .sqlcoder_agent import ExecutionMode
+                        exec_mode_enum = ExecutionMode(execution_mode)
+                    except:
+                        pass
+                
+                # 执行SQL
+                exec_result = self.text2sql_agent.execute_sql(
+                    result['sql'], 
+                    force_mode=exec_mode_enum
+                )
+                
+                return {
+                    'query_type': 'natural_language',
+                    'natural_query': natural_query,
+                    'generated_sql': result['sql'],
+                    'results': exec_result.get('data', []),
+                    'row_count': exec_result.get('row_count', 0),
+                    'execution_mode': exec_result.get('execution_mode', execution_mode or 'direct'),
+                    'success': True
+                }
+            else:
+                return {
+                    'error': result.get('error', 'SQL生成失败'),
+                    'natural_query': natural_query,
+                    'success': False
+                }
+                
+        except Exception as e:
+            print(f"[DB_QUERY] ❌ 自然语言查询失败: {str(e)}")
+            return {
+                'error': f'自然语言查询执行失败: {str(e)}',
+                'natural_query': natural_query,
+                'success': False
+            }
+    
     async def _list_bugs(self, project_id: str = None, plan_id: str = None, limit: int = 10, **kwargs) -> Dict[str, Any]:
         """获取 Bug 列表"""
         print(f"[DB_QUERY] 📋 列举Bug（项目: {project_id or 'all'}, 计划: {plan_id or 'all'}, 限制: {limit}）")
             
         try:
-            # 动态导入模型避免循环导入
             from app import db, Bug, Project
                 
             query = db.session.query(Bug)
@@ -298,15 +255,12 @@ class DatabaseTool(BaseTool):
         try:
             from app import db, Bug, Plan
                 
-            # 尝试多种方式获取关键词
             if bug_id:
-                # 根据 bug_id 查找
                 original_bug = db.session.query(Bug).filter_by(id=bug_id).first()
                 if not original_bug:
                     return {'error': f'Bug {bug_id} 不存在', 'success': False}
                 keywords = original_bug.title
                 
-            # 如果仍然没有keywords，尝试从上下文提取
             if not keywords:
                 url = kwargs.get('url', '')
                 if 'login' in url.lower():
@@ -316,26 +270,23 @@ class DatabaseTool(BaseTool):
                 elif 'bug' in url.lower():
                     keywords = 'bug 编辑'
                 else:
-                    keywords = '界面'  # 默认关键词
+                    keywords = '界面'
                 print(f"[DB_QUERY] 🧐 从 URL 自动提取关键词: {keywords}")
                 
             if not keywords:
                 return {
                     'error': '查找相似Bug需要提供 keywords 参数或 bug_id 参数',
                     'success': False,
-                    'hint': '例: {"query_type": "find_similar", "keywords": "登录失败"} 或 {"query_type": "find_similar", "bug_id": "123"}'
+                    'hint': '例: {"query_type": "find_similar", "keywords": "登录失败"}'
                 }
             
-            # 简单的关键词匹配
             query = db.session.query(Bug).filter(
                 Bug.title.ilike(f'%{keywords}%')
             )
             
-            # 添加project_id过滤
             if project_id:
                 query = query.filter_by(project_id=project_id)
                 
-                # 如果没有指定plan_id，查询项目下所有bug类型计划的Bug
                 if not plan_id:
                     bug_type_plans = db.session.query(Plan).filter_by(
                         project_id=project_id,
@@ -345,17 +296,13 @@ class DatabaseTool(BaseTool):
                         bug_plan_ids = [p.id for p in bug_type_plans]
                         query = query.filter(Bug.plan_id.in_(bug_plan_ids))
             
-            # 处理plan_id：查询相同parent_id的所有同级计划下的Bug
             if plan_id:
-                # 获取当前计划信息
                 current_plan = db.session.query(Plan).filter_by(id=plan_id).first()
                 if current_plan and current_plan.parent_id:
-                    # 获取所有同级计划（相同parent_id）
                     sibling_plans = db.session.query(Plan).filter_by(parent_id=current_plan.parent_id).all()
                     sibling_plan_ids = [p.id for p in sibling_plans]
                     query = query.filter(Bug.plan_id.in_(sibling_plan_ids))
                 else:
-                    # 如果没有parent_id，只查询当前计划
                     query = query.filter_by(plan_id=plan_id)
             
             similar_bugs = query.limit(limit).all()
@@ -394,22 +341,10 @@ class DatabaseTool(BaseTool):
             if project_id:
                 query = query.filter_by(project_id=project_id)
             
-            # 按严重程度分组统计
             bugs = query.all()
             
-            severity_stats = {
-                'critical': 0,
-                'high': 0,
-                'medium': 0,
-                'low': 0
-            }
-            
-            status_stats = {
-                'pending_review': 0,
-                'confirmed': 0,
-                'in_progress': 0,
-                'resolved': 0
-            }
+            severity_stats = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+            status_stats = {'pending_review': 0, 'confirmed': 0, 'in_progress': 0, 'resolved': 0}
             
             for bug in bugs:
                 severity = bug.severity or 'medium'
@@ -432,7 +367,6 @@ class DatabaseTool(BaseTool):
     
     async def _search_pattern(self, keywords: str = None, limit: int = 10, name: str = None, title: str = None, **kwargs) -> Dict[str, Any]:
         """按模式搜索 Bug"""
-        # 支持多种参数名
         search_term = keywords or name or title or kwargs.get('query', '')
         print(f"[DB_QUERY] 🔎 按模式搜索: {search_term}")
         

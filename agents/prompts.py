@@ -70,11 +70,12 @@ class ReactPromptTemplates:
    - 创建意图关键词：创建、新建、添加、增加
 
 【grep 工具参数规范】：
-- keywords: 搜索关键词（必填）
+- keywords: 搜索关键词（必填，如果要查询所有，设置为空字符串 "" 或 "*"）
 - target: 分析目标 - bug/badcase/all（必填）
 - project_id: 项目ID（可选）
 
 示例：使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug
+示例：使用 grep 工具查询所有BadCase，keywords="" 或 keywords="*"，target=badcase
 </system>
 
 <user_request>
@@ -133,6 +134,28 @@ class ReactPromptTemplates:
 ]
 </todo_list>
 说明：批量修改也是两步流程
+</good_example>
+
+<good_example>
+<request>把所有的BadCase都修改成已关闭状态</request>
+<todo_list>
+[
+  "使用 grep 工具查询所有BadCase，keywords=\"\"，target=badcase",
+  "使用 modify 工具批量修改所有BadCase的状态为closed"
+]
+</todo_list>
+说明：批量修改只需两个任务：grep 查询所有记录，然后一个 modify 任务批量修改。后端会自动处理所有记录。不要为每个记录生成单独的 modify 任务！
+</good_example>
+
+<good_example>
+<request>所有Bug的状态都改成已解决</request>
+<todo_list>
+[
+  "使用 grep 工具查询所有Bug，keywords=\"\"，target=bug",
+  "使用 modify 工具批量修改所有Bug的状态为resolved"
+]
+</todo_list>
+说明：批量修改只需一个 modify 任务，后端会自动处理全部记录
 </good_example>
 
 <good_example>
@@ -380,10 +403,10 @@ class ReactPromptTemplates:
   "target_id": 1,
   "modifications": {{"priority": "高"}},
   "project_id": "1",
-  "confirm": true
+  "confirm": false
 }}
 </params>
-<reason>修改Bug优先级，直接执行修改（confirm=true）</reason>
+<reason>修改Bug优先级，先沙箱预览（confirm=false），用户确认后再执行</reason>
 </decision>
 </good_example>
 
@@ -405,10 +428,10 @@ class ReactPromptTemplates:
   "target_id": 1,
   "modifications": {{"status": "resolved"}},
   "project_id": "1",
-  "confirm": true
+  "confirm": false
 }}
 </params>
-<reason>从context的bug_list中获取第一个Bug的id=1作为target_id，修改其状态为resolved（已解决）</reason>
+<reason>从context的bug_list中获取第一个Bug的id=1作为target_id，修改其状态为resolved，先沙箱预览</reason>
 </decision>
 </good_example>
 
@@ -685,15 +708,15 @@ def parse_xml_decision(text: Any) -> dict:
             result['reason'] = '检测到grep参数，自动执行grep工具'
             return result
         
-        if 'modifications' in text and 'target_id' in text:
+        if 'modifications' in text and ('target_id' in text or 'target' in text):
             # 这是 modify 工具的参数
             result['execute'] = True
             result['tool'] = 'modify'
             result['params'] = text
-            # 确保 confirm 默认为 True
+            # 确保 confirm 默认为 False（沙箱预览模式），需要用户确认后才执行
             if 'confirm' not in result['params']:
-                result['params']['confirm'] = True
-            result['reason'] = '检测到修改参数，自动执行modify工具'
+                result['params']['confirm'] = False
+            result['reason'] = '检测到修改参数，自动执行modify工具（沙箱预览模式）'
             return result
         
         if 'fields' in text and 'target' in text and text.get('target') in ['bug', 'badcase', 'plan', 'testcase']:

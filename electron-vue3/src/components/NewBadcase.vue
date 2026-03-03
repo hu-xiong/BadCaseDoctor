@@ -1281,7 +1281,8 @@ export default {
           solution: badcase.solution || '',
           priority: badcase.priority,
           status: badcase.status,
-          assignee: Array.isArray(badcase.assignee) ? badcase.assignee.join(',') : badcase.assignee,
+          // 优先使用 assignee_id（用户ID），兼容旧格式
+          assignee: badcase.assignee_id ? String(badcase.assignee_id) : (Array.isArray(badcase.assignee) ? badcase.assignee.join(',') : badcase.assignee),
           plan: badcase.plan,
           project_id: badcase.project_id,
           assigned_users: Array.isArray(badcase.assigned_users) ? badcase.assigned_users.join(',') : badcase.assigned_users,
@@ -1636,6 +1637,19 @@ export default {
 
     // 获取负责人显示文本
     const getAssigneeDisplayText = () => {
+      // 优先使用 assignee_id 查找用户名
+      if (badcase.assignee_id) {
+        const member = projectMembers.value.find(m => m.id == badcase.assignee_id)
+        if (member) {
+          return member.name
+        }
+        // 如果找不到成员，尝试使用 currentUser
+        if (currentUser.value && currentUser.value.id == badcase.assignee_id) {
+          return currentUser.value.name
+        }
+        return String(badcase.assignee_id)
+      }
+      
       if (!badcase.assignee || badcase.assignee.length === 0) {
         return '未指派'
       }
@@ -1645,10 +1659,19 @@ export default {
         return badcase.assignee
       }
       
-      // 如果是数组
+      // 如果是数组，尝试查找用户名
       if (Array.isArray(badcase.assignee)) {
+        if (badcase.assignee.length === 0) {
+          return '未指派'
+        }
         if (badcase.assignee.length === 1) {
-          return badcase.assignee[0]
+          // 尝试查找用户名
+          const memberId = badcase.assignee[0]
+          const member = projectMembers.value.find(m => m.id == memberId)
+          if (member) {
+            return member.name
+          }
+          return memberId
         } else {
           return `${badcase.assignee.length}...`
         }
@@ -1659,21 +1682,32 @@ export default {
 
     // 检查负责人是否被选中
     const isAssigneeSelected = (assigneeValue) => {
-      return badcase.assignee && badcase.assignee.includes(assigneeValue)
+      // 优先使用 assignee_id（后端返回的用户ID）
+      if (badcase.assignee_id) {
+        return badcase.assignee_id.toString() === assigneeValue.toString()
+      }
+      // 兼容旧逻辑：检查数组
+      if (Array.isArray(badcase.assignee)) {
+        return badcase.assignee.includes(assigneeValue)
+      }
+      // 兼容字符串比较
+      return badcase.assignee && badcase.assignee.toString() === assigneeValue.toString()
     }
 
     // 切换负责人选择状态
     const toggleAssignee = (assigneeValue) => {
+      // 更新 assignee_id（用于选中状态判断）
+      badcase.assignee_id = parseInt(assigneeValue)
+      
+      // 同时更新 assignee 数组（兼容旧逻辑）
       if (!badcase.assignee) {
         badcase.assignee = []
       }
       
-      const index = badcase.assignee.indexOf(assigneeValue)
-      if (index > -1) {
-        badcase.assignee.splice(index, 1)
-      } else {
-        badcase.assignee.push(assigneeValue)
-      }
+      // 单选模式：清空并设置为当前选中值
+      badcase.assignee = [assigneeValue]
+      
+      console.log('切换负责人:', assigneeValue, 'assignee_id:', badcase.assignee_id)
     }
 
     // 切换计划下拉框显示
