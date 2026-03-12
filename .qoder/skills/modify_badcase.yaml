@@ -13,9 +13,9 @@ tools:
   - name: grep
     purpose: 定位目标 BadCase
     params:
-      keywords: ${user_keywords}
       target: badcase
       mode: locate
+      keywords: ${user_keywords}
       project_id: ${project_id}
   
   - name: modify
@@ -25,7 +25,7 @@ tools:
       target_id: ${grep_result.first_badcase_id}
       modifications: ${user_modifications}
       project_id: ${project_id}
-      confirm: true
+      confirm: false
 
 workflow:
   - step: 1

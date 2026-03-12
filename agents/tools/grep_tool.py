@@ -22,8 +22,8 @@ class GrepTool(BaseTool):
         super().__init__(
             name="grep",
             description="缺陷定位工具：模拟人类阅读习惯，精准定位BadCase/Bug/测试用例的归属关系和业务场景。"
-                         "必须参数：keywords(关键词), project_id(项目ID), target(分析目标：bug/badcase/all)。"
-                         "重要：根据用户意图设置target参数 - 查询Bug时用target=bug，查询BadCase时用target=badcase"
+                         "必须参数：project_id(项目ID)。可选参数：keywords(标题关键词), target(分析目标：bug/badcase/all), status(状态过滤：如'已关闭'/'closed'/'new'等)。"
+                         "重要：按状态查询时使用status参数（如status='已关闭'），按标题查询时使用keywords参数。"
         )
     
     async def execute(
@@ -34,6 +34,7 @@ class GrepTool(BaseTool):
         evidence: Dict[str, Any] = None,
         mode: str = "locate",  # locate/associate/compare
         target: str = "all",  # 新增：all/bug/badcase - 分析目标
+        status: str = None,  # 新增：按状态过滤
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -52,12 +53,13 @@ class GrepTool(BaseTool):
                 - all: 分析BadCase和Bug（默认）
                 - bug: 只分析Bug
                 - badcase: 只分析BadCase
+            status: 按状态过滤（如 "closed", "new", "pending" 等）
             **kwargs: 其他参数
             
         Returns:
             定位分析结果（包含思考过程）
         """
-        print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target})")
+        print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target}, status={status})")
         
         try:
             from app import app, db, BadCase, Bug, Plan
@@ -77,9 +79,9 @@ class GrepTool(BaseTool):
                     badcase_list = []
                     bug_list = []
                     if target in ['all', 'badcase']:
-                        badcase_list = await self._get_badcase_list(project_id, keywords)
+                        badcase_list = await self._get_badcase_list(project_id, keywords, status)
                     if target in ['all', 'bug']:
-                        bug_list = await self._get_bug_list(project_id, keywords)
+                        bug_list = await self._get_bug_list(project_id, keywords, status)
                     
                     # 【阶段2】分析关联
                     analysis_result = await self._analyze_associations(
@@ -240,16 +242,46 @@ class GrepTool(BaseTool):
         
         return '通用'
     
-    async def _get_badcase_list(self, project_id: str, keywords: str = None) -> List[Dict[str, Any]]:
+    async def _get_badcase_list(self, project_id: str, keywords: str = None, status: str = None) -> List[Dict[str, Any]]:
         """逐行定位引擎（优化版）"""
-        from app import db, BadCase
+        from app import db, BadCase, BadCaseStatus
         
         query = db.session.query(BadCase).filter_by(project_id=project_id)
+        
+        # 按 status 过滤
+        if status:
+            # 标准化 status 值
+            status_map = {
+                '已关闭': 'closed', '关闭': 'closed', 'closed': 'closed',
+                '新建': 'new', '新': 'new', 'new': 'new',
+                '待处理': 'pending', 'pending': 'pending',
+                '已解决': 'resolved', '解决': 'resolved', 'resolved': 'resolved',
+                '已重新打开': 'reopened', '重新打开': 'reopened', 'reopened': 'reopened',
+            }
+            normalized_status = status_map.get(status.lower(), status.lower())
+            try:
+                status_enum = BadCaseStatus(normalized_status)
+                # SQLite 不支持枚举类型，使用字符串值
+                query = query.filter(BadCase.status == status_enum.value)
+                print(f"[GREP] 按 status 过滤: {normalized_status}")
+            except ValueError:
+                print(f"[GREP] 无效的 status 值: {status}")
         
         # keywords 为空或 "*" 表示查询全部
         is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
         if not is_query_all and keywords:
-            query = query.filter(BadCase.title.ilike(f'%{keywords}%'))
+            # 支持空格分隔的多个关键词，每个关键词都要匹配
+            keyword_list = [k.strip() for k in keywords.split() if k.strip()]
+            if len(keyword_list) > 1:
+                # 多个关键词：每个都要匹配
+                from sqlalchemy import and_
+                for kw in keyword_list:
+                    query = query.filter(BadCase.title.ilike(f'%{kw}%'))
+                print(f"[GREP] 多关键词搜索: {keyword_list}")
+            else:
+                # 单个关键词
+                query = query.filter(BadCase.title.ilike(f'%{keywords}%'))
+                print(f"[GREP] 单关键词搜索: {keywords}")
         
         # 查询全部时不限制数量，否则限制20条
         if is_query_all:
@@ -272,12 +304,13 @@ class GrepTool(BaseTool):
                 'extracted_keywords': self._extract_keywords(bc.title),
                 'keyword_match': keywords and keywords in bc.title
             })
+            print(f"[GREP] BadCase ID={bc.id}, plan_id={bc.plan_id}")
         
         return result
     
-    async def _get_bug_list(self, project_id: str, keywords: str = None) -> List[Dict[str, Any]]:
+    async def _get_bug_list(self, project_id: str, keywords: str = None, status: str = None) -> List[Dict[str, Any]]:
         """Bug定位引擎（优化版）"""
-        from app import db, Bug
+        from app import db, Bug, BugStatus
         
         # 确保 project_id 是整数
         try:
@@ -285,9 +318,29 @@ class GrepTool(BaseTool):
         except (ValueError, TypeError):
             project_id_int = 1
         
-        print(f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}")
+        print(f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}, status={status}")
         
         query = db.session.query(Bug).filter_by(project_id=project_id_int)
+        
+        # 按 status 过滤
+        if status:
+            # 标准化 status 值
+            status_map = {
+                '已关闭': 'closed', '关闭': 'closed', 'closed': 'closed',
+                '新建': 'new', '新': 'new', 'new': 'new',
+                '已分配': 'assigned', '分配': 'assigned', 'assigned': 'assigned',
+                '进行中': 'in_progress', '处理中': 'in_progress', 'in_progress': 'in_progress',
+                '已解决': 'resolved', '解决': 'resolved', 'resolved': 'resolved',
+                '已重新打开': 'reopened', '重新打开': 'reopened', 'reopened': 'reopened',
+            }
+            normalized_status = status_map.get(status.lower(), status.lower())
+            try:
+                status_enum = BugStatus(normalized_status)
+                # SQLite 不支持枚举类型，使用字符串值
+                query = query.filter(Bug.status == status_enum.value)
+                print(f"[GREP] 按 status 过滤: {normalized_status}")
+            except ValueError:
+                print(f"[GREP] 无效的 status 值: {status}")
         
         # keywords 为空或 "*" 表示查询全部
         is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
@@ -341,15 +394,18 @@ class GrepTool(BaseTool):
         # 分析 BadCase
         for bc in badcase_list:
             is_related = keywords and keywords.lower() in bc['title'].lower()
-            badcase_analysis.append({
+            analysis_item = {
                 'id': bc['id'],
                 'title': bc['title'],
                 'business_scenario': bc.get('business_scenario', ''),
                 'keywords': bc.get('extracted_keywords', []),
                 'severity': self._assess_severity(bc),
                 'related_to_evidence': is_related,
-                'current_plan_id': bc.get('plan_id')
-            })
+                'plan_id': bc.get('plan_id'),  # 使用 plan_id 以便后续处理
+                'current_plan_id': bc.get('plan_id')  # 保留兼容性
+            }
+            print(f"[GREP-ANALYSIS] BadCase ID={bc['id']}, plan_id={bc.get('plan_id')}, item.plan_id={analysis_item['plan_id']}")
+            badcase_analysis.append(analysis_item)
         
         # 分析 Bug
         for bug in bug_list:
@@ -482,9 +538,14 @@ class GrepTool(BaseTool):
         """生成分析总结（人类可读）"""
         parts = []
         
+        # 如果没有关键词，直接显示找到的记录数
+        is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
+        
         # 1. BadCase定位结果
         if badcase_count > 0:
-            if related_badcase_count > 0:
+            if is_query_all:
+                parts.append(f"🔍 找到 {badcase_count} 条BadCase")
+            elif related_badcase_count > 0:
                 parts.append(f"🔍 定位 {related_badcase_count} 条BadCase（关键词：{keywords}）")
             else:
                 parts.append(f"🔍 扫描了 {badcase_count} 条BadCase，未找到匹配 '{keywords}' 的记录")

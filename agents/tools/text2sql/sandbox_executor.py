@@ -37,6 +37,8 @@ import tempfile
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+from urllib import request as urllib_request
+from urllib.error import URLError, HTTPError
 
 
 # ========== 依赖检测 ==========
@@ -685,6 +687,230 @@ class SandboxExecutor:
         result['db_is_copy'] = db_copy_path is not None
         
         return result
+
+
+# ========== 云端 llm-sandbox（HTTP）客户端 ==========
+
+@dataclass
+class CloudSandboxConfig:
+    """
+    云端沙箱配置（HTTP）
+
+    通过环境变量覆盖：
+    - SANDBOX_REMOTE_URL: 例如 https://example.com 或 http://117.72.33.38:8080
+    - SANDBOX_REMOTE_TOKEN: Bearer Token
+    - SANDBOX_TENANT_ID: 租户标识（可选）
+    - SANDBOX_REMOTE_TIMEOUT_S: 任务整体超时（秒）
+    - SANDBOX_REMOTE_POLL_INTERVAL_S: 轮询间隔（秒）
+    """
+    base_url: str = ""
+    token: str = ""
+    tenant_id: str = ""
+    timeout_s: int = 30
+    poll_interval_s: float = 0.5
+
+    @staticmethod
+    def from_env() -> "CloudSandboxConfig":
+        def _to_int(v: str, default: int) -> int:
+            try:
+                return int(v)
+            except Exception:
+                return default
+
+        def _to_float(v: str, default: float) -> float:
+            try:
+                return float(v)
+            except Exception:
+                return default
+
+        return CloudSandboxConfig(
+            base_url=(os.getenv("SANDBOX_REMOTE_URL", "") or "").rstrip("/"),
+            token=os.getenv("SANDBOX_REMOTE_TOKEN", "") or "",
+            tenant_id=os.getenv("SANDBOX_TENANT_ID", "") or "",
+            timeout_s=_to_int(os.getenv("SANDBOX_REMOTE_TIMEOUT_S", "30"), 30),
+            poll_interval_s=_to_float(os.getenv("SANDBOX_REMOTE_POLL_INTERVAL_S", "0.5"), 0.5),
+        )
+
+
+class CloudSandboxExecutor:
+    """
+    云端沙箱执行器（HTTP）
+
+    约定接口（与需求文档一致）：
+    - GET  /healthz
+    - POST /api/v1/execute
+    - GET  /api/v1/jobs/{job_id}
+    """
+
+    def __init__(self, config: CloudSandboxConfig | None = None):
+        self.config = config or CloudSandboxConfig.from_env()
+
+    def _is_configured(self) -> bool:
+        return bool(self.config.base_url)
+
+    def _request_json(self, method: str, path: str, body: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if not self._is_configured():
+            raise RuntimeError("SANDBOX_REMOTE_URL 未配置，无法使用云端沙箱")
+
+        url = f"{self.config.base_url}{path}"
+        data = None
+        headers = {"Content-Type": "application/json"}
+
+        if self.config.token:
+            headers["Authorization"] = f"Bearer {self.config.token}"
+        if self.config.tenant_id:
+            headers["X-Tenant-Id"] = self.config.tenant_id
+
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+        req = urllib_request.Request(url=url, data=data, headers=headers, method=method.upper())
+        try:
+            with urllib_request.urlopen(req, timeout=self.config.timeout_s) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                if not raw:
+                    return {}
+                return json.loads(raw)
+        except HTTPError as e:
+            raw = ""
+            try:
+                raw = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            raise RuntimeError(f"云端沙箱 HTTP 错误: {e.code} {e.reason} {raw}".strip())
+        except URLError as e:
+            raise RuntimeError(f"云端沙箱连接失败: {e}")
+
+    def healthz(self) -> Dict[str, Any]:
+        return self._request_json("GET", "/healthz")
+
+    def execute_sql(self, sql: str, db_config: Dict[str, Any] | None = None, timeout_s: int | None = None) -> Dict[str, Any]:
+        """
+        执行只读 SQL（云端负责连接其数据库副本）
+
+        说明：
+        - 本地 db_config['path'] 不会上传到云端；仅传递 db 类型/标识信息（若有）
+        """
+        overall_timeout = timeout_s or self.config.timeout_s
+        started = time.time()
+
+        payload = {
+            "task_type": "sql_readonly",
+            "timeout_ms": int(overall_timeout * 1000),
+            "payload": {
+                "sql": sql,
+                "db": {
+                    "type": (db_config or {}).get("type", "sqlite"),
+                    "name": (db_config or {}).get("name") or (db_config or {}).get("database") or "badcase_doctor",
+                },
+            },
+        }
+
+        submit = self._request_json("POST", "/api/v1/execute", payload)
+        job_id = submit.get("job_id") or submit.get("id")
+        status = submit.get("status")
+        if not job_id:
+            return {
+                "success": False,
+                "error": f"云端沙箱返回异常（缺少 job_id）: {submit}",
+                "execution_mode": "cloud",
+            }
+
+        # 轮询获取结果
+        while True:
+            elapsed = time.time() - started
+            if elapsed > overall_timeout:
+                return {
+                    "success": False,
+                    "error": f"云端沙箱执行超时（>{overall_timeout}s）",
+                    "job_id": job_id,
+                    "status": status or "timeout",
+                    "execution_time": elapsed,
+                    "execution_mode": "cloud",
+                    "timeout": True,
+                }
+
+            detail = self._request_json("GET", f"/api/v1/jobs/{job_id}")
+            status = detail.get("status") or status
+
+            if status in ("succeeded", "failed"):
+                ok = status == "succeeded"
+                return {
+                    "success": ok,
+                    "job_id": job_id,
+                    "status": status,
+                    "stdout": detail.get("stdout", ""),
+                    "stderr": detail.get("stderr", ""),
+                    "result": detail.get("result"),
+                    "data": (detail.get("result") or {}).get("data", []) if isinstance(detail.get("result"), dict) else detail.get("data", []),
+                    "columns": (detail.get("result") or {}).get("columns", []) if isinstance(detail.get("result"), dict) else detail.get("columns", []),
+                    "row_count": (detail.get("result") or {}).get("row_count", 0) if isinstance(detail.get("result"), dict) else detail.get("row_count", 0),
+                    "execution_time": elapsed,
+                    "execution_mode": "cloud",
+                    "error": None if ok else (detail.get("error") or detail.get("stderr") or "云端沙箱执行失败"),
+                }
+
+            time.sleep(self.config.poll_interval_s)
+
+    def trigger_db_sync(self, server_path: str | None = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {}
+        if server_path:
+            body["server_path"] = server_path
+        return self._request_json("POST", "/api/v1/db/sync", body)
+
+
+class UnifiedSandboxExecutor:
+    """
+    统一沙箱执行器：local（现有 Docker llm-sandbox）+ cloud（HTTP）
+
+    环境变量：
+    - SANDBOX_MODE: local / cloud / auto （默认 auto）
+    - SANDBOX_REMOTE_URL / SANDBOX_REMOTE_TOKEN / SANDBOX_TENANT_ID
+    """
+
+    def __init__(
+        self,
+        local_executor: SandboxExecutor,
+        cloud_executor: CloudSandboxExecutor,
+        mode: str = "auto",
+        fallback_to_local: bool = False,
+    ):
+        self.local_executor = local_executor
+        self.cloud_executor = cloud_executor
+        self.mode = (mode or "auto").strip().lower()
+        self.fallback_to_local = fallback_to_local
+
+    def _choose(self) -> str:
+        if self.mode in ("local", "cloud"):
+            return self.mode
+        # auto
+        if self.cloud_executor._is_configured():
+            return "cloud"
+        return "local"
+
+    def execute_sql(self, sql: str, db_config: Dict[str, Any] = None, language: str = "python", skip_security_check: bool = False) -> Dict[str, Any]:
+        chosen = self._choose()
+        if chosen == "cloud":
+            try:
+                return self.cloud_executor.execute_sql(sql, db_config=db_config)
+            except Exception as e:
+                if self.fallback_to_local:
+                    local_ret = self.local_executor.execute_sql(sql, db_config=db_config, language=language, skip_security_check=skip_security_check)
+                    local_ret["fallback_reason"] = f"云端失败，已降级本地: {e}"
+                    local_ret["chosen_mode"] = "cloud->local"
+                    return local_ret
+                return {
+                    "success": False,
+                    "error": f"云端沙箱执行失败: {e}",
+                    "execution_mode": "cloud",
+                }
+
+        # local
+        return self.local_executor.execute_sql(sql, db_config=db_config, language=language, skip_security_check=skip_security_check)
+
+    def execute_code(self, code: str, language: str = "python", timeout: int = None, libraries: List[str] = None, skip_security_check: bool = False) -> Dict[str, Any]:
+        # 目前仅本地支持 execute_code；云端若需要可扩展成 /execute task_type=python_sandbox
+        return self.local_executor.execute_code(code, language=language, timeout=timeout, libraries=libraries, skip_security_check=skip_security_check)
     
     def _prepare_db_copy(self, db_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -806,10 +1032,18 @@ def get_sandbox_executor(
     """
     global _sandbox_executor
     if _sandbox_executor is None:
-        _sandbox_executor = SandboxExecutor(
+        local = SandboxExecutor(
             image=image,
             security_config=security_config or get_security_config(),
             fallback_to_local=fallback_to_local
+        )
+        cloud = CloudSandboxExecutor()
+        mode = os.getenv("SANDBOX_MODE", "auto")
+        _sandbox_executor = UnifiedSandboxExecutor(
+            local_executor=local,
+            cloud_executor=cloud,
+            mode=mode,
+            fallback_to_local=fallback_to_local,
         )
     return _sandbox_executor
 

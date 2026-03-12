@@ -289,6 +289,16 @@ export function getPlanTestCases(planId) {
   return api.get(`/api/plans/${planId}/testcases`)
 }
 
+// 获取项目的TestCase列表（分页）
+export function getProjectTestCases(projectId, page = 1, perPage = 10, params = {}) {
+  const queryParams = new URLSearchParams({
+    page,
+    per_page: perPage,
+    ...params
+  })
+  return api.get(`/api/projects/${projectId}/testcases?${queryParams}`)
+}
+
 // ==================== Agent API ====================
 
 // 执行通用 Agent

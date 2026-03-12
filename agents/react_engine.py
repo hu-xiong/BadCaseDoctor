@@ -268,14 +268,20 @@ class ReActEngine:
     "reason": "选择此工具的原因"
 }}
 
-可用工具:
-{json.dumps(self.tools.list_tools(), ensure_ascii=False, indent=2)}
+{self.tools.get_tools_prompt()}
 
-例如:
+例如，查询已关闭的BadCase:
 {{
-    "tool": "browser_test",
-    "params": {{"test_case": "登录功能", "steps": ["打开登录页", "输入用户名"]}},
-    "reason": "需要执行浏览器测试"
+    "tool": "grep",
+    "params": {{"project_id": 1, "target": "badcase", "status": "已关闭"}},
+    "reason": "查询状态为已关闭的BadCase"
+}}
+
+例如，修改BadCase状态:
+{{
+    "tool": "modify",
+    "params": {{"target": "badcase", "target_id": 1, "modifications": {{"status": "已关闭"}}}},
+    "reason": "修改BadCase状态"
 }}
 """
         

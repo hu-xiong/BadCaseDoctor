@@ -27,7 +27,7 @@ class SkillRegistry:
         self.skill_load_time: Dict[str, datetime] = {}
         self.skill_usage_count: Dict[str, int] = {}
         self._initialized = True
-        print(f"[SKILL_REGISTRY] 🪧 技能注册中心已初始化")
+        print("[SKILL_REGISTRY] 技能注册中心已初始化")
     
     def register(self, skill: Skill) -> bool:
         """
@@ -40,11 +40,11 @@ class SkillRegistry:
             是否注册成功
         """
         if not skill or not skill.name:
-            print(f"[SKILL_REGISTRY] ❌ 无效的技能对象")
+            print("[SKILL_REGISTRY] 无效的技能对象")
             return False
         
         if self.has_skill(skill.name):
-            print(f"[SKILL_REGISTRY] ⚠️  技能已存在: {skill.name}")
+            print(f"[SKILL_REGISTRY] 技能已存在: {skill.name}")
             return False
         
         self.skills[skill.name] = skill
@@ -65,14 +65,14 @@ class SkillRegistry:
             是否注销成功
         """
         if not self.has_skill(skill_name):
-            print(f"[SKILL_REGISTRY] ⚠️  技能不存在: {skill_name}")
+            print(f"[SKILL_REGISTRY] 技能不存在: {skill_name}")
             return False
         
         del self.skills[skill_name]
         del self.skill_load_time[skill_name]
         del self.skill_usage_count[skill_name]
         
-        print(f"[SKILL_REGISTRY] 🗑️  注销技能: {skill_name}")
+        print(f"[SKILL_REGISTRY] 注销技能: {skill_name}")
         return True
     
     def get_skill(self, skill_name: str) -> Optional[Skill]:

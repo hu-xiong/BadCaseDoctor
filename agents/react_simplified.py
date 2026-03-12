@@ -4,6 +4,8 @@
 核心：单主循环 + Agent 自管理 Todo +强约束提示词 + 自动修正 +技能匹配 + 自然语言SQL
 """
 
+import asyncio
+import concurrent.futures
 import json
 import time
 from typing import Dict, Any, List
@@ -18,14 +20,30 @@ from .evidence_extractor import EvidenceExtractor
 from .skill_loader import SkillLoader
 from .skill_registry import skill_registry
 from .skill import Skill
+from .skill_integration import skill_integration  # Skill 集成管理器
 
 # Text2SQL
 try:
-    from .tools.vanna_text2sql import get_vanna_text2sql, VANNA_AVAILABLE
-    TEXT2SQL_AVAILABLE = VANNA_AVAILABLE
+    from .tools.sqlcoder_agent import Text2SQLAgent, LLMBackend
+    TEXT2SQL_AVAILABLE = True
 except ImportError:
     TEXT2SQL_AVAILABLE = False
-    print("[REACT]⚠  Vanna Text2SQL 未安装")
+    print("[REACT]⚠  Text2SQLAgent 未安装，使用传统查询模式")
+
+
+def get_text2sql_tool(db_path="instance/badcase_doctor.db"):
+    """获取 Text2SQL 工具实例"""
+    if TEXT2SQL_AVAILABLE:
+        try:
+            return Text2SQLAgent(
+                database_path=db_path,
+                llm_backend=LLMBackend.GLM_5,
+                debug=False
+            )
+        except Exception as e:
+            print(f"[REACT] Text2SQL初始化失败: {e}")
+            return None
+    return None
 
 
 class SimplifiedReActEngine:
@@ -45,11 +63,13 @@ class SimplifiedReActEngine:
         
         # Text2SQL
         if TEXT2SQL_AVAILABLE:
-            self.text2sql_tool = get_vanna_text2sql("instance/badcase_doctor.db")
+            self.text2sql_tool = get_text2sql_tool("instance/badcase_doctor.db")
             print("[REACT] ✅ Text2SQL已启用")
         else:
             self.text2sql_tool = None
             print("[REACT] ⚠️  Text2SQL 不可用")
+        # 线程池：modify 等工具内部有同步 DB（Flask/SQLAlchemy），在事件循环中会阻塞，导致流式“修改中...”卡住
+        self._tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="react_tool")
     
     async def run_stream(self, user_input: str, project_id: int = None):
         """流式执行 ReAct循环（使用Skill工具）"""
@@ -84,7 +104,133 @@ class SimplifiedReActEngine:
             
             yield {'event': 'todos', 'data': todos}
             
-            # ===== MAIN LOOP: ACT =====
+            # ===== SKILL 匹配：检查是否有匹配的技能工作流 =====
+            matched_skill, skill_score = skill_integration.match_skill(user_input, result_context)
+            
+            if matched_skill and skill_score >= 0.3:
+                print(f"[REACT-STREAM] 🎯 匹配到技能: {matched_skill.name} (分数: {skill_score:.2f})")
+                print(f"[REACT-STREAM] 📋 将按 todos 逐个执行，共 {len(todos)} 个任务")
+                yield {'event': 'skill_matched', 'skill': matched_skill.name, 'score': skill_score}
+                
+                # 初始化 observation 变量
+                observation = {}
+                batch_results = []  # 收集所有批量修改结果
+                
+                # 按 todos 逐个执行，而不是按固定技能工作流
+                for i, todo in enumerate(todos):
+                    yield {'event': 'todo_start', 'index': i, 'todo': todo}
+                    
+                    # 从 todo 中提取关键词和状态
+                    todo_params = await self._extract_todo_params(todo, user_input)
+                    tool_name = todo_params['tool']
+                    
+                    print(f"[REACT-STREAM] Todo[{i}] 提取参数: tool={tool_name}, params={todo_params}")
+                    
+                    # 确保必要参数
+                    params = todo_params['params']
+                    if 'project_id' not in params and project_id:
+                        params['project_id'] = project_id
+                    if 'userId' not in params:
+                        params['userId'] = 'system_agent'
+                    
+                    # 如果是 modify 工具，需要从 grep 结果中获取 target_id
+                    if tool_name == 'modify':
+                        grep_result = result_context.get('grep_result', {})
+                        target_type = params.get('target', 'badcase')
+                        
+                        if target_type == 'bug':
+                            target_id = grep_result.get('first_bug_id')
+                        else:
+                            target_id = grep_result.get('first_badcase_id')
+                        
+                        if target_id:
+                            params['target_id'] = target_id
+                            print(f"[REACT-STREAM] 从 grep 结果获取 target_id={target_id}")
+                        else:
+                            print(f"[REACT-STREAM] ⚠️ 无法从 grep 结果获取 target_id")
+                    
+                    # 执行工具
+                    decision = {'execute': True, 'tool': tool_name, 'params': params}
+                    yield {'event': 'executing', 'tool': tool_name, 'reason': f'Todo步骤 {i+1}'}
+                    
+                    observation = await self._execute_tool(decision)
+                    print(f"[REACT-STREAM] Todo[{i}] 工具 {tool_name} 结果: success={observation.get('success')}")
+                    
+                    # 更新上下文（供后续步骤使用）
+                    if tool_name == 'grep' and observation.get('success'):
+                        grep_data = observation.get('data', {})
+                        badcase_list = grep_data.get('badcase_analysis', [])
+                        bug_list = grep_data.get('bug_location', [])
+                        
+                        result_context['grep_result'] = {
+                            'first_badcase_id': badcase_list[0].get('id') if badcase_list else None,
+                            'first_bug_id': bug_list[0].get('id') if bug_list else None,
+                            'badcase_list': badcase_list,
+                            'bug_list': bug_list
+                        }
+                        result_context['badcase_list'] = badcase_list
+                        result_context['bug_list'] = bug_list
+                        print(f"[REACT-STREAM] grep 结果已存储到 context: {len(badcase_list)} badcase, {len(bug_list)} bug")
+                    
+                    # 如果是 modify，收集结果
+                    if tool_name == 'modify':
+                        target_list = result_context.get('badcase_list', []) or result_context.get('bug_list', [])
+                        target_type = 'badcase' if result_context.get('badcase_list') else 'bug'
+                        
+                        if observation.get('success'):
+                            batch_results.append({
+                                'target_id': params.get('target_id'),
+                                'target': target_type,
+                                'plan_id': None,
+                                'diff': observation.get('diff', []),
+                                'modifications': params.get('modifications', {}),
+                                'before': observation.get('before', {}),
+                                'after': observation.get('after', {}),
+                                'confirmation_required': observation.get('confirmation_required', True),
+                                'success': True
+                            })
+                    
+                    # 发送观察结果
+                    yield {'event': 'observation', 'data': observation}
+                    yield {'event': 'todo_end', 'index': i}
+                
+                # 技能工作流完成
+                print(f"[REACT-STREAM] ✅ Todos 执行完成")
+                
+                # 汇总结果
+                workflow_findings = []
+                if batch_results:
+                    # 批量修改结果
+                    target_name = 'BadCase'
+                    mod_summaries = []
+                    for r in batch_results:
+                        mods = r.get('modifications', {})
+                        status = mods.get('status', '')
+                        if status:
+                            mod_summaries.append(f"ID={r['target_id']} 状态={status}")
+                    
+                    observation = {
+                        'success': all(r.get('success') for r in batch_results),
+                        'message': f'已生成 {len(batch_results)} 条修改预览',
+                        'summary': f'批量修改预览：{"、".join(mod_summaries)}',
+                        'batch_modify': True,
+                        'batch_results': batch_results,
+                        'batch_count': len(batch_results),
+                        'target': 'badcase'
+                    }
+                    workflow_findings.append(observation['summary'])
+                    yield {'event': 'observation', 'data': observation}
+                
+                # 发送 done 事件
+                yield {
+                    'event': 'done', 
+                    'findings': workflow_findings, 
+                    'steps_count': len(todos),
+                    'duration': time.time() - start_time
+                }
+                return
+            
+            # ===== MAIN LOOP: ACT（正常流程，当没有匹配技能时）=====
             for i, todo in enumerate(todos):
                 yield {'event': 'todo_start', 'index': i, 'todo': todo}
                 
@@ -137,18 +283,27 @@ class SimplifiedReActEngine:
                         target_type = 'badcase' if badcase_list else 'bug'
                         for item in target_list:
                             item_id = item.get('id')
+                            item_plan_id = item.get('plan_id')  # 获取 plan_id
                             if item_id:
                                 modify_decision = decision.copy()
                                 modify_decision['params']['target_id'] = item_id
                                 modify_decision['params']['target'] = target_type
-                                print(f"[REACT-STREAM] 批量修改 {target_type} ID={item_id}")
+                                print(f"[REACT-STREAM] 批量修改 {target_type} ID={item_id}, plan_id={item_plan_id}")
                                 observation = await self._execute_tool(modify_decision)
-                                all_results.append({'id': item_id, 'result': observation})
+                                all_results.append({
+                                    'id': item_id,
+                                    'plan_id': item_plan_id,  # 添加 plan_id
+                                    'result': observation
+                                })
                         
                         # 合并结果
+                        target_name = 'Bug' if target_type == 'bug' else ('测试用例' if target_type == 'testcase' else 'BadCase')
+                        modifications = decision.get('params', {}).get('modifications', {})
+                        mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
                         observation = {
                             'success': all(r['result'].get('success') for r in all_results),
                             'message': f'已批量修改 {len(all_results)} 个 {target_type}',
+                            'summary': f'批量修改{len(all_results)}条{target_name}：{mod_summary}',
                             'results': all_results,
                             'batch_modify': True,
                             'target': target_type
@@ -181,6 +336,76 @@ class SimplifiedReActEngine:
                 if 'error' in observation:
                     print(f"[REACT-STREAM]   错误: {observation.get('error')}")
                 print(f"[REACT-STREAM]   完整结果: {observation}")
+                
+                # 智能重试：如果 modify 缺少 target_id，自动执行 grep 查询
+                if decision['tool'] == 'modify' and observation.get('need_grep_first'):
+                    print(f"[REACT-STREAM] modify 缺少 target_id，自动执行 grep 查询...")
+                    yield {'event': 'retry', 'message': '正在执行 grep 工具定位目标记录...'}
+                    
+                    suggested_params = observation.get('suggested_params', {})
+                    grep_decision = {
+                        'execute': True,
+                        'tool': 'grep',
+                        'params': {
+                            'target': suggested_params.get('target', 'badcase'),
+                            'project_id': suggested_params.get('project_id', self.project_id),
+                            'userId': 'system_agent'
+                        }
+                    }
+                    grep_observation = await self._execute_tool(grep_decision)
+                    print(f"[REACT-STREAM] grep 结果: success={grep_observation.get('success')}")
+                    
+                    # 从 grep 结果中提取 target_id
+                    if grep_observation.get('success'):
+                        grep_data = grep_observation.get('data', {})
+                        badcase_list = grep_data.get('badcase_analysis', [])
+                        bug_list = grep_data.get('bug_location', [])
+                        
+                        if badcase_list and len(badcase_list) > 0:
+                            result_context['badcase_list'] = badcase_list
+                            result_context['first_badcase_id'] = badcase_list[0].get('id')
+                            print(f"[REACT-STREAM] 从 grep 获取到 {len(badcase_list)} 条 BadCase")
+                        
+                        if bug_list and len(bug_list) > 0:
+                            result_context['bug_list'] = bug_list
+                            result_context['first_bug_id'] = bug_list[0].get('id')
+                            print(f"[REACT-STREAM] 从 grep 获取到 {len(bug_list)} 条 Bug")
+                        
+                        # 发送 grep 结果
+                        yield {'event': 'observation', 'data': grep_observation}
+                        
+                        # 重试 modify
+                        target_list = result_context.get('badcase_list', []) or result_context.get('bug_list', [])
+                        if target_list and len(target_list) > 0:
+                            target_type = 'badcase' if result_context.get('badcase_list') else 'bug'
+                            # 批量修改
+                            if len(target_list) > 1:
+                                print(f"[REACT-STREAM] 重试批量修改 {len(target_list)} 条 {target_type}")
+                                all_results = []
+                                for item in target_list:
+                                    item_id = item.get('id')
+                                    if item_id:
+                                        retry_decision = decision.copy()
+                                        retry_decision['params']['target_id'] = item_id
+                                        retry_decision['params']['target'] = target_type
+                                        retry_obs = await self._execute_tool(retry_decision)
+                                        all_results.append({'id': item_id, 'plan_id': item.get('plan_id'), 'result': retry_obs})
+                                
+                                observation = {
+                                    'success': all(r['result'].get('success') for r in all_results),
+                                    'message': f'已批量修改 {len(all_results)} 个 {target_type}',
+                                    'summary': f'批量修改{len(all_results)}条{"Bug" if target_type == "bug" else ("测试用例" if target_type == "testcase" else "BadCase")}',
+                                    'results': all_results,
+                                    'batch_modify': True,
+                                    'target': target_type
+                                }
+                            else:
+                                # 单个修改
+                                retry_decision = decision.copy()
+                                retry_decision['params']['target_id'] = target_list[0].get('id')
+                                retry_decision['params']['target'] = target_type
+                                print(f"[REACT-STREAM] 重试单个修改: target_id={retry_decision['params']['target_id']}")
+                                observation = await self._execute_tool(retry_decision)
                 
                 # 自动修正（最多1次）
                 if not observation.get('success') and not observation.get('corrected'):
@@ -221,32 +446,47 @@ class SimplifiedReActEngine:
                 result_context.update(analysis.get('context_update', {}))
                 
                 # 兜底逻辑：如果 context 中没有 bug_list/badcase_list 但 observation 中有，自动添加
-                if decision['tool'] == 'grep' and isinstance(observation, dict) and 'data' in observation:
-                    obs_data = observation.get('data', {})
+                if decision['tool'] == 'grep' and isinstance(observation, dict):
+                    # 多种可能的数据位置
+                    obs_data = observation.get('data', observation)
+                    if not isinstance(obs_data, dict):
+                        obs_data = {}
                     
-                    # Bug 列表
+                    # Bug 列表 - 从多个可能的位置提取
                     if 'bug_list' not in result_context:
-                        bug_location = obs_data.get('bug_location', [])
-                        if bug_location:
+                        bug_location = obs_data.get('bug_location', []) or observation.get('bug_location', [])
+                        if bug_location and isinstance(bug_location, list) and len(bug_location) > 0:
                             result_context['bug_list'] = bug_location
-                            print(f"[REACT-STREAM] 自动将 bug_location 添加到 context: {bug_location}")
+                            result_context['first_bug_id'] = bug_location[0].get('id') if isinstance(bug_location[0], dict) else None
+                            print(f"[REACT-STREAM] 自动将 bug_location 添加到 context: {len(bug_location)} 条")
                     
-                    # BadCase 列表：从 badcase_analysis 提取
+                    # BadCase 列表 - 从多个可能的位置提取
                     if 'badcase_list' not in result_context:
-                        badcase_analysis = obs_data.get('badcase_analysis', [])
-                        if badcase_analysis:
+                        badcase_analysis = obs_data.get('badcase_analysis', []) or observation.get('badcase_analysis', [])
+                        if badcase_analysis and isinstance(badcase_analysis, list) and len(badcase_analysis) > 0:
                             # 提取为简化列表格式
                             badcase_list = []
                             for bc in badcase_analysis:
+                                if not isinstance(bc, dict):
+                                    continue
+                                bc_id = bc.get('id')
+                                if bc_id is None:
+                                    continue
                                 badcase_list.append({
-                                    'id': bc.get('id'),
-                                    'title': bc.get('title'),
+                                    'id': bc_id,
+                                    'title': bc.get('title', ''),
                                     'status': bc.get('status'),
                                     'plan_id': bc.get('plan_id')
                                 })
-                            result_context['badcase_list'] = badcase_list
-                            result_context['badcase_analysis'] = badcase_analysis  # 保留原始数据
-                            print(f"[REACT-STREAM] 自动将 badcase_list 添加到 context: {badcase_list}")
+                            
+                            if badcase_list:
+                                result_context['badcase_list'] = badcase_list
+                                result_context['badcase_analysis'] = badcase_analysis  # 保留原始数据
+                                result_context['first_badcase_id'] = badcase_list[0].get('id')
+                                print(f"[REACT-STREAM] 自动将 badcase_list 添加到 context: {len(badcase_list)} 条")
+                    
+                    # 记录提取结果
+                    print(f"[REACT-STREAM] Context 更新后: bug_list={len(result_context.get('bug_list', []))}条, badcase_list={len(result_context.get('badcase_list', []))}条")
                 
                 if analysis.get('findings'):
                     findings.extend(analysis['findings'])
@@ -566,7 +806,6 @@ class SimplifiedReActEngine:
             return result
         
         #先尝匹配技能
-        from .skill_integration import skill_integration
         matched_skill, score = skill_integration.match_skill(todo, context)
         
         if matched_skill and score >= 0.3:
@@ -648,30 +887,38 @@ class SimplifiedReActEngine:
                         return result
         
         # 如果技能匹配失败，回到标准流程
-        # 从 context 中获取 bug_list 或 badcase_analysis
+        # 从 context 中获取 bug_list 或 badcase_analysis（优先 bug_list）
         bug_list = context.get('bug_list', [])
+        badcase_list = context.get('badcase_list', [])
+        
+        # 尝试从多个位置提取
         if not bug_list and 'bug_location' in context:
-            # 尝试从 grep 结果中提取
             bug_list = context.get('bug_location', [])
         
-        # 支持从 badcase_analysis 中获取 BadCase ID
-        if not bug_list and 'badcase_analysis' in context:
+        if not badcase_list and 'badcase_analysis' in context:
             badcase_analysis = context.get('badcase_analysis', [])
             if badcase_analysis and isinstance(badcase_analysis, list):
-                # 将 badcase_analysis 转换为 bug_list 格式
-                bug_list = badcase_analysis
-                print(f"[REACT-STREAM] 从 badcase_analysis 中获取到 {len(bug_list)} 条记录")
+                badcase_list = badcase_analysis
+                print(f"[REACT-STREAM] 从 badcase_analysis 中获取到 {len(badcase_list)} 条记录")
         
-        if not bug_list:
-            print(f"[REACT-STREAM] 无法从 context 中获取 bug_list 或 badcase_analysis")
+        # 确定目标类型和列表
+        target_list = bug_list if bug_list else badcase_list
+        target_type = 'bug' if bug_list else ('badcase' if badcase_list else None)
+        
+        if not target_list or not isinstance(target_list, list) or len(target_list) == 0:
+            print(f"[REACT-STREAM] 无法从 context 中获取有效的 bug_list 或 badcase_list")
+            print(f"[REACT-STREAM] context keys: {list(context.keys())}")
             return result
         
-        # 获取第一个 Bug 的 ID
-        first_bug = bug_list[0] if isinstance(bug_list[0], dict) else bug_list[0]
-        target_id = first_bug.get('id') if isinstance(first_bug, dict) else None
+        # 获取第一个目标的 ID
+        first_item = target_list[0]
+        if not isinstance(first_item, dict):
+            print(f"[REACT-STREAM] target_list[0] 不是字典: {type(first_item)}")
+            return result
         
-        if not target_id:
-            print(f"[REACT-STREAM] 无法从 bug_list 中提取 target_id")
+        target_id = first_item.get('id')
+        if target_id is None:
+            print(f"[REACT-STREAM] 无法从 target_list 中提取 id")
             return result
         
         # 从 Todo 中提取要修改的字段
@@ -693,6 +940,18 @@ class SimplifiedReActEngine:
         if not modifications:
             modifications['status'] = 'resolved'
         
+        # 状态值标准化（确保使用英文）
+        status_normalize = {
+            '关闭': 'closed', '已关闭': 'closed', 'close': 'closed',
+            '解决': 'resolved', '已解决': 'resolved',
+            '重新打开': 'reopened', '重开': 'reopened', 'reopen': 'reopened',
+            '新建': 'new', '新': 'new',
+            '待处理': 'pending',
+            '搁置': 'hold',
+        }
+        if 'status' in modifications:
+            modifications['status'] = status_normalize.get(modifications['status'].lower(), modifications['status'])
+        
         # 获取 project_id
         project_id = context.get('project_id') or self.project_id or '1'
         
@@ -700,16 +959,84 @@ class SimplifiedReActEngine:
             'execute': True,
             'tool': 'modify',
             'params': {
-                'target': 'bug',
+                'target': target_type or 'badcase',  # 使用推断的目标类型
                 'target_id': target_id,
                 'modifications': modifications,
                 'project_id': project_id,
                 'confirm': False  # 默认使用沙箱预览模式，需要用户确认后才执行
             },
-            'reason': f'基于 todo内容和 context推断的 modify 参数（沙箱预览模式）'
+            'reason': f'基于 todo内容和 context推断的 modify 参数，target={target_type}, target_id={target_id}'
         }
         
+        print(f"[REACT-STREAM] _infer_modify_params 返回: {result}")
         return result
+    
+    def _resolve_skill_params(self, param_template: Dict[str, Any], context: Dict[str, Any], user_input: str, project_id: int = None) -> Dict[str, Any]:
+        """
+        解析技能参数模板中的变量
+        
+        支持：
+        - ${user_keywords}: 从用户输入提取关键词
+        - ${user_modifications}: 从用户输入提取修改内容
+        - ${grep_result.first_badcase_id}: 从上下文获取嵌套值
+        - ${project_id}: 项目ID
+        """
+        import re
+        params = {}
+        
+        for key, value in param_template.items():
+            if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
+                var_name = value[2:-1]  # 去除 ${}
+                
+                # 特殊变量处理
+                if var_name == 'user_keywords':
+                    # 从用户输入提取关键词
+                    # 优先匹配“标题为XXX”或“标题是XXX”的模式
+                    title_match = re.search(r'标题[是为]([^，。,]+)', user_input)
+                    if title_match:
+                        keywords = title_match.group(1).strip()
+                        print(f"[REACT] 从用户输入提取标题关键词: '{keywords}'")
+                    else:
+                        # 回退：去除常见动词
+                        keywords = re.sub(r'(修改|更新|调整|所有|状态|改成|设为|标题|为|是)', '', user_input).strip()
+                    params[key] = keywords if keywords else ''
+                
+                elif var_name == 'user_modifications':
+                    # 从用户输入提取修改内容
+                    modifications = self._extract_modifications_from_todo(user_input)
+                    params[key] = modifications if modifications else {}
+                
+                elif var_name == 'project_id':
+                    params[key] = project_id or context.get('project_id', '1')
+                
+                elif '.' in var_name:
+                    # 嵌套变量解析：grep_result.first_badcase_id
+                    parts = var_name.split('.')
+                    base_var = parts[0]
+                    field_path = parts[1:]
+                    
+                    base_value = context.get(base_var)
+                    if base_value:
+                        current = base_value
+                        for field in field_path:
+                            if isinstance(current, dict) and field in current:
+                                current = current[field]
+                            else:
+                                current = None
+                                break
+                        params[key] = current
+                    else:
+                        params[key] = None
+                
+                else:
+                    # 简单变量
+                    params[key] = context.get(var_name)
+            
+            else:
+                # 非变量，直接使用
+                params[key] = value
+        
+        return params
     
     def _extract_modifications_from_todo(self, todo: str) -> Dict[str, Any]:
         """
@@ -718,10 +1045,33 @@ class SimplifiedReActEngine:
         import re
         modifications = {}
         
-        #状态修改
-        status_match = re.search(r"状态.*?['\"](\w+)['\"]|status.*?['\"](\w+)['\"]|设为(\w+)", todo, re.IGNORECASE)
-        if status_match:
-            status_value = status_match.group(1) or status_match.group(2) or status_match.group(3)
+        # 中文状态映射
+        status_map = {
+            '重新打开': 'reopened', '重开': 'reopened', 'reopen': 'reopened',
+            '已关闭': 'closed', '关闭': 'closed', 'close': 'closed',
+            '新建': 'new', '新': 'new',
+            '待处理': 'pending', '等待': 'pending',
+            '已解决': 'resolved', '解决': 'resolved',
+            '搁置': 'hold', '暂停': 'hold',
+        }
+        
+        # 状态修改 - 支持中文
+        status_value = None
+        
+        # 检查中文状态关键词
+        for cn_status, en_status in status_map.items():
+            if cn_status in todo:
+                status_value = en_status
+                print(f"[REACT] 从 todo 提取状态: '{cn_status}' -> '{en_status}'")
+                break
+        
+        # 正则匹配英文状态
+        if not status_value:
+            status_match = re.search(r"status.*?['\"](\w+)['\"]|设为(\w+)", todo, re.IGNORECASE)
+            if status_match:
+                status_value = status_match.group(1) or status_match.group(2)
+        
+        if status_value:
             modifications['status'] = status_value
         
         # 优先级修改
@@ -729,11 +1079,143 @@ class SimplifiedReActEngine:
         if priority_match:
             modifications['priority'] = priority_match.group(1)
         
-        # 如果没有提取到任何内容，返回默认值
+        # 如果没有提取到任何内容，返回空
         if not modifications:
-            modifications['status'] = 'resolved'
+            print(f"[REACT] 无法从 todo 提取修改内容: {todo}")
+            return {}
             
         return modifications
+    
+    async def _extract_modifications_with_llm(self, todo: str, user_input: str = '') -> Dict[str, Any]:
+        """
+        使用大模型从 todo 中提取修改参数
+        
+        Args:
+            todo: todo 描述文本
+            user_input: 原始用户输入（用于更准确识别字段）
+            
+        Returns:
+            modifications: {字段名: 新值}
+        """
+        import re
+        import json
+        
+        # 构建上下文，包含原始用户输入
+        prompt = f"""
+原始用户请求：{user_input}
+任务步骤描述：{todo}
+
+请根据原始用户请求识别要修改的字段，返回JSON格式。
+
+【重要】字段名映射规则：
+- "相似问题"、"具体问题"、"问题" -> 必须映射为 base_problem
+- "标题" -> title
+- "状态" -> status (值：new/pending/resolved/closed/reopened/hold)
+- "优先级" -> priority (值：p1/p2/p3)
+- "负责人" -> assignee
+- "复现步骤" -> reproduction_steps
+- "正确答案" -> correct_answer
+- "解决方式" -> solution
+- "问题原因" -> problem_reason
+
+示例：
+- 用户说"修改相似问题为XXX" -> {{"base_problem": "XXX"}}
+- 用户说"状态改为已解决" -> {{"status": "resolved"}}
+- 用户说"标题改成测试标题" -> {{"title": "测试标题"}}
+
+请直接返回JSON，不要包含其他内容："""
+        
+        try:
+            response = await self.llm.parse_intent(prompt)
+            print(f"[REACT-LLM] 提取修改参数响应: {response}")
+            
+            # 如果 parse_intent 已经返回字典，直接使用
+            if isinstance(response, dict):
+                print(f"[REACT-LLM] 提取的修改参数: {response}")
+                return response
+            
+            # 如果是字符串，提取 JSON 部分
+            if isinstance(response, str):
+                json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+                if json_match:
+                    modifications = json.loads(json_match.group())
+                    print(f"[REACT-LLM] 提取的修改参数: {modifications}")
+                    return modifications
+        except Exception as e:
+            print(f"[REACT-LLM] 提取修改参数失败: {e}")
+        
+        return {}
+    
+    async def _extract_todo_params(self, todo: str, user_input: str) -> Dict[str, Any]:
+        """
+        从 todo 中提取工具名称和参数
+        
+        支持的 todo 格式:
+        - "使用 grep 工具搜索标题为XXX的BadCase，keywords=XXX，target=badcase"
+        - "使用 modify 工具将标题为XXX的BadCase状态修改为resolved"
+        """
+        import re
+        result = {'tool': None, 'params': {}}
+        
+        # 1. 确定工具类型 - 优先匹配 modify，因为 modify 的 todo 中可能包含"搜索"关键词
+        # 例如："使用 modify 工具将搜索到的BadCase状态修改为resolved"
+        
+        # 先检查是否明确指定了 modify 工具
+        if 'modify' in todo.lower() or ('修改' in todo and 'grep' not in todo.lower()):
+            result['tool'] = 'modify'
+            
+            # 使用大模型提取修改参数（更准确）
+            modifications = await self._extract_modifications_with_llm(todo, user_input)
+            
+            # 提取目标类型
+            if 'bug' in todo.lower():
+                target = 'bug'
+            elif 'badcase' in todo.lower():
+                target = 'badcase'
+            else:
+                target = 'badcase'  # 默认
+            
+            result['params'] = {
+                'target': target,
+                'modifications': modifications,
+                'confirm': False,
+            }
+            print(f"[REACT] 从 todo 提取 modify 参数: modifications={modifications}, target={target}")
+        
+        # 再检查 grep 工具
+        elif 'grep' in todo.lower() or '搜索' in todo or '查找' in todo or '定位' in todo:
+            result['tool'] = 'grep'
+            
+            # 提取关键词 - 优先匹配 keywords=XXX 格式
+            keywords_match = re.search(r'keywords[=：]\s*([^，,]+)', todo, re.IGNORECASE)
+            if keywords_match:
+                keywords = keywords_match.group(1).strip()
+            else:
+                # 回退：匹配“标题为XXX”格式
+                title_match = re.search(r'标题[是为]([^，。,]+)', todo)
+                keywords = title_match.group(1).strip() if title_match else ''
+            
+            # 提取目标类型
+            if 'bug' in todo.lower():
+                target = 'bug'
+            elif 'badcase' in todo.lower():
+                target = 'badcase'
+            else:
+                target = 'badcase'  # 默认
+            
+            result['params'] = {
+                'target': target,
+                'mode': 'locate',
+                'keywords': keywords,
+            }
+            print(f"[REACT] 从 todo 提取 grep 参数: keywords='{keywords}', target={target}")
+        
+        else:
+            # 未知工具，返回空
+            print(f"[REACT] 无法从 todo 识别工具: {todo}")
+            result['tool'] = 'unknown'
+        
+        return result
     
     async def _execute_tool(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         """执行工具"""
@@ -766,7 +1248,20 @@ class SimplifiedReActEngine:
             
             print(f"[REACT] 工具参数: {params}")
             print(f"[REACT] 正在执行工具: {tool_name}")
-            res = await tool.execute(**params)
+            # modify 工具内部使用 Flask/SQLAlchemy 同步 DB，会阻塞 asyncio 事件循环，导致流式一直“修改中...”
+            # 放到线程池中执行，在独立线程里跑新事件循环，避免阻塞主循环
+            if tool_name == 'modify':
+                loop = asyncio.get_event_loop()
+                def _run_modify_in_thread():
+                    thread_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(thread_loop)
+                    try:
+                        return thread_loop.run_until_complete(tool.execute(**params))
+                    finally:
+                        thread_loop.close()
+                res = await loop.run_in_executor(self._tool_executor, _run_modify_in_thread)
+            else:
+                res = await tool.execute(**params)
             
             print(f"[REACT] ✅ 工具执行完成: {tool_name}")
             print(f"[REACT] 工具返回数据类型: {type(res).__name__}")

@@ -46,7 +46,7 @@ class CreateTool(BaseTool):
             try:
                 self.text2sql = Text2SQLAgent(
                     database_path='instance/badcase_doctor.db',
-                    llm_backend=LLMBackend.GLM_4_FLASH,
+                    llm_backend=LLMBackend.GLM_5,
                     debug=False
                 )
             except Exception as e:

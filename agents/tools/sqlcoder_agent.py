@@ -33,7 +33,7 @@ class Text2SQLAgent:
     
     def __init__(self, 
                  database_path: str = "instance/badcase_doctor.db",
-                 llm_backend: LLMBackend = LLMBackend.GLM_4_FLASH,
+                 llm_backend: LLMBackend = LLMBackend.GLM_5,
                  api_key: str = None,
                  debug: bool = False,
                  execution_mode: ExecutionMode = ExecutionMode.DIRECT):

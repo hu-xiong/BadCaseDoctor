@@ -61,10 +61,12 @@ def execute_agent():
         conversation_history = data.get('conversation_history', [])
         agent_mode = data.get('agent_mode', 'auto')
         model_name = data.get('model')
+        project_id = data.get('project_id')  # 获取项目ID
         
         print(f"[AGENT] 用户ID: {current_user.id}")
         print(f"[AGENT] 用户输入: {user_input}")
         print(f"[AGENT] Agent 模式: {agent_mode}")
+        print(f"[AGENT] 项目ID: {project_id}")
         print(f"[AGENT] 对话历史长度: {len(conversation_history)}")
         
         if not user_input.strip():
@@ -110,7 +112,8 @@ def execute_agent():
                 user_input,
                 conversation_history,
                 current_user.id,
-                llm
+                llm,
+                project_id  # 传入项目ID
             )
         
         # 记录 Agent 执行指标
@@ -214,15 +217,16 @@ def _detect_intent(user_input: str, conversation_history: list, llm) -> dict:
         }
 
 
-def _dispatch_to_agent(agent_type: str, 
+def _dispatch_to_agent(agent_type: str,
                        user_input: str, 
                        conversation_history: list,
                        user_id: str,
-                       llm) -> dict:
+                       llm,
+                       project_id: int = None) -> dict:
     """
     根据 Agent 类型分发任务
     """
-    print(f"[AGENT-DISPATCH] 分发到 Agent: {agent_type}")
+    print(f"[AGENT-DISPATCH] 分发到 Agent: {agent_type}, project_id: {project_id}")
     
     try:
         if agent_type == 'browser_use':

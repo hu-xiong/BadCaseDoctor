@@ -35,6 +35,10 @@ import enum
 from routers.chat import chat_bp
 from routers.agent import agent_bp
 from routers.payment import payment_bp
+from routers.sandbox import sandbox_bp
+from routers.sandbox_client import sandbox_client_bp
+from routers.proposal import proposal_bp
+from routers.sql_preview import sql_preview_bp
 
 # 导入 Prometheus
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -121,6 +125,10 @@ app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
 app.register_blueprint(chat_bp)
 app.register_blueprint(agent_bp)
 app.register_blueprint(payment_bp)
+app.register_blueprint(sandbox_bp)
+app.register_blueprint(sandbox_client_bp)
+app.register_blueprint(proposal_bp)
+app.register_blueprint(sql_preview_bp)
 
 # MinIO配置
 MINIO_CONFIG = {
@@ -906,6 +914,84 @@ class TestCase(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
+class ProposalStatus(enum.Enum):
+    """提案状态"""
+    PENDING = 'pending'          # 待审核
+    APPROVED = 'approved'        # 已审核通过，待执行
+    APPLIED = 'applied'          # 已执行
+    REJECTED = 'rejected'        # 已拒绝
+    ROLLED_BACK = 'rolled_back'  # 标记为回滚
+    CONFLICT = 'conflict'        # 与当前数据冲突
+
+
+class Proposal(db.Model):
+    """Text2SQL 修改提案元数据"""
+    __tablename__ = 'proposal'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+
+    # 多租户标识，对应沙箱中的 tenant_id（如 default / p{project_id}）
+    tenant_id = db.Column(db.String(64), nullable=False, index=True)
+
+    # 目标表：目前支持 'bug' / 'bad_case' / 'test_case'
+    target_table = db.Column(db.String(64), nullable=False)
+
+    # 给人看的摘要
+    summary = db.Column(db.String(255), nullable=False)
+
+    # 待执行的 SQL（UPDATE / DELETE），生成提案时不会直接执行
+    sql_text = db.Column(db.Text, nullable=False)
+
+    # 预估影响行数（生成提案时根据快照 rows 长度/COUNT 得出）
+    affected_rows_estimate = db.Column(db.Integer)
+
+    # 状态机
+    status = db.Column(Enum(ProposalStatus, values_callable=lambda obj: [e.value for e in obj]),
+                       default=ProposalStatus.PENDING,
+                       nullable=False,
+                       index=True)
+    has_conflict = db.Column(db.Boolean, default=False)
+
+    # 时间戳
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    approved_at = db.Column(db.DateTime)
+    applied_at = db.Column(db.DateTime)
+    rejected_at = db.Column(db.DateTime)
+    rolled_back_at = db.Column(db.DateTime)
+
+    # 额外元数据，例如生成时使用的模型、提示词摘要等
+    meta = db.Column(db.JSON)
+
+    project = db.relationship('Project', backref='proposals')
+    user = db.relationship('User', backref='proposals')
+
+
+class ProposalSnapshot(db.Model):
+    """提案快照：记录修改前的行数据，用于精确 diff 与并发控制"""
+    __tablename__ = 'proposal_snapshot'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    proposal_id = db.Column(db.Integer, db.ForeignKey('proposal.id', ondelete='CASCADE'),
+                            nullable=False, index=True)
+
+    tenant_id = db.Column(db.String(64), nullable=False, index=True)
+    target_table = db.Column(db.String(64), nullable=False)
+
+    # 被修改行的主键值（默认使用 id 列）
+    row_id = db.Column(db.Integer, nullable=False, index=True)
+
+    # 修改前整行数据（字段 -> 值），使用 JSON 存储
+    before_data = db.Column(db.JSON, nullable=False)
+
+    # 乐观锁字段：记录快照时行的 updated_at，用于 apply 前冲突检查
+    row_updated_at = db.Column(db.DateTime)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    proposal = db.relationship('Proposal', backref='snapshots')
+
 class ChatSession(db.Model):
     __tablename__ = 'chat_session'
     id = db.Column(db.Integer, primary_key=True)
@@ -936,6 +1022,7 @@ class ChatMessage(db.Model):
     evidences = db.Column(db.Text)  # JSON格式存储evidences
     navigation = db.Column(db.Text)  # JSON格式存储navigation（点击跳转Bug）
     modify_navigation = db.Column(db.Text)  # JSON格式存储modifyNavigation（修改预览导航）
+    modify_groups = db.Column(db.Text)  # JSON格式存储modifyGroups（分组修改预览）
     final_response = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -3690,6 +3777,39 @@ def sync_database_schema():
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
+            'test_case': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'title VARCHAR(200) NOT NULL',
+                    'status VARCHAR(20) DEFAULT "draft"',
+                    'case_type VARCHAR(50) DEFAULT "功能测试"',
+                    'priority VARCHAR(10) DEFAULT "P3"',
+                    'test_type VARCHAR(20) DEFAULT "手动"',
+                    'preconditions TEXT',
+                    'steps TEXT',
+                    'remark TEXT',
+                    'requirement_id INT',
+                    'related_defects TEXT',
+                    'baseline VARCHAR(100)',
+                    'estimated_time INT DEFAULT 0',
+                    'actual_time INT',
+                    'remaining_time INT',
+                    'last_executed DATETIME',
+                    'executed_by INT',
+                    'execution_result VARCHAR(20)',
+                    'version VARCHAR(20) DEFAULT "v1"',
+                    'plan_id INT',
+                    'project_id INT NOT NULL',
+                    'creator_id INT',
+                    'assignee_id INT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'FOREIGN KEY (plan_id) REFERENCES plan(id)',
+                    'FOREIGN KEY (project_id) REFERENCES project(id)',
+                    'FOREIGN KEY (creator_id) REFERENCES user(id)',
+                    'FOREIGN KEY (assignee_id) REFERENCES user(id)'
+                ]
+            },
             'chat_session': {
                 'columns': [
                     'id INTEGER PRIMARY KEY AUTOINCREMENT',
@@ -3717,6 +3837,9 @@ def sync_database_schema():
                     'execution_results TEXT',
                     'agent_result TEXT',
                     'evidences TEXT',
+                    'navigation TEXT',
+                    'modify_navigation TEXT',
+                    'modify_groups TEXT',
                     'final_response TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
@@ -4644,10 +4767,18 @@ def api_get_project_bugs(project_id):
         # 获取计划ID参数
         plan_id = request.args.get('plan_id', type=int)
         
+        # 获取状态类型参数
+        status_type = request.args.get('status_type')
+        
         # 构建查询条件
         query = Bug.query.filter_by(project_id=project_id)
         
-        if plan_id is not None:
+        # 处理status_type参数
+        if status_type == 'unplanned':
+            # 未计划的Bug：没有关联计划的Bug
+            query = query.filter(Bug.plan_id.is_(None))
+            print(f"过滤未计划的Bug (status_type=unplanned)")
+        elif plan_id is not None:
             query = query.filter_by(plan_id=plan_id)
         
         # 分页查询Bug
@@ -5239,7 +5370,8 @@ def api_get_chat_session(session_id):
                 'agent_result': msg.agent_result,
                 'evidences': msg.evidences,
                 'navigation': msg.navigation,
-                'modify_navigation': msg.modify_navigation,  # 添加 modify_navigation
+                'modify_navigation': msg.modify_navigation,
+                'modify_groups': msg.modify_groups,  # 添加 modify_groups
                 'final_response': msg.final_response,
                 'created_at': msg.created_at.isoformat()
             })
@@ -5401,7 +5533,8 @@ def api_add_chat_message(session_id):
             agent_result=data.get('agent_result'),
             evidences=data.get('evidences'),
             navigation=data.get('navigation'),
-            modify_navigation=data.get('modify_navigation'),  # 添加 modify_navigation
+            modify_navigation=data.get('modify_navigation'),
+            modify_groups=data.get('modify_groups'),  # 添加 modify_groups
             final_response=data.get('final_response')
         )
             
@@ -5419,6 +5552,77 @@ def api_add_chat_message(session_id):
         db.session.rollback()
         print(f"添加消息失败: {e}")
         return jsonify({'success': False, 'error': '添加消息失败'}), 500
+
+@app.route('/api/projects/<int:project_id>/testcases', methods=['GET'])
+@login_required
+def api_get_project_testcases(project_id):
+    """获取项目的TestCase列表（分页）"""
+    try:
+        # 检查权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        
+        # 获取计划ID参数
+        plan_id = request.args.get('plan_id', type=int)
+        
+        # 获取状态类型参数
+        status_type = request.args.get('status_type')
+        
+        # 构建查询条件
+        query = TestCase.query.filter_by(project_id=project_id)
+        
+        # 处理status_type参数
+        if status_type == 'unplanned':
+            # 未计划的测试用例：没有关联计划的测试用例
+            query = query.filter(TestCase.plan_id.is_(None))
+            print(f"过滤未计划的TestCase (status_type=unplanned)")
+        elif plan_id is not None:
+            query = query.filter_by(plan_id=plan_id)
+        
+        # 分页查询TestCase
+        pagination = query.order_by(TestCase.created_at.desc())\
+            .paginate(page=page, per_page=per_page, error_out=False)
+        
+        testcases = []
+        for tc in pagination.items:
+            # 获取负责人姓名
+            assignee_name = '未指派'
+            if tc.assignee_id:
+                user = User.query.get(tc.assignee_id)
+                if user:
+                    assignee_name = user.name
+            
+            testcases.append({
+                'id': tc.id,
+                'title': tc.title,
+                'status': tc.status.value if hasattr(tc.status, 'value') else str(tc.status),
+                'case_type': tc.case_type,
+                'priority': tc.priority,
+                'assignee': assignee_name,
+                'plan_id': tc.plan_id,
+                'created_at': tc.created_at.isoformat()
+            })
+        
+        return jsonify({
+            'success': True,
+            'badcases': testcases,  # 为了兼容前端 filteredBadcases，这里使用 badcases 键名
+            'total': pagination.total,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': pagination.total,
+                'pages': pagination.pages,
+                'has_next': pagination.has_next,
+                'has_prev': pagination.has_prev
+            }
+        })
+    except Exception as e:
+        print(f"获取项目TestCase列表失败: {e}")
+        return jsonify({'success': False, 'error': '获取TestCase列表失败'}), 500
 
 if __name__ == '__main__':
     print(generate_password_hash("123456"))

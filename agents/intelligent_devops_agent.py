@@ -6,6 +6,7 @@
 
 import asyncio
 import time
+import os
 from typing import Dict, Any
 from .react_simplified import SimplifiedReActEngine
 from .tool_registry import ToolRegistry
@@ -88,9 +89,11 @@ class IntelligentDevOpsAgent:
     
     def _register_tools(self):
         """注册所有工具 - 包含分层工具和Skill工具"""
-        # 注册业务工具
-        self.tool_registry.register(BrowserTestTool(self.llm))
-        self.tool_registry.register(DatabaseTool(self.llm, self.db))
+        # 注册业务工具（BrowserTestTool 依赖 playwright，可能未安装）
+        if BrowserTestTool is not None:
+            self.tool_registry.register(BrowserTestTool(self.llm))
+        execution_mode = (os.getenv("TEXT2SQL_EXECUTION_MODE", "direct") or "direct").strip().lower()
+        self.tool_registry.register(DatabaseTool(self.llm, self.db, execution_mode=execution_mode))
         self.tool_registry.register(LogAnalyzerTool(self.llm))
         self.tool_registry.register(AccuracyTesterTool(self.llm))
         self.tool_registry.register(SearchTool(self.llm))

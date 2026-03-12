@@ -107,7 +107,41 @@
           </div>
           
           <!-- 修改预览导航区域 - 沙箱预览模式需要用户确认 -->
-          <div v-if="message.modifyNavigation" class="modify-navigation-section">
+          <!-- 支持 modifyGroups 多分组显示 -->
+          <div v-if="message.modifyGroups && message.modifyGroups.length > 0" class="modify-navigation-section">
+            <div v-for="(group, groupIdx) in message.modifyGroups" :key="groupIdx" class="findings-card" style="margin-bottom: 12px;">
+              <div class="findings-header">
+                <span class="findings-icon">📝</span>
+                <span class="findings-title">沙箱预览</span>
+                <span class="findings-count">{{ group.items.length }} 项</span>
+                <span v-if="group.plan_id" class="plan-badge">计划 #{{ group.plan_id }}</span>
+              </div>
+              <div class="modify-navigation-content">
+                <!-- 显示该组第一个项的修改字段对比 -->
+                <template v-if="group.items[0]?.diff">
+                  <div v-for="(fieldDiff, idx) in group.items[0].diff" :key="idx" class="modify-field-preview">
+                    <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                    <span :class="['old-value', { 'empty-value': !getFieldOldValue(fieldDiff) }]">
+                      {{ getFieldOldValue(fieldDiff) || '未设置' }}
+                    </span>
+                    <span class="arrow">→</span>
+                    <span class="new-value">{{ getFieldNewValue(fieldDiff) || '-' }}</span>
+                  </div>
+                </template>
+                <!-- 如果有多项，显示提示 -->
+                <div v-if="group.items.length > 1" class="group-items-hint">
+                  共 {{ group.items.length }} 条连续记录待确认
+                </div>
+                <!-- 只有在列表中显示按钮 -->
+                <div class="modify-actions">
+                  <button @click="handleShowGroupInList(group, message.id)" class="btn-primary">在列表中显示</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- 兼容旧版本：单个 modifyNavigation -->
+          <div v-else-if="message.modifyNavigation && !message.modifyNavigation.batch_modify" class="modify-navigation-section">
             <div class="findings-card">
               <div class="findings-header">
                 <span class="findings-icon">📝</span>
@@ -277,6 +311,36 @@ const isSending = ref(false)
 const isComposing = ref(false)  // 输入法组合状态
 const abortController = ref(null)  // 用于终止请求
 const currentProjectId = ref(null)
+
+// 将运行中状态收敛（停止/异常时用）
+const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
+  if (!aiMessage) return
+
+  if (Array.isArray(aiMessage.steps)) {
+    aiMessage.steps.forEach(step => {
+      if (step?.status === 'running') {
+        step.status = 'skipped'
+        step.description = reason === 'stopped' ? '已停止' : '已中断'
+        if (step.toolCall && step.toolCall.output === '执行中...') {
+          step.toolCall.output = reason === 'stopped' ? '已停止' : '已中断'
+        }
+      }
+    })
+  }
+
+  if (aiMessage.agentResult) {
+    aiMessage.agentResult.status = reason === 'stopped' ? 'cancelled' : 'failed'
+  }
+
+  // 顶部提示同步更新，避免还停留在“修改中/执行中”
+  if (typeof aiMessage.understanding === 'string') {
+    aiMessage.understanding = reason === 'stopped' ? '⏹ 已停止生成' : '⚠️ 已中断'
+  }
+
+  if (!aiMessage.finalResponse) {
+    aiMessage.finalResponse = reason === 'stopped' ? '已停止生成' : '已中断'
+  }
+}
 
 // 格式化消息内容（支持简单的markdown）
 const formatMessage = (content) => {
@@ -538,6 +602,30 @@ const extractToolName = (title) => {
   return ''
 }
 
+// 获取 diff 字段的旧值（兼容 delete 和 unchanged 类型）
+const getFieldOldValue = (fieldDiff) => {
+  if (!fieldDiff || !fieldDiff.lines) return null
+  // 优先找 delete 类型
+  const deleteLine = fieldDiff.lines.find(l => l.type === 'delete')
+  if (deleteLine) return deleteLine.content
+  // 如果只有 unchanged，说明值没变，返回该值作为旧值
+  const unchangedLine = fieldDiff.lines.find(l => l.type === 'unchanged')
+  if (unchangedLine) return unchangedLine.content
+  return null
+}
+
+// 获取 diff 字段的新值（兼容 add 和 unchanged 类型）
+const getFieldNewValue = (fieldDiff) => {
+  if (!fieldDiff || !fieldDiff.lines) return null
+  // 优先找 add 类型
+  const addLine = fieldDiff.lines.find(l => l.type === 'add')
+  if (addLine) return addLine.content
+  // 如果只有 unchanged，说明值没变，返回该值作为新值
+  const unchangedLine = fieldDiff.lines.find(l => l.type === 'unchanged')
+  if (unchangedLine) return unchangedLine.content
+  return null
+}
+
 // 获取时间轴状态描述
 const getTimelineStatus = (message) => {
   const hasRunning = message.steps?.some(s => s.status === 'running')
@@ -616,24 +704,98 @@ const handleConfirmModify = async (modifyData) => {
 }
 
 // 在列表中显示修改
+// 处理分组跳转到列表
+const handleShowGroupInList = (group, messageId) => {
+  console.log('[MODIFY] 分组跳转到列表:', group, 'messageId:', messageId)
+  
+  // 防御性检查
+  if (!group) {
+    console.error('[MODIFY] group 为空')
+    return
+  }
+  if (!group.items || !Array.isArray(group.items) || group.items.length === 0) {
+    console.warn('[MODIFY] group.items 为空或无效')
+    return
+  }
+  
+  // 为该组的每个记录发送事件
+  group.items.forEach((item, index) => {
+    // 防御性检查
+    if (!item || item.target_id === undefined) {
+      console.warn('[MODIFY] 跳过无效 item:', item)
+      return
+    }
+    
+    const intTargetId = parseInt(item.target_id)
+    if (isNaN(intTargetId)) {
+      console.warn('[MODIFY] 跳过无效 target_id:', item.target_id)
+      return
+    }
+    
+    // 只有 confirmation_required === false 才表示已处理（不需要确认）
+    // success: true 只表示预览成功，不表示已执行
+    const alreadyProcessed = item.confirmation_required === false
+    
+    console.log('[MODIFY] 发送事件:', {
+      targetId: intTargetId,
+      confirmation_required: item.confirmation_required,
+      alreadyProcessed,
+      diff: item.diff
+    })
+    
+    const event = new CustomEvent('show-modify-in-list', {
+      detail: {
+        targetId: intTargetId,
+        target: item.target || 'badcase',
+        diff: item.diff || [],
+        modifications: item.modifications || {},
+        plan_id: group.plan_id,  // 使用分组的 plan_id
+        executed: alreadyProcessed,
+        messageId: messageId,
+        batchIndex: index
+      },
+      bubbles: true
+    })
+    window.dispatchEvent(event)
+  })
+}
+
 const handleShowModifyInList = (modifyData, messageId) => {
-  console.log('[MODIFY] 在列表中显示修改:', modifyData, 'messageId:', messageId)  
+  console.log('[MODIFY] 在列表中显示修改:', modifyData, 'messageId:', messageId)
+  
+  // 防御性检查
+  if (!modifyData) {
+    console.error('[MODIFY] modifyData 为空')
+    return
+  }  
   
   // 批量修改：为每个记录发送单独的事件
-  if (modifyData.batch_modify && modifyData.batch_results && modifyData.batch_results.length > 0) {
+  if (modifyData.batch_modify && modifyData.batch_results && Array.isArray(modifyData.batch_results) && modifyData.batch_results.length > 0) {
     console.log('[MODIFY] 批量修改，发送多个事件')
     modifyData.batch_results.forEach((result, index) => {
-      const alreadyProcessed = result.confirmation_required === false
+      // 防御性检查
+      if (!result || result.target_id === undefined) {
+        console.warn('[MODIFY] 跳过无效 result:', result)
+        return
+      }
+      
+      const intTargetId = parseInt(result.target_id)
+      if (isNaN(intTargetId)) {
+        console.warn('[MODIFY] 跳过无效 target_id:', result.target_id)
+        return
+      }
+      
+      const alreadyProcessed = result.confirmation_required === false || result.success === true
       
       const event = new CustomEvent('show-modify-in-list', {
         detail: {
-          targetId: result.target_id,
-          target: result.target,
-          diff: result.diff,
-          modifications: result.modifications,
+          targetId: intTargetId,
+          target: result.target || 'badcase',
+          diff: result.diff || [],
+          modifications: result.modifications || {},
           executed: alreadyProcessed,
           messageId: messageId,
-          batchIndex: index  // 标记批量索引
+          batchIndex: index
         },
         bubbles: true
       })
@@ -643,17 +805,23 @@ const handleShowModifyInList = (modifyData, messageId) => {
   }
   
   // 单个修改
+  const intTargetId = parseInt(modifyData.target_id)
+  if (isNaN(intTargetId)) {
+    console.error('[MODIFY] 无效的 target_id:', modifyData.target_id)
+    return
+  }
+  
   const alreadyProcessed = modifyData.success === true || 
                           modifyData.cancelled === true || 
                           modifyData.confirmation_required === false
   
   const event = new CustomEvent('show-modify-in-list', {
     detail: {
-      targetId: modifyData.target_id,
-      target: modifyData.target,
-      diff: modifyData.diff,
-      modifications: modifyData.modifications,
-      plan_id: modifyData.plan_id || modifyData.before?.plan_id,
+      targetId: intTargetId,
+      target: modifyData.target || 'badcase',
+      diff: modifyData.diff || [],
+      modifications: modifyData.modifications || {},
+      plan_id: modifyData.plan_id || modifyData.before?.plan_id || null,
       executed: alreadyProcessed,
       messageId: messageId
     },
@@ -817,6 +985,7 @@ const loadSessionMessages = async () => {
           }
         } else {
           const modifyNav = msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null
+          const modifyGroups = msg.modify_groups ? JSON.parse(msg.modify_groups) : null
           
           // 检查历史消息中的 modifyNavigation 是否已执行
           // 如果 confirmation_required=true 但数据库中的记录已被修改，标记为已执行
@@ -832,6 +1001,7 @@ const loadSessionMessages = async () => {
             evidences: msg.evidences ? JSON.parse(msg.evidences) : [],
             navigation: msg.navigation ? JSON.parse(msg.navigation) : null,
             modifyNavigation: modifyNav,  // 加载 modifyNavigation
+            modifyGroups: modifyGroups,  // 加载 modifyGroups
             finalResponse: msg.final_response,
             time: new Date(msg.created_at).toLocaleTimeString(),
             isHistorical: true  // 标记为历史消息
@@ -851,78 +1021,101 @@ const loadSessionMessages = async () => {
 
 // 检查历史 modifyNavigation 的执行状态
 const checkModifyNavigationStatus = async () => {
-  // 遍历所有消息，检查 modifyNavigation 是否需要验证执行状态
+  // 遍历所有消息，检查 modifyNavigation 和 modifyGroups 是否需要验证执行状态
   for (const msg of messages.value) {
+    // 检查 modifyGroups（批量修改分组）
+    if (msg.modifyGroups && Array.isArray(msg.modifyGroups) && msg.modifyGroups.length > 0) {
+      for (const group of msg.modifyGroups) {
+        if (!group.items || !Array.isArray(group.items)) continue
+        
+        for (const item of group.items) {
+          // 只检查需要确认且未标记为成功的项
+          if (item.confirmation_required !== false && !item.success) {
+            const { target, target_id, modifications } = item
+            
+            if (!target || !target_id || !modifications) continue
+            
+            try {
+              const isApplied = await checkRecordModified(target, target_id, modifications)
+              if (isApplied) {
+                item.confirmation_required = false
+                item.success = true
+                console.log('[MODIFY] 历史消息 modifyGroups 检测到修改已生效:', target_id)
+              }
+            } catch (error) {
+              console.error('[MODIFY] 检查 modifyGroups 执行状态失败:', error)
+            }
+          }
+        }
+      }
+    }
+    
+    // 检查单个 modifyNavigation
     if (msg.modifyNavigation && msg.modifyNavigation.confirmation_required && !msg.modifyNavigation.success) {
       const { target, target_id, modifications } = msg.modifyNavigation
       
       if (!target || !target_id || !modifications) continue
       
       try {
-        // 调用后端 API 检查当前记录状态
-        let detailUrl = ''
-        if (target === 'badcase') {
-          detailUrl = `/api/badcases/${target_id}`
-        } else if (target === 'bug') {
-          detailUrl = `/api/bugs/${target_id}`
-        } else if (target === 'testcase') {
-          detailUrl = `/api/testcases/${target_id}`
-        }
-        
-        if (!detailUrl) continue
-        
-        const response = await fetch(detailUrl, { credentials: 'include' })
-        if (response.ok) {
-          const result = await response.json()
-          // 检查是否有错误（如未登录）
-          if (result.error) {
-            console.warn('[MODIFY] API 返回错误:', result.error)
-            continue
-          }
-          const currentData = result[target] || result.badcase || result.bug || result.testcase
-          
-          if (currentData) {
-            // 检查修改是否已生效
-            let isApplied = true
-            for (const [field, newValue] of Object.entries(modifications)) {
-              const currentValue = currentData[field]
-              
-              // 比较 assignee 字段时需要特殊处理
-              if (field === 'assignee') {
-                // newValue 可能是用户名或用户ID字符串
-                // 需要检查：1. assignee_id (数字) 与 newValue (可能是数字字符串)
-                //         2. assignee (用户名) 与 newValue (可能是用户名)
-                
-                const currentAssigneeId = currentData.assignee_id
-                const currentAssigneeName = currentData.assignee
-                
-                // 检查是否匹配（用户ID或用户名）
-                const matchesById = currentAssigneeId && currentAssigneeId.toString() === newValue.toString()
-                const matchesByName = currentAssigneeName && currentAssigneeName.toString() === newValue.toString()
-                
-                if (!matchesById && !matchesByName) {
-                  isApplied = false
-                  break
-                }
-              } else if (currentValue?.toString() !== newValue?.toString()) {
-                isApplied = false
-                break
-              }
-            }
-            
-            if (isApplied) {
-              // 修改已生效，标记为已执行
-              msg.modifyNavigation.success = true
-              msg.modifyNavigation.confirmation_required = false
-              console.log('[MODIFY] 历史消息检测到修改已生效:', msg.id)
-            }
-          }
+        const isApplied = await checkRecordModified(target, target_id, modifications)
+        if (isApplied) {
+          msg.modifyNavigation.success = true
+          msg.modifyNavigation.confirmation_required = false
+          console.log('[MODIFY] 历史消息 modifyNavigation 检测到修改已生效:', msg.id)
         }
       } catch (error) {
         console.error('[MODIFY] 检查执行状态失败:', error)
       }
     }
   }
+}
+
+// 检查记录是否已被修改
+const checkRecordModified = async (target, target_id, modifications) => {
+  let detailUrl = ''
+  if (target === 'badcase') {
+    detailUrl = `/api/badcases/${target_id}`
+  } else if (target === 'bug') {
+    detailUrl = `/api/bugs/${target_id}`
+  } else if (target === 'testcase') {
+    detailUrl = `/api/testcases/${target_id}`
+  }
+  
+  if (!detailUrl) return false
+  
+  const response = await fetch(detailUrl, { credentials: 'include' })
+  if (!response.ok) return false
+  
+  const result = await response.json()
+  if (result.error) {
+    console.warn('[MODIFY] API 返回错误:', result.error)
+    return false
+  }
+  
+  const currentData = result[target] || result.badcase || result.bug || result.testcase
+  if (!currentData) return false
+  
+  // 检查修改是否已生效
+  for (const [field, newValue] of Object.entries(modifications)) {
+    const currentValue = currentData[field]
+    
+    // 比较 assignee 字段时需要特殊处理
+    if (field === 'assignee') {
+      const currentAssigneeId = currentData.assignee_id
+      const currentAssigneeName = currentData.assignee
+      
+      const matchesById = currentAssigneeId && currentAssigneeId.toString() === newValue.toString()
+      const matchesByName = currentAssigneeName && currentAssigneeName.toString() === newValue.toString()
+      
+      if (!matchesById && !matchesByName) {
+        return false
+      }
+    } else if (currentValue?.toString() !== newValue?.toString()) {
+      return false
+    }
+  }
+  
+  return true
 }
 
 // 保存消息到数据库
@@ -1008,6 +1201,12 @@ const handleSend = async (e) => {
 
 // 停止生成
 const handleStop = () => {
+  // 先把 UI 状态收敛（即使网络层 abort 还没抛异常）
+  const lastMsg = messages.value[messages.value.length - 1]
+  if (lastMsg && !lastMsg.isUser) {
+    finalizeRunningMessage(lastMsg, 'stopped')
+  }
+
   if (abortController.value) {
     abortController.value.abort()
     abortController.value = null
@@ -1148,10 +1347,26 @@ const handleReactAgentMode = async (userMessage) => {
                 }
               } else if (stepEvent.event === 'observation') {
                 console.log('[CHAT-STREAM] === 触发 observation 事件 ===')
-                const runningStep = aiMessage.steps.find(s => s.status === 'running')
+                const outputData = stepEvent.data
+                console.log('[CHAT-STREAM] 收到 observation 数据:', JSON.stringify(outputData, null, 2).substring(0, 500))
+                console.log('[CHAT-STREAM] outputData 类型:', typeof outputData)
+                console.log('[CHAT-STREAM] outputData.keys:', outputData ? Object.keys(outputData) : 'null')
+                
+                // 存储所有 observation 数据
+                aiMessage.allObservations.push(outputData)
+                
+                // 查找正在运行的步骤，如果找不到就用最后一个步骤
+                let runningStep = aiMessage.steps.find(s => s.status === 'running')
+                if (!runningStep) {
+                  // 如果没有 running 的步骤，找最后一个 modify 相关的步骤
+                  runningStep = aiMessage.steps.slice().reverse().find(s => 
+                    s.title && (s.title.includes('modify') || s.title === 'grep')
+                  ) || aiMessage.steps[aiMessage.steps.length - 1]
+                  console.log('[CHAT-STREAM] 没有找到 running 步骤，使用:', runningStep?.title)
+                }
+                
                 if (runningStep) {
-                  const outputData = stepEvent.data
-                  console.log('[CHAT-STREAM] 收到 observation 数据:', outputData)
+                  runningStep.toolCall = runningStep.toolCall || { name: '', output: '' }
                   runningStep.toolCall.output = typeof outputData === 'string' 
                     ? outputData 
                     : JSON.stringify(outputData, null, 2)
@@ -1159,8 +1374,6 @@ const handleReactAgentMode = async (userMessage) => {
                   // 收到结果后立即更新步骤状态为 completed
                   runningStep.status = 'completed'
                   runningStep.description = '已完成'
-                  
-                  aiMessage.allObservations.push(outputData)
                   
                   // 提取搜索结果 - 执行辅揥器可能会调用搜索工具
                   let isSearchResult = false
@@ -1192,38 +1405,114 @@ const handleReactAgentMode = async (userMessage) => {
                     // 注意：后端返回的是 {success: true, data: {..., navigation: ...}} 
                     // 但流式传输时可能直接返回 data 部分
                     const toolData = outputData.data || outputData
+                    console.log('[MODIFY-DEBUG] toolName:', toolName)
+                    console.log('[MODIFY-DEBUG] toolData:', JSON.stringify(toolData, null, 2).substring(0, 800))
+                    console.log('[MODIFY-DEBUG] toolData.batch_modify:', toolData.batch_modify)
+                    console.log('[MODIFY-DEBUG] toolData.batch_results:', toolData.batch_results ? 'exists, length=' + toolData.batch_results.length : 'not exists')
+                    console.log('[MODIFY-DEBUG] toolData.results:', toolData.results ? 'exists, length=' + toolData.results.length : 'not exists')
                                       
-                    // 处理modify工具输出 - 使用modifyNavigation替代modifyPreview
+                    // 处理modify工具输出 - 使用modifyGroups替代modifyNavigation
                     if (toolName === 'modify' && toolData && typeof toolData === 'object') {
-                      // 情况1: 批量修改结果
-                      if (toolData.batch_modify && toolData.results && toolData.results.length > 0) {
-                        // 批量修改：为每个结果生成单独的消息或合并显示
-                        const allDiffs = []
-                        toolData.results.forEach(r => {
-                          if (r.result?.diff) {
-                            allDiffs.push({
-                              target_id: r.id,
-                              target: toolData.target,
-                              diff: r.result.diff,
-                              confirmation_required: r.result.confirmation_required
+                      // 情况1: 批量修改结果 - 按 (plan_id, 连续性) 分组
+                      // 注意：后端返回 batch_results，不是 results
+                      const resultsArray = toolData.batch_results || toolData.results
+                      console.log('[MODIFY] 检测批量修改数据: batch_modify=', toolData.batch_modify, 'results=', resultsArray ? resultsArray.length : 0)
+                      if (toolData.batch_modify && resultsArray && Array.isArray(resultsArray) && resultsArray.length > 0) {
+                        try {
+                          // ===== 收集所有修改项（包含 plan_id）=====
+                          const allItems = []
+                          resultsArray.forEach(r => {
+                            // 防御性检查 - batch_results 格式是 {target_id, plan_id, diff, ...}
+                            // 不是 {id, result: {...}} 格式
+                            const itemId = parseInt(r.target_id || r.id)
+                            const itemPlanId = r.plan_id ? parseInt(r.plan_id) : null
+                            
+                            // 验证 ID 有效性
+                            if (isNaN(itemId)) {
+                              console.warn('[MODIFY] 跳过无效 ID:', r.target_id || r.id)
+                              return
+                            }
+                            
+                            // 检查是否有 diff
+                            const diff = r.diff || (r.result && r.result.diff) || []
+                            
+                            allItems.push({
+                              target_id: itemId,
+                              plan_id: itemPlanId,
+                              target: toolData.target || 'badcase',
+                              diff: diff,
+                              modifications: r.modifications || (r.result && r.result.modifications) || {},
+                              confirmation_required: r.confirmation_required !== false,
+                              success: r.success === true
                             })
+                          })
+                          
+                          if (allItems.length === 0) {
+                            console.warn('[MODIFY] 没有有效的修改项')
+                          } else {
+                            // ===== 按 plan_id 分组 =====
+                            const planGroups = {}
+                            allItems.forEach(item => {
+                              const planKey = item.plan_id !== null ? String(item.plan_id) : 'unplanned'
+                              if (!planGroups[planKey]) {
+                                planGroups[planKey] = []
+                              }
+                              planGroups[planKey].push(item)
+                            })
+                            
+                            // ===== 在每个 plan_id 组内按连续性分组 =====
+                            const modifyGroups = []
+                            Object.entries(planGroups).forEach(([planId, items]) => {
+                              // 按 target_id 数值排序
+                              items.sort((a, b) => a.target_id - b.target_id)
+                              
+                              // 分组连续的项（ID 差值为 1）
+                              let currentGroup = []
+                              
+                              items.forEach((item, idx) => {
+                                if (idx === 0) {
+                                  // 第一项直接加入
+                                  currentGroup.push(item)
+                                } else {
+                                  const prevItem = items[idx - 1]
+                                  const idDiff = item.target_id - prevItem.target_id
+                                  
+                                  if (idDiff === 1) {
+                                    // 连续：加入当前组
+                                    currentGroup.push(item)
+                                  } else {
+                                    // 不连续：保存当前组，开始新组
+                                    if (currentGroup.length > 0) {
+                                      modifyGroups.push({
+                                        plan_id: planId === 'unplanned' ? null : parseInt(planId),
+                                        items: [...currentGroup]  // 复制数组
+                                      })
+                                    }
+                                    currentGroup = [item]
+                                  }
+                                }
+                              })
+                              
+                              // 保存最后一组
+                              if (currentGroup.length > 0) {
+                                modifyGroups.push({
+                                  plan_id: planId === 'unplanned' ? null : parseInt(planId),
+                                  items: [...currentGroup]  // 复制数组
+                                })
+                              }
+                            })
+                            
+                            // 使用 Vue.set 风格更新，确保响应式
+                            aiMessage.modifyGroups = Object.freeze([...modifyGroups])
+                            aiMessage.modifyNavigation = {
+                              batch_modify: true,
+                              batch_results: [...allItems],
+                              batch_count: allItems.length
+                            }
+                            console.log('[MODIFY] 生成 modifyGroups:', modifyGroups.length, '个分组, 共', allItems.length, '项')
                           }
-                        })
-                        
-                        // 显示第一个需要确认的结果
-                        const firstPending = allDiffs.find(d => d.confirmation_required) || allDiffs[0]
-                        if (firstPending) {
-                          aiMessage.modifyNavigation = {
-                            target: firstPending.target || toolData.target,
-                            target_id: firstPending.target_id,
-                            diff: firstPending.diff,
-                            modifications: toolData.results.find(r => r.id === firstPending.target_id)?.result?.modifications,
-                            confirmation_required: firstPending.confirmation_required,
-                            batch_modify: true,
-                            batch_results: allDiffs,
-                            batch_count: toolData.results.length
-                          }
-                          console.log('[MODIFY] 存储批量修改导航:', aiMessage.modifyNavigation)
+                        } catch (err) {
+                          console.error('[MODIFY] 分组处理异常:', err)
                         }
                       }
                       // 情况2: 单个需要确认的预览模式
@@ -1486,7 +1775,25 @@ const handleReactAgentMode = async (userMessage) => {
     }
   } catch (error) {
     console.error('ReAct 执行失败:', error)
-    aiMessage.finalResponse = `错误: ${error.message || '未知错误'}`
+    // 如果用户已点过停止（我们已在 handleStop 里收敛 UI），这里不要再覆盖成错误
+    if (aiMessage?.agentResult?.status === 'cancelled') {
+      // noop
+    } else {
+      const msg = String(error?.message || error || '')
+      const msgLower = msg.toLowerCase()
+      const aborted =
+        abortController.value?.signal?.aborted ||
+        error?.name === 'AbortError' ||
+        msgLower.includes('aborted') ||
+        msgLower.includes('bodystreambuffer')
+
+      if (aborted) {
+        finalizeRunningMessage(aiMessage, 'stopped')
+      } else {
+        finalizeRunningMessage(aiMessage, 'failed')
+        aiMessage.finalResponse = `错误: ${error.message || '未知错误'}`
+      }
+    }
   }
   
   // 保存最终结果到数据库
@@ -1500,6 +1807,7 @@ const handleReactAgentMode = async (userMessage) => {
     evidences: JSON.stringify(aiMessage.evidences || []),
     navigation: JSON.stringify(aiMessage.navigation || null),
     modify_navigation: JSON.stringify(aiMessage.modifyNavigation || null),  // 保存 modifyNavigation
+    modify_groups: JSON.stringify(aiMessage.modifyGroups || null),  // 保存 modifyGroups
     final_response: aiMessage.finalResponse
   })
 }
@@ -1531,6 +1839,7 @@ const handleAgentMode = async (userMessage) => {
       body: JSON.stringify({
         user_input: userMessage,
         model: selectedModel.value,
+        project_id: currentProjectId.value || props.projectId,  // 传入项目ID
         conversation_history: messages.value.map(m => ({
           role: m.isUser ? 'user' : 'assistant',
           content: m.content || m.finalResponse || m.understanding
@@ -1788,14 +2097,82 @@ const handleModifyCancelled = (event) => {
 // 处理修改确认事件
 const handleModifyConfirmed = (event) => {
   const { targetId } = event.detail
-  console.log('[MODIFY] 收到确认事件，targetId:', targetId)
+  const intTargetId = parseInt(targetId)
+  console.log('[MODIFY] 收到确认事件，targetId:', intTargetId)
   
-  // 找到对应的 modifyNavigation 并标记为已执行
-  messages.value.forEach(msg => {
-    if (msg.modifyNavigation && msg.modifyNavigation.target_id === targetId) {
-      msg.modifyNavigation.success = true  // 标记为已执行，再次点击只定位
-      msg.modifyNavigation.confirmation_required = false
-      console.log('[MODIFY] 已标记消息为已执行:', msg.id)
+  if (isNaN(intTargetId)) {
+    console.error('[MODIFY] 无效的 targetId:', targetId)
+    return
+  }
+  
+  // 找到对应的 modifyNavigation 或 modifyGroups 并标记为已执行
+  messages.value.forEach((msg, msgIdx) => {
+    let updated = false
+    
+    // 处理 modifyGroups
+    if (msg.modifyGroups && Array.isArray(msg.modifyGroups)) {
+      msg.modifyGroups.forEach((group, groupIdx) => {
+        if (!group.items || !Array.isArray(group.items)) return
+        
+        const itemIdx = group.items.findIndex(i => i.target_id === intTargetId)
+        if (itemIdx !== -1) {
+          // 创建新对象触发响应式更新
+          const newItem = {
+            ...group.items[itemIdx],
+            confirmation_required: false,
+            success: true
+          }
+          // 替换数组中的项
+          group.items.splice(itemIdx, 1, newItem)
+          updated = true
+          console.log('[MODIFY] modifyGroups 中标记项为已执行:', intTargetId)
+          
+          // 检查组内是否全部确认完成
+          const allGroupConfirmed = group.items.every(i => i.confirmation_required === false || i.success === true)
+          if (allGroupConfirmed) {
+            console.log('[MODIFY] 该分组全部确认完成, plan_id:', group.plan_id)
+          }
+        }
+      })
+    }
+    
+    // 处理 modifyNavigation
+    if (msg.modifyNavigation) {
+      // 批量修改：标记 batch_results 中对应的项
+      if (msg.modifyNavigation.batch_modify && msg.modifyNavigation.batch_results) {
+        const resultIdx = msg.modifyNavigation.batch_results.findIndex(r => r.target_id === intTargetId)
+        if (resultIdx !== -1) {
+          // 创建新对象触发响应式更新
+          msg.modifyNavigation.batch_results.splice(resultIdx, 1, {
+            ...msg.modifyNavigation.batch_results[resultIdx],
+            confirmation_required: false,
+            success: true
+          })
+          updated = true
+          console.log('[MODIFY] 批量修改中标记项为已执行:', intTargetId)
+          
+          // 检查是否所有项都已确认
+          const allConfirmed = msg.modifyNavigation.batch_results.every(r => r.confirmation_required === false || r.success === true)
+          if (allConfirmed) {
+            console.log('[MODIFY] 批量修改全部确认完成')
+          }
+        }
+      }
+      // 单个修改：标记整个 modifyNavigation
+      else if (msg.modifyNavigation.target_id === intTargetId) {
+        msg.modifyNavigation = {
+          ...msg.modifyNavigation,
+          success: true,
+          confirmation_required: false
+        }
+        updated = true
+        console.log('[MODIFY] 已标记消息为已执行:', msg.id)
+      }
+    }
+    
+    // 触发响应式更新
+    if (updated) {
+      messages.value[msgIdx] = { ...messages.value[msgIdx] }
     }
   })
 }
@@ -2498,6 +2875,23 @@ watch(() => props.sessionId, (newSessionId) => {
 /* 修改导航区域 */
 .modify-navigation-section {
   margin: 12px 0;
+}
+
+.plan-badge {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 8px;
+}
+
+.group-items-hint {
+  font-size: 12px;
+  color: #888;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #eee;
 }
 
 .modify-navigation-content {

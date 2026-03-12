@@ -45,7 +45,7 @@ class DatabaseTool(BaseTool):
                 mode_enum = ExecutionMode(execution_mode)
                 self.text2sql_agent = Text2SQLAgent(
                     database_path='instance/badcase_doctor.db',
-                    llm_backend=LLMBackend.GLM_4_FLASH,
+                    llm_backend=LLMBackend.GLM_5,
                     debug=False,
                     execution_mode=mode_enum
                 )

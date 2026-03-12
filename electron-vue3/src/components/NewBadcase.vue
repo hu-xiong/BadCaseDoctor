@@ -6,31 +6,142 @@
       <div class="loading-text">正在加载项目信息...</div>
     </div>
     
-    <!-- 顶部标题栏 -->
-    <div class="header-bar">
-      <div class="header-left">
-        <span class="back-arrow" @click="goBack">←</span>
-        <span class="header-title">{{ isEdit ? '编辑BadCase' : '新建BadCase' }}</span>
-        <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
+    <!-- 顶部导航栏：嵌入模式隐藏第一栏（布局/人头），保留第二栏（返回/操作） -->
+    <div class="top-bar top-bar--stacked">
+      <!-- 第一栏：仅在非嵌入模式显示 -->
+      <div v-if="!embedded" class="top-bar-row top-bar-row--primary">
+        <div class="top-left">
+          <div class="logo" @click="goToDashboard" style="cursor: pointer;">
+            <span class="logo-text">BadCase Doctor</span>
+            <span class="star-icon">⭐</span>
+          </div>
+
+          <div class="breadcrumb">
+            <span
+              class="breadcrumb-item breadcrumb-link"
+              @click="goBackToProjectDetail"
+              :title="projectInfo?.name || '返回项目详情'"
+            >
+              {{ projectInfo?.name || '项目' }}
+            </span>
+            <span class="breadcrumb-separator">/</span>
+            <span class="breadcrumb-item">编辑BadCase</span>
+            <span class="dropdown-arrow">▼</span>
+          </div>
+
+          <span class="edit-permission">编辑权限</span>
+        </div>
+
+        <div class="top-right">
+          <div class="layout-buttons">
+            <button class="layout-btn" :class="{ active: !leftSidebarHidden }" @click="setLayout('left')" title="切换侧边栏">
+              <div class="layout-icon left-aligned"></div>
+            </button>
+            <button class="layout-btn" :class="{ active: showTerminal }" @click="setLayout('bottom')" title="切换终端">
+              <div class="layout-icon bottom-aligned"></div>
+            </button>
+            <button class="layout-btn" :class="{ active: showAIAssistant }" @click="setLayout('right')" title="切换AI助手">
+              <div class="layout-icon right-aligned"></div>
+            </button>
+          </div>
+
+          <div class="user-dropdown" @click="toggleUserDropdown">
+            <div class="user-avatar">👤</div>
+
+            <div v-if="showUserDropdown" class="user-menu" @click.stop>
+              <div class="user-info">
+                <div class="user-name">{{ currentUser?.name || '用户' }}</div>
+                <div class="user-email">{{ currentUser?.email || 'user@example.com' }}</div>
+              </div>
+              <div class="menu-divider"></div>
+              <div class="menu-item" @click="showNotifications">
+                <span class="menu-icon">🔔</span>
+                <span class="menu-text">通知</span>
+              </div>
+              <div class="menu-item" @click="showHelp">
+                <span class="menu-icon">❓</span>
+                <span class="menu-text">帮助</span>
+              </div>
+              <div class="menu-item" @click="showTeamManagement">
+                <span class="menu-icon">👥</span>
+                <span class="menu-text">团队管理</span>
+              </div>
+              <div class="menu-item" @click="showUserProfile">
+                <span class="menu-icon">👤</span>
+                <span class="menu-text">个人资料</span>
+              </div>
+              <div class="menu-divider"></div>
+              <div class="menu-item logout-item" @click="logout">
+                <span class="menu-icon">🚪</span>
+                <span class="menu-text">退出登录</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="header-right">
-        <button class="header-btn" @click="toggleRequiredOnly">
-          <span class="checkbox-icon" :class="{ checked: showRequiredOnly }">✓</span>
-          只看必填项
-        </button>
-        <button class="header-btn">
-          <span class="gear-icon">⚙</span>
-          配置
-        </button>
-        <button class="header-btn close-btn" @click="goBack">
-          <span class="close-icon">×</span>
-        </button>
+
+      <!-- 第二栏：页面级标题与操作 -->
+      <div class="top-bar-row top-bar-row--secondary">
+        <div class="secondary-left">
+          <span class="back-arrow" @click="goBack">←</span>
+          <span class="page-title">{{ isEdit ? '编辑BadCase' : '新建BadCase' }}</span>
+        </div>
+        <div class="secondary-right">
+          <button class="header-btn" @click="toggleRequiredOnly" title="只看必填项">
+            <span class="checkbox-icon" :class="{ checked: showRequiredOnly }">✓</span>
+            只看必填项
+          </button>
+          <button class="header-btn" title="配置">
+            <span class="gear-icon">⚙</span>
+            配置
+          </button>
+          <button class="header-btn close-btn" @click="goBack" title="关闭">
+            <span class="close-icon">×</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <div class="main-content">
       <!-- 左侧主要内容区 -->
       <div class="content-left">
+        <!-- 待采纳改动（show_diff 模式） -->
+        <div
+          v-if="pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          class="pending-diff-panel"
+        >
+          <div class="pending-diff-header">
+            <div class="pending-diff-title">待采纳改动</div>
+            <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
+          </div>
+
+          <div
+            v-for="(data, field) in pendingDiff.modifications"
+            :key="field"
+            v-show="!String(field).startsWith('_')"
+            class="pending-diff-item"
+            :id="`diff-field-${field}`"
+          >
+            <div class="pending-diff-item-head">
+              <div class="pending-diff-field">
+                <span class="pending-diff-field-label">{{ field }}</span>
+              </div>
+              <div class="pending-diff-actions">
+                <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
+                <button class="btn-icon-reject" title="拒绝该字段" @click="cancelFieldChange(field)">✗</button>
+              </div>
+            </div>
+            <MonacoDiffEditor
+              :original="String(data?.old ?? '')"
+              :modified="String(data?.new ?? '')"
+              language="markdown"
+              theme="vs-dark"
+              height="160px"
+              :renderSideBySide="false"
+            />
+          </div>
+        </div>
+
         <!-- 标题区域 -->
         <div class="title-section">
           <input 
@@ -339,11 +450,33 @@
         </div>
         
         <!-- 相似问题 -->
-        <div class="problem-section">
+        <div class="problem-section" :class="{ 'has-diff': pendingDiff?.modifications?.base_problem }">
           <h3 class="problem-title">相似问题:</h3>
+          <!-- diff 显示区域 -->
+          <div v-if="pendingDiff?.modifications?.base_problem" class="field-diff-panel">
+            <div class="diff-header">
+              <span class="diff-label">修改预览:</span>
+              <div class="diff-actions">
+                <button @click="confirmFieldChange('base_problem')" class="btn-confirm" title="确认">✓</button>
+                <button @click="cancelFieldChange('base_problem')" class="btn-cancel" title="取消">✗</button>
+              </div>
+            </div>
+            <div class="diff-content">
+              <div class="diff-old">
+                <span class="diff-tag old">原值</span>
+                <span class="diff-value">{{ pendingDiff.modifications.base_problem.old || '未设置' }}</span>
+              </div>
+              <div class="diff-arrow">→</div>
+              <div class="diff-new">
+                <span class="diff-tag new">新值</span>
+                <span class="diff-value">{{ pendingDiff.modifications.base_problem.new }}</span>
+              </div>
+            </div>
+          </div>
           <textarea 
             v-model="badcase.base_problem" 
             class="problem-textarea" 
+            :class="{ 'field-with-diff': pendingDiff?.modifications?.base_problem }"
             placeholder="请详细描述相似问题..."
             maxlength="500"
             required
@@ -607,11 +740,36 @@ import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { createBadcase, getBadcaseDetail, updateBadcase, getProjects, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
 import user from '../store/user.js'
+import MonacoDiffEditor from './MonacoDiffEditor.vue'
 
 
 export default {
   name: 'NewBadcase',
-  setup() {
+  components: { MonacoDiffEditor },
+  props: {
+    id: {
+      type: [String, Number],
+      default: null
+    },
+    project_id: {
+      type: [String, Number],
+      default: null
+    },
+    edit: {
+      type: Boolean,
+      default: false
+    },
+    show_diff: {
+      type: Boolean,
+      default: false
+    },
+    embedded: {
+      type: Boolean,
+      default: false
+    }
+  },
+  emits: ['close'],
+  setup(props, { emit }) {
     const router = useRouter()
     const route = useRoute()
     const loading = ref(false)
@@ -641,6 +799,14 @@ export default {
     
     // 当前用户信息 - 使用全局用户状态
     const currentUser = computed(() => user.value)
+
+    // 顶部栏：用户下拉菜单
+    const showUserDropdown = ref(false)
+
+    // 顶部栏：布局按钮（本页用于保持与项目详情页一致）
+    const leftSidebarHidden = ref(false)
+    const showTerminal = ref(false)
+    const showAIAssistant = ref(false)
     
     // 最近选择的用户列表（暂时为空，后续可以从历史记录中获取）
     const recentAssignees = ref([])
@@ -696,6 +862,9 @@ export default {
       console.log('搜索结果:', result)
       return result
     })
+    
+    // 待确认的 diff 数据
+    const pendingDiff = ref(null)
     
     const badcase = reactive({
       title: '',
@@ -993,18 +1162,33 @@ export default {
     // 初始化BadCase数据
     const initBadcase = async () => {
       try {
+        // 优先使用 props，其次使用路由参数
         const query = route.query
         console.log('=== 初始化BadCase开始 ===')
         console.log('路由查询参数:', query)
+        console.log('Props 参数:', props)
         
-        if (query.edit === 'true' && query.id) {
-          console.log('编辑模式，BadCase ID:', query.id)
+        // 判断是否编辑模式
+        const isEditMode = props.edit || query.edit === 'true'
+        const itemId = props.id ?? query.id
+        const itemProjectId = props.project_id || query.project_id
+        
+        // 防御：避免把 undefined/null 的字符串当成有效 id
+        const normalizedItemId =
+          itemId === undefined || itemId === null ? null : String(itemId).trim()
+        const effectiveItemId =
+          !normalizedItemId || normalizedItemId === 'undefined' || normalizedItemId === 'null'
+            ? null
+            : normalizedItemId
+
+        if (isEditMode && effectiveItemId) {
+          console.log('编辑模式，BadCase ID:', itemId)
           isEdit.value = true
-          badcaseId.value = query.id
+          badcaseId.value = effectiveItemId
           loading.value = true
         
         try {
-          const response = await getBadcaseDetail(query.id)
+          const response = await getBadcaseDetail(effectiveItemId)
           if (response.data.success && response.data.badcase) {
             console.log('=== BadCase详情API响应 ===')
             console.log('完整响应:', response.data)
@@ -1720,9 +1904,104 @@ export default {
       badcase.plan = planValue
       showPlanDropdown.value = false
     }
+    
+    // 确认字段修改
+    const confirmFieldChange = (field) => {
+      console.log('[DIFF] 确认字段修改:', field)
+      if (pendingDiff.value?.modifications?.[field]) {
+        // 已经预填充了新值，直接清除 diff 显示
+        delete pendingDiff.value.modifications[field]
+        
+        // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
+        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+          sessionStorage.removeItem('pendingModifyDiff')
+          // 通知对话区修改已确认
+          const event = new CustomEvent('modify-confirmed', {
+            detail: { targetId: pendingDiff.value.targetId },
+            bubbles: true
+          })
+          window.dispatchEvent(event)
+          pendingDiff.value = null
+        }
+      }
+    }
+    
+    // 取消字段修改
+    const cancelFieldChange = (field) => {
+      console.log('[DIFF] 取消字段修改:', field)
+      if (pendingDiff.value?.modifications?.[field]) {
+        // 恢复原值
+        const oldValue = pendingDiff.value.modifications[field].old
+        if (badcase.hasOwnProperty(field)) {
+          badcase[field] = oldValue || ''
+        }
+        
+        // 清除该字段的 diff
+        delete pendingDiff.value.modifications[field]
+        
+        // 如果所有字段都已取消，清除 sessionStorage
+        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+          sessionStorage.removeItem('pendingModifyDiff')
+          pendingDiff.value = null
+        }
+      }
+    }
+
+    const scrollToDiffField = async (field) => {
+      await nextTick()
+      const el = document.getElementById(`diff-field-${field}`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+
+    // 采纳字段修改：单字段落库（复用既有 /api/projects/{project_id}/modify）
+    const applyFieldChange = async (field) => {
+      if (!pendingDiff.value?.modifications?.[field]) return
+
+      const projectId = badcase.project_id || props.project_id
+      const targetId = pendingDiff.value?.targetId || props.id
+      const target = pendingDiff.value?.target || 'badcase'
+      const newValue = pendingDiff.value.modifications[field]?.new
+
+      if (!projectId || !targetId) {
+        console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId, targetId })
+        return
+      }
+
+      try {
+        await scrollToDiffField(field)
+        const resp = await fetch(`/api/projects/${projectId}/modify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            target,
+            target_id: targetId,
+            modifications: { [field]: newValue },
+            confirm: true,
+            message_id: pendingDiff.value?.messageId
+          })
+        })
+        const result = await resp.json()
+        if (!result.success) {
+          console.error('[DIFF] 采纳失败:', result.error)
+          return
+        }
+
+        confirmFieldChange(field)
+      } catch (e) {
+        console.error('[DIFF] 采纳字段异常:', e)
+      }
+    }
 
     // 返回上一页
     const goBack = () => {
+      // 如果是通过覆盖层打开的，触发 close 事件
+      if (props.id) {
+        console.log('[OVERLAY] 触发 close 事件')
+        emit('close')
+        return
+      }
+      
       // 如果有项目ID和计划ID，返回到项目详情页并展开对应计划
       if (badcase.project_id) {
         const targetUrl = `/project-detail/${badcase.project_id}`
@@ -1735,6 +2014,73 @@ export default {
       } else {
         // 如果没有项目ID，使用浏览器后退
         router.go(-1)
+      }
+    }
+
+    // 顶部栏：跳转到 Dashboard
+    const goToDashboard = () => {
+      showUserDropdown.value = false
+      router.push('/dashboard')
+    }
+
+    // 顶部栏：回到项目详情（与面包屑交互一致）
+    const goBackToProjectDetail = () => {
+      showUserDropdown.value = false
+      if (badcase.project_id) {
+        router.push(`/project-detail/${badcase.project_id}`)
+      } else if (props.project_id) {
+        router.push(`/project-detail/${props.project_id}`)
+      } else if (projectInfo.value?.id) {
+        router.push(`/project-detail/${projectInfo.value.id}`)
+      } else {
+        goBack()
+      }
+    }
+
+    const toggleUserDropdown = () => {
+      showUserDropdown.value = !showUserDropdown.value
+    }
+
+    const showNotifications = () => {
+      showUserDropdown.value = false
+      alert('通知功能开发中...')
+    }
+
+    const showHelp = () => {
+      showUserDropdown.value = false
+      alert('帮助功能开发中...')
+    }
+
+    const showTeamManagement = () => {
+      showUserDropdown.value = false
+      alert('团队管理功能开发中...')
+    }
+
+    const showUserProfile = () => {
+      showUserDropdown.value = false
+      alert('个人资料功能开发中...')
+    }
+
+    const logout = () => {
+      showUserDropdown.value = false
+      // 与 ProjectDetail 一致：动态导入并调用 logout
+      import('../store/user.js').then(({ logout: logoutUser }) => {
+        logoutUser()
+      })
+      router.push('/login')
+    }
+
+    const setLayout = (layout) => {
+      switch (layout) {
+        case 'left':
+          leftSidebarHidden.value = !leftSidebarHidden.value
+          break
+        case 'bottom':
+          showTerminal.value = !showTerminal.value
+          break
+        case 'right':
+          showAIAssistant.value = !showAIAssistant.value
+          break
       }
     }
     
@@ -1786,6 +2132,29 @@ export default {
         setTimeout(checkAndUpdateEditor, 500)
         setTimeout(checkAndUpdateEditor, 1000)
         
+        // 检查是否有待确认的 diff 数据（优先使用 props，其次使用路由参数）
+        if (props.show_diff || route.query.show_diff === 'true') {
+          console.log('[DIFF] 检测到 show_diff 参数，读取 sessionStorage')
+          const diffDataStr = sessionStorage.getItem('pendingModifyDiff')
+          if (diffDataStr) {
+            try {
+              pendingDiff.value = JSON.parse(diffDataStr)
+              console.log('[DIFF] 读取到 diff 数据:', pendingDiff.value)
+              
+              // 预填充新值到表单
+              if (pendingDiff.value.modifications) {
+                for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+                  if (badcase.hasOwnProperty(field) && data.new) {
+                    badcase[field] = data.new
+                  }
+                }
+              }
+            } catch (e) {
+              console.error('[DIFF] 解析 diff 数据失败:', e)
+            }
+          }
+        }
+        
         // 添加全局点击事件监听器，点击外部关闭下拉框
         document.addEventListener('click', (event) => {
           const statusDropdown = document.querySelector('.status-dropdown')
@@ -1827,6 +2196,19 @@ export default {
       planSearchText,
       availableStatuses,
       currentUser,
+      showUserDropdown,
+      leftSidebarHidden,
+      showTerminal,
+      showAIAssistant,
+      goToDashboard,
+      goBackToProjectDetail,
+      toggleUserDropdown,
+      showNotifications,
+      showHelp,
+      showTeamManagement,
+      showUserProfile,
+      logout,
+      setLayout,
       recentAssignees,
       availablePlans,
       filteredPlans,
@@ -1849,6 +2231,10 @@ export default {
       refreshProjectPlans,
       togglePlanExpansion,
       goBack,
+      pendingDiff,
+      confirmFieldChange,
+      cancelFieldChange,
+      applyFieldChange,
       copyDocumentLink,
       addAttachment,
       handleFileUpload,
@@ -1901,6 +2287,88 @@ export default {
   z-index: 1000;
 }
 
+/* show_diff：待采纳改动面板（暗色、Cursor风格） */
+.pending-diff-panel {
+  margin: 16px 0 20px;
+  padding: 14px;
+  background: #1e1e1e;
+  border: 1px solid #3e3e3e;
+  border-radius: 10px;
+}
+
+.pending-diff-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.pending-diff-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #e5e7eb;
+}
+
+.pending-diff-subtitle {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.pending-diff-item {
+  padding: 12px;
+  border: 1px solid #2d2d2d;
+  border-radius: 10px;
+  background: #111827;
+  margin-top: 12px;
+}
+
+.pending-diff-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.pending-diff-field-label {
+  font-weight: 700;
+  color: #93c5fd;
+}
+
+.pending-diff-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-icon-approve,
+.btn-icon-reject {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-approve {
+  background: #10b981;
+  color: #fff;
+}
+
+.btn-icon-reject {
+  background: #ef4444;
+  color: #fff;
+}
+
+.btn-icon-approve:hover,
+.btn-icon-reject:hover {
+  transform: scale(1.06);
+}
+
 .loading-spinner {
   width: 40px;
   height: 40px;
@@ -1922,21 +2390,119 @@ export default {
   100% { transform: rotate(360deg); }
 }
 
-/* 顶部标题栏 */
-.header-bar {
+/* 顶部导航栏（对齐 ProjectDetail 的 top-bar 规格） */
+.top-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px 24px;
+  padding: 0 24px;
+  height: 60px;
   background: #fff;
   border-bottom: 1px solid #e9ecef;
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
-.header-left {
+.top-left {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.top-bar--stacked {
+  height: auto;
+  padding: 0;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.top-bar-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 24px;
+}
+
+.top-bar-row--primary {
+  height: 60px;
+}
+
+.top-bar-row--secondary {
+  height: 48px;
+  border-top: 1px solid #f1f3f5;
+}
+
+.secondary-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.secondary-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.page-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+/* 顶部栏内容：与 ProjectDetail 对齐 */
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.2s;
+}
+
+.logo:hover {
+  opacity: 0.8;
+}
+
+.logo-text {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.star-icon {
+  font-size: 12px;
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #333;
+}
+
+.breadcrumb-separator {
+  color: #999;
+}
+
+.dropdown-arrow {
+  font-size: 10px;
+  color: #999;
+  margin-left: 4px;
+}
+
+.breadcrumb-link {
+  cursor: pointer;
+}
+
+.breadcrumb-link:hover {
+  text-decoration: underline;
+}
+
+.edit-permission {
+  font-size: 12px;
+  color: #666;
+  padding: 4px 8px;
+  background: #f8f9fa;
+  border-radius: 4px;
 }
 
 .back-arrow {
@@ -1963,10 +2529,205 @@ export default {
   color: #666;
 }
 
-.header-right {
+.top-right {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+/* 布局按钮组样式（从 ProjectDetail 原样拷贝） */
+.layout-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 16px;
+}
+
+.layout-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.layout-btn:hover {
+  background: transparent;
+  transform: translateY(-1px);
+}
+
+.layout-btn.active {
+  background: transparent;
+  box-shadow: 0 0 0 1px #e2e8f0;
+}
+
+.layout-icon {
+  width: 16px;
+  height: 16px;
+  background: #a0aec0;
+  border-radius: 2px;
+  position: relative;
+}
+
+/* 左对齐图标 - 左黑右灰 */
+.layout-icon.left-aligned {
+  background: #a0aec0;
+}
+
+.layout-icon.left-aligned::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 8px;
+  height: 16px;
+  background: #000000;
+  border-radius: 1px;
+}
+
+/* 底部对齐图标 - 上黑下灰 */
+.layout-icon.bottom-aligned {
+  background: #a0aec0;
+}
+
+.layout-icon.bottom-aligned::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 16px;
+  height: 8px;
+  background: #000000;
+  border-radius: 1px;
+}
+
+/* 右对齐图标 - 左灰右黑 */
+.layout-icon.right-aligned {
+  background: #a0aec0;
+}
+
+.layout-icon.right-aligned::before {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 8px;
+  height: 16px;
+  background: #000000;
+  border-radius: 1px;
+}
+
+/* 用户下拉菜单样式（从 ProjectDetail 原样拷贝） */
+.user-dropdown {
+  position: relative;
+  cursor: pointer;
+}
+
+.user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #f0f0f0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  transition: all 0.2s ease;
+  border: 2px solid transparent;
+}
+
+.user-avatar:hover {
+  background: #e0e0e0;
+  border-color: #007bff;
+}
+
+.user-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  width: 240px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  border: 1px solid #e0e0e0;
+  z-index: 1000;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.user-info {
+  padding: 16px 20px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.user-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 4px;
+}
+
+.user-email {
+  font-size: 12px;
+  color: #666;
+}
+
+.menu-divider {
+  height: 1px;
+  background: #e0e0e0;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.menu-item:last-child {
+  border-bottom: none;
+}
+
+.menu-item:hover {
+  background: #f8f9fa;
+}
+
+.menu-icon {
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+.menu-text {
+  font-size: 14px;
+  color: #333;
+  font-weight: 400;
+}
+
+.logout-item {
+  color: #dc3545;
+}
+
+.logout-item:hover {
+  background: #fff5f5;
+}
+
+.logout-item .menu-icon {
+  color: #dc3545;
+}
+
+.logout-item .menu-text {
+  color: #dc3545;
+  font-weight: 500;
 }
 
 .header-btn {
@@ -3448,5 +4209,120 @@ export default {
   background: #f8f9fa;
   border-radius: 6px;
   margin: 8px 0;
+}
+
+/* 字段 diff 面板样式 */
+.has-diff {
+  position: relative;
+}
+
+.field-diff-panel {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 2px solid #f59e0b;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.2);
+}
+
+.diff-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.diff-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.diff-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-confirm,
+.btn-cancel {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-confirm {
+  background: #10b981;
+  color: white;
+}
+
+.btn-confirm:hover {
+  background: #059669;
+  transform: scale(1.1);
+}
+
+.btn-cancel {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-cancel:hover {
+  background: #dc2626;
+  transform: scale(1.1);
+}
+
+.diff-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.diff-old,
+.diff-new {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.diff-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
+  width: fit-content;
+}
+
+.diff-tag.old {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.diff-tag.new {
+  background: #bbf7d0;
+  color: #166534;
+}
+
+.diff-value {
+  font-size: 14px;
+  color: #333;
+  word-break: break-all;
+}
+
+.diff-arrow {
+  font-size: 18px;
+  color: #9ca3af;
+}
+
+.field-with-diff {
+  border-color: #f59e0b !important;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2) !important;
 }
 </style> 

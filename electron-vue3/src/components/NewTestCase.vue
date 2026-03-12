@@ -6,7 +6,7 @@
       <div class="loading-text">正在加载项目信息...</div>
     </div>
     
-    <!-- 顶部标题栏 -->
+    <!-- 顶部标题栏：嵌入模式也需要返回/关闭等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
         <span class="back-arrow" @click="goBack">←</span>
@@ -27,6 +27,43 @@
     <div class="main-content">
       <!-- 左侧主要内容区 -->
       <div class="content-left">
+        <!-- 待采纳改动（show_diff 模式） -->
+        <div
+          v-if="pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          class="pending-diff-panel"
+        >
+          <div class="pending-diff-header">
+            <div class="pending-diff-title">待采纳改动</div>
+            <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
+          </div>
+
+          <div
+            v-for="(data, field) in pendingDiff.modifications"
+            :key="field"
+            v-show="!String(field).startsWith('_')"
+            class="pending-diff-item"
+            :id="`diff-field-${field}`"
+          >
+            <div class="pending-diff-item-head">
+              <div class="pending-diff-field">
+                <span class="pending-diff-field-label">{{ field }}</span>
+              </div>
+              <div class="pending-diff-actions">
+                <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
+                <button class="btn-icon-reject" title="拒绝该字段" @click="cancelFieldChange(field)">✗</button>
+              </div>
+            </div>
+            <MonacoDiffEditor
+              :original="String(data?.old ?? '')"
+              :modified="String(data?.new ?? '')"
+              language="markdown"
+              theme="vs-dark"
+              height="160px"
+              :renderSideBySide="false"
+            />
+          </div>
+        </div>
+
         <!-- 标题区域 -->
         <div class="title-section">
           <input 
@@ -204,8 +241,29 @@
           <!-- 基本信息 Tab -->
           <div v-if="activeTab === 'basic'" class="tab-pane">
             <!-- 前置条件 - 富文本编辑器 -->
-            <div class="form-group">
+            <div class="form-group" :class="{ 'has-diff': pendingDiff?.modifications?.preconditions }">
               <label class="field-label">前置条件</label>
+              <!-- diff 显示区域 -->
+              <div v-if="pendingDiff?.modifications?.preconditions" class="field-diff-panel">
+                <div class="diff-header">
+                  <span class="diff-label">修改预览:</span>
+                  <div class="diff-actions">
+                    <button @click="confirmFieldChange('preconditions')" class="btn-confirm" title="确认">✓</button>
+                    <button @click="cancelFieldChange('preconditions')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-old">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value">{{ pendingDiff.modifications.preconditions.old || '未设置' }}</span>
+                  </div>
+                  <div class="diff-arrow">→</div>
+                  <div class="diff-new">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value">{{ pendingDiff.modifications.preconditions.new }}</span>
+                  </div>
+                </div>
+              </div>
               <div class="editor-section">
                 <div class="editor-toolbar">
                   <button class="toolbar-btn" type="button" title="撤销" @click="formatPreconditions('undo')">↶</button>
@@ -316,8 +374,28 @@
             </div>
 
             <!-- 备注 -->
-            <div class="form-group">
+            <div class="form-group" :class="{ 'has-diff': pendingDiff?.modifications?.remark }">
               <label class="field-label">备注</label>
+              <!-- diff 显示区域 -->
+              <div v-if="pendingDiff?.modifications?.remark" class="field-diff-panel">
+                <div class="diff-header">
+                  <span class="diff-label">备注修改预览:</span>
+                  <div class="diff-actions">
+                    <button @click="confirmFieldChange('remark')" class="btn-confirm" title="确认">✓</button>
+                    <button @click="cancelFieldChange('remark')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value">{{ pendingDiff.modifications.remark?.old || '未设置' }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value">{{ pendingDiff.modifications.remark?.new }}</span>
+                  </div>
+                </div>
+              </div>
               <textarea 
                 v-model="testcase.remark" 
                 class="form-textarea"
@@ -632,18 +710,44 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectPlans, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
+import MonacoDiffEditor from './MonacoDiffEditor.vue'
 
 export default {
   name: 'NewTestCase',
-  setup() {
+  components: { MonacoDiffEditor },
+  props: {
+    id: {
+      type: [String, Number],
+      default: null
+    },
+    project_id: {
+      type: [String, Number],
+      default: null
+    },
+    edit: {
+      type: Boolean,
+      default: false
+    },
+    show_diff: {
+      type: Boolean,
+      default: false
+    },
+    embedded: {
+      type: Boolean,
+      default: false
+    }
+  },
+  emits: ['close'],
+  setup(props, { emit }) {
     const route = useRoute()
     const router = useRouter()
 
-    const projectId = route.query.project_id ? Number(route.query.project_id) : null
-    const testcaseId = route.query.id ? Number(route.query.id) : null
+    // 优先使用 props，其次使用路由参数
+    const projectId = props.project_id ? Number(props.project_id) : (route.query.project_id ? Number(route.query.project_id) : null)
+    const testcaseId = props.id ? Number(props.id) : (route.query.id ? Number(route.query.id) : null)
     const isEdit = !!testcaseId
 
     const loading = ref(false)
@@ -663,6 +767,9 @@ export default {
     const projectInfo = reactive({
       name: ''
     })
+
+    // 待确认的 diff 数据
+    const pendingDiff = ref(null)
 
     const testcase = reactive({
       title: '',
@@ -1201,7 +1308,99 @@ export default {
     }
 
     const goBack = () => {
+      // 如果是通过覆盖层打开的，触发 close 事件
+      if (props.id) {
+        console.log('[OVERLAY] 触发 close 事件')
+        emit('close')
+        return
+      }
+      
       router.push(`/project-detail/${projectId}`)
+    }
+    
+    // 确认字段修改
+    const confirmFieldChange = (field) => {
+      console.log('[DIFF] 确认字段修改:', field)
+      if (pendingDiff.value?.modifications?.[field]) {
+        // 已经预填充了新值，直接清除 diff 显示
+        delete pendingDiff.value.modifications[field]
+        
+        // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
+        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+          sessionStorage.removeItem('pendingModifyDiff')
+          // 通知对话区修改已确认
+          const event = new CustomEvent('modify-confirmed', {
+            detail: { targetId: pendingDiff.value.targetId },
+            bubbles: true
+          })
+          window.dispatchEvent(event)
+          pendingDiff.value = null
+        }
+      }
+    }
+    
+    // 取消字段修改
+    const cancelFieldChange = (field) => {
+      console.log('[DIFF] 取消字段修改:', field)
+      if (pendingDiff.value?.modifications?.[field]) {
+        // 恢复原值
+        const oldVal = pendingDiff.value.modifications[field].old
+        if (testcase.hasOwnProperty(field) && oldVal !== undefined) {
+          testcase[field] = oldVal
+        }
+        // 清除 diff 显示
+        delete pendingDiff.value.modifications[field]
+        
+        // 如果所有字段都已处理，清除 sessionStorage
+        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+          sessionStorage.removeItem('pendingModifyDiff')
+          pendingDiff.value = null
+        }
+      }
+    }
+
+    const scrollToDiffField = async (field) => {
+      await nextTick()
+      const el = document.getElementById(`diff-field-${field}`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+
+    const applyFieldChange = async (field) => {
+      if (!pendingDiff.value?.modifications?.[field]) return
+
+      const targetId = pendingDiff.value?.targetId || testcaseId
+      const target = pendingDiff.value?.target || 'testcase'
+      const newValue = pendingDiff.value.modifications[field]?.new
+
+      if (!projectId || !targetId) {
+        console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId, targetId })
+        return
+      }
+
+      try {
+        await scrollToDiffField(field)
+        const resp = await fetch(`/api/projects/${projectId}/modify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            target,
+            target_id: targetId,
+            modifications: { [field]: newValue },
+            confirm: true,
+            message_id: pendingDiff.value?.messageId
+          })
+        })
+        const result = await resp.json()
+        if (!result.success) {
+          console.error('[DIFF] 采纳失败:', result.error)
+          return
+        }
+
+        confirmFieldChange(field)
+      } catch (e) {
+        console.error('[DIFF] 采纳字段异常:', e)
+      }
     }
 
     const deleteTestCaseAction = async () => {
@@ -1306,6 +1505,29 @@ export default {
       } finally {
         loading.value = false
         console.log('=== NewTestCase onMounted 完成 ===')
+        
+        // 检查是否有待确认的 diff 数据（优先使用 props，其次使用路由参数）
+        if (props.show_diff || route.query.show_diff === 'true') {
+          console.log('[DIFF] 检测到 show_diff 参数，读取 sessionStorage')
+          const diffDataStr = sessionStorage.getItem('pendingModifyDiff')
+          if (diffDataStr) {
+            try {
+              pendingDiff.value = JSON.parse(diffDataStr)
+              console.log('[DIFF] 读取到 diff 数据:', pendingDiff.value)
+              
+              // 预填充新值到表单
+              if (pendingDiff.value.modifications) {
+                for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+                  if (testcase.hasOwnProperty(field) && data.new) {
+                    testcase[field] = data.new
+                  }
+                }
+              }
+            } catch (e) {
+              console.error('[DIFF] 解析 diff 数据失败:', e)
+            }
+          }
+        }
       }
     })
 
@@ -1373,7 +1595,11 @@ export default {
       insertLink,
       updateComment,
       saveTestCase,
-      goBack
+      goBack,
+      pendingDiff,
+      confirmFieldChange,
+      cancelFieldChange,
+      applyFieldChange
     }
   }
 }
@@ -2198,6 +2424,88 @@ export default {
   z-index: 1000;
 }
 
+/* show_diff：待采纳改动面板（暗色、Cursor风格） */
+.pending-diff-panel {
+  margin: 16px 0 20px;
+  padding: 14px;
+  background: #1e1e1e;
+  border: 1px solid #3e3e3e;
+  border-radius: 10px;
+}
+
+.pending-diff-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.pending-diff-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #e5e7eb;
+}
+
+.pending-diff-subtitle {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.pending-diff-item {
+  padding: 12px;
+  border: 1px solid #2d2d2d;
+  border-radius: 10px;
+  background: #111827;
+  margin-top: 12px;
+}
+
+.pending-diff-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.pending-diff-field-label {
+  font-weight: 700;
+  color: #93c5fd;
+}
+
+.pending-diff-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-icon-approve,
+.btn-icon-reject {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-approve {
+  background: #10b981;
+  color: #fff;
+}
+
+.btn-icon-reject {
+  background: #ef4444;
+  color: #fff;
+}
+
+.btn-icon-approve:hover,
+.btn-icon-reject:hover {
+  transform: scale(1.06);
+}
+
 .loading-spinner {
   width: 40px;
   height: 40px;
@@ -2798,5 +3106,109 @@ export default {
 .add-defect-btn:hover {
   border-color: #409eff;
   color: #409eff;
+}
+
+/* 字段 diff 面板样式 */
+.has-diff {
+  position: relative;
+}
+
+.field-diff-panel {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 2px solid #f59e0b;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.2);
+}
+
+.diff-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.diff-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.diff-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-confirm,
+.btn-cancel {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-confirm {
+  background: #10b981;
+  color: white;
+}
+
+.btn-confirm:hover {
+  background: #059669;
+  transform: scale(1.1);
+}
+
+.btn-cancel {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-cancel:hover {
+  background: #dc2626;
+  transform: scale(1.1);
+}
+
+.diff-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.diff-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.diff-tag {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  min-width: 40px;
+  text-align: center;
+}
+
+.diff-tag.old {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.diff-tag.new {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.diff-value {
+  flex: 1;
+  font-size: 14px;
+  color: #374151;
+  word-break: break-all;
 }
 </style>

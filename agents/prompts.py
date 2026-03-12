@@ -256,9 +256,10 @@ class ReactPromptTemplates:
 ⭐ modify 工具状态值规则（重要）：
 修改 status 字段时，必须使用以下合法的状态值（英文），不能使用中文：
 - Bug 的合法状态值：new（新建）、assigned（已分配）、in_progress（进行中）、resolved（已解决）、closed（已关闭）、reopened（重新打开）
-- BadCase 的合法状态值：new（新建）、pending（待处理）、resolved（已解决）、hold（搁置）、reopen（重新打开）、close（已关闭）
-- 示例：用户说"关闭这个Bug"，应输出 "status": "closed"（Bug）或 "status": "close"（BadCase）
+- BadCase 的合法状态值：new（新建）、pending（待处理）、resolved（已解决）、hold（搁置）、reopened（重新打开）、closed（已关闭）
+- 示例：用户说"关闭这个Bug"，应输出 "status": "closed"（Bug或BadCase都用closed）
 - 示例：用户说"标记为已解决"，应输出 "status": "resolved"
+- 示例：用户说"重新打开"，应输出 "status": "reopened"
 
 ⭐ 搜索引擎智能选择规则（当使用 search 工具时）：
 根据搜索关键词的语言、内容类型和用户意图智能选择最合适的搜索引擎：
@@ -432,6 +433,30 @@ class ReactPromptTemplates:
 }}
 </params>
 <reason>从context的bug_list中获取第一个Bug的id=1作为target_id，修改其状态为resolved，先沙箱预览</reason>
+</decision>
+</good_example>
+
+<good_example>
+<todo>使用 modify 工具修改BadCase的status字段为'已关闭'</todo>
+<current_context>
+  "badcase_list": [
+    {{"id": 3, "title": "测试badcase", "status": "closed", "plan_id": 1}},
+    {{"id": 5, "title": "雪碧和七喜", "status": "pending", "plan_id": 2}}
+  ]
+</current_context>
+<decision>
+<execute>true</execute>
+<tool>modify</tool>
+<params>
+{{
+  "target": "badcase",
+  "target_id": 3,
+  "modifications": {{"status": "closed"}},
+  "project_id": "1",
+  "confirm": false
+}}
+</params>
+<reason>从context的badcase_list中获取第一个BadCase的id=3作为target_id，修改其状态为closed（注意BadCase和Bug都用closed而不是close）</reason>
 </decision>
 </good_example>
 
@@ -706,6 +731,14 @@ def parse_xml_decision(text: Any) -> dict:
             result['tool'] = 'grep'
             result['params'] = text
             result['reason'] = '检测到grep参数，自动执行grep工具'
+            return result
+        
+        # grep 工具参数识别（放宽条件：有 target 和 project_id 也识别为 grep）
+        if 'target' in text and 'project_id' in text and 'query_type' not in text and 'modifications' not in text and 'fields' not in text:
+            result['execute'] = True
+            result['tool'] = 'grep'
+            result['params'] = text
+            result['reason'] = '检测到grep参数（target+project_id），自动执行grep工具'
             return result
         
         if 'modifications' in text and ('target_id' in text or 'target' in text):

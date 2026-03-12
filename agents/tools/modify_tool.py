@@ -50,7 +50,7 @@ class ModifyTool(BaseTool):
             try:
                 self.text2sql = Text2SQLAgent(
                     database_path='instance/badcase_doctor.db',
-                    llm_backend=LLMBackend.GLM_4_FLASH,
+                    llm_backend=LLMBackend.GLM_5,
                     debug=False
                 )
             except Exception as e:
@@ -82,12 +82,12 @@ class ModifyTool(BaseTool):
             '待处理': 'pending', '等待': 'pending',
             '已解决': 'resolved', '解决': 'resolved',
             '搁置': 'hold', '暂停': 'hold',
-            '已重新打开': 'reopen', '重新打开': 'reopen', '重开': 'reopen',
-            '已关闭': 'close', '关闭': 'close',
+            '已重新打开': 'reopened', '重新打开': 'reopened', '重开': 'reopened', 'reopen': 'reopened',
+            '已关闭': 'closed', '关闭': 'closed', 'close': 'closed',
         }
         
         bug_valid_status = ['new', 'assigned', 'in_progress', 'resolved', 'closed', 'reopened']
-        badcase_valid_status = ['new', 'pending', 'resolved', 'hold', 'reopen', 'close']
+        badcase_valid_status = ['new', 'pending', 'resolved', 'hold', 'reopened', 'closed', 'not_badcase']
         
         if target == 'bug':
             if status_value in bug_valid_status:
@@ -143,10 +143,19 @@ class ModifyTool(BaseTool):
         print(f"[MODIFY] 开始处理修改请求: target={target}, target_id={target_id}, modifications={modifications}, confirm={confirm}")
         
         if not target_id or not modifications:
+            error_msg = f'缺少必要参数：target_id={target_id}或modifications={modifications}'
+            hint_msg = '请先使用 grep 工具查询并定位目标记录，然后再使用 modify 工具修改。'
+            if not target_id:
+                hint_msg += f'\n\n示例流程：\n1. 使用 grep 工具查询 {target}：grep(target="{target}", project_id={project_id})\n2. 从 grep 结果中获取 target_id\n3. 使用 modify 工具修改：modify(target="{target}", target_id=<从grep获取的ID>, modifications={modifications})'
+            print(f"[MODIFY] ❌ {error_msg}")
+            print(f"[MODIFY] 💡 {hint_msg}")
             return {
                 'success': False,
-                'error': f'缺少必要参数：target_id={target_id}或modifications={modifications}',
-                'hint': '可以提供natural_query参数来查找目标记录'
+                'error': error_msg,
+                'hint': hint_msg,
+                'need_grep_first': True,  # 标记需要先执行 grep
+                'suggested_action': 'grep',
+                'suggested_params': {'target': target, 'project_id': project_id}
             }
         
         # 字段名映射（LLM 可能返回 owner，需要映射为 assignee）
@@ -201,10 +210,16 @@ class ModifyTool(BaseTool):
                 if not confirm:
                     # confirm=False: 沙箱副本预览
                     sandbox_result = await self._preview_in_sandbox(target, target_id, modifications, project_id)
+                    
+                    # 生成人类可读的摘要
+                    target_name = 'Bug' if target == 'bug' else ('测试用例' if target == 'testcase' else 'BadCase')
+                    mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
+                    
                     return {
                         'success': True,
                         'confirmation_required': True,
                         'message': '沙箱预览完成，请确认是否应用修改：',
+                        'summary': f'预览修改{target_name}(ID={target_id})：{mod_summary}',
                         'target': target,
                         'target_id': target_id,
                         'before': original_data,
@@ -216,9 +231,15 @@ class ModifyTool(BaseTool):
                 
                 # confirm=True: 应用到生产库
                 success = await self._apply_modifications(target, target_id, modifications, project_id)
+                
+                # 生成人类可读的摘要
+                target_name = 'Bug' if target == 'bug' else ('测试用例' if target == 'testcase' else 'BadCase')
+                mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
+                
                 return {
                     'success': success,
                     'message': f'已成功修改{target} ID={target_id}',
+                    'summary': f'已修改{target_name}(ID={target_id})：{mod_summary}',
                     'before': original_data,
                     'after': modified_data,
                     'diff': diff_result
@@ -322,7 +343,7 @@ class ModifyTool(BaseTool):
                 'id': bug.id,
                 'title': bug.title,
                 'description': bug.description or '',
-                'status': bug.status,
+                'status': bug.status.value if hasattr(bug.status, 'value') else str(bug.status),
                 'priority': bug.priority,
                 'severity': bug.severity or '',
                 'assignee_id': bug.assignee_id,
@@ -346,13 +367,14 @@ class ModifyTool(BaseTool):
             return {
                 'id': badcase.id,
                 'title': badcase.title,
-                'status': badcase.status,
+                'status': badcase.status.value if hasattr(badcase.status, 'value') else str(badcase.status),
                 'priority': badcase.priority,
                 'assignee': badcase.assignee or '',
                 'plan_id': badcase.plan_id,
                 'reproduction_steps': badcase.reproduction_steps or '',
                 'correct_answer': badcase.correct_answer or '',
-                'badcase_result': badcase.badcase_result or ''
+                'badcase_result': badcase.badcase_result or '',
+                'base_problem': badcase.base_problem or ''
             }
         
         elif target == 'testcase':
@@ -414,7 +436,7 @@ class ModifyTool(BaseTool):
             'reproduction_steps': '复现步骤',
             'correct_answer': '正确答案',
             'badcase_result': 'BadCase结果',
-            'base_problem': '基础问题',
+            'base_problem': '相似问题',
             # TestCase 字段
             'case_type': '用例类型',
             'test_type': '测试类型',
@@ -444,36 +466,54 @@ class ModifyTool(BaseTool):
                 before_value = str(before.get(field, ''))
                 after_value = str(after.get(field, ''))
             
-            before_lines = before_value.split('\n') if before_value else ['']
-            after_lines = after_value.split('\n') if after_value else ['']
-            
-            differ = difflib.Differ()
-            diff_lines = list(differ.compare(before_lines, after_lines))
-            
+            # 构造 diff 行
             parsed_lines = []
-            line_no = 0
             
-            for line in diff_lines:
-                if line.startswith('- '):
-                    parsed_lines.append({
-                        'type': 'delete',
-                        'content': line[2:],
-                        'line_no': line_no
-                    })
-                elif line.startswith('+ '):
-                    parsed_lines.append({
-                        'type': 'add',
-                        'content': line[2:],
-                        'line_no': line_no
-                    })
-                    line_no += 1
-                elif line.startswith('  '):
-                    parsed_lines.append({
-                        'type': 'unchanged',
-                        'content': line[2:],
-                        'line_no': line_no
-                    })
-                    line_no += 1
+            # 即使值相同，也显示 delete → add 格式（用户期望看到完整的修改预览）
+            if before_value == after_value:
+                # 值相同，仍然显示为 delete → add 格式
+                parsed_lines.append({
+                    'type': 'delete',
+                    'content': before_value,
+                    'line_no': 0
+                })
+                parsed_lines.append({
+                    'type': 'add',
+                    'content': after_value,
+                    'line_no': 0
+                })
+            else:
+                # 值不同，使用 difflib 生成详细 diff
+                before_lines = before_value.split('\n') if before_value else ['']
+                after_lines = after_value.split('\n') if after_value else ['']
+                
+                differ = difflib.Differ()
+                diff_lines = list(differ.compare(before_lines, after_lines))
+                
+                line_no = 0
+                
+                for line in diff_lines:
+                    if line.startswith('- '):
+                        parsed_lines.append({
+                            'type': 'delete',
+                            'content': line[2:],
+                            'line_no': line_no
+                        })
+                    elif line.startswith('+ '):
+                        parsed_lines.append({
+                            'type': 'add',
+                            'content': line[2:],
+                            'line_no': line_no
+                        })
+                        line_no += 1
+                    elif line.startswith('  '):
+                        # 对于多行内容中的 unchanged 行，仍然保留
+                        parsed_lines.append({
+                            'type': 'unchanged',
+                            'content': line[2:],
+                            'line_no': line_no
+                        })
+                        line_no += 1
             
             diff_result.append({
                 'field': field,
@@ -561,7 +601,8 @@ class ModifyTool(BaseTool):
                 db_read_only=False,    # 副本可写
                 timeout=15
             )
-            sandbox = get_sandbox_executor(security_config=sandbox_config)
+            # 启用本地回退，当 llm-sandbox 不可用时使用本地执行
+            sandbox = get_sandbox_executor(security_config=sandbox_config, fallback_to_local=True)
             
             # 在沙箱副本上执行 UPDATE
             db_config = {
