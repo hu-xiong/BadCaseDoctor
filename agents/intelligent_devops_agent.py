@@ -133,11 +133,13 @@ class IntelligentDevOpsAgent:
         print(f"[AGENT]      - L3 (完整流程): 2 个")
         print(f"[AGENT]   - 🎯 Skill工具: 1 个 (skill_executor)")
     
-    async def handle_user_request_stream(self, user_input: str, project_id: int = None):
-        """流式处理用户请求"""
+    async def handle_user_request_stream(self, user_input: str, project_id: int = None, plan_id: int = None):
+        """流式处理用户请求。plan_id 为当前迭代计划ID时，grep 会只检索该计划下的记录（人类式先看本迭代）。"""
         print(f"\n[AGENT] User Request (Stream): {user_input}")
         if project_id:
             print(f"[AGENT] Project ID: {project_id}")
+        if plan_id is not None:
+            print(f"[AGENT] Plan ID (当前迭代): {plan_id}")
         
         # 0. 初始状态推送
         yield {'type': 'status', 'message': '正在分析请求意图...'}
@@ -146,9 +148,8 @@ class IntelligentDevOpsAgent:
         intent = await self._classify_intent(user_input)
         yield {'type': 'intent', 'intent': intent}
         
-        # 2. 启动 ReAct 循环 (流式) - 传入 project_id
-        # 需要修改 SimplifiedReActEngine 以支持流式返回每一步
-        async for step_data in self.react_engine.run_stream(user_input, project_id=project_id):
+        # 2. 启动 ReAct 循环 (流式) - 传入 project_id、plan_id
+        async for step_data in self.react_engine.run_stream(user_input, project_id=project_id, plan_id=plan_id):
             yield {'type': 'step', 'data': step_data}
         
         # 3. 获取最终结果并格式化

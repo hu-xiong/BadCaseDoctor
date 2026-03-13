@@ -1,0 +1,7 @@
+# 云端沙箱最小依赖（与 python:3.11-slim 镜像配合）
+Flask>=2.0
+Werkzeug>=2.0
+redis>=4.0
+
+# 可选：启用 Docker 沙箱（pip install -r requirements-sandbox.txt 后追加）
+# llm-sandbox[docker]

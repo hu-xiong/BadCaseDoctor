@@ -129,7 +129,7 @@ if (outputData && typeof outputData === 'object') {
 
 ## 测试验证
 
-已通过 `test_search_tool.py` 验证搜索工具的正确性：
+已通过 `tests/test_search_tool.py` 验证搜索工具的正确性：
 
 ```
 ✅ 测试百度搜索 C罗 - 返回 6 个结果
@@ -176,7 +176,7 @@ summary = await self.llm.summarize_search_results(results)
 
 ### 新增文件
 - `agents/tools/search_tool.py` (265 行) - 搜索工具实现
-- `test_search_tool.py` (90 行) - 测试脚本
+- `tests/test_search_tool.py` (90 行) - 测试脚本
 
 ### 修改文件
 - `agents/intelligent_devops_agent.py` - 导入并注册搜索工具
@@ -197,7 +197,7 @@ summary = await self.llm.summarize_search_results(results)
 ### 方式 1：直接 Python 测试
 ```bash
 cd /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor
-python test_search_tool.py
+python tests/test_search_tool.py
 ```
 
 ### 方式 2：通过前端界面

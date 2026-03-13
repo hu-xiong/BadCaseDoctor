@@ -946,7 +946,7 @@
 <script>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
+import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
 import { getBadCaseStatusText } from '../constants/status.js'
 import TeamManagement from './TeamManagement.vue'
 import XTerminal from './XTerminal.vue'
@@ -1181,6 +1181,7 @@ export default {
     const DETAIL_FIELDS = [
       'base_problem',
       'reproduction_steps',
+      'answer',
       'correct_answer',
       'badcase_result',
       'solution',
@@ -1205,6 +1206,7 @@ export default {
       'assignee': '负责人',
       'base_problem': '相似问题',
       'reproduction_steps': '复现步骤',
+      'answer': '答案',
       'correct_answer': '正确答案',
       'badcase_result': 'BadCase结果',
       'solution': '解决方式',
@@ -1765,7 +1767,7 @@ export default {
       try {
         console.log('=== 开始获取项目计划 ===')
         console.log('项目ID:', projectId.value)
-        console.log('API URL:', `http://localhost:5000/api/projects/${projectId.value}/plans`)
+        console.log('API URL:', `${BACKEND_BASE_URL}/api/projects/${projectId.value}/plans`)
         
         const response = await getProjectPlans(projectId.value)
         console.log('获取项目计划完整响应:', response)
@@ -2533,7 +2535,7 @@ export default {
       console.log('[MODIFY] UI 已乐观更新')
       
       // ======== 异步发送后端请求（不阻塞 UI）========
-      fetch(`/api/projects/${projectId.value}/modify`, {
+      fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/modify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3478,7 +3480,7 @@ export default {
         
         console.log('发送到后端的数据:', planData)
         console.log('项目ID:', projectId.value)
-        console.log('API基础URL:', 'http://localhost:5000')
+        console.log('API基础URL:', BACKEND_BASE_URL)
         
         let response
         try {
@@ -3489,7 +3491,7 @@ export default {
             console.log('更新计划API响应:', response)
           } else {
             console.log('调用创建计划API')
-            console.log('API URL: POST http://localhost:5000/api/plans')
+            console.log('API URL: POST ' + `${BACKEND_BASE_URL}/api/plans`)
             console.log('请求数据:', JSON.stringify(planData, null, 2))
             response = await createPlanApi(planData)
             console.log('创建计划API完整响应:', response)

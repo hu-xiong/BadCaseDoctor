@@ -1,10 +1,15 @@
 import axios from 'axios'
 
+// 统一后端 Host；必须与前端同站点以携带登录 Cookie
+export const BACKEND_BASE_URL = 'http://localhost:5000'
+
 const api = axios.create({
-  baseURL: 'http://localhost:5000', // TODO: 根据后端实际端口调整
+  baseURL: BACKEND_BASE_URL,
   timeout: 30000, // 增加超时时间到30秒
   withCredentials: true // 如需携带cookie
 })
+
+export { api }
 
 // 登录
 export function login(data) {
@@ -33,6 +38,10 @@ export function createProject(data) {
 // 获取项目详情
 export function getProjectDetail(id) {
   return api.get(`/api/projects/${id}`)
+}
+// 编辑页最小上下文（project + plans + members）
+export function getProjectEditContext(projectId) {
+  return api.get(`/api/projects/${projectId}/edit-context`)
 }
 // 获取项目BadCase列表（分页）
 export function getProjectBadcases(projectId, page = 1, perPage = 10, additionalParams = {}) {

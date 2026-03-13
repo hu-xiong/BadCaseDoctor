@@ -30,7 +30,7 @@
 #### 方式 B：通过终端直接测试（推荐用于调试）
 ```bash
 cd /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor
-python test_search_tool.py
+python tests/test_search_tool.py
 ```
 
 预期输出：
@@ -192,7 +192,7 @@ python test_search_tool.py
 cd /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/electron-vue3 && npm run dev
 
 # 3. 运行搜索工具测试
-cd /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor && python test_search_tool.py
+cd /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor && python tests/test_search_tool.py
 
 # 4. 查看搜索工具代码
 cat /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor/agents/tools/search_tool.py | head -50

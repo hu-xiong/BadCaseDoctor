@@ -8,8 +8,9 @@ import asyncio
 import sys
 import os
 
-# 添加项目路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 添加项目根路径（脚本位于 tests/ 下时仍可正确导入 agents 等）
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _root)
 
 from agents.tools.search_tool import SearchTool
 from agents.tool_registry import ToolRegistry

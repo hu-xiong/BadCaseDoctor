@@ -32,7 +32,7 @@ class SkillLoader:
         self.skills: Dict[str, Skill] = {}
         self.skill_files: Dict[str, str] = {}  # skill_name -> file_path
         self.last_reload_time: Optional[datetime] = None
-        print(f"[SKILL_LOADER] 📁 技能目录: {self.skill_dir}")
+        print(f"[SKILL_LOADER] 技能目录: {self.skill_dir}")
     
     def load_all(self, force_reload: bool = False) -> Dict[str, Skill]:
         """
@@ -45,17 +45,17 @@ class SkillLoader:
             技能字典 {skill_name: Skill}
         """
         if not self.skill_dir or not os.path.exists(self.skill_dir):
-            print(f"[SKILL_LOADER] ⚠️  技能目录不存在: {self.skill_dir}")
+            print(f"[SKILL_LOADER] 技能目录不存在: {self.skill_dir}")
             return {}
         
         # 检查是否需要重新加载（按文件修改时间）
         if not force_reload and self.last_reload_time:
             latest_mtime = self._get_latest_modification_time()
             if latest_mtime <= self.last_reload_time:
-                print(f"[SKILL_LOADER] ✅ 技能文件无变化，使用缓存")
+                print(f"[SKILL_LOADER] 技能文件无变化，使用缓存")
                 return self.skills
         
-        print(f"[SKILL_LOADER] 🔍 扫描技能文件...")
+        print(f"[SKILL_LOADER] 扫描技能文件...")
         new_skills = {}
         new_skill_files = {}
         loaded_count = 0
@@ -71,17 +71,17 @@ class SkillLoader:
                         new_skills[skill.name] = skill
                         new_skill_files[skill.name] = file_path
                         loaded_count += 1
-                        print(f"[SKILL_LOADER] ✅ 加载技能: {skill.name} ({file})")
+                        print(f"[SKILL_LOADER] 加载技能: {skill.name} ({file})")
                     else:
                         error_count += 1
-                        print(f"[SKILL_LOADER] ❌ 加载失败: {file_path}")
+                        print(f"[SKILL_LOADER] 加载失败: {file_path}")
         
         # 更新内部状态
         self.skills = new_skills
         self.skill_files = new_skill_files
         self.last_reload_time = datetime.now()
         
-        print(f"[SKILL_LOADER] 📊 加载完成: {loaded_count} 个技能，{error_count} 个失败")
+        print(f"[SKILL_LOADER] 加载完成: {loaded_count} 个技能，{error_count} 个失败")
         return self.skills
     
     def _load_skill_from_file(self, file_path: str) -> Optional[Skill]:
@@ -181,16 +181,16 @@ class SkillLoader:
         best_skill, best_score = skill_scores[0]
         
         # 记录匹配详情
-        print(f"[SKILL_MATCHER] 🎯 用户输入: '{user_input}'")
-        print(f"[SKILL_MATCHER] 📊 匹配结果:")
+        print(f"[SKILL_MATCHER] 用户输入: '{user_input}'")
+        print(f"[SKILL_MATCHER] 匹配结果:")
         for skill, score in skill_scores[:3]:  # 显示前3名
             print(f"  - {skill.name}: {score:.2f}")
         
         if best_score >= 0.3:  # 阈值
-            print(f"[SKILL_MATCHER] ✅ 选择技能: {best_skill.name} (分数: {best_score:.2f})")
+            print(f"[SKILL_MATCHER] 选择技能: {best_skill.name} (分数: {best_score:.2f})")
             return best_skill, best_score
         else:
-            print(f"[SKILL_MATCHER] ⚠️  无合适技能 (最高分: {best_score:.2f})")
+            print(f"[SKILL_MATCHER] 无合适技能 (最高分: {best_score:.2f})")
             return None, best_score
     
     def _extract_intents(self, text: str) -> List[str]:
@@ -262,7 +262,7 @@ class SkillLoader:
         """
         skill = self.get_skill(skill_name)
         if not skill:
-            print(f"[SKILL_LOADER] ⚠️  技能不存在: {skill_name}")
+            print(f"[SKILL_LOADER] 技能不存在: {skill_name}")
             return ""
         
         return skill.get_workflow_prompt()
@@ -294,7 +294,7 @@ class SkillLoader:
         self.skills[skill.name] = skill
         self.skill_files[skill.name] = file_path
         
-        print(f"[SKILL_LOADER] 💾 保存技能: {skill.name} -> {file_path}")
+        print(f"[SKILL_LOADER] 保存技能: {skill.name} -> {file_path}")
         return file_path
     
     def remove_skill(self, skill_name: str) -> bool:
@@ -309,15 +309,15 @@ class SkillLoader:
         """
         file_path = self.skill_files.get(skill_name)
         if not file_path or not os.path.exists(file_path):
-            print(f"[SKILL_LOADER] ⚠️  技能文件不存在: {skill_name}")
+            print(f"[SKILL_LOADER] 技能文件不存在: {skill_name}")
             return False
         
         try:
             os.remove(file_path)
             del self.skills[skill_name]
             del self.skill_files[skill_name]
-            print(f"[SKILL_LOADER] 🗑️  删除技能: {skill_name}")
+            print(f"[SKILL_LOADER] 删除技能: {skill_name}")
             return True
         except Exception as e:
-            print(f"[SKILL_LOADER] ❌ 删除失败: {str(e)}")
+            print(f"[SKILL_LOADER] 删除失败: {str(e)}")
             return False

@@ -1,0 +1,42 @@
+# 云端沙箱镜像（与当前运行的 python:3.11-slim 一致）
+# 构建（仅 SQLite 直跑，不装 Docker 沙箱）:
+#   docker build -f Dockerfile.sandbox -t badcase-sandbox:latest .
+# 构建（镜像内装 llm-sandbox，需挂载宿主机 Docker socket 才能用）:
+#   docker build -f Dockerfile.sandbox --build-arg INSTALL_SANDBOX=1 -t badcase-sandbox:latest .
+# 运行（仅 SQLite）:
+#   docker run -d -p 5000:5000 -e SANDBOX_USE_DIRECT_SQLITE=1 -v /opt/sandbox_db:/opt/sandbox_db --name sandbox badcase-sandbox:latest
+# 运行（用镜像内 Docker 沙箱，挂载宿主机 Docker）:
+#   docker run -d -p 5000:5000 -v /var/run/docker.sock:/var/run/docker.sock -v /opt/sandbox_db:/opt/sandbox_db --name sandbox badcase-sandbox:latest
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 是否在镜像内安装 llm-sandbox[docker]（默认 0：不装，用 SANDBOX_USE_DIRECT_SQLITE 直跑）
+ARG INSTALL_SANDBOX=0
+
+# 最小依赖
+COPY requirements-sandbox.txt .
+RUN pip install --no-cache-dir -r requirements-sandbox.txt
+
+# 可选：在镜像里装 sandbox（需宿主机挂载 docker.sock 才能起子容器）
+RUN if [ "$INSTALL_SANDBOX" = "1" ]; then pip install --no-cache-dir 'llm-sandbox[docker]'; fi
+
+# 仅复制沙箱所需代码（避免整项目）
+COPY sandbox/server_sandbox.py .
+COPY routers/sandbox.py routers/
+COPY agents/tools/text2sql/sandbox_executor.py agents/tools/text2sql/
+COPY agents/tools/text2sql/sql_code_wrapper.py agents/tools/text2sql/
+COPY agents/tools/text2sql/__init__.py agents/tools/text2sql/
+
+# 空包占位（不复制 agents/tools/__init__.py 以免拉取 playwright 等）
+RUN mkdir -p routers agents/tools/text2sql && \
+    touch routers/__init__.py agents/__init__.py agents/tools/__init__.py
+
+# 未装 llm-sandbox 时用 1；装了且挂载了 docker.sock 时可设为 0 用真实沙箱
+ENV SANDBOX_USE_DIRECT_SQLITE=1
+ENV SANDBOX_DB_DIR=/opt/sandbox_db
+ENV PORT=5000
+
+EXPOSE 5000
+CMD ["python", "server_sandbox.py"]

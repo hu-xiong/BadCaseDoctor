@@ -22,7 +22,7 @@
    - 美观的蓝色主题样式
 
 4. **调试和测试**
-   - 完整的测试脚本 (`test_search_tool.py`)
+   - 完整的测试脚本 (`tests/test_search_tool.py`)
    - 前后端调试日志
    - 验证搜索工具正确工作
 
@@ -85,7 +85,7 @@
 
 ### 新增文件 (2个)
 - `agents/tools/search_tool.py` - 265 行代码
-- `test_search_tool.py` - 90 行测试代码
+- `tests/test_search_tool.py` - 90 行测试代码
 - `SEARCH_TOOL_IMPLEMENTATION.md` - 详细文档
 - `SEARCH_TOOL_QUICK_TEST.md` - 快速测试指南
 
@@ -132,7 +132,7 @@
 ### 方式 1：终端测试
 ```bash
 cd /Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor
-python test_search_tool.py
+python tests/test_search_tool.py
 ```
 
 预期输出：所有测试通过，显示 ✅ 搜索工具已成功注册
@@ -208,7 +208,7 @@ result = await search_tool.execute(
 
 - **详细文档**：`SEARCH_TOOL_IMPLEMENTATION.md`
 - **快速测试**：`SEARCH_TOOL_QUICK_TEST.md`
-- **测试脚本**：`test_search_tool.py`
+- **测试脚本**：`tests/test_search_tool.py`
 
 ## 问题排查
 

@@ -71,13 +71,16 @@ class SimplifiedReActEngine:
         # 线程池：modify 等工具内部有同步 DB（Flask/SQLAlchemy），在事件循环中会阻塞，导致流式“修改中...”卡住
         self._tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="react_tool")
     
-    async def run_stream(self, user_input: str, project_id: int = None):
-        """流式执行 ReAct循环（使用Skill工具）"""
+    async def run_stream(self, user_input: str, project_id: int = None, plan_id: int = None):
+        """流式执行 ReAct循环（使用Skill工具）。plan_id 为当前迭代计划ID，传入则 grep 可只检索该计划下的记录（人类式先看本迭代）。"""
         print(f"\n[REACT] ReAct Stream Loop Start")
-        self.project_id = project_id  # 保存项目ID
+        self.project_id = project_id
+        self.plan_id = plan_id  # 当前迭代计划，供 grep 按计划检索
         start_time = time.time()
         
         result_context = {}
+        if plan_id is not None:
+            result_context['plan_id'] = plan_id  # 供 LLM 传给 grep，先检索本计划再阅读
         findings = []
         steps = []
         
@@ -133,16 +136,16 @@ class SimplifiedReActEngine:
                     if 'userId' not in params:
                         params['userId'] = 'system_agent'
                     
-                    # 如果是 modify 工具，需要从 grep 结果中获取 target_id
+                    # 如果是 modify 工具，需要从 grep 结果中获取 target_id（含 testcase）
                     if tool_name == 'modify':
                         grep_result = result_context.get('grep_result', {})
                         target_type = params.get('target', 'badcase')
-                        
                         if target_type == 'bug':
                             target_id = grep_result.get('first_bug_id')
+                        elif target_type == 'testcase':
+                            target_id = grep_result.get('first_testcase_id')
                         else:
                             target_id = grep_result.get('first_badcase_id')
-                        
                         if target_id:
                             params['target_id'] = target_id
                             print(f"[REACT-STREAM] 从 grep 结果获取 target_id={target_id}")
@@ -156,26 +159,35 @@ class SimplifiedReActEngine:
                     observation = await self._execute_tool(decision)
                     print(f"[REACT-STREAM] Todo[{i}] 工具 {tool_name} 结果: success={observation.get('success')}")
                     
-                    # 更新上下文（供后续步骤使用）
+                    # 更新上下文（供后续步骤使用，含 testcase；id 用 rerank 取分高的）
                     if tool_name == 'grep' and observation.get('success'):
                         grep_data = observation.get('data', {})
                         badcase_list = grep_data.get('badcase_analysis', [])
                         bug_list = grep_data.get('bug_location', [])
-                        
+                        testcase_list = grep_data.get('testcase_location', [])
+                        kw = (params.get('keywords') or result_context.get('_last_grep_keywords') or '')
+                        result_context['_last_grep_keywords'] = kw or params.get('keywords') or ''
+                        def first_id(lst, kws):
+                            if not lst: return None
+                            picked = self._rerank_and_pick(lst, kws, 'title', 1)
+                            return picked[0].get('id') if picked else lst[0].get('id')
                         result_context['grep_result'] = {
-                            'first_badcase_id': badcase_list[0].get('id') if badcase_list else None,
-                            'first_bug_id': bug_list[0].get('id') if bug_list else None,
+                            'first_badcase_id': first_id(badcase_list, kw),
+                            'first_bug_id': first_id(bug_list, kw),
+                            'first_testcase_id': first_id(testcase_list, kw),
                             'badcase_list': badcase_list,
-                            'bug_list': bug_list
+                            'bug_list': bug_list,
+                            'testcase_list': testcase_list
                         }
                         result_context['badcase_list'] = badcase_list
                         result_context['bug_list'] = bug_list
-                        print(f"[REACT-STREAM] grep 结果已存储到 context: {len(badcase_list)} badcase, {len(bug_list)} bug")
+                        result_context['testcase_list'] = testcase_list
+                        print(f"[REACT-STREAM] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, {len(testcase_list)} testcase")
                     
-                    # 如果是 modify，收集结果
+                    # 如果是 modify，收集结果（含 testcase）
                     if tool_name == 'modify':
-                        target_list = result_context.get('badcase_list', []) or result_context.get('bug_list', [])
-                        target_type = 'badcase' if result_context.get('badcase_list') else 'bug'
+                        target_list = (result_context.get('badcase_list') or result_context.get('bug_list') or result_context.get('testcase_list') or [])
+                        target_type = 'badcase' if result_context.get('badcase_list') else ('bug' if result_context.get('bug_list') else 'testcase')
                         
                         if observation.get('success'):
                             batch_results.append({
@@ -270,17 +282,17 @@ class SimplifiedReActEngine:
                 print(f"[REACT-STREAM] 执行工具: {decision['tool']}")
                 yield {'event': 'executing', 'tool': decision['tool'], 'reason': decision.get('reason', '')}
                 
-                # 批量修改逻辑：如果是 modify 工具，检查是否需要修改多个记录
+                # 批量修改逻辑：如果是 modify 工具，检查是否有候选列表（badcase/bug/testcase）
                 if decision['tool'] == 'modify':
-                    # 检查是否有 badcase_list 或 bug_list
                     badcase_list = result_context.get('badcase_list', [])
                     bug_list = result_context.get('bug_list', [])
-                    target_list = badcase_list if badcase_list else bug_list
+                    testcase_list = result_context.get('testcase_list', [])
+                    target_list = badcase_list or bug_list or testcase_list
+                    target_type = 'badcase' if badcase_list else ('bug' if bug_list else 'testcase')
                     
                     if target_list and len(target_list) > 1:
                         # 批量修改所有记录
                         all_results = []
-                        target_type = 'badcase' if badcase_list else 'bug'
                         for item in target_list:
                             item_id = item.get('id')
                             item_plan_id = item.get('plan_id')  # 获取 plan_id
@@ -343,43 +355,60 @@ class SimplifiedReActEngine:
                     yield {'event': 'retry', 'message': '正在执行 grep 工具定位目标记录...'}
                     
                     suggested_params = observation.get('suggested_params', {})
+                    # 从用户输入/ todo 中提取要查找的标题作为 keywords（拆分模糊匹配由 grep 内部处理）
+                    keywords = self._extract_title_keywords_for_grep(user_input, todo)
+                    grep_params = {
+                        'target': suggested_params.get('target', 'badcase'),
+                        'project_id': suggested_params.get('project_id', self.project_id),
+                        'userId': 'system_agent'
+                    }
+                    if keywords:
+                        grep_params['keywords'] = keywords
+                        print(f"[REACT-STREAM] 从用户输入提取 grep keywords: '{keywords}'")
+                    # 若有当前迭代计划，只查该计划下的记录（人类式先检索本迭代）
+                    if result_context.get('plan_id') is not None or getattr(self, 'plan_id', None) is not None:
+                        grep_params['plan_id'] = result_context.get('plan_id') or self.plan_id
                     grep_decision = {
                         'execute': True,
                         'tool': 'grep',
-                        'params': {
-                            'target': suggested_params.get('target', 'badcase'),
-                            'project_id': suggested_params.get('project_id', self.project_id),
-                            'userId': 'system_agent'
-                        }
+                        'params': grep_params
                     }
                     grep_observation = await self._execute_tool(grep_decision)
                     print(f"[REACT-STREAM] grep 结果: success={grep_observation.get('success')}")
                     
-                    # 从 grep 结果中提取 target_id
+                    # 从 grep 结果中提取 target_id（rerank 分高的选一条；支持 badcase/bug/testcase）
                     if grep_observation.get('success'):
                         grep_data = grep_observation.get('data', {})
                         badcase_list = grep_data.get('badcase_analysis', [])
                         bug_list = grep_data.get('bug_location', [])
+                        testcase_list = grep_data.get('testcase_location', [])
                         
-                        if badcase_list and len(badcase_list) > 0:
+                        if badcase_list:
                             result_context['badcase_list'] = badcase_list
-                            result_context['first_badcase_id'] = badcase_list[0].get('id')
-                            print(f"[REACT-STREAM] 从 grep 获取到 {len(badcase_list)} 条 BadCase")
-                        
-                        if bug_list and len(bug_list) > 0:
+                            best = self._pick_best_match_from_list(badcase_list, keywords, key_title='title')
+                            result_context['first_badcase_id'] = best.get('id')
+                            print(f"[REACT-STREAM] BadCase rerank 选中 id={best.get('id')}")
+                        if bug_list:
                             result_context['bug_list'] = bug_list
-                            result_context['first_bug_id'] = bug_list[0].get('id')
-                            print(f"[REACT-STREAM] 从 grep 获取到 {len(bug_list)} 条 Bug")
+                            best = self._pick_best_match_from_list(bug_list, keywords, key_title='title')
+                            result_context['first_bug_id'] = best.get('id')
+                            print(f"[REACT-STREAM] Bug rerank 选中 id={best.get('id')}")
+                        if testcase_list:
+                            result_context['testcase_list'] = testcase_list
+                            best = self._pick_best_match_from_list(testcase_list, keywords, key_title='title')
+                            result_context['first_testcase_id'] = best.get('id')
+                            print(f"[REACT-STREAM] 测试用例 rerank 选中 id={best.get('id')}")
                         
-                        # 发送 grep 结果
                         yield {'event': 'observation', 'data': grep_observation}
                         
-                        # 重试 modify
-                        target_list = result_context.get('badcase_list', []) or result_context.get('bug_list', [])
-                        if target_list and len(target_list) > 0:
-                            target_type = 'badcase' if result_context.get('badcase_list') else 'bug'
-                            # 批量修改
-                            if len(target_list) > 1:
+                        target_list = result_context.get('badcase_list') or result_context.get('bug_list') or result_context.get('testcase_list')
+                        if target_list:
+                            target_type = 'badcase' if result_context.get('badcase_list') else ('bug' if result_context.get('bug_list') else 'testcase')
+                            best_match = self._pick_best_match_from_list(target_list, keywords, key_title='title')
+                            target_list = [best_match]
+                            result_context['first_badcase_id' if target_type == 'badcase' else ('first_bug_id' if target_type == 'bug' else 'first_testcase_id')] = best_match.get('id')
+                            # 单条修改（不再按“多条就批量”）
+                            if len(target_list) >= 1:
                                 print(f"[REACT-STREAM] 重试批量修改 {len(target_list)} 条 {target_type}")
                                 all_results = []
                                 for item in target_list:
@@ -457,7 +486,9 @@ class SimplifiedReActEngine:
                         bug_location = obs_data.get('bug_location', []) or observation.get('bug_location', [])
                         if bug_location and isinstance(bug_location, list) and len(bug_location) > 0:
                             result_context['bug_list'] = bug_location
-                            result_context['first_bug_id'] = bug_location[0].get('id') if isinstance(bug_location[0], dict) else None
+                            kw = result_context.get('_last_grep_keywords', '')
+                            best = self._pick_best_match_from_list(bug_location, kw, 'title') if kw else (bug_location[0] if isinstance(bug_location[0], dict) else None)
+                            result_context['first_bug_id'] = best.get('id') if isinstance(best, dict) else (bug_location[0].get('id') if isinstance(bug_location[0], dict) else None)
                             print(f"[REACT-STREAM] 自动将 bug_location 添加到 context: {len(bug_location)} 条")
                     
                     # BadCase 列表 - 从多个可能的位置提取
@@ -481,12 +512,24 @@ class SimplifiedReActEngine:
                             
                             if badcase_list:
                                 result_context['badcase_list'] = badcase_list
-                                result_context['badcase_analysis'] = badcase_analysis  # 保留原始数据
-                                result_context['first_badcase_id'] = badcase_list[0].get('id')
+                                result_context['badcase_analysis'] = badcase_analysis
+                                kw = result_context.get('_last_grep_keywords', '')
+                                best = self._pick_best_match_from_list(badcase_list, kw, 'title') if kw else badcase_list[0]
+                                result_context['first_badcase_id'] = best.get('id')
                                 print(f"[REACT-STREAM] 自动将 badcase_list 添加到 context: {len(badcase_list)} 条")
                     
-                    # 记录提取结果
-                    print(f"[REACT-STREAM] Context 更新后: bug_list={len(result_context.get('bug_list', []))}条, badcase_list={len(result_context.get('badcase_list', []))}条")
+                    if 'testcase_list' not in result_context:
+                        testcase_location = obs_data.get('testcase_location', []) or observation.get('testcase_location', [])
+                        if testcase_location and isinstance(testcase_location, list) and len(testcase_location) > 0:
+                            testcase_list = [{'id': tc.get('id'), 'title': tc.get('title'), 'plan_id': tc.get('current_plan_id')} for tc in testcase_location if isinstance(tc, dict) and tc.get('id') is not None]
+                            if testcase_list:
+                                result_context['testcase_list'] = testcase_list
+                                kw = result_context.get('_last_grep_keywords', '')
+                                best = self._pick_best_match_from_list(testcase_list, kw, 'title') if kw else testcase_list[0]
+                                result_context['first_testcase_id'] = best.get('id')
+                                print(f"[REACT-STREAM] 自动将 testcase_list 添加到 context: {len(testcase_list)} 条")
+                    
+                    print(f"[REACT-STREAM] Context 更新后: bug_list={len(result_context.get('bug_list', []))}条, badcase_list={len(result_context.get('badcase_list', []))}条, testcase_list={len(result_context.get('testcase_list', []))}条")
                 
                 if analysis.get('findings'):
                     findings.extend(analysis['findings'])
@@ -782,6 +825,70 @@ class SimplifiedReActEngine:
         
         return ""
 
+    def _rerank_score(self, item: Dict, keywords: str, key_title: str = 'title') -> float:
+        """
+        Rerank 打分：分高的优先。关键词命中数×10 + 整句命中加 50，便于选最相关的一条。
+        """
+        if not keywords or not keywords.strip():
+            return 1.0
+        import re
+        title = (item.get(key_title) or '').strip()
+        text = re.sub(r'[和与]', ' ', keywords.strip())
+        parts = [p.strip() for p in text.split() if p.strip()]
+        stop = {'的', '为', '与', '和', '或', '及'}
+        terms = [p for p in parts if p not in stop and (len(p) > 1 or p not in stop)]
+        if not terms:
+            return 50.0 if keywords.strip() in title else 0.0
+        score = sum(10 for t in terms if t in title)
+        if keywords.strip() in title:
+            score += 50
+        return float(score)
+
+    def _rerank_and_pick(self, items: List[Dict], keywords: str, key_title: str = 'title', top_k: int = 1) -> List[Dict]:
+        """
+        Rerank 后取分高的：按 _rerank_score 排序，返回 top_k 条（分高的就都可以，默认取 1 条）。
+        """
+        if not items:
+            return []
+        if not keywords or not keywords.strip():
+            return items[:top_k]
+        scored = [(item, self._rerank_score(item, keywords, key_title)) for item in items]
+        scored.sort(key=lambda x: -x[1])
+        # 同分都算「分高的」：取所有与最高分相同的项，再截 top_k
+        if not scored:
+            return []
+        best_score = scored[0][1]
+        top = [item for item, s in scored if s == best_score][:top_k]
+        return top if top else [scored[0][0]]
+
+    def _pick_best_match_from_list(self, items: List[Dict], keywords: str, key_title: str = 'title') -> Dict:
+        """Rerank 后取分最高的那一条（兼容旧调用）。"""
+        picked = self._rerank_and_pick(items, keywords, key_title, top_k=1)
+        return picked[0] if picked else {}
+
+    def _extract_title_keywords_for_grep(self, user_input: str, todo: str) -> str:
+        """
+        从用户输入或 todo 中提取要修改的 BadCase/Bug 标题，用于 grep 的 keywords 参数。
+        例如：「修改雪碧和七喜的正确答案为理解正确」 -> 「雪碧和七喜」
+        """
+        import re
+        text = (user_input or '') + ' ' + (todo or '')
+        if not text.strip():
+            return ''
+        # 修改/把/将 XXX 的 … -> XXX（非贪婪，取到第一个「的」为止）
+        for pattern in [
+            r'修改\s*(.+?)\s*的',
+            r'把\s*(.+?)\s*的',
+            r'将\s*(.+?)\s*的',
+            r'标题[是为]\s*([^，。\n]+)',
+        ]:
+            m = re.search(pattern, text)
+            if m:
+                kw = m.group(1).strip()
+                if kw and len(kw) <= 50:  # 避免整句当关键词
+                    return kw
+        return ''
+
     def _infer_modify_params(self, todo: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         从 Todo 和 Context 中推断 modify工具参数
@@ -847,7 +954,7 @@ class SimplifiedReActEngine:
                                     if var_name == 'user_modifications':
                                         resolved_value = self._extract_modifications_from_todo(todo)
                                     elif var_name == 'target_id':
-                                        resolved_value = context.get('first_bug_id') or context.get('first_badcase_id')
+                                        resolved_value = (context.get('first_bug_id') or context.get('first_badcase_id') or context.get('first_testcase_id'))
                                     elif var_name == 'project_id':
                                         resolved_value = context.get('project_id', '1')
                                     elif var_name in context:
@@ -862,7 +969,8 @@ class SimplifiedReActEngine:
                                     # 如果是 target_id，尝试从其他来源获取
                                     if key == 'target_id':
                                         target_id = (context.get('first_bug_id') or 
-                                                    context.get('first_badcase_id') or
+                                                    context.get('first_badcase_id') or 
+                                                    context.get('first_testcase_id') or
                                                     context.get('target_id'))
                                         if target_id:
                                             params[key] = target_id
@@ -886,24 +994,20 @@ class SimplifiedReActEngine:
                         }
                         return result
         
-        # 如果技能匹配失败，回到标准流程
-        # 从 context 中获取 bug_list 或 badcase_analysis（优先 bug_list）
+        # 如果技能匹配失败，回到标准流程（含 testcase）
         bug_list = context.get('bug_list', [])
         badcase_list = context.get('badcase_list', [])
-        
-        # 尝试从多个位置提取
+        testcase_list = context.get('testcase_list', [])
         if not bug_list and 'bug_location' in context:
             bug_list = context.get('bug_location', [])
-        
         if not badcase_list and 'badcase_analysis' in context:
             badcase_analysis = context.get('badcase_analysis', [])
             if badcase_analysis and isinstance(badcase_analysis, list):
                 badcase_list = badcase_analysis
-                print(f"[REACT-STREAM] 从 badcase_analysis 中获取到 {len(badcase_list)} 条记录")
-        
-        # 确定目标类型和列表
-        target_list = bug_list if bug_list else badcase_list
-        target_type = 'bug' if bug_list else ('badcase' if badcase_list else None)
+        if not testcase_list and 'testcase_location' in context:
+            testcase_list = context.get('testcase_location', [])
+        target_list = bug_list or badcase_list or testcase_list
+        target_type = 'bug' if bug_list else ('badcase' if badcase_list else ('testcase' if testcase_list else None))
         
         if not target_list or not isinstance(target_list, list) or len(target_list) == 0:
             print(f"[REACT-STREAM] 无法从 context 中获取有效的 bug_list 或 badcase_list")

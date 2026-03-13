@@ -29,7 +29,7 @@
       <div class="content-left">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
-          v-if="pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
           class="pending-diff-panel"
         >
           <div class="pending-diff-header">
@@ -712,8 +712,10 @@
 <script>
 import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectPlans, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
-import MonacoDiffEditor from './MonacoDiffEditor.vue'
+import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjectEditContext, getProjectPlans, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
+import { defineAsyncComponent } from 'vue'
+
+const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
 
 export default {
   name: 'NewTestCase',
@@ -897,6 +899,26 @@ export default {
       } catch (error) {
         console.error('获取项目计划失败:', error)
       }
+    }
+
+    const setTestcasePlansFromTree = async (plansTree) => {
+      const result = []
+      const walk = (nodes) => {
+        ;(nodes || []).forEach(p => {
+          if (p.plan_type === 'test_case') result.push(p)
+          if (p.children && p.children.length) walk(p.children)
+        })
+      }
+      walk(plansTree || [])
+      testcasePlans.value = [
+        { value: 'unplanned', label: '未计划', icon: '📋' },
+        ...result.map(p => ({
+          value: p.id.toString(),
+          label: p.name,
+          icon: '🧪'
+        }))
+      ]
+      await nextTick()
     }
 
     const fetchProjectMembers = async (projectId) => {
@@ -1379,7 +1401,7 @@ export default {
 
       try {
         await scrollToDiffField(field)
-        const resp = await fetch(`/api/projects/${projectId}/modify`, {
+        const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -1418,17 +1440,7 @@ export default {
       }
     }
 
-    const fetchProjects = async () => {
-      try {
-        const response = await getProjects()
-        if (response.data.success) {
-          availableProjects.value = response.data.projects || []
-          console.log('fetchProjects: 项目列表加载完成')
-        }
-      } catch (error) {
-        console.error('获取项目列表失败:', error)
-      }
-    }
+    // 编辑页不需要拉全量项目列表（包含头像等），避免额外慢接口
 
     onMounted(async () => {
       console.log('=== NewTestCase onMounted 开始 ===')
@@ -1438,24 +1450,36 @@ export default {
       
       loading.value = true
       try {
-        // 加载当前用户
-        await fetchCurrentUser()
+        // 先预读取 diff（不依赖 show_diff，避免跳转后漏读；且不阻塞首屏）
+        const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+        if (diffDataStrEarly) {
+          try {
+            pendingDiff.value = JSON.parse(diffDataStrEarly)
+            console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
+          } catch (e) {
+            console.error('[DIFF] 预读取 diff 失败:', e)
+          }
+        }
+
+        // 后台并行加载用户信息（不阻塞首屏）
+        const bgTasks = []
+        bgTasks.push(fetchCurrentUser())
         
-        // 加载项目列表
-        await fetchProjects()
-        
-        // 如果有项目 ID，加载项目相关数据
+        // 项目相关上下文：用最小接口一次性取
         if (testcase.project_id) {
-          console.log('开始加载项目相关数据, project_id:', testcase.project_id)
-          await fetchProjectPlans(testcase.project_id)
-          await fetchProjectMembers(testcase.project_id)
-        } else {
-          console.warn('没有project_id，跳过加载计划和成员')
+          try {
+            const resp = await getProjectEditContext(testcase.project_id)
+            if (resp.data?.success) {
+              projectInfo.value = resp.data.project || projectInfo.value
+              projectMembers.value = resp.data.members || projectMembers.value
+              await setTestcasePlansFromTree(resp.data.plans || [])
+            }
+          } catch (e) {
+            console.error('获取编辑页上下文失败:', e)
+          }
         }
         
-        // 加载项目信息和计划列表
-        // 简化处理，实际应调用API
-        projectInfo.name = '项目名称'
+        // projectInfo 由 edit-context 返回
         
         // 如果是编辑模式，加载测试用例详情
         if (isEdit) {
@@ -1500,34 +1524,25 @@ export default {
             }
           }
         }
+
+        // 如果有预读到 diff，预填充新值到表单（确保内联 diff/✓✗ 立即可见）
+        if (pendingDiff.value?.modifications) {
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (testcase.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
+              testcase[field] = data.new
+            }
+          }
+        }
+
+        // 后台等待全量请求完成（不阻塞首屏）；忽略失败
+        Promise.allSettled(bgTasks).then(() => {
+          console.log('后台用户/项目/成员/计划加载完成')
+        })
       } catch (error) {
         console.error('加载失败:', error)
       } finally {
         loading.value = false
         console.log('=== NewTestCase onMounted 完成 ===')
-        
-        // 检查是否有待确认的 diff 数据（优先使用 props，其次使用路由参数）
-        if (props.show_diff || route.query.show_diff === 'true') {
-          console.log('[DIFF] 检测到 show_diff 参数，读取 sessionStorage')
-          const diffDataStr = sessionStorage.getItem('pendingModifyDiff')
-          if (diffDataStr) {
-            try {
-              pendingDiff.value = JSON.parse(diffDataStr)
-              console.log('[DIFF] 读取到 diff 数据:', pendingDiff.value)
-              
-              // 预填充新值到表单
-              if (pendingDiff.value.modifications) {
-                for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-                  if (testcase.hasOwnProperty(field) && data.new) {
-                    testcase[field] = data.new
-                  }
-                }
-              }
-            } catch (e) {
-              console.error('[DIFF] 解析 diff 数据失败:', e)
-            }
-          }
-        }
       }
     })
 

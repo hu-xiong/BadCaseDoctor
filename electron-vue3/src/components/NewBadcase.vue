@@ -107,7 +107,7 @@
       <div class="content-left">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
-          v-if="pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
           class="pending-diff-panel"
         >
           <div class="pending-diff-header">
@@ -118,7 +118,7 @@
           <div
             v-for="(data, field) in pendingDiff.modifications"
             :key="field"
-            v-show="!String(field).startsWith('_')"
+            v-show="!String(field).startsWith('_') && !inlineDiffFields.includes(String(field))"
             class="pending-diff-item"
             :id="`diff-field-${field}`"
           >
@@ -523,27 +523,71 @@
         </div>
         
         <!-- 答案输入框 -->
-        <div class="answer-section">
+        <div class="answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.answer }">
           <h3 class="answer-title">答案:</h3>
+          <!-- diff 显示区域（放在文本域内部上方，带 ✓/✗） -->
+          <div v-if="pendingDiff?.modifications?.answer" class="field-diff-panel">
+            <div class="diff-header">
+              <span class="diff-label">修改预览:</span>
+              <div class="diff-actions">
+                <button @click="confirmFieldChange('answer')" class="btn-confirm" title="确认">✓</button>
+                <button @click="cancelFieldChange('answer')" class="btn-cancel" title="取消">✗</button>
+              </div>
+            </div>
+            <div class="diff-content">
+              <div class="diff-old">
+                <span class="diff-tag old">原值</span>
+                <span class="diff-value">{{ pendingDiff.modifications.answer.old || '未设置' }}</span>
+              </div>
+              <div class="diff-arrow">→</div>
+              <div class="diff-new">
+                <span class="diff-tag new">新值</span>
+                <span class="diff-value">{{ pendingDiff.modifications.answer.new }}</span>
+              </div>
+            </div>
+          </div>
           <textarea 
-            v-model="badcase.correct_answer" 
+            v-model="badcase.answer" 
             class="answer-textarea" 
+            :class="{ 'field-with-diff': pendingDiff?.modifications?.answer }"
             placeholder="请输入答案..."
             maxlength="1000"
           ></textarea>
-          <div class="answer-count">{{ badcase.correct_answer.length }} / 1000</div>
+          <div class="answer-count">{{ badcase.answer.length }} / 1000</div>
         </div>
         
         <!-- 正确答案输入框 -->
-        <div class="correct-answer-section">
+        <div class="correct-answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.correct_answer }">
           <h3 class="correct-answer-title">正确答案:</h3>
+          <!-- diff 显示区域（放在文本域内部上方，带 ✓/✗） -->
+          <div v-if="pendingDiff?.modifications?.correct_answer" class="field-diff-panel">
+            <div class="diff-header">
+              <span class="diff-label">修改预览:</span>
+              <div class="diff-actions">
+                <button @click="confirmFieldChange('correct_answer')" class="btn-confirm" title="确认">✓</button>
+                <button @click="cancelFieldChange('correct_answer')" class="btn-cancel" title="取消">✗</button>
+              </div>
+            </div>
+            <div class="diff-content">
+              <div class="diff-old">
+                <span class="diff-tag old">原值</span>
+                <span class="diff-value">{{ pendingDiff.modifications.correct_answer.old || '未设置' }}</span>
+              </div>
+              <div class="diff-arrow">→</div>
+              <div class="diff-new">
+                <span class="diff-tag new">新值</span>
+                <span class="diff-value">{{ pendingDiff.modifications.correct_answer.new }}</span>
+              </div>
+            </div>
+          </div>
           <textarea 
-            v-model="badcase.correct_answer_final" 
+            v-model="badcase.correct_answer" 
             class="correct-answer-textarea" 
+            :class="{ 'field-with-diff': pendingDiff?.modifications?.correct_answer }"
             placeholder="请输入正确答案..."
             maxlength="1000"
           ></textarea>
-          <div class="correct-answer-count">{{ badcase.correct_answer_final.length }} / 1000</div>
+          <div class="correct-answer-count">{{ badcase.correct_answer.length }} / 1000</div>
         </div>
                 
         <!-- 问题分类和优先级 -->
@@ -738,7 +782,7 @@
 <script>
 import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { createBadcase, getBadcaseDetail, updateBadcase, getProjects, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
+import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
 
@@ -865,14 +909,17 @@ export default {
     
     // 待确认的 diff 数据
     const pendingDiff = ref(null)
+
+    // 这些字段使用“就地 diff”（显示在对应文本域内部），不在顶部 MonacoDiffEditor 列表重复展示
+    const inlineDiffFields = ['base_problem', 'answer', 'correct_answer']
     
     const badcase = reactive({
       title: '',
       case_category: '',
       base_problem: '',
       badcase_result: '',
+      answer: '',
       correct_answer: '',
-      correct_answer_final: '',
       problem_reason: '',
       solution: '',
       priority: '',
@@ -992,21 +1039,44 @@ export default {
       }
     }
     
-    // 获取可用项目列表
-    const fetchProjects = async () => {
-      try {
-        const response = await getProjects()
-        if (response.data.success) {
-          availableProjects.value = response.data.projects || []
-          console.log('fetchProjects: 项目列表加载完成')
-          console.log('项目数量:', availableProjects.value.length)
-          console.log('项目数据结构:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
-        }
-      } catch (error) {
-        console.error('获取项目列表失败:', error)
-      }
-    }
+    // 编辑页不需要拉全量项目列表（包含头像等），避免额外慢接口
     
+    // 使用后端 plans 树直接生成下拉选项（避免额外请求 /plans）
+    const setAvailablePlansFromTree = async (plansTree) => {
+      const formattedPlans = [
+        { value: 'unplanned', label: '未计划', icon: '📋' }
+      ]
+
+      const processPlans = (planList, level = 0) => {
+        const processedPlans = []
+        ;(planList || []).forEach(plan => {
+          // 只显示进行中的计划，且必须是 badcase 类型计划
+          if (plan.status === 'active') {
+            const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
+
+            if (plan.plan_type === 'badcase' || children.length > 0) {
+              const planOption = {
+                value: plan.id.toString(),
+                label: plan.name,
+                level,
+                is_pinned: plan.is_pinned || false,
+                icon: plan.icon || '📁',
+                plan_type: plan.plan_type,
+                badcase_count: plan.badcase_count || 0
+              }
+              if (children.length > 0) planOption.children = children
+              processedPlans.push(planOption)
+            }
+          }
+        })
+        return processedPlans
+      }
+
+      formattedPlans.push(...processPlans(plansTree || []))
+      availablePlans.value = formattedPlans
+      await nextTick()
+    }
+
     // 搜索计划
     const searchPlans = () => {
       console.log('搜索计划:', planSearchText.value)
@@ -1085,64 +1155,7 @@ export default {
         console.log('API响应数据结构:', Object.keys(response || {}))
         
         if (response.data.success) {
-          const plans = response.data.plans || []
-          console.log('获取到的原始计划数据:', plans)
-          console.log('计划数量:', plans.length)
-          
-          // 转换计划数据格式：第一个是"未计划"，后面是项目实际计划
-          const formattedPlans = [
-            { value: 'unplanned', label: '未计划', icon: '📋' }
-          ]
-          
-          // 递归处理项目计划树，保持树结构
-          const processPlans = (planList, level = 0) => {
-            const processedPlans = []
-            planList.forEach(plan => {
-              console.log(`处理计划: ${plan.name} (ID: ${plan.id}, 状态: ${plan.status}, 类型: ${plan.plan_type})`)
-              // 只显示进行中的计划，且必须是 badcase 类型计划
-              if (plan.status === 'active') {
-                // 如果是 badcase 类型计划，或者是包含 badcase 类型子计划的父计划
-                const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
-                
-                if (plan.plan_type === 'badcase' || children.length > 0) {
-                  const planOption = {
-                    value: plan.id.toString(),
-                    label: plan.name,
-                    level: level,
-                    is_pinned: plan.is_pinned || false,
-                    icon: plan.icon || '📁',
-                    plan_type: plan.plan_type,
-                    badcase_count: plan.badcase_count || 0
-                  }
-                  
-                  if (children.length > 0) {
-                    planOption.children = children
-                  }
-                  
-                  processedPlans.push(planOption)
-                  console.log(`添加计划: ${plan.name} (类型: ${plan.plan_type})`)
-                } else {
-                  console.log(`跳过计划: ${plan.name} (非badcase类型且无badcase子计划)`)
-                }
-              }
-            })
-            return processedPlans
-          }
-          
-          // 添加项目实际计划（保持树结构）
-          const projectPlans = processPlans(plans)
-          console.log('处理后的项目计划:', projectPlans)
-          
-          formattedPlans.push(...projectPlans)
-          availablePlans.value = formattedPlans
-          
-          console.log('=== 最终的计划选项 ===')
-          console.log('availablePlans:', availablePlans.value)
-          console.log('filteredPlans计算值:', filteredPlans.value)
-          console.log('计划总数:', availablePlans.value.length)
-          
-          // 强制触发响应式更新
-          await nextTick()
+          await setAvailablePlansFromTree(response.data.plans || [])
         } else {
           console.error('API返回失败:', response.data)
           // 如果API失败，至少显示"未计划"选项
@@ -1246,23 +1259,6 @@ export default {
             // 获取项目计划列表和成员列表（编辑模式）
             if (badcase.project_id) {
               console.log('编辑模式，获取项目计划，项目ID:', badcase.project_id)
-              
-              // 确保项目列表已加载
-              if (availableProjects.value.length === 0) {
-                console.log('编辑模式：项目列表为空，先加载项目列表')
-                await fetchProjects()
-              }
-              
-              // 设置项目信息
-              const project = availableProjects.value.find(p => p.id == badcase.project_id)
-              if (project) {
-                projectInfo.value = project
-                console.log('编辑模式：设置项目信息:', project.name)
-              } else {
-                console.log('编辑模式：未找到项目信息，availableProjects:', availableProjects.value)
-                console.log('尝试查找项目，badcase.project_id:', badcase.project_id)
-                console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
-              }
               
               // 等待数据加载完成
               await Promise.all([
@@ -1459,8 +1455,8 @@ export default {
           base_problem: badcase.base_problem || '',
           reproduction_steps: badcase.reproduction_steps || '',
           badcase_result: badcase.badcase_result || '待确认',
+          answer: badcase.answer || '待确认',
           correct_answer: badcase.correct_answer || '待确认',
-          correct_answer_final: badcase.correct_answer_final || '待确认',
           problem_reason: badcase.problem_reason || '',
           solution: badcase.solution || '',
           priority: badcase.priority,
@@ -1969,7 +1965,7 @@ export default {
 
       try {
         await scrollToDiffField(field)
-        const resp = await fetch(`/api/projects/${projectId}/modify`, {
+        const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -2088,16 +2084,36 @@ export default {
       console.log('=== 组件挂载开始 ===')
       
       try {
-        // 先获取当前用户信息
-        console.log('开始获取当前用户信息...')
-        await fetchCurrentUser()
-        console.log('当前用户信息获取完成')
-        
-        // 再获取项目列表
-        console.log('开始获取项目列表...')
-        await fetchProjects()
-        console.log('项目列表获取完成，数量:', availableProjects.value.length)
-        console.log('项目列表:', availableProjects.value)
+        // 先尝试读取待确认 diff（不依赖 show_diff，避免“跳转过去但不显示”）
+        const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+        if (diffDataStrEarly) {
+          try {
+            pendingDiff.value = JSON.parse(diffDataStrEarly)
+            console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
+            // 兼容旧字段名/旧版本 diff：统一到 answer / correct_answer
+            if (pendingDiff.value && pendingDiff.value.modifications && typeof pendingDiff.value.modifications === 'object') {
+              const mods = { ...pendingDiff.value.modifications }
+              if (mods.correct_answer_final && !mods.correct_answer) {
+                mods.correct_answer = mods.correct_answer_final
+                delete mods.correct_answer_final
+              }
+              if (mods.correct_answer_text && !mods.answer) {
+                mods.answer = mods.correct_answer_text
+                delete mods.correct_answer_text
+              }
+              pendingDiff.value.modifications = mods
+            }
+          } catch (e) {
+            console.error('[DIFF] 预读取 diff 失败:', e)
+          }
+        }
+
+        // embedded 模式下尽量少请求（ProjectDetail 已有大量上下文），提升进入编辑页速度
+        if (!props.embedded) {
+          console.log('开始获取当前用户信息...')
+          await fetchCurrentUser()
+          console.log('当前用户信息获取完成')
+        }
         
         // 等待一下确保数据完全加载
         await new Promise(resolve => setTimeout(resolve, 100))
@@ -2106,6 +2122,22 @@ export default {
         console.log('开始初始化BadCase...')
         await initBadcase()
         console.log('BadCase初始化完成')
+
+        // 初始化后，一次性拉取编辑页最小上下文（project + plans + members）
+        const ctxProjectId = badcase.project_id || props.project_id
+        if (ctxProjectId) {
+          try {
+            const resp = await getProjectEditContext(ctxProjectId)
+            if (resp.data?.success) {
+              projectInfo.value = resp.data.project || projectInfo.value
+              projectMembers.value = resp.data.members || projectMembers.value
+              // 直接用 edit-context 返回的 plans，避免额外请求 /plans
+              await setAvailablePlansFromTree(resp.data.plans || [])
+            }
+          } catch (e) {
+            console.error('获取编辑页上下文失败:', e)
+          }
+        }
         
         // 等待DOM更新完成后再设置步骤编辑器内容
         await nextTick()
@@ -2132,25 +2164,11 @@ export default {
         setTimeout(checkAndUpdateEditor, 500)
         setTimeout(checkAndUpdateEditor, 1000)
         
-        // 检查是否有待确认的 diff 数据（优先使用 props，其次使用路由参数）
-        if (props.show_diff || route.query.show_diff === 'true') {
-          console.log('[DIFF] 检测到 show_diff 参数，读取 sessionStorage')
-          const diffDataStr = sessionStorage.getItem('pendingModifyDiff')
-          if (diffDataStr) {
-            try {
-              pendingDiff.value = JSON.parse(diffDataStr)
-              console.log('[DIFF] 读取到 diff 数据:', pendingDiff.value)
-              
-              // 预填充新值到表单
-              if (pendingDiff.value.modifications) {
-                for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-                  if (badcase.hasOwnProperty(field) && data.new) {
-                    badcase[field] = data.new
-                  }
-                }
-              }
-            } catch (e) {
-              console.error('[DIFF] 解析 diff 数据失败:', e)
+        // 无论 show_diff 是否为 true，只要 pendingDiff 存在就预填充（确保红框内 diff/✓✗ 一定出现）
+        if (pendingDiff.value?.modifications) {
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (badcase.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
+              badcase[field] = data.new
             }
           }
         }

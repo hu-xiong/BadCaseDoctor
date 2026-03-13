@@ -372,6 +372,7 @@ class ModifyTool(BaseTool):
                 'assignee': badcase.assignee or '',
                 'plan_id': badcase.plan_id,
                 'reproduction_steps': badcase.reproduction_steps or '',
+                'answer': badcase.answer or '',
                 'correct_answer': badcase.correct_answer or '',
                 'badcase_result': badcase.badcase_result or '',
                 'base_problem': badcase.base_problem or ''
@@ -434,6 +435,7 @@ class ModifyTool(BaseTool):
             'steps_to_reproduce': '复现步骤',
             # BadCase 字段
             'reproduction_steps': '复现步骤',
+            'answer': '答案',
             'correct_answer': '正确答案',
             'badcase_result': 'BadCase结果',
             'base_problem': '相似问题',
@@ -751,6 +753,15 @@ class ModifyTool(BaseTool):
                 **common_mapping,
                 'creator': 'creator_id',
                 '创建人': 'creator_id',
+                # 对话层字段命名统一：
+                # - answer         -> 数据库 answer
+                # - correct_answer -> 数据库 correct_answer
+                'answer': 'answer',
+                '答案': 'answer',
+                'conect_answer': 'answer',  # 常见拼写纠错
+                'correct_answer': 'correct_answer',
+                '正确答案': 'correct_answer',
+                '最终正确答案': 'correct_answer',
             }
         else:
             # Bug 和 TestCase 使用 assignee_id

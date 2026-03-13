@@ -30,3 +30,6 @@ sqlalchemy
 
 # 沙箱执行依赖（可选）
 # pip install llm-sandbox  # Docker 沙箱执行（推荐）
+
+# Oracle 源库（方案2 预览用，可选）：瘦驱动，无需 Oracle Client，体积小
+# pip install oracledb

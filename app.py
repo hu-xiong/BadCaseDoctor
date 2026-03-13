@@ -1,3 +1,15 @@
+# Windows 下强制 stdout/stderr 使用 UTF-8，避免 print 中文/emoji 时 GBK 报错
+import sys
+import io
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "buffer"):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "buffer"):
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
@@ -717,8 +729,8 @@ class BadCase(db.Model):
     base_problem = db.Column(db.Text, nullable=False)  # 具体问题
     reproduction_steps = db.Column(db.Text)  # 复现步骤
     badcase_result = db.Column(db.Text, nullable=False)  # badcase问题结果
-    correct_answer = db.Column(db.Text, nullable=False)  # 应该得到的正确答案
-    correct_answer_final = db.Column(db.Text)  # 最终正确答案
+    answer = db.Column(db.Text, nullable=False)  # 答案（原 correct_answer）
+    correct_answer = db.Column(db.Text)  # 正确答案（原 correct_answer_final）
     problem_reason = db.Column(db.Text)  # 问题原因
     needs_processing = db.Column(db.Boolean, default=True)  # 是否需要处理
     solution = db.Column(db.Text)  # 解决方式
@@ -750,8 +762,8 @@ class BadCase(db.Model):
             'base_problem': self.base_problem,
             'reproduction_steps': self.reproduction_steps,
             'badcase_result': self.badcase_result,
+            'answer': self.answer,
             'correct_answer': self.correct_answer,
-            'correct_answer_final': self.correct_answer_final,
             'problem_reason': self.problem_reason,
             'needs_processing': self.needs_processing,
             'solution': self.solution,
@@ -1072,28 +1084,61 @@ def generate_verification_code():
 
 # 检查用户是否有项目权限
 def has_project_permission(user_id, project_id, required_role='collaborator'):
-    # 首先检查项目是否存在
-    project = Project.query.get(project_id)
-    if not project:
+    """
+    权限检查要尽量轻量，避免每个接口重复两次数据库查询导致整体慢。
+    - 先用标量查询判断是否项目 owner
+    - 再用 EXISTS 查询判断权限是否满足
+    """
+    # 尽量只做 1 次查询：同时拿到 owner_id + 当前用户在该项目的权限 role
+    from sqlalchemy import and_
+
+    t0 = time.perf_counter()
+    row = (
+        db.session.query(Project.user_id, ProjectPermission.role)
+        .outerjoin(
+            ProjectPermission,
+            and_(ProjectPermission.project_id == Project.id, ProjectPermission.user_id == user_id),
+        )
+        .filter(Project.id == project_id)
+        .first()
+    )
+    dt_ms = (time.perf_counter() - t0) * 1000
+    try:
+        # 强制 flush，避免在某些环境下日志缓冲导致看不到
+        print(
+            f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}, required_role={required_role}) db={dt_ms:.1f}ms",
+            flush=True,
+        )
+    except Exception:
+        pass
+    if not row:
         return False
-    
-    # 如果用户是项目创建者，直接允许访问
-    if project.user_id == user_id:
+    owner_id, role = row
+    if owner_id == user_id:
         return True
-    
-    # 检查权限记录
-    permission = ProjectPermission.query.filter_by(
-        user_id=user_id, 
-        project_id=project_id
-    ).first()
-    
-    if not permission:
+    if not role:
         return False
-    
     if required_role == 'admin':
-        return permission.role == 'admin'
-    else:
-        return permission.role in ['admin', 'collaborator']
+        return role == 'admin'
+    return role in ['admin', 'collaborator']
+
+
+# 轻量缓存：降低同页重复请求的耗时（plans/members 变更不频繁，短 TTL 足够）
+_PROJECT_CTX_CACHE = {}
+
+def _cache_get(key, ttl_s: float):
+    try:
+        ts, value = _PROJECT_CTX_CACHE.get(key, (None, None))
+        if ts is None:
+            return None
+        if (time.time() - ts) <= ttl_s:
+            return value
+    except Exception:
+        return None
+    return None
+
+def _cache_set(key, value):
+    _PROJECT_CTX_CACHE[key] = (time.time(), value)
 
 # 路由
 @app.route('/')
@@ -1402,7 +1447,8 @@ def new_badcase(project_id):
             case_category=request.form['case_category'],
             base_problem=request.form['base_problem'],
             badcase_result=request.form['badcase_result'],
-            correct_answer=request.form['correct_answer'],
+            answer=request.form['answer'],
+            correct_answer=request.form.get('correct_answer', ''),
             problem_reason=request.form['problem_reason'],
             needs_processing=request.form.get('needs_processing') == 'on',
             priority=request.form['priority']
@@ -1548,6 +1594,7 @@ def import_excel():
                         case_category=row.get('case_category', ''),
                         base_problem=row.get('base_problem', ''),
                         badcase_result=row.get('badcase_result', ''),
+                        answer=row.get('answer', row.get('correct_answer', '')),
                         correct_answer=row.get('correct_answer', ''),
                         problem_reason=row.get('problem_reason', ''),
                         needs_processing=row.get('needs_processing', True),
@@ -1609,6 +1656,7 @@ def import_database():
                     case_category=row.get('case_category', ''),
                     base_problem=row.get('base_problem', ''),
                     badcase_result=row.get('badcase_result', ''),
+                    answer=row.get('answer', row.get('correct_answer', '')),
                     correct_answer=row.get('correct_answer', ''),
                     problem_reason=row.get('problem_reason', ''),
                     needs_processing=row.get('needs_processing', True),
@@ -2498,6 +2546,7 @@ def api_import_excel():
                     case_category=row.get('case_category', ''),
                     base_problem=row.get('base_problem', ''),
                     badcase_result=row.get('badcase_result', ''),
+                    answer=row.get('answer', row.get('correct_answer', '')),
                     correct_answer=row.get('correct_answer', ''),
                     problem_reason=row.get('problem_reason', ''),
                     needs_processing=row.get('needs_processing', True),
@@ -2550,6 +2599,7 @@ def api_import_database():
                     case_category=row.get('case_category', ''),
                     base_problem=row.get('base_problem', ''),
                     badcase_result=row.get('badcase_result', ''),
+                    answer=row.get('answer', row.get('correct_answer', '')),
                     correct_answer=row.get('correct_answer', ''),
                     problem_reason=row.get('problem_reason', ''),
                     needs_processing=row.get('needs_processing', True),
@@ -2775,73 +2825,8 @@ def api_get_projects():
                 'created_at': project.created_at.isoformat(),
                 'role': project.role
             })
-        
-        # 处理项目头像URL
-        for project in user_projects:
-            if project['avatar']:
-                # 检查是否是预签名URL且可能已过期
-                if 'AWSAccessKeyId' in project['avatar'] and 'Expires=' in project['avatar']:
-                    try:
-                        # 从URL中提取文件名
-                        import urllib.parse
-                        from urllib.parse import urlparse, parse_qs
-                        
-                        parsed_url = urlparse(project['avatar'])
-                        path_parts = parsed_url.path.split('/')
-                        filename = path_parts[-1] if path_parts else ''
-                        
-                        if filename:
-                            # 生成新的预签名URL
-                            full_path = f"{MINIO_CONFIG['saas_file_path']}avatar/{filename}"
-                            client = get_minio_client()
-                            
-                            # 检查文件是否存在
-                            try:
-                                client.head_object(Bucket=MINIO_CONFIG['bucket_name'], Key=full_path)
-                                # 生成新的预签名URL
-                                new_presigned_url = client.generate_presigned_url(
-                                    'get_object',
-                                    Params={'Bucket': MINIO_CONFIG['bucket_name'], 'Key': full_path},
-                                    ExpiresIn=86400  # 24小时有效期，支持浏览器缓存
-                                )
-                                project['avatar'] = new_presigned_url
-                            except ClientError as e:
-                                if e.response['Error']['Code'] == '404':
-                                    project['avatar'] = None
-                    except Exception as e:
-                        print(f"处理项目 {project['id']} 头像URL时出错: {e}")
-                else:
-                    # 如果不是预签名URL，检查是否是MinIO的普通URL，需要转换为预签名URL
-                    if project['avatar'].startswith('http://117.72.33.38:9901/') and 'AWSAccessKeyId' not in project['avatar']:
-                        try:
-                            # 从URL中提取文件名
-                            import urllib.parse
-                            from urllib.parse import urlparse
-                            
-                            parsed_url = urlparse(project['avatar'])
-                            path_parts = parsed_url.path.split('/')
-                            filename = path_parts[-1] if path_parts else ''
-                            
-                            if filename:
-                                # 生成预签名URL
-                                full_path = f"{MINIO_CONFIG['saas_file_path']}avatar/{filename}"
-                                client = get_minio_client()
-                                
-                                # 检查文件是否存在
-                                try:
-                                    client.head_object(Bucket=MINIO_CONFIG['bucket_name'], Key=full_path)
-                                    # 生成新的预签名URL
-                                    new_presigned_url = client.generate_presigned_url(
-                                        'get_object',
-                                        Params={'Bucket': MINIO_CONFIG['bucket_name'], 'Key': full_path},
-                                        ExpiresIn=86400  # 24小时有效期，支持浏览器缓存
-                                    )
-                                    project['avatar'] = new_presigned_url
-                                except ClientError as e:
-                                    if e.response['Error']['Code'] == '404':
-                                        project['avatar'] = None
-                        except Exception as e:
-                            print(f"处理项目 {project['id']} 普通URL时出错: {e}")
+        # 性能：项目列表接口不在此处做 MinIO 探测/重新签名（会产生外部网络耗时）
+        # 头像 URL 的刷新应由前端缓存策略或独立的刷新接口来处理
         
         # 按创建时间排序
         user_projects.sort(key=lambda x: x['created_at'], reverse=True)
@@ -2922,13 +2907,16 @@ def api_get_project_detail(project_id):
     print(f"当前用户ID: {current_user.id}")
     
     try:
-        # 检查权限
-        if not has_project_permission(current_user.id, project_id):
-            print(f"权限检查失败: 用户 {current_user.id} 无权访问项目 {project_id}")
-            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
-        
-        # 只获取项目基本信息，不包含BadCase列表
+        # 只获取项目基本信息，不包含BadCase列表（并避免重复查询 Project）
         project = Project.query.get_or_404(project_id)
+        if project.user_id != current_user.id:
+            has_perm = ProjectPermission.query.filter_by(
+                user_id=current_user.id,
+                project_id=project_id
+            ).first() is not None
+            if not has_perm:
+                print(f"权限检查失败: 用户 {current_user.id} 无权访问项目 {project_id}")
+                return jsonify({'success': False, 'error': '无权访问此项目'}), 403
         print(f"项目信息获取成功: {project.name}")
         
         # 获取BadCase统计信息（快速统计）
@@ -2965,6 +2953,131 @@ def api_get_project_detail(project_id):
         print(f"获取项目详情失败: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': '获取项目信息失败'}), 500
+
+@app.route('/api/projects/<int:project_id>/edit-context', methods=['GET'])
+@login_required
+def api_get_project_edit_context(project_id):
+    """编辑页专用：一次性返回最小必要上下文（project + plans + members）"""
+    try:
+        project = Project.query.get_or_404(project_id)
+        if project.user_id != current_user.id:
+            has_perm = ProjectPermission.query.filter_by(
+                user_id=current_user.id,
+                project_id=project_id
+            ).first() is not None
+            if not has_perm:
+                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+
+        # plans：沿用 /plans 的批量统计逻辑（无 N+1）
+        plans = Plan.query.filter_by(project_id=project_id).all()
+        children_map = {}
+        plan_by_id = {}
+        for p in plans:
+            plan_by_id[p.id] = p
+            children_map.setdefault(p.parent_id, []).append(p)
+
+        from sqlalchemy import func
+        plan_ids = list(plan_by_id.keys())
+        badcase_counts = {}
+        bug_counts = {}
+        if plan_ids:
+            badcase_counts = dict(
+                db.session.query(BadCase.plan_id, func.count(BadCase.id))
+                .filter(BadCase.plan_id.in_(plan_ids))
+                .group_by(BadCase.plan_id)
+                .all()
+            )
+            bug_counts = dict(
+                db.session.query(Bug.plan_id, func.count(Bug.id))
+                .filter(Bug.plan_id.in_(plan_ids))
+                .group_by(Bug.plan_id)
+                .all()
+            )
+
+        def _sort_key(p: Plan):
+            pinned = 1 if getattr(p, "is_pinned", False) else 0
+            created = getattr(p, "created_at", None)
+            return (-pinned, -(created.timestamp() if created else 0))
+
+        def build_plan_tree(plan: Plan):
+            children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
+            return {
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'plan_type': plan.plan_type,
+                'status': plan.status,
+                'priority': plan.priority,
+                'is_pinned': plan.is_pinned,
+                'start_date': plan.start_date.isoformat() if plan.start_date else None,
+                'end_date': plan.end_date.isoformat() if plan.end_date else None,
+                'progress': plan.progress,
+                'creator_id': plan.creator_id,
+                'assignee_id': plan.assignee_id,
+                'created_at': plan.created_at.isoformat() if plan.created_at else None,
+                'updated_at': plan.updated_at.isoformat() if plan.updated_at else None,
+                'children': children,
+                'badcase_count': int(badcase_counts.get(plan.id, 0)),
+                'bug_count': int(bug_counts.get(plan.id, 0)),
+            }
+
+        root_plans = sorted(children_map.get(None, []), key=_sort_key)
+        plans_tree = [build_plan_tree(p) for p in root_plans]
+
+        # members：JOIN 批量取（无 N+1）
+        direct_rows = (
+            db.session.query(User.id, User.name, User.email, ProjectPermission.role)
+            .join(ProjectPermission, ProjectPermission.user_id == User.id)
+            .filter(ProjectPermission.project_id == project_id)
+            .all()
+        )
+        direct_member_map = {
+            uid: {
+                'id': uid,
+                'name': name,
+                'email': email,
+                'role': role,
+                'source': 'direct_permission',
+            }
+            for uid, name, email, role in direct_rows
+        }
+        team_rows = (
+            db.session.query(User.id, User.name, User.email, TeamMember.role, Team.name)
+            .join(TeamMember, TeamMember.user_id == User.id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .filter(Team.project_id == project_id)
+            .all()
+        )
+        team_members = []
+        for uid, name, email, role, team_name in team_rows:
+            if uid in direct_member_map:
+                continue
+            team_members.append({
+                'id': uid,
+                'name': name,
+                'email': email,
+                'role': role,
+                'source': f'team_{team_name}',
+            })
+
+        return jsonify({
+            'success': True,
+            'project': {
+                'id': project.id,
+                'name': project.name,
+                'description': project.description,
+                'status': project.status,
+            },
+            'plans': plans_tree,
+            'members': list(direct_member_map.values()) + team_members,
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"获取编辑页上下文失败: {e}")
+        print(traceback.format_exc())
+        db.session.rollback()
+        return jsonify({'success': False, 'error': '获取编辑页上下文失败'}), 500
 
 @app.route('/api/projects/<int:project_id>', methods=['PUT'])
 @login_required
@@ -3171,35 +3284,48 @@ def api_get_project_badcases(project_id):
         # 分页查询BadCase
         pagination = query.order_by(BadCase.created_at.desc())\
             .paginate(page=page, per_page=per_page, error_out=False)
-        
+
+        # 批量解析 assignee -> user.name，避免 N+1
+        def _parse_assignee_ids(raw):
+            if raw is None:
+                return []
+            s = str(raw).strip()
+            if not s:
+                return []
+            try:
+                if ',' in s:
+                    return [int(x.strip()) for x in s.split(',') if x.strip()]
+                return [int(s)]
+            except (ValueError, TypeError):
+                return []
+
+        all_user_ids = set()
+        assignee_id_lists = {}
+        for bc in pagination.items:
+            ids = _parse_assignee_ids(bc.assignee)
+            assignee_id_lists[bc.id] = ids
+            all_user_ids.update(ids)
+
+        user_name_map = {}
+        if all_user_ids:
+            rows = db.session.query(User.id, User.name).filter(User.id.in_(list(all_user_ids))).all()
+            user_name_map = {uid: name for uid, name in rows}
+
         badcases = []
         for bc in pagination.items:
-            # 处理负责人字段，将用户ID转换为用户名
             assignee_display = '未指派'
-            if bc.assignee:
-                try:
-                    # 如果assignee是逗号分隔的用户ID字符串
-                    if ',' in str(bc.assignee):
-                        user_ids = [int(uid.strip()) for uid in str(bc.assignee).split(',') if uid.strip()]
-                        if user_ids:
-                            users = User.query.filter(User.id.in_(user_ids)).all()
-                            if len(users) == 1:
-                                assignee_display = users[0].name
-                            else:
-                                assignee_display = f"{users[0].name}..." if users else '未指派'
-                    else:
-                        # 单个用户ID
-                        user_id = int(bc.assignee)
-                        user = User.query.get(user_id)
-                        if user:
-                            assignee_display = user.name
-                        else:
-                            # 用户不存在，显示原始值
-                            assignee_display = str(bc.assignee)
-                except (ValueError, AttributeError):
-                    # 如果转换失败，直接使用原值
-                    assignee_display = str(bc.assignee) if bc.assignee else '未指派'
-            
+            ids = assignee_id_lists.get(bc.id) or []
+            if ids:
+                # 兼容单选/多选展示
+                first_name = user_name_map.get(ids[0])
+                if first_name:
+                    assignee_display = first_name if len(ids) == 1 else f"{first_name}..."
+                else:
+                    assignee_display = str(bc.assignee)
+            elif bc.assignee:
+                # 非法格式直接回显
+                assignee_display = str(bc.assignee)
+
             badcases.append({
                 'id': bc.id,
                 'title': bc.title,
@@ -3305,6 +3431,7 @@ def api_create_badcase():
         case_category = data.get('case_category')
         base_problem = data.get('base_problem')
         badcase_result = data.get('badcase_result')
+        answer = data.get('answer')
         correct_answer = data.get('correct_answer')
         
         # 检查必要字段
@@ -3319,8 +3446,8 @@ def api_create_badcase():
             missing_fields.append('base_problem')
         if not badcase_result:
             missing_fields.append('badcase_result')
-        if not correct_answer:
-            missing_fields.append('correct_answer')
+        if not answer:
+            missing_fields.append('answer')
             
         if missing_fields:
             return jsonify({
@@ -3343,8 +3470,8 @@ def api_create_badcase():
             base_problem=base_problem,
             reproduction_steps=data.get('reproduction_steps', ''),
             badcase_result=badcase_result,
-            correct_answer=correct_answer,
-            correct_answer_final=data.get('correct_answer_final', ''),
+            answer=answer,
+            correct_answer=correct_answer or '',
             problem_reason=data.get('problem_reason', ''),
             solution=data.get('solution', ''),
             priority=data.get('priority', 'p3'),
@@ -3371,8 +3498,8 @@ def api_create_badcase():
                 'case_category': badcase.case_category,
                 'base_problem': badcase.base_problem,
                 'badcase_result': badcase.badcase_result,
+                'answer': badcase.answer,
                 'correct_answer': badcase.correct_answer,
-                'correct_answer_final': badcase.correct_answer_final,
                 'priority': badcase.priority,
                 'status': badcase.status,
                 'assignee': badcase.assignee,
@@ -3396,7 +3523,13 @@ def api_get_badcase_detail(badcase_id):
     if not has_project_permission(current_user.id, badcase.project_id):
         return jsonify({'success': False, 'error': '无权访问此BadCase'}), 403
     
-    comments = Comment.query.filter_by(badcase_id=badcase_id).order_by(Comment.created_at.desc()).all()
+    # 评论：只取必要字段，避免 comment.user 触发 N+1
+    comments = (
+        db.session.query(Comment.id, Comment.content, Comment.user_id, Comment.created_at)
+        .filter(Comment.badcase_id == badcase_id)
+        .order_by(Comment.created_at.desc())
+        .all()
+    )
     
     # 解析附件数据
     import json
@@ -3407,19 +3540,38 @@ def api_get_badcase_detail(badcase_id):
         except:
             attachments = []
     
-    # 解析负责人字段（将用户ID字符串转换为用户ID和用户名）
-    assignee_id = None
-    assignee_name = ''
-    if badcase.assignee:
+    # 解析负责人字段（支持单个/逗号分隔 ID），并批量查 user_map，避免 N+1
+    def _parse_assignee_ids(raw):
+        if raw is None:
+            return []
+        s = str(raw).strip()
+        if not s:
+            return []
         try:
-            assignee_id = int(badcase.assignee)
-            user = User.query.get(assignee_id)
-            if user:
-                assignee_name = user.name
-            else:
-                assignee_name = str(badcase.assignee)  # 用户不存在，显示原始值
+            if ',' in s:
+                return [int(x.strip()) for x in s.split(',') if x.strip()]
+            return [int(s)]
         except (ValueError, TypeError):
+            return []
+
+    assignee_ids = _parse_assignee_ids(badcase.assignee)
+    assignee_id = assignee_ids[0] if assignee_ids else None
+
+    comment_user_ids = [uid for (_cid, _content, uid, _dt) in comments if uid]
+    need_user_ids = set(assignee_ids) | set(comment_user_ids)
+    user_name_map = {}
+    if need_user_ids:
+        rows = db.session.query(User.id, User.name).filter(User.id.in_(list(need_user_ids))).all()
+        user_name_map = {uid: name for uid, name in rows}
+
+    if assignee_ids:
+        first_name = user_name_map.get(assignee_ids[0])
+        if first_name:
+            assignee_name = first_name if len(assignee_ids) == 1 else f"{first_name}..."
+        else:
             assignee_name = str(badcase.assignee)
+    else:
+        assignee_name = str(badcase.assignee) if badcase.assignee else ''
     
     return jsonify({
         'success': True,
@@ -3431,8 +3583,8 @@ def api_get_badcase_detail(badcase_id):
             'base_problem': badcase.base_problem,
             'reproduction_steps': badcase.reproduction_steps,
             'badcase_result': badcase.badcase_result,
+            'answer': badcase.answer,
             'correct_answer': badcase.correct_answer,
-            'correct_answer_final': badcase.correct_answer_final,
             'problem_reason': badcase.problem_reason,
             'solution': badcase.solution,
             'priority': badcase.priority,
@@ -3446,11 +3598,11 @@ def api_get_badcase_detail(badcase_id):
             'created_at': badcase.created_at.isoformat(),
             'updated_at': badcase.updated_at.isoformat(),
             'comments': [{
-                'id': comment.id,
-                'content': comment.content,
-                'user_name': comment.user.name,
-                'created_at': comment.created_at.isoformat()
-            } for comment in comments]
+                'id': cid,
+                'content': content,
+                'user_name': user_name_map.get(user_id, ''),
+                'created_at': created_at.isoformat()
+            } for (cid, content, user_id, created_at) in comments]
         }
     })
 
@@ -3534,10 +3686,10 @@ def api_update_badcase(badcase_id):
             badcase.base_problem = data['base_problem']
         if 'badcase_result' in data:
             badcase.badcase_result = data['badcase_result']
+        if 'answer' in data:
+            badcase.answer = data['answer']
         if 'correct_answer' in data:
             badcase.correct_answer = data['correct_answer']
-        if 'correct_answer_final' in data:
-            badcase.correct_answer_final = data['correct_answer_final']
         if 'reproduction_steps' in data:
             badcase.reproduction_steps = data['reproduction_steps']
         if 'problem_reason' in data:
@@ -3594,6 +3746,37 @@ def sync_database_schema():
         
         # 获取数据库检查器
         inspector = inspect(db.engine)
+
+        # === 兼容迁移：bad_case 字段重命名（避免 answer/correct_answer 混淆） ===
+        # correct_answer      -> answer
+        # correct_answer_final-> correct_answer
+        def _migrate_bad_case_answer_fields():
+            try:
+                cols = inspector.get_columns('bad_case')
+                col_names = {c.get('name') for c in (cols or [])}
+                # 先把 correct_answer 重命名为 answer
+                if 'correct_answer' in col_names and 'answer' not in col_names:
+                    print("[DB] 迁移: bad_case.correct_answer -> bad_case.answer")
+                    db.session.execute(text('ALTER TABLE bad_case RENAME COLUMN correct_answer TO answer'))
+                    db.session.commit()
+                    cols = inspector.get_columns('bad_case')
+                    col_names = {c.get('name') for c in (cols or [])}
+                # 再把 correct_answer_final 重命名为 correct_answer
+                if 'correct_answer_final' in col_names and 'correct_answer' not in col_names:
+                    print("[DB] 迁移: bad_case.correct_answer_final -> bad_case.correct_answer")
+                    db.session.execute(text('ALTER TABLE bad_case RENAME COLUMN correct_answer_final TO correct_answer'))
+                    db.session.commit()
+            except Exception as e:
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+                print(f"[DB] ⚠️ bad_case 字段迁移失败(可忽略/手动处理): {e}")
+
+        _migrate_bad_case_answer_fields()
+
+        # 重要：SQLite ALTER TABLE 后 inspector 可能缓存旧列信息，重新创建 inspector 避免重复加列
+        inspector = inspect(db.engine)
         
         # 定义表结构映射
         table_definitions = {
@@ -3646,8 +3829,8 @@ def sync_database_schema():
                     'base_problem TEXT NOT NULL',
                     'reproduction_steps TEXT',
                     'badcase_result TEXT NOT NULL',
-                    'correct_answer TEXT NOT NULL',
-                    'correct_answer_final TEXT',
+                    'answer TEXT NOT NULL',
+                    'correct_answer TEXT',
                     'problem_reason TEXT',
                     'needs_processing BOOLEAN DEFAULT TRUE',
                     'solution TEXT',
@@ -4317,27 +4500,75 @@ def api_pin_plan(plan_id):
 def api_get_project_plans(project_id):
     """获取项目的计划树"""
     try:
+        t_total0 = time.perf_counter()
+        cached = _cache_get(('plans', project_id, current_user.id), ttl_s=3.0)
+        if cached is not None:
+            print(
+                f"[PERF] GET /api/projects/{project_id}/plans cache_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
+                flush=True,
+            )
+            return jsonify(cached)
+
         # 检查项目权限
+        t0 = time.perf_counter()
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
-        
-        # 获取顶级计划（没有父计划的计划），按置顶状态和创建时间排序
-        root_plans = Plan.query.filter_by(project_id=project_id, parent_id=None).order_by(
-            Plan.is_pinned.desc(),  # 置顶的在前
-            Plan.created_at.desc()  # 然后按创建时间倒序
-        ).all()
-        print(f"=== 获取项目 {project_id} 的计划 ===")
-        print(f"找到 {len(root_plans)} 个顶级计划")
-        for plan in root_plans:
-            print(f"计划: {plan.name} (ID: {plan.id}, 状态: {plan.status}, 置顶: {plan.is_pinned}, 创建时间: {plan.created_at})")
-        
-        def build_plan_tree(plan):
-            """递归构建计划树"""
-            children = []
-            for child in plan.children:
-                children.append(build_plan_tree(child))
-            
-            plan_data = {
+        t_perm = (time.perf_counter() - t0) * 1000
+
+        # 计划 + 两种 count 用 1 次查询拿齐（避免 plans + 2 次 group by）
+        t0 = time.perf_counter()
+        from sqlalchemy import func
+        bc_sub = (
+            db.session.query(BadCase.plan_id.label('plan_id'), func.count(BadCase.id).label('badcase_count'))
+            .group_by(BadCase.plan_id)
+            .subquery()
+        )
+        bug_sub = (
+            db.session.query(Bug.plan_id.label('plan_id'), func.count(Bug.id).label('bug_count'))
+            .group_by(Bug.plan_id)
+            .subquery()
+        )
+
+        plan_rows = (
+            db.session.query(
+                Plan,
+                func.coalesce(bc_sub.c.badcase_count, 0),
+                func.coalesce(bug_sub.c.bug_count, 0),
+            )
+            .outerjoin(bc_sub, bc_sub.c.plan_id == Plan.id)
+            .outerjoin(bug_sub, bug_sub.c.plan_id == Plan.id)
+            .filter(Plan.project_id == project_id)
+            .all()
+        )
+        t_sql = (time.perf_counter() - t0) * 1000
+
+        if not plan_rows:
+            payload = {'success': True, 'plans': []}
+            _cache_set(('plans', project_id, current_user.id), payload)
+            print(
+                f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build=0.0ms total={(time.perf_counter()-t_total0)*1000:.1f}ms (empty)",
+                flush=True,
+            )
+            return jsonify(payload)
+
+        t0 = time.perf_counter()
+        # 构建 parent_id -> [child_plan] 映射，顺便准备 count map
+        children_map = {}
+        count_map = {}
+        for plan, badcase_cnt, bug_cnt in plan_rows:
+            children_map.setdefault(plan.parent_id, []).append(plan)
+            count_map[plan.id] = (int(badcase_cnt or 0), int(bug_cnt or 0))
+
+        def _sort_key(p: Plan):
+            # 置顶优先，其次创建时间倒序（与原接口保持一致）
+            pinned = 1 if getattr(p, "is_pinned", False) else 0
+            created = getattr(p, "created_at", None)
+            return (-pinned, -(created.timestamp() if created else 0))
+
+        def build_plan_tree(plan: Plan):
+            """递归构建计划树（children 从 children_map 取，避免触发 ORM lazy load）"""
+            children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
+            return {
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
@@ -4350,24 +4581,30 @@ def api_get_project_plans(project_id):
                 'progress': plan.progress,
                 'creator_id': plan.creator_id,
                 'assignee_id': plan.assignee_id,
-                'created_at': plan.created_at.isoformat(),
-                'updated_at': plan.updated_at.isoformat(),
+                'created_at': plan.created_at.isoformat() if plan.created_at else None,
+                'updated_at': plan.updated_at.isoformat() if plan.updated_at else None,
                 'children': children,
-                # 始终计算两种类型的数量，不再根据 plan_type 过滤
-                'badcase_count': BadCase.query.filter_by(plan_id=plan.id).count(),
-                'bug_count': Bug.query.filter_by(plan_id=plan.id).count()
+                'badcase_count': count_map.get(plan.id, (0, 0))[0],
+                'bug_count': count_map.get(plan.id, (0, 0))[1],
             }
-            print(f"[DEBUG] Plan data: ID={plan.id}, name={plan.name}, plan_type={plan.plan_type}")
-            return plan_data
+
+        # 顶级计划：parent_id=None
+        root_plans = sorted(children_map.get(None, []), key=_sort_key)
+        plans_tree = [build_plan_tree(p) for p in root_plans]
+        t_build = (time.perf_counter() - t0) * 1000
         
-        plans_tree = []
-        for plan in root_plans:
-            plans_tree.append(build_plan_tree(plan))
-        
-        return jsonify({
+        t0 = time.perf_counter()
+        payload = {
             'success': True,
             'plans': plans_tree
-        })
+        }
+        _cache_set(('plans', project_id, current_user.id), payload)
+        t_payload = (time.perf_counter() - t0) * 1000
+        print(
+            f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build={t_build:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms rows={len(plan_rows)}",
+            flush=True,
+        )
+        return jsonify(payload)
         
     except Exception as e:
         import traceback
@@ -4546,51 +4783,81 @@ def api_get_project_teams(project_id):
 def api_get_project_members(project_id):
     """获取项目的所有成员（包括直接权限和团队成员）"""
     try:
+        t_total0 = time.perf_counter()
+        cached = _cache_get(('members', project_id, current_user.id), ttl_s=3.0)
+        if cached is not None:
+            print(
+                f"[PERF] GET /api/projects/{project_id}/members cache_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
+                flush=True,
+            )
+            return jsonify(cached)
+
         # 检查项目权限
+        t0 = time.perf_counter()
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        t_perm = (time.perf_counter() - t0) * 1000
         
-        # 获取直接项目权限的用户
-        direct_permissions = ProjectPermission.query.filter_by(project_id=project_id).all()
-        direct_members = []
+        # 直接权限 + 团队成员 都用 JOIN（总共 2 次查询）
+        t0 = time.perf_counter()
+        direct_rows = (
+            db.session.query(User.id, User.name, User.email, ProjectPermission.role)
+            .join(ProjectPermission, ProjectPermission.user_id == User.id)
+            .filter(ProjectPermission.project_id == project_id)
+            .all()
+        )
+        t_sql1 = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
+        direct_member_map = {}
+        for uid, name, email, role in direct_rows:
+            direct_member_map[uid] = {
+                'id': uid,
+                'name': name,
+                'email': email,
+                'role': role,
+                'source': 'direct_permission',
+            }
+        t_build1 = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
+        team_rows = (
+            db.session.query(User.id, User.name, User.email, TeamMember.role, Team.name)
+            .join(TeamMember, TeamMember.user_id == User.id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .filter(Team.project_id == project_id)
+            .all()
+        )
+        t_sql2 = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
+        all_members = list(direct_member_map.values())
+        seen = set(direct_member_map.keys())
+        for uid, name, email, role, team_name in team_rows:
+            if uid in seen:
+                continue
+            seen.add(uid)
+            all_members.append({
+                'id': uid,
+                'name': name,
+                'email': email,
+                'role': role,
+                'source': f'team_{team_name}',
+            })
+        t_build2 = (time.perf_counter() - t0) * 1000
         
-        for perm in direct_permissions:
-            user = User.query.get(perm.user_id)
-            if user:
-                direct_members.append({
-                    'id': user.id,
-                    'name': user.name,
-                    'email': user.email,
-                    'role': perm.role,
-                    'source': 'direct_permission'
-                })
-        
-        # 获取团队成员
-        teams = Team.query.filter_by(project_id=project_id).all()
-        team_members = []
-        
-        for team in teams:
-            members = TeamMember.query.filter_by(team_id=team.id).all()
-            for member in members:
-                user = User.query.get(member.user_id)
-                if user:
-                    # 检查是否已经在直接成员列表中
-                    if not any(dm['id'] == user.id for dm in direct_members):
-                        team_members.append({
-                            'id': user.id,
-                            'name': user.name,
-                            'email': user.email,
-                            'role': member.role,
-                            'source': f'team_{team.name}'
-                        })
-        
-        # 合并所有成员
-        all_members = direct_members + team_members
-        
-        return jsonify({
+        t0 = time.perf_counter()
+        payload = {
             'success': True,
             'members': all_members
-        })
+        }
+        _cache_set(('members', project_id, current_user.id), payload)
+        t_payload = (time.perf_counter() - t0) * 1000
+        print(
+            f"[PERF] GET /api/projects/{project_id}/members perm={t_perm:.1f}ms sql1={t_sql1:.1f}ms build1={t_build1:.1f}ms sql2={t_sql2:.1f}ms build2={t_build2:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms direct={len(direct_rows)} team={len(team_rows)}",
+            flush=True,
+        )
+        return jsonify(payload)
         
     except Exception as e:
         print(f"获取项目成员失败: {e}")

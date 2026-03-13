@@ -73,8 +73,10 @@ class ReactPromptTemplates:
 - keywords: 搜索关键词（必填，如果要查询所有，设置为空字符串 "" 或 "*"）
 - target: 分析目标 - bug/badcase/all（必填）
 - project_id: 项目ID（可选）
+- **keywords 由你从用户话里识别**：用户若提到具体 BadCase/Bug 标题（如「雪碧和七喜」），必须把用户说的**完整标题原文**作为 keywords，不要将「和」等字替换成空格或省略，否则会查不到记录。例：用户说「修改雪碧和七喜的正确答案」→ keywords=雪碧和七喜（不要写成 keywords=雪碧 七喜）。
 
 示例：使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug
+示例：用户说「修改雪碧和七喜的状态」→ 使用 grep 工具定位该 BadCase，keywords=雪碧和七喜，target=badcase
 示例：使用 grep 工具查询所有BadCase，keywords="" 或 keywords="*"，target=badcase
 </system>
 
@@ -247,11 +249,12 @@ class ReactPromptTemplates:
 5. 提供清晰的决策理由
 6. 工具参数应该具体且可执行
 
-⭐ modify 工具参数提取规则（重要）：
-- 使用 modify 工具时，必须从 current_context 中的 bug_list 提取 target_id
-- 如果 bug_list 存在，取第一个 Bug 的 id 作为 target_id
-- 例如：current_context 中有 "bug_list": [{{"id": 1, "title": "登录失败"}}]，则 target_id = 1
-- 绝不能使用默认值或猜测 target_id，必须从 context 中获取
+⭐ 人类式先检索再阅读（modify 前必读）：
+- 流程：先 grep 检索出候选列表（badcase_list/bug_list/testcase_location），对候选做 rerank，**分高的**作为 target_id；支持 BadCase、Bug、测试用例( testcase )。
+- 若 context 中尚无列表，必须先 grep：grep(keywords="用户话里的标题或关键词", target="badcase"或"bug"或"testcase"或"all", project_id=当前项目)。可选 plan_id 限定当前迭代。grep 支持关键词拆分模糊匹配。
+- 选 target_id 时：系统会对候选按与关键词的匹配度 rerank，分高的即可；修改目标类型由 target 指定（bug/badcase/testcase）。
+- 字段命名统一（避免混淆）：**答案用 answer**，**正确答案用 correct_answer**（由 modify 工具映射到数据库字段）。
+- 绝不能猜测 target_id，必须从检索到的列表中选。
 
 ⭐ modify 工具状态值规则（重要）：
 修改 status 字段时，必须使用以下合法的状态值（英文），不能使用中文：
@@ -457,6 +460,48 @@ class ReactPromptTemplates:
 }}
 </params>
 <reason>从context的badcase_list中获取第一个BadCase的id=3作为target_id，修改其状态为closed（注意BadCase和Bug都用closed而不是close）</reason>
+</decision>
+</good_example>
+
+<good_example>
+<todo>修改雪碧和七喜的正确答案为理解正确</todo>
+<current_context>
+  "badcase_list": [{{"id": 5, "title": "雪碧和七喜", "status": "resolved"}}]
+</current_context>
+<decision>
+<execute>true</execute>
+<tool>modify</tool>
+<params>
+{{
+  "target": "badcase",
+  "target_id": 5,
+  "modifications": {{"correct_answer": "理解正确"}},
+  "project_id": "1",
+  "confirm": false
+}}
+</params>
+<reason>从context的badcase_list中取标题为「雪碧和七喜」的id=5；字段命名统一：正确答案用correct_answer，值为理解正确</reason>
+</decision>
+</good_example>
+
+<good_example>
+<todo>修改雪碧和七喜的答案为2</todo>
+<current_context>
+  "badcase_list": [{{"id": 5, "title": "雪碧和七喜", "status": "resolved"}}]
+</current_context>
+<decision>
+<execute>true</execute>
+<tool>modify</tool>
+<params>
+{{
+  "target": "badcase",
+  "target_id": 5,
+  "modifications": {{"answer": "2"}},
+  "project_id": "1",
+  "confirm": false
+}}
+</params>
+<reason>字段命名统一：答案用answer（会映射到数据库的correct_answer）</reason>
 </decision>
 </good_example>
 

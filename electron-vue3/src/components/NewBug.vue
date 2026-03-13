@@ -33,7 +33,7 @@
       <div class="content-left">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
-          v-if="pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
           class="pending-diff-panel"
         >
           <div class="pending-diff-header">
@@ -688,9 +688,11 @@
 <script>
 import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { createBug, getBugDetail, updateBug, getProjects, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
+import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
 import user from '../store/user.js'
-import MonacoDiffEditor from './MonacoDiffEditor.vue'
+import { defineAsyncComponent } from 'vue'
+
+const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
 
 
 export default {
@@ -933,21 +935,46 @@ export default {
       }
     }
     
-    // 获取可用项目列表
-    const fetchProjects = async () => {
-      try {
-        const response = await getProjects()
-        if (response.data.success) {
-          availableProjects.value = response.data.projects || []
-          console.log('fetchProjects: 项目列表加载完成')
-          console.log('项目数量:', availableProjects.value.length)
-          console.log('项目数据结构:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
-        }
-      } catch (error) {
-        console.error('获取项目列表失败:', error)
-      }
-    }
+    // 编辑页不需要拉全量项目列表（包含头像等），避免额外慢接口
     
+    // 使用后端 plans 树直接生成下拉选项（避免额外请求 /plans）
+    const setAvailablePlansFromTree = async (plansTree) => {
+      const formattedPlans = [
+        { value: 'unplanned', label: '未计划', icon: '📋' }
+      ]
+
+      const processPlans = (planList, level = 0) => {
+        const processedPlans = []
+        ;(planList || []).forEach(plan => {
+          const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
+
+          const isBugPlan = plan.plan_type === 'bug'
+          const isSelected = bug.plan && bug.plan.toString() === plan.id.toString()
+          const hasVisibleChildren = children.length > 0
+
+          if (isBugPlan || isSelected || hasVisibleChildren) {
+            const planOption = {
+              value: plan.id.toString(),
+              label: plan.name,
+              level,
+              is_pinned: plan.is_pinned || false,
+              icon: plan.icon || '📁',
+              plan_type: plan.plan_type,
+              bug_count: plan.bug_count || 0,
+              status: plan.status
+            }
+            if (children.length > 0) planOption.children = children
+            processedPlans.push(planOption)
+          }
+        })
+        return processedPlans
+      }
+
+      formattedPlans.push(...processPlans(plansTree || []))
+      availablePlans.value = formattedPlans
+      await nextTick()
+    }
+
     // 搜索计划
     const searchPlans = () => {
       console.log('搜索计划:', planSearchText.value)
@@ -1026,69 +1053,7 @@ export default {
         console.log('API响应数据结构:', Object.keys(response || {}))
         
         if (response.data.success) {
-          const plans = response.data.plans || []
-          console.log('获取到的原始计划数据:', plans)
-          console.log('计划数量:', plans.length)
-          
-          // 转换计划数据格式：第一个是"未计划"，后面是项目实际计划
-          const formattedPlans = [
-            { value: 'unplanned', label: '未计划', icon: '📋' }
-          ]
-          
-          // 递归处理项目计划树，保持树结构
-          const processPlans = (planList, level = 0) => {
-            const processedPlans = []
-            planList.forEach(plan => {
-              console.log(`处理计划: ${plan.name} (ID: ${plan.id}, 状态: ${plan.status}, 类型: ${plan.plan_type})`)
-              
-              // 递归处理子计划
-              const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
-              
-              // 显示逻辑：或者是bug类型计划，或者是包含符合条件子计划的父计划
-              // 在编辑模式下，或者是当前选中的计划
-              const isBugPlan = plan.plan_type === 'bug'
-              const isSelected = bug.plan && bug.plan.toString() === plan.id.toString()
-              const hasVisibleChildren = children.length > 0
-              
-              if (isBugPlan || isSelected || hasVisibleChildren) {
-                const planOption = {
-                  value: plan.id.toString(),
-                  label: plan.name,
-                  level: level,
-                  is_pinned: plan.is_pinned || false,
-                  icon: plan.icon || '📁',
-                  plan_type: plan.plan_type,
-                  bug_count: plan.bug_count || 0,
-                  status: plan.status
-                }
-                
-                if (children.length > 0) {
-                  planOption.children = children
-                }
-                
-                processedPlans.push(planOption)
-                console.log(`添加计划: ${plan.name} (类型: ${plan.plan_type}, 状态: ${plan.status})`)
-              } else {
-                console.log(`跳过计划: ${plan.name} (非bug类型且非当前选中且无符合条件子计划)`)
-              }
-            })
-            return processedPlans
-          }
-          
-          // 添加项目实际计划（保持树结构）
-          const projectPlans = processPlans(plans)
-          console.log('处理后的项目计划:', projectPlans)
-          
-          formattedPlans.push(...projectPlans)
-          availablePlans.value = formattedPlans
-          
-          console.log('=== 最终的计划选项 ===')
-          console.log('availablePlans:', availablePlans.value)
-          console.log('filteredPlans计算值:', filteredPlans.value)
-          console.log('计划总数:', availablePlans.value.length)
-          
-          // 强制触发响应式更新
-          await nextTick()
+          await setAvailablePlansFromTree(response.data.plans || [])
         } else {
           console.error('API返回失败:', response.data)
           // 如果API失败，至少显示"未计划"选项
@@ -1915,7 +1880,7 @@ export default {
 
       try {
         await scrollToDiffField(field)
-        const resp = await fetch(`/api/projects/${projectId}/modify`, {
+        const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -1967,24 +1932,50 @@ export default {
       console.log('=== 组件挂载开始 ===')
       
       try {
-        // 先获取当前用户信息
-        console.log('开始获取当前用户信息...')
-        await fetchCurrentUser()
-        console.log('当前用户信息获取完成')
-        
-        // 再获取项目列表
-        console.log('开始获取项目列表...')
-        await fetchProjects()
-        console.log('项目列表获取完成，数量:', availableProjects.value.length)
-        console.log('项目列表:', availableProjects.value)
-        
-        // 等待一下确保数据完全加载
-        await new Promise(resolve => setTimeout(resolve, 100))
+        // 先预读取 diff（不依赖 show_diff，避免跳转后漏读；且不阻塞首屏）
+        const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+        if (diffDataStrEarly) {
+          try {
+            pendingDiff.value = JSON.parse(diffDataStrEarly)
+            console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
+          } catch (e) {
+            console.error('[DIFF] 预读取 diff 失败:', e)
+          }
+        }
+
+        // 后台并行加载用户信息（不阻塞首屏）
+        const bgTasks = []
+        console.log('开始后台加载用户信息...')
+        bgTasks.push(fetchCurrentUser())
         
         // 然后初始化Bug
         console.log('开始初始化Bug...')
         await initBug()
         console.log('Bug初始化完成')
+
+        // 初始化后，一次性拉取编辑页最小上下文（project + plans + members）
+        const ctxProjectId = bug.project_id
+        if (ctxProjectId) {
+          try {
+            const resp = await getProjectEditContext(ctxProjectId)
+            if (resp.data?.success) {
+              projectInfo.value = resp.data.project || projectInfo.value
+              projectMembers.value = resp.data.members || projectMembers.value
+              await setAvailablePlansFromTree(resp.data.plans || [])
+            }
+          } catch (e) {
+            console.error('获取编辑页上下文失败:', e)
+          }
+        }
+
+        // 如果有预读到 diff，预填充新值到表单（确保内联 diff/✓✗ 立即可见）
+        if (pendingDiff.value?.modifications) {
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (bug.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
+              bug[field] = data.new
+            }
+          }
+        }
         
         // 等待DOM更新完成后再设置步骤编辑器内容
         await nextTick()
@@ -1998,41 +1989,11 @@ export default {
         } else {
           console.log('编辑器或复现步骤为空，无法设置内容')
         }
-        
-        // 添加一个监听器，当复现步骤变化时自动更新编辑器
-        const checkAndUpdateEditor = () => {
-          if (stepsEditor.value && bug.reproduction_steps) {
-            console.log('检查并更新步骤编辑器内容:', bug.reproduction_steps)
-            stepsEditor.value.innerHTML = bug.reproduction_steps
-          }
-        }
-        
-        // 延迟检查并更新编辑器内容
-        setTimeout(checkAndUpdateEditor, 500)
-        setTimeout(checkAndUpdateEditor, 1000)
-        
-        // 检查是否有待确认的 diff 数据（优先使用 props，其次使用路由参数）
-        if (props.show_diff || route.query.show_diff === 'true') {
-          console.log('[DIFF] 检测到 show_diff 参数，读取 sessionStorage')
-          const diffDataStr = sessionStorage.getItem('pendingModifyDiff')
-          if (diffDataStr) {
-            try {
-              pendingDiff.value = JSON.parse(diffDataStr)
-              console.log('[DIFF] 读取到 diff 数据:', pendingDiff.value)
-              
-              // 预填充新值到表单
-              if (pendingDiff.value.modifications) {
-                for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-                  if (bug.hasOwnProperty(field) && data.new) {
-                    bug[field] = data.new
-                  }
-                }
-              }
-            } catch (e) {
-              console.error('[DIFF] 解析 diff 数据失败:', e)
-            }
-          }
-        }
+
+        // 后台等待全量请求完成（不阻塞首屏）；忽略失败
+        Promise.allSettled(bgTasks).then(() => {
+          console.log('后台用户/上下文加载完成')
+        })
         
         // 添加全局点击事件监听器，点击外部关闭下拉框
         document.addEventListener('click', (event) => {

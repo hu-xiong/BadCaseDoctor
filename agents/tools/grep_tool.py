@@ -21,20 +21,21 @@ class GrepTool(BaseTool):
     def __init__(self):
         super().__init__(
             name="grep",
-            description="缺陷定位工具：模拟人类阅读习惯，精准定位BadCase/Bug/测试用例的归属关系和业务场景。"
-                         "必须参数：project_id(项目ID)。可选参数：keywords(标题关键词), target(分析目标：bug/badcase/all), status(状态过滤：如'已关闭'/'closed'/'new'等)。"
-                         "重要：按状态查询时使用status参数（如status='已关闭'），按标题查询时使用keywords参数。"
+            description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位BadCase/Bug/测试用例的归属关系和业务场景。"
+                         "必须参数：project_id(项目ID)。可选：keywords(标题关键词，支持拆分模糊匹配), target(bug/badcase/testcase/all)，status，plan_id(当前迭代计划ID)。"
+                         "返回 plan_tree、badcase_analysis、bug_location、testcase_location。建议先用 plan_id 限定迭代计划，再把候选记录交给大模型逐条阅读判断。"
         )
     
     async def execute(
         self,
         keywords: str = None,
         project_id: str = None,
+        plan_id: str = None,  # 当前迭代计划ID，传入则只检索该计划下的记录
         plan_context: str = None,
         evidence: Dict[str, Any] = None,
         mode: str = "locate",  # locate/associate/compare
-        target: str = "all",  # 新增：all/bug/badcase - 分析目标
-        status: str = None,  # 新增：按状态过滤
+        target: str = "all",  # all/bug/badcase/testcase
+        status: str = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -59,7 +60,7 @@ class GrepTool(BaseTool):
         Returns:
             定位分析结果（包含思考过程）
         """
-        print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target}, status={status})")
+        print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target}, status={status}, plan_id={plan_id})")
         
         try:
             from app import app, db, BadCase, Bug, Plan
@@ -73,15 +74,23 @@ class GrepTool(BaseTool):
             
             with app.app_context():
                 if mode == "locate":
-                    # 【阶段1】数据库查询
+                    # 【阶段1】数据库查询（支持 plan_id 限定当前迭代，关键词拆分模糊匹配）
                     plan_tree = await self._get_plan_tree(project_id)
+
+                    # 人类阅读模式：如果指定了 plan_id，则返回该计划及其子计划的树形结构，并挂载各计划下的记录（从上到下、从外到里）
+                    plan_records_tree = None
+                    if plan_id:
+                        plan_records_tree = await self._build_plan_records_tree(project_id=project_id, root_plan_id=plan_id)
                     
                     badcase_list = []
                     bug_list = []
+                    testcase_list = []
                     if target in ['all', 'badcase']:
-                        badcase_list = await self._get_badcase_list(project_id, keywords, status)
+                        badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
                     if target in ['all', 'bug']:
-                        bug_list = await self._get_bug_list(project_id, keywords, status)
+                        bug_list = await self._get_bug_list(project_id, keywords, status, plan_id=plan_id)
+                    if target in ['all', 'testcase']:
+                        testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
                     
                     # 【阶段2】分析关联
                     analysis_result = await self._analyze_associations(
@@ -89,6 +98,7 @@ class GrepTool(BaseTool):
                         plan_tree=plan_tree,
                         badcase_list=badcase_list,
                         bug_list=bug_list,
+                        testcase_list=testcase_list,
                         evidence=evidence
                     )
                     
@@ -127,8 +137,10 @@ class GrepTool(BaseTool):
                     
                     result['data'] = {
                         'plan_tree': plan_tree,
+                        'plan_records_tree': plan_records_tree,
                         'badcase_analysis': analysis_result['badcase_analysis'],
                         'bug_location': analysis_result['bug_location'],
+                        'testcase_location': analysis_result.get('testcase_location', []),
                         'plan_attribution': analysis_result['plan_attribution'],
                         'comparison_report': comparison['markdown'],
                         'summary': analysis_result['summary'],
@@ -164,6 +176,103 @@ class GrepTool(BaseTool):
                 'success': False,
                 'error': str(e)
             }
+
+    async def _build_plan_records_tree(self, project_id: str, root_plan_id: str) -> Dict[str, Any]:
+        """
+        构建“计划树 + 计划下记录”的阅读结构：
+        - 从 root_plan_id 出发，递归包含所有子计划
+        - 每个计划节点挂载 badcases/bugs/testcases（包含尽可能完整字段，便于大模型逐条阅读判断）
+        """
+        from app import db, Plan, BadCase, Bug, TestCase
+        try:
+            root_id = int(root_plan_id)
+        except (ValueError, TypeError):
+            return None
+
+        # 取该项目下所有计划，构建 parent->children
+        plans = db.session.query(Plan).filter_by(project_id=project_id).all()
+        plan_map = {}
+        children_map = {}
+        for p in plans:
+            plan_map[p.id] = p
+            children_map.setdefault(p.parent_id, []).append(p.id)
+
+        # 收集 root 下所有 plan_ids（含子孙）
+        plan_ids = []
+        stack = [root_id]
+        visited = set()
+        while stack:
+            pid = stack.pop()
+            if pid in visited:
+                continue
+            visited.add(pid)
+            if pid in plan_map:
+                plan_ids.append(pid)
+                for cid in children_map.get(pid, []):
+                    stack.append(cid)
+
+        # 查询三类记录（不做 rerank/不做筛选，仅按 plan_id 归类，模拟人类先把材料拿全）
+        badcases = db.session.query(BadCase).filter(BadCase.project_id == int(project_id), BadCase.plan_id.in_(plan_ids)).all() if plan_ids else []
+        bugs = db.session.query(Bug).filter(Bug.project_id == int(project_id), Bug.plan_id.in_(plan_ids)).all() if plan_ids else []
+        testcases = db.session.query(TestCase).filter(TestCase.project_id == int(project_id), TestCase.plan_id.in_(plan_ids)).all() if plan_ids else []
+
+        badcase_by_plan = {}
+        for bc in badcases:
+            badcase_by_plan.setdefault(bc.plan_id, []).append(bc.to_dict() if hasattr(bc, 'to_dict') else {
+                'id': bc.id, 'title': bc.title, 'plan_id': bc.plan_id
+            })
+        bug_by_plan = {}
+        for b in bugs:
+            bug_by_plan.setdefault(b.plan_id, []).append(b.to_dict() if hasattr(b, 'to_dict') else {
+                'id': b.id, 'title': b.title, 'plan_id': b.plan_id
+            })
+        testcase_by_plan = {}
+        for tc in testcases:
+            testcase_by_plan.setdefault(tc.plan_id, []).append(tc.to_dict() if hasattr(tc, 'to_dict') else {
+                'id': tc.id, 'title': tc.title, 'plan_id': tc.plan_id
+            })
+
+        def plan_to_dict(p: Plan) -> Dict[str, Any]:
+            return {
+                'id': p.id,
+                'name': p.name,
+                'description': getattr(p, 'description', ''),
+                'plan_type': getattr(p, 'plan_type', None),
+                'status': getattr(p, 'status', None),
+                'priority': getattr(p, 'priority', None),
+                'is_pinned': getattr(p, 'is_pinned', None),
+                'start_date': p.start_date.isoformat() if getattr(p, 'start_date', None) else None,
+                'end_date': p.end_date.isoformat() if getattr(p, 'end_date', None) else None,
+                'progress': getattr(p, 'progress', None),
+                'parent_id': getattr(p, 'parent_id', None),
+                'project_id': getattr(p, 'project_id', None),
+                'creator_id': getattr(p, 'creator_id', None),
+                'assignee_id': getattr(p, 'assignee_id', None),
+                'cycle': getattr(p, 'cycle', None),
+                'plan_count': getattr(p, 'plan_count', None),
+                'scope_notification': getattr(p, 'scope_notification', None),
+                'created_at': p.created_at.isoformat() if getattr(p, 'created_at', None) else None,
+                'updated_at': p.updated_at.isoformat() if getattr(p, 'updated_at', None) else None,
+            }
+
+        def build_node(pid: int) -> Dict[str, Any]:
+            p = plan_map.get(pid)
+            if not p:
+                return {}
+            node = {
+                'plan': plan_to_dict(p),
+                'badcases': badcase_by_plan.get(pid, []),
+                'bugs': bug_by_plan.get(pid, []),
+                'testcases': testcase_by_plan.get(pid, []),
+                'children': []
+            }
+            for cid in sorted(children_map.get(pid, [])):
+                child_node = build_node(cid)
+                if child_node:
+                    node['children'].append(child_node)
+            return node
+
+        return build_node(root_id)
     
     async def _get_plan_tree(self, project_id: str) -> Dict[str, Any]:
         """
@@ -242,11 +351,37 @@ class GrepTool(BaseTool):
         
         return '通用'
     
-    async def _get_badcase_list(self, project_id: str, keywords: str = None, status: str = None) -> List[Dict[str, Any]]:
+    def _normalize_keywords_for_match(self, keywords: str) -> List[str]:
+        """
+        人类式关键词拆分：支持「雪碧和七喜」「雪碧 七喜」都拆成 [雪碧, 七喜]，用于模糊 AND 匹配。
+        按 和、与、空格 拆分，去掉停用字（的、为、与、和等单字连接词），保留有意义的词。
+        """
+        if not keywords or not keywords.strip():
+            return []
+        import re
+        # 统一用空格分隔：把 "和" "与" 当分隔符
+        text = re.sub(r'[和与]', ' ', keywords.strip())
+        # 再按空格拆
+        parts = [p.strip() for p in text.split() if p.strip()]
+        # 去掉纯停用字（单字且为常见连接/助词）
+        stop = {'的', '为', '与', '和', '或', '及', '、', '，'}
+        terms = [p for p in parts if p not in stop and (len(p) > 1 or p not in stop)]
+        return terms[:10]  # 最多 10 个词，避免过长
+    
+    async def _get_badcase_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
         """逐行定位引擎（优化版）"""
         from app import db, BadCase, BadCaseStatus
         
         query = db.session.query(BadCase).filter_by(project_id=project_id)
+        
+        # 按 plan_id 过滤：只查当前迭代计划下的记录（人类式先看本计划再判断）
+        if plan_id:
+            try:
+                pid = int(plan_id)
+                query = query.filter(BadCase.plan_id == pid)
+                print(f"[GREP] 限定计划 plan_id={pid}")
+            except (ValueError, TypeError):
+                pass
         
         # 按 status 过滤
         if status:
@@ -267,21 +402,18 @@ class GrepTool(BaseTool):
             except ValueError:
                 print(f"[GREP] 无效的 status 值: {status}")
         
-        # keywords 为空或 "*" 表示查询全部
-        is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
-        if not is_query_all and keywords:
-            # 支持空格分隔的多个关键词，每个关键词都要匹配
-            keyword_list = [k.strip() for k in keywords.split() if k.strip()]
-            if len(keyword_list) > 1:
-                # 多个关键词：每个都要匹配
-                from sqlalchemy import and_
-                for kw in keyword_list:
-                    query = query.filter(BadCase.title.ilike(f'%{kw}%'))
-                print(f"[GREP] 多关键词搜索: {keyword_list}")
-            else:
-                # 单个关键词
-                query = query.filter(BadCase.title.ilike(f'%{keywords}%'))
-                print(f"[GREP] 单关键词搜索: {keywords}")
+        # 关键词：支持拆分模糊匹配（人类式，和/与/空格拆词，每个词都匹配即可）
+        keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
+        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
+        if not is_query_all and keyword_list:
+            from sqlalchemy import and_
+            for kw in keyword_list:
+                query = query.filter(BadCase.title.ilike(f'%{kw}%'))
+            print(f"[GREP] 拆分关键词模糊匹配: {keyword_list} (原: {keywords})")
+        elif not is_query_all and keywords and not keyword_list:
+            # 拆分后为空（全是停用字）则整句匹配
+            query = query.filter(BadCase.title.ilike(f'%{keywords.strip()}%'))
+            print(f"[GREP] 单关键词搜索: {keywords}")
         
         # 查询全部时不限制数量，否则限制20条
         if is_query_all:
@@ -308,19 +440,27 @@ class GrepTool(BaseTool):
         
         return result
     
-    async def _get_bug_list(self, project_id: str, keywords: str = None, status: str = None) -> List[Dict[str, Any]]:
-        """Bug定位引擎（优化版）"""
+    async def _get_bug_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
+        """Bug定位引擎（优化版），支持 plan_id 与关键词拆分模糊匹配"""
         from app import db, Bug, BugStatus
         
-        # 确保 project_id 是整数
         try:
             project_id_int = int(project_id)
         except (ValueError, TypeError):
             project_id_int = 1
         
-        print(f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}, status={status}")
+        print(f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}, status={status}, plan_id={plan_id}")
         
         query = db.session.query(Bug).filter_by(project_id=project_id_int)
+        
+        # 按 plan_id 过滤：只查当前迭代计划下的记录
+        if plan_id:
+            try:
+                pid = int(plan_id)
+                query = query.filter(Bug.plan_id == pid)
+                print(f"[GREP] 限定计划 plan_id={pid}")
+            except (ValueError, TypeError):
+                pass
         
         # 按 status 过滤
         if status:
@@ -342,12 +482,16 @@ class GrepTool(BaseTool):
             except ValueError:
                 print(f"[GREP] 无效的 status 值: {status}")
         
-        # keywords 为空或 "*" 表示查询全部
-        is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
-        if not is_query_all and keywords:
-            query = query.filter(Bug.title.ilike(f'%{keywords}%'))
+        # 关键词：拆分模糊匹配（与 BadCase 一致）
+        keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
+        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
+        if not is_query_all and keyword_list:
+            for kw in keyword_list:
+                query = query.filter(Bug.title.ilike(f'%{kw}%'))
+            print(f"[GREP] Bug 拆分关键词模糊匹配: {keyword_list}")
+        elif not is_query_all and keywords and not keyword_list:
+            query = query.filter(Bug.title.ilike(f'%{keywords.strip()}%'))
         
-        # 查询全部时不限制数量，否则限制20条
         if is_query_all:
             print(f"[GREP] 查询所有 Bug，project_id={project_id_int}")
             bugs = query.order_by(Bug.created_at.desc()).limit(100).all()
@@ -374,26 +518,72 @@ class GrepTool(BaseTool):
         
         return result
     
+    async def _get_testcase_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
+        """测试用例定位，支持 plan_id 与关键词拆分模糊匹配"""
+        from app import db, TestCase
+        try:
+            project_id_int = int(project_id)
+        except (ValueError, TypeError):
+            project_id_int = 1
+        query = db.session.query(TestCase).filter_by(project_id=project_id_int)
+        if plan_id:
+            try:
+                query = query.filter(TestCase.plan_id == int(plan_id))
+            except (ValueError, TypeError):
+                pass
+        if status:
+            status_map = {'草稿': 'draft', 'draft': 'draft', '评审': 'review', 'review': 'review', '生效': 'active', 'active': 'active', '归档': 'archived', 'archived': 'archived'}
+            norm = status_map.get(status.strip().lower(), status.strip().lower())
+            try:
+                from app import TestCaseStatus
+                status_enum = TestCaseStatus(norm)
+                query = query.filter(TestCase.status == status_enum.value)
+            except (ValueError, TypeError):
+                query = query.filter(TestCase.status == norm)
+        keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
+        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
+        if not is_query_all and keyword_list:
+            for kw in keyword_list:
+                query = query.filter(TestCase.title.ilike(f'%{kw}%'))
+        elif not is_query_all and keywords and not keyword_list:
+            query = query.filter(TestCase.title.ilike(f'%{keywords.strip()}%'))
+        testcases = query.order_by(TestCase.created_at.desc()).limit(100 if is_query_all else 20).all()
+        result = []
+        for tc in testcases:
+            result.append({
+                'id': tc.id,
+                'title': tc.title,
+                'status': tc.status.value if hasattr(tc.status, 'value') else str(tc.status),
+                'plan_id': tc.plan_id,
+                'created_at': tc.created_at.isoformat() if tc.created_at else None,
+                'business_scenario': self._infer_business_scenario(tc.title, keywords),
+            })
+        return result
+    
     async def _analyze_associations(
         self,
         keywords: str,
         plan_tree: Dict[str, Any],
         badcase_list: List[Dict[str, Any]],
         bug_list: List[Dict[str, Any]],
+        testcase_list: List[Dict[str, Any]] = None,
         evidence: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """分析关联关系（优化版）"""
-        
+        """分析关联关系（含 BadCase/Bug/TestCase）"""
+        testcase_list = testcase_list or []
         badcase_analysis = []
         bug_location = []
+        testcase_location = []
         plan_attribution = []
-        
-        # 构建 plan_id -> plan_name 映射
         plan_map = plan_tree.get('plan_map', {})
         
-        # 分析 BadCase
+        # 分析 BadCase（列表已是按 keywords 过滤后的结果，故均视为匹配）
+        keyword_list = [k.strip() for k in (keywords or '').split() if k.strip()] if keywords else []
         for bc in badcase_list:
-            is_related = keywords and keywords.lower() in bc['title'].lower()
+            if keyword_list:
+                is_related = all(kw in (bc.get('title') or '') for kw in keyword_list)
+            else:
+                is_related = bool(keywords and (keywords.lower() in (bc.get('title') or '').lower()))
             analysis_item = {
                 'id': bc['id'],
                 'title': bc['title'],
@@ -407,9 +597,12 @@ class GrepTool(BaseTool):
             print(f"[GREP-ANALYSIS] BadCase ID={bc['id']}, plan_id={bc.get('plan_id')}, item.plan_id={analysis_item['plan_id']}")
             badcase_analysis.append(analysis_item)
         
-        # 分析 Bug
+        # 分析 Bug（同上，按关键词过滤后的结果均视为匹配）
         for bug in bug_list:
-            is_related = keywords and keywords.lower() in bug['title'].lower()
+            if keyword_list:
+                is_related = all(kw in (bug.get('title') or '') for kw in keyword_list)
+            else:
+                is_related = bool(keywords and (keywords.lower() in (bug.get('title') or '').lower()))
             plan_id = bug.get('plan_id')
             plan_name = plan_map.get(plan_id, {}).get('name', '') if plan_id else ''
             
@@ -423,13 +616,31 @@ class GrepTool(BaseTool):
                 'plan_name': plan_name
             })
         
-        # 生成总结
+        for tc in testcase_list:
+            keyword_list = [k.strip() for k in (keywords or '').split() if k.strip()] if keywords else []
+            if keyword_list:
+                is_related = all(kw in (tc.get('title') or '') for kw in keyword_list)
+            else:
+                is_related = bool(keywords and (keywords.lower() in (tc.get('title') or '').lower()))
+            plan_id = tc.get('plan_id')
+            plan_name = plan_map.get(plan_id, {}).get('name', '') if plan_id else ''
+            testcase_location.append({
+                'id': tc['id'],
+                'title': tc['title'],
+                'business_scenario': tc.get('business_scenario', ''),
+                'related_to_evidence': is_related,
+                'current_plan_id': plan_id,
+                'plan_name': plan_name
+            })
+        
         summary = self._generate_summary(
             keywords=keywords,
             badcase_count=len(badcase_list),
             bug_count=len(bug_list),
+            testcase_count=len(testcase_list),
             related_badcase_count=sum(1 for bc in badcase_analysis if bc['related_to_evidence']),
             related_bug_count=sum(1 for bug in bug_location if bug['related_to_evidence']),
+            related_testcase_count=sum(1 for tc in testcase_location if tc['related_to_evidence']),
             attribution_count=len(plan_attribution),
             bug_location=bug_location
         )
@@ -437,6 +648,7 @@ class GrepTool(BaseTool):
         return {
             'badcase_analysis': badcase_analysis,
             'bug_location': bug_location,
+            'testcase_location': testcase_location,
             'plan_attribution': plan_attribution,
             'summary': summary
         }
@@ -533,22 +745,21 @@ class GrepTool(BaseTool):
         related_badcase_count: int,
         related_bug_count: int,
         attribution_count: int,
-        bug_location: List[Dict[str, Any]] = None  # 新增参数
+        bug_location: List[Dict[str, Any]] = None,
+        testcase_count: int = 0,
+        related_testcase_count: int = 0
     ) -> str:
         """生成分析总结（人类可读）"""
         parts = []
-        
-        # 如果没有关键词，直接显示找到的记录数
         is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
         
-        # 1. BadCase定位结果
         if badcase_count > 0:
             if is_query_all:
                 parts.append(f"🔍 找到 {badcase_count} 条BadCase")
             elif related_badcase_count > 0:
                 parts.append(f"🔍 定位 {related_badcase_count} 条BadCase（关键词：{keywords}）")
             else:
-                parts.append(f"🔍 扫描了 {badcase_count} 条BadCase，未找到匹配 '{keywords}' 的记录")
+                parts.append(f"🔍 定位 {badcase_count} 条BadCase（关键词：{keywords}）")
         
         # 2. Bug定位结果（显示计划名）
         if bug_count > 0:
@@ -564,9 +775,16 @@ class GrepTool(BaseTool):
                 else:
                     parts.append(f"🐛 定位 {related_bug_count} 条Bug（关键词：{keywords}）")
             else:
-                parts.append(f"🐛 扫描了 {bug_count} 条Bug，未找到匹配 '{keywords}' 的记录")
+                parts.append(f"🐛 定位 {bug_count} 条Bug（关键词：{keywords}）")
         
-        # 3. 计划归属建议
+        if testcase_count > 0:
+            if is_query_all:
+                parts.append(f"📋 找到 {testcase_count} 条测试用例")
+            elif related_testcase_count > 0:
+                parts.append(f"📋 定位 {related_testcase_count} 条测试用例（关键词：{keywords}）")
+            else:
+                parts.append(f"📋 定位 {testcase_count} 条测试用例（关键词：{keywords}）")
+        
         if attribution_count > 0:
             parts.append(f"🎯 生成 {attribution_count} 条计划归属调整建议")
         

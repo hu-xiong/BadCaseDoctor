@@ -456,6 +456,7 @@ def react_agent():
         stream_mode = data.get('stream', True)  # 默认开启流式
         model_name = data.get('model')  # 获取模型名称
         project_id = data.get('project_id')  # 获取项目ID
+        plan_id = data.get('plan_id')  # 当前迭代计划ID，传入则 grep 只查该计划下的记录（人类式先看本迭代）
         
         if not user_input.strip():
             return jsonify({'code': 400, 'message': '输入不能为空'}), 400
@@ -486,7 +487,7 @@ def react_agent():
                 async def task():
                     try:
                         print(f"[REACT-STREAM] 开始异步任务循环")
-                        async for chunk in agent.handle_user_request_stream(user_input, project_id=project_id):
+                        async for chunk in agent.handle_user_request_stream(user_input, project_id=project_id, plan_id=plan_id):
                             print(f"[REACT-STREAM] 产出 chunk: {chunk.get('type')}")
                             q.put(chunk)
                     except Exception as e:

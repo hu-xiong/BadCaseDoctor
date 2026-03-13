@@ -262,7 +262,7 @@
               class="stop-icon-button"
               title="停止生成"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                 <rect x="6" y="6" width="12" height="12" rx="2"></rect>
               </svg>
             </button>
@@ -275,7 +275,7 @@
 
 <script setup>
 import { ref, reactive, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
+import { BACKEND_BASE_URL, getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
 import TypewriterText from './TypewriterText.vue'
@@ -685,7 +685,7 @@ const handleConfirmModify = async (modifyData) => {
   
   // 调用modify工具，confirm=true
   try {
-    const response = await fetch('/api/devops/chat_stream', {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -864,7 +864,7 @@ const handleRejectItem = async (item) => {
   // 需要回滚该修改
   if (item.result?.before) {
     try {
-      const response = await fetch('/api/devops/chat_stream', {
+      const response = await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -899,7 +899,7 @@ const handleRejectAll = async (results) => {
   for (const item of results) {
     if (item.result?.before) {
       try {
-        await fetch('/api/devops/chat_stream', {
+        await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -927,7 +927,7 @@ const handleConfirmCreate = async (createData) => {
   
   // 调用create工具，confirm=true
   try {
-    const response = await fetch('/api/devops/chat_stream', {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1142,8 +1142,9 @@ const handleSend = async (e) => {
   abortController.value = new AbortController()
   isSending.value = true
   
-  // 判断是否是第一条消息（用于生成会话标题）
-  const isFirstMessage = messages.value.length === 0
+  // 判断是否是“第一条用户消息”（用于生成会话标题）
+  // 新会话里可能会预置提示/历史消息，不能用 messages.length 判断
+  const isFirstUserMessage = !messages.value.some(m => m && m.isUser)
   
   // 添加用户消息
   const userMessage = {
@@ -1161,7 +1162,7 @@ const handleSend = async (e) => {
   })
   
   // 如果是第一条消息，异步生成会话标题
-  if (isFirstMessage && props.sessionId) {
+  if (isFirstUserMessage && props.sessionId) {
     generateSessionTitle(props.sessionId, userMessage.content)
       .then(res => {
         if (res.data.success) {
@@ -1221,7 +1222,8 @@ const handleReactAgentMode = async (userMessage) => {
     isUser: false,
     content: '',
     time: new Date().toLocaleTimeString(),
-    understanding: '🧠 正在初始化 ReAct 推理...',
+    // 不在对话中暴露推理方式（如 ReAct），只展示通用处理状态
+    understanding: '正在处理中...',
     steps: [],
     finalResponse: '',
     agentResult: { findings: [], recommendations: [], status: 'running' },
@@ -1236,7 +1238,7 @@ const handleReactAgentMode = async (userMessage) => {
   
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
-    const response = await fetch('http://localhost:5000/api/agent/react', {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/agent/react`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -1287,7 +1289,8 @@ const handleReactAgentMode = async (userMessage) => {
           // 处理不同类型的事件
           switch (chunk.type) {
             case 'status':
-              aiMessage.understanding = `🧠 ${chunk.message}`
+              // 不在 UI 中展示“ReAct推理”等内部实现细节
+              aiMessage.understanding = chunk.message || '正在处理中...'
               break
 
             case 'intent':
@@ -1300,7 +1303,8 @@ const handleReactAgentMode = async (userMessage) => {
               console.log('[CHAT-STREAM] 收到 step 事件:', stepEvent.event, stepEvent)
 
               if (stepEvent.event === 'thought') {
-                aiMessage.understanding = `💭 ${stepEvent.message}`
+                // thought 仅用于内部调试，不在对话中展示推理过程
+                // 保留当前 understanding，不覆盖
               } else if (stepEvent.event === 'todos') {
                 // 初始化 Todo 列表
                 console.log('[CHAT-STREAM] 收到 todos 数据:', stepEvent.data)
@@ -1831,7 +1835,7 @@ const handleAgentMode = async (userMessage) => {
     // 调用后端 Agent 接口
     console.log(`[CHAT-EXECUTE] 正在调用 /api/agent/execute 接口: ${userMessage}`)
     // 使用 fetch 调用 /api/agent/execute（不是 ReAct）
-    const response = await fetch('/api/agent/execute', {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/agent/execute`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -1923,7 +1927,7 @@ const handleChatMode = async (userMessage) => {
   
   try {
     console.log(`[CHAT] 调用聊天接口 (流式): ${userMessage}`)
-    const response = await fetch('/api/chat', {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -2668,8 +2672,8 @@ watch(() => props.sessionId, (newSessionId) => {
   background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
   color: white;
   border: none;
-  width: 40px;
-  height: 40px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -2681,8 +2685,8 @@ watch(() => props.sessionId, (newSessionId) => {
 
 .stop-icon-button:hover {
   background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-  transform: scale(1.1);
-  box-shadow: 0 6px 20px rgba(34, 197, 94, 0.5);
+  transform: scale(1.05);
+  box-shadow: 0 6px 16px rgba(34, 197, 94, 0.45);
 }
 
 .stop-icon-button:active {

@@ -89,7 +89,8 @@
                         <li><strong>case_category</strong>：问题分类</li>
                         <li><strong>base_problem</strong>：具体问题</li>
                         <li><strong>badcase_result</strong>：BadCase问题结果</li>
-                        <li><strong>correct_answer</strong>：应该得到的正确答案</li>
+                        <li><strong>answer</strong>：答案</li>
+                        <li><strong>correct_answer</strong>：正确答案</li>
                         <li><strong>problem_reason</strong>：问题原因（可选）</li>
                         <li><strong>priority</strong>：优先级（p1/p2/p3，默认为p3）</li>
                       </ul>
@@ -237,16 +238,17 @@ function downloadTemplate() {
       case_category: '示例分类',
       base_problem: '这是一个示例问题描述',
       badcase_result: '这是BadCase的问题结果',
-      correct_answer: '这是应该得到的正确答案',
+      answer: '这是答案',
+      correct_answer: '这是正确答案',
       problem_reason: '这是问题原因（可选）',
       priority: 'p3'
     }
   ]
   
   const csvContent = [
-    'case_category,base_problem,badcase_result,correct_answer,problem_reason,priority',
+    'case_category,base_problem,badcase_result,answer,correct_answer,problem_reason,priority',
     ...templateData.map(row => 
-      `${row.case_category},${row.base_problem},${row.badcase_result},${row.correct_answer},${row.problem_reason},${row.priority}`
+      `${row.case_category},${row.base_problem},${row.badcase_result},${row.answer},${row.correct_answer},${row.problem_reason},${row.priority}`
     )
   ].join('\n')
   
