@@ -353,14 +353,14 @@ class GrepTool(BaseTool):
     
     def _normalize_keywords_for_match(self, keywords: str) -> List[str]:
         """
-        人类式关键词拆分：支持「雪碧和七喜」「雪碧 七喜」都拆成 [雪碧, 七喜]，用于模糊 AND 匹配。
-        按 和、与、空格 拆分，去掉停用字（的、为、与、和等单字连接词），保留有意义的词。
+        人类式关键词拆分：支持「雪碧和七喜」「雪碧 七喜」「雪碧的七喜」都拆成 [雪碧，七喜]，用于模糊 AND 匹配。
+        按 和、与、的、为、空格 拆分，去掉停用字（的、为、与、和等单字连接词），保留有意义的词。
         """
         if not keywords or not keywords.strip():
             return []
         import re
-        # 统一用空格分隔：把 "和" "与" 当分隔符
-        text = re.sub(r'[和与]', ' ', keywords.strip())
+        # 统一用空格分隔：把 "和" "与" "的" "为" 当分隔符
+        text = re.sub(r'[和与的为]', ' ', keywords.strip())
         # 再按空格拆
         parts = [p.strip() for p in text.split() if p.strip()]
         # 去掉纯停用字（单字且为常见连接/助词）
@@ -788,7 +788,7 @@ class GrepTool(BaseTool):
         if attribution_count > 0:
             parts.append(f"🎯 生成 {attribution_count} 条计划归属调整建议")
         
-        return '\n'.join(parts) if parts else '未找到相关缺陷'
+        return '\n'.join(parts) if parts else '未找到相关记录'
     
     async def _three_way_association(self, project_id: str, keywords: str) -> List[Dict[str, Any]]:
         """

@@ -10,7 +10,7 @@ import json
 
 # Text2SQL Agent
 try:
-    from .sqlcoder_agent import Text2SQLAgent, LLMBackend
+    from .sqlcoder_agent import LLMBackend, get_cached_text2sql_agent
     TEXT2SQL_AVAILABLE = True
 except ImportError:
     TEXT2SQL_AVAILABLE = False
@@ -19,21 +19,22 @@ except ImportError:
 class ModifyTool(BaseTool):
     """对话修改Bug/BadCase工具"""
     
-    def __init__(self, db_session):
+    def __init__(self, db_session, database_uri: str = None):
         self.db = db_session
         self.name = "modify"
         self.description = """
-用于修改Bug或BadCase的工具，支持对话式修改和行级别对比。
+用于修改 Bug / BadCase / 测试用例(testcase) 的工具，支持对话式修改和行级别对比。
 
 使用场景：
-- 用户说"修改这个Bug的标题"
+- 用户说"修改这个 Bug 的标题"
 - 用户说"把优先级改成高"
 - 用户说"更新复现步骤"
-- 用户说"修改最近创建的bug状态为已解决"
+- 用户说"修改最近创建的 Bug 状态为已解决"
+- 用户说"修改某个测试用例的标题/状态/负责人等"
 
 参数：
-- target: 修改目标类型，'bug'或'badcase'
-- target_id: 目标ID（可选，如果提供natural_query可自动查找）
+- target: 修改目标类型，'bug'、'badcase' 或 'testcase'
+- target_id: 目标ID（可选，如果提供 natural_query 可自动查找）
 - modifications: 修改内容字典，格式 {"字段名": "新值"}
 - project_id: 项目ID（必需）
 - natural_query: 自然语言查询（可选，用于查找目标记录）
@@ -45,19 +46,31 @@ class ModifyTool(BaseTool):
 - confirmation_required: 是否需要用户确认
 """
         
-        # 初始化 Text2SQL Agent
+        # 延迟初始化 Text2SQL（采纳时不需要，仅沙箱预览 / natural_query 时再初始化）
+        self._database_uri = database_uri
+        self.text2sql = None
+    
+    def _ensure_text2sql(self):
+        """仅在实际需要时初始化 Text2SQL（沙箱预览 / 自然语言查询）"""
+        if self.text2sql is not None:
+            return
         if TEXT2SQL_AVAILABLE:
             try:
-                self.text2sql = Text2SQLAgent(
-                    database_path='instance/badcase_doctor.db',
-                    llm_backend=LLMBackend.GLM_5,
-                    debug=False
+                db_path = self._database_uri or 'instance/badcase_doctor.db'
+                # 默认用 glm-4-flash（更快更稳）；如需 glm-5 可通过环境变量指定
+                import os
+                backend_env = (os.getenv("TEXT2SQL_LLM_BACKEND", "glm-4-flash") or "").strip().lower()
+                backend = LLMBackend.GLM_5.value if backend_env in ("glm-5", "glm5") else LLMBackend.GLM_4_FLASH.value
+                self.text2sql = get_cached_text2sql_agent(
+                    database_path=db_path,
+                    llm_backend=backend,
+                    debug=False,
+                    execution_mode="direct",
                 )
+                print(f"[MODIFY] Text2SQL 延迟初始化完成")
             except Exception as e:
                 self.text2sql = None
                 print(f"[MODIFY] Text2SQL初始化失败: {e}")
-        else:
-            self.text2sql = None
     
     def _get_app_context(self):
         """获取 Flask 应用上下文"""
@@ -123,8 +136,23 @@ class ModifyTool(BaseTool):
             confirm: True=应用到生产库, False=沙箱预览
             natural_query: 自然语言查询（用于查找目标记录）
         """
-        # 如果没有target_id但有natural_query，尝试查找
+        progress_callback = kwargs.get("progress_callback")
+        def _progress(msg: str):
+            s = str(msg)
+            print(f"[MODIFY] 进度: {s}", flush=True)
+            try:
+                if callable(progress_callback):
+                    progress_callback(s)
+            except Exception:
+                pass
+
+        _progress("初始化 modify 参数…")
+
+        # 如果没有target_id但有natural_query，尝试查找（需要时再初始化 Text2SQL）
+        if not target_id and natural_query:
+            self._ensure_text2sql()
         if not target_id and natural_query and self.text2sql:
+            _progress("根据自然语言查询定位目标记录…")
             target_id = await self._find_target_by_query(target, natural_query, project_id)
             if target_id:
                 print(f"[MODIFY] 通过自然语言查询找到目标ID: {target_id}")
@@ -140,8 +168,12 @@ class ModifyTool(BaseTool):
                     'error': f'target_id 格式错误: {target_id}'
                 }
         
-        print(f"[MODIFY] 开始处理修改请求: target={target}, target_id={target_id}, modifications={modifications}, confirm={confirm}")
+        _progress(f"已定位目标: target_id={target_id}，开始校验修改内容…")
         
+        print(
+            f"[MODIFY] 开始执行: target={target}, target_id={target_id}, modifications keys={list((modifications or {}).keys())}",
+            flush=True,
+        )
         if not target_id or not modifications:
             error_msg = f'缺少必要参数：target_id={target_id}或modifications={modifications}'
             hint_msg = '请先使用 grep 工具查询并定位目标记录，然后再使用 modify 工具修改。'
@@ -162,87 +194,102 @@ class ModifyTool(BaseTool):
         normalized_modifications = {}
         for field, value in modifications.items():
             mapped_field = self._map_field_name(field, target)
-            if mapped_field != field:
-                print(f"[MODIFY] 字段映射: '{field}' -> '{mapped_field}'")
             normalized_modifications[mapped_field] = value
         modifications = normalized_modifications
+        _progress(f"字段映射完成：{list(modifications.keys())}")
+        
+        # 不可修改字段检查：若用户请求修改 type/类型 等，直接返回明确错误，避免长时间执行
+        IMMUTABLE_FIELDS = {'id', 'type', 'project_id', 'plan_id', 'created_at', 'updated_at', 'creator_id'}
+        requested_immutable = [f for f in modifications.keys() if f in IMMUTABLE_FIELDS]
+        if requested_immutable:
+            for f in requested_immutable:
+                modifications.pop(f, None)
+            if not modifications:
+                hint = '可修改的字段包括：状态、期望结果、标题、优先级、复现步骤、负责人等。'
+                msg = f'「类型」(type) 等字段为系统固定，不可修改。{hint}'
+                print(f"[MODIFY] ❌ {msg}")
+                return {
+                    'success': False,
+                    'error': msg,
+                    'immutable_field_rejected': True,
+                    'hint': hint
+                }
         
         # 状态值映射
         if 'status' in modifications:
             original_status = modifications['status']
             normalized_status = self._normalize_status(modifications['status'], target)
             modifications['status'] = normalized_status
-            print(f"[MODIFY] 状态映射: '{original_status}' -> '{normalized_status}'")
+            _progress(f"状态值归一化：{original_status} -> {normalized_status}")
         
         try:
             with self._get_app_context():
-                # 1. 获取原始数据（生产库）
-                original_data = await self._get_original_data(target, target_id, project_id)
-                if not original_data:
-                    return {
-                        'success': False,
-                        'error': f'未找到{target} ID={target_id}'
-                    }
-                
-                # 2. 生成修改后的数据
-                modified_data = original_data.copy()
-                modified_data.update(modifications)
-                
-                # 特殊处理：如果修改的是 assignee 字段，同步更新 assignee_display
-                if 'assignee' in modifications and target == 'badcase':
-                    from app import User, db as flask_db
-                    try:
-                        new_assignee = modifications['assignee']
-                        # 尝试将新值解析为用户ID并获取用户名
-                        user_id = int(new_assignee)
-                        user = flask_db.session.query(User).get(user_id)
-                        if user:
-                            modified_data['assignee_display'] = user.name
-                        else:
-                            modified_data['assignee_display'] = str(new_assignee)
-                    except (ValueError, TypeError):
-                        modified_data['assignee_display'] = str(new_assignee)
-                
-                # 3. 生成行级别差异对比
-                diff_result = self._generate_line_diff(original_data, modified_data, modifications.keys())
-                
-                # 4. 根据 confirm 决定执行模式
                 if not confirm:
-                    # confirm=False: 沙箱副本预览
+                    # confirm=False: 沙箱副本预览（需要 Text2SQL + 原始数据）
+                    print(f"[MODIFY] 沙箱预览模式，获取原始数据…", flush=True)
+                    _progress("进入沙箱预览：读取原始数据…")
+                    self._ensure_text2sql()
+                    _progress("正在查询数据库获取当前记录…")
+                    original_data = await self._get_original_data(target, target_id, project_id, progress_callback=_progress)
+                    if not original_data:
+                        return {'success': False, 'error': f'未找到{target} ID={target_id}'}
+                    _progress("已读取原始数据，正在生成 diff 与预览…")
+                    modified_data = original_data.copy()
+                    modified_data.update(modifications)
+                    # 负责人显示名：BadCase 用 assignee，Bug/TestCase 用 assignee_id 解析为 name
+                    if 'assignee' in modifications and target == 'badcase':
+                        from app import User, db as flask_db
+                        try:
+                            new_assignee = modifications['assignee']
+                            user_id = int(new_assignee)
+                            user = flask_db.session.query(User).get(user_id)
+                            modified_data['assignee_display'] = user.name if user else str(new_assignee)
+                        except (ValueError, TypeError):
+                            modified_data['assignee_display'] = str(modifications.get('assignee', ''))
+                    if target in ('bug', 'testcase') and ('assignee_id' in modifications or 'assignee' in modifications):
+                        from app import User, db as flask_db
+                        try:
+                            raw = modified_data.get('assignee_id') or modifications.get('assignee_id') or modifications.get('assignee')
+                            if raw is not None:
+                                # 与落库一致：先按用户名解析，再按有效 user.id 解析
+                                resolved_uid = self._resolve_user_value(raw, project_id)
+                                u = flask_db.session.query(User).get(int(resolved_uid)) if resolved_uid is not None else None
+                                name = (u.name if u else str(raw))
+                                modified_data['assignee_display'] = name
+                                modified_data['assignee'] = name
+                                modified_data['assignee_id'] = int(resolved_uid) if resolved_uid is not None else modified_data.get('assignee_id')
+                        except Exception:
+                            # 预览阶段解析失败：仍展示用户输入，避免预览崩溃
+                            modified_data['assignee_display'] = str(modifications.get('assignee') or modifications.get('assignee_id', ''))
+                            modified_data['assignee'] = modified_data['assignee_display']
+                    diff_result = self._generate_line_diff(original_data, modified_data, modifications.keys())
+                    _progress("正在生成沙箱 SQL 预览…")
                     sandbox_result = await self._preview_in_sandbox(target, target_id, modifications, project_id)
-                    
-                    # 生成人类可读的摘要
+                    _progress("沙箱预览完成，等待确认…")
                     target_name = 'Bug' if target == 'bug' else ('测试用例' if target == 'testcase' else 'BadCase')
                     mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
-                    
                     return {
-                        'success': True,
-                        'confirmation_required': True,
+                        'success': True, 'confirmation_required': True,
                         'message': '沙箱预览完成，请确认是否应用修改：',
                         'summary': f'预览修改{target_name}(ID={target_id})：{mod_summary}',
-                        'target': target,
-                        'target_id': target_id,
-                        'before': original_data,
-                        'after': modified_data,
-                        'diff': diff_result,
-                        'modifications': modifications,
-                        'sandbox_preview': sandbox_result
+                        'target': target, 'target_id': target_id,
+                        'before': original_data, 'after': modified_data, 'diff': diff_result,
+                        'modifications': modifications, 'sandbox_preview': sandbox_result
                     }
                 
-                # confirm=True: 应用到生产库
+                # confirm=True: 采纳即落库，快速路径（跳过 Text2SQL 和原始数据获取）
+                print(f"[MODIFY] 正在应用修改到数据库（ORM）…", flush=True)
+                _progress("开始落库：解析用户/负责人字段并写入 ORM…")
                 success = await self._apply_modifications(target, target_id, modifications, project_id)
-                
-                # 生成人类可读的摘要
+                print(f"[MODIFY] 应用修改完成: success={success}", flush=True)
+                _progress("落库完成" if success else "落库失败")
                 target_name = 'Bug' if target == 'bug' else ('测试用例' if target == 'testcase' else 'BadCase')
                 mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
-                
                 return {
                     'success': success,
-                    'message': f'已成功修改{target} ID={target_id}',
+                    'message': f'已成功修改{target} ID={target_id}' if success else '修改失败',
                     'summary': f'已修改{target_name}(ID={target_id})：{mod_summary}',
-                    'before': original_data,
-                    'after': modified_data,
-                    'diff': diff_result
+                    'before': None, 'after': None, 'diff': None
                 }
             
         except Exception as e:
@@ -278,12 +325,25 @@ class ModifyTool(BaseTool):
             print(f"[MODIFY] 自然语言查询失败: {e}")
             return None
     
-    async def _get_original_data(self, target: str, target_id: int, project_id: int) -> Dict[str, Any]:
-        """获取原始数据"""
+    async def _get_original_data(self, target: str, target_id: int, project_id: int, progress_callback=None) -> Dict[str, Any]:
+        """获取原始数据。progress_callback(msg) 用于流式上报进度。"""
+        def _prog(msg: str):
+            if callable(progress_callback):
+                try:
+                    progress_callback(str(msg))
+                except Exception:
+                    pass
         # 优先使用 Text2SQL 查询
         if self.text2sql:
+            _prog("通过 Text2SQL 查询原始数据…")
             try:
-                table_name = 'bug' if target == 'bug' else 'bad_case'
+                # 注意：不同 target 对应不同表，testcase 为 test_case
+                table_map = {
+                    'bug': 'bug',
+                    'badcase': 'bad_case',
+                    'testcase': 'test_case',
+                }
+                table_name = table_map.get(target, 'bad_case')
                 sql_result = self.text2sql.generate_sql(
                     f"查询{table_name}表中ID为{target_id}的记录",
                     f"项目ID: {project_id}"
@@ -298,7 +358,9 @@ class ModifyTool(BaseTool):
                         if 'assignee_id' in data and data['assignee_id']:
                             # Bug/TestCase: 从用户表获取用户名
                             user = flask_db.session.query(User).get(data['assignee_id'])
-                            data['assignee'] = user.name if user else ''
+                            name = user.name if user else ''
+                            data['assignee'] = name
+                            data['assignee_display'] = name or '未指派'
                         elif 'assignee' in data and data.get('assignee'):
                             # BadCase: assignee 存储的是用户ID字符串，需要转换为用户名
                             from app import User
@@ -321,8 +383,10 @@ class ModifyTool(BaseTool):
         
         # 回退到 ORM 查询（使用 Flask-SQLAlchemy 的 db.session）
         from app import db as flask_db
-        
+        _prog("通过 ORM 查询原始数据…")
+
         if target == 'bug':
+            _prog("正在查询 Bug 记录…")
             from app import Bug, User
             bug = flask_db.session.query(Bug).filter(
                 Bug.id == target_id,
@@ -355,6 +419,7 @@ class ModifyTool(BaseTool):
             }
         
         elif target == 'badcase':
+            _prog("正在查询 BadCase 记录…")
             from app import BadCase
             badcase = flask_db.session.query(BadCase).filter(
                 BadCase.id == target_id,
@@ -379,6 +444,7 @@ class ModifyTool(BaseTool):
             }
         
         elif target == 'testcase':
+            _prog("正在查询测试用例记录…")
             from app import TestCase, User
             testcase = flask_db.session.query(TestCase).filter(
                 TestCase.id == target_id,
@@ -388,7 +454,11 @@ class ModifyTool(BaseTool):
             if not testcase:
                 return None
             
-            # 获取执行人用户名
+            assignee_name = ''
+            if testcase.assignee_id:
+                u = flask_db.session.query(User).get(testcase.assignee_id)
+                if u:
+                    assignee_name = u.name
             executed_by_name = ''
             if testcase.executed_by:
                 user = flask_db.session.query(User).get(testcase.executed_by)
@@ -406,6 +476,8 @@ class ModifyTool(BaseTool):
                 'steps': json.dumps(testcase.steps, ensure_ascii=False) if testcase.steps else '',
                 'remark': testcase.remark or '',
                 'execution_result': testcase.execution_result.value if testcase.execution_result else '',
+                'assignee_id': testcase.assignee_id,
+                'assignee': assignee_name,
                 'executed_by': executed_by_name,
                 'estimated_time': testcase.estimated_time or '',
                 'actual_time': testcase.actual_time or '',
@@ -413,6 +485,73 @@ class ModifyTool(BaseTool):
             }
         
         return None
+    
+    def explore_record(self, target: str, target_id: int, project_id: int) -> Dict[str, Any]:
+        """
+        探索目标记录与可选用户列表，供「思考意图」时使用（类似 Cursor 探索文件）。
+        返回当前记录快照 + 用户列表(id/name)，便于大模型结合上下文确认修改意图。
+        """
+        with self._get_app_context():
+            current = self._get_original_data(target, target_id, project_id)
+            users = []
+            try:
+                from app import User
+                for u in User.query.filter_by(is_verified=True).limit(100).all():
+                    users.append({'id': u.id, 'name': (u.name or '').strip() or str(u.id)})
+            except Exception as e:
+                print(f"[MODIFY] explore_record 查询用户失败: {e}")
+            return {
+                'current_record': current,
+                'users': users,
+                'modifiable_fields': self._get_modifiable_fields(target),
+            }
+    
+    def _get_modifiable_fields(self, target: str) -> List[Dict[str, str]]:
+        """返回目标类型可修改的字段列表（英文字段名 + 中文标签），供探索时明确有哪些列可改。"""
+        # 统一格式: [ {"field": "title", "label": "标题"}, ... ]
+        if target == 'bug':
+            return [
+                {'field': 'title', 'label': '标题'},
+                {'field': 'description', 'label': '描述'},
+                {'field': 'status', 'label': '状态'},
+                {'field': 'priority', 'label': '优先级'},
+                {'field': 'severity', 'label': '严重程度'},
+                {'field': 'assignee', 'label': '负责人'},
+                {'field': 'steps_to_reproduce', 'label': '复现步骤'},
+                {'field': 'expected_result', 'label': '期望结果'},
+                {'field': 'actual_result', 'label': '实际结果'},
+            ]
+        if target == 'badcase':
+            return [
+                {'field': 'title', 'label': '标题'},
+                {'field': 'status', 'label': '状态'},
+                {'field': 'priority', 'label': '优先级'},
+                {'field': 'assignee', 'label': '负责人'},
+                {'field': 'base_problem', 'label': '相似问题/具体问题'},
+                {'field': 'reproduction_steps', 'label': '复现步骤'},
+                {'field': 'answer', 'label': '答案'},
+                {'field': 'correct_answer', 'label': '正确答案'},
+                {'field': 'badcase_result', 'label': 'BadCase结果'},
+                {'field': 'solution', 'label': '解决方式'},
+                {'field': 'problem_reason', 'label': '问题原因'},
+            ]
+        if target == 'testcase':
+            return [
+                {'field': 'title', 'label': '标题'},
+                {'field': 'status', 'label': '状态'},
+                {'field': 'priority', 'label': '优先级'},
+                {'field': 'assignee', 'label': '负责人'},
+                {'field': 'preconditions', 'label': '前置条件'},
+                {'field': 'steps', 'label': '测试步骤'},
+                {'field': 'remark', 'label': '备注'},
+                {'field': 'baseline', 'label': '基线'},
+                {'field': 'case_type', 'label': '用例类型'},
+                {'field': 'test_type', 'label': '测试类型'},
+                {'field': 'execution_result', 'label': '执行结果'},
+                {'field': 'estimated_time', 'label': '预估工时'},
+                {'field': 'actual_time', 'label': '实际工时'},
+            ]
+        return []
     
     def _generate_line_diff(self, before: Dict, after: Dict, changed_fields: List[str]) -> List[Dict]:
         """生成行级别差异对比"""
@@ -453,6 +592,7 @@ class ModifyTool(BaseTool):
         }
         
         diff_result = []
+        assignee_row_added = False  # 负责人只输出一行，且用 display name，field 统一为 assignee
         
         for field in changed_fields:
             # 跳过不可修改的字段
@@ -460,13 +600,18 @@ class ModifyTool(BaseTool):
                 print(f"[MODIFY] 跳过不可修改字段: {field}")
                 continue
             
-            # 特殊处理：对于 assignee 字段，优先使用 assignee_display
-            if field == 'assignee' and 'assignee_display' in before:
-                before_value = str(before.get('assignee_display', before.get(field, '')))
-                after_value = str(after.get('assignee_display', after.get(field, '')))
+            # 负责人：assignee_id/assignee/owner 统一按「显示名」输出为 field='assignee'，便于前端列表展示
+            if field in ('assignee_id', 'assignee', 'owner'):
+                if assignee_row_added:
+                    continue
+                assignee_row_added = True
+                before_value = str(before.get('assignee_display') or before.get('assignee') or '')
+                after_value = str(after.get('assignee_display') or after.get('assignee') or '')
+                out_field = 'assignee'
             else:
                 before_value = str(before.get(field, ''))
                 after_value = str(after.get(field, ''))
+                out_field = field
             
             # 构造 diff 行
             parsed_lines = []
@@ -518,8 +663,8 @@ class ModifyTool(BaseTool):
                         line_no += 1
             
             diff_result.append({
-                'field': field,
-                'field_label': field_labels.get(field, field),
+                'field': out_field,
+                'field_label': field_labels.get(out_field, out_field),
                 'lines': parsed_lines
             })
         
@@ -563,7 +708,7 @@ class ModifyTool(BaseTool):
                 field_name = self._map_field_name(field, target)
                 
                 # 用户相关字段：解析用户名到用户ID（BadCase 除外，因为它的 assignee 是字符串）
-                if field in ['assignee', '负责人', 'creator', '创建人'] and target != 'badcase':
+                if field in ['assignee', 'assignee_id', '负责人', 'creator', '创建人'] and target != 'badcase':
                     resolved_value = self._resolve_user_value(actual_value, project_id)
                     if resolved_value != actual_value:
                         print(f"[MODIFY-SANDBOX] 用户解析: '{actual_value}' -> 用户ID={resolved_value}")
@@ -632,13 +777,8 @@ class ModifyTool(BaseTool):
             }
     
     async def _apply_modifications(self, target: str, target_id: int, modifications: Dict, project_id: int) -> bool:
-        """应用修改到数据库 - 使用 Text2SQL Agent 生成 SQL"""
-        print(f"\n{'='*60}")
-        print(f"[MODIFY] 🚀 开始执行修改")
-        print(f"[MODIFY] 目标: {target}, ID: {target_id}")
-        print(f"[MODIFY] 修改内容: {modifications}")
-        print(f"{'='*60}")
-        
+        """应用修改到数据库"""
+        print(f"[MODIFY] _apply_modifications 开始: target={target}, target_id={target_id}, 共 {len(modifications or {})} 个字段")
         # 不可修改的字段列表
         immutable_fields = {'id', 'type', 'project_id', 'created_at', 'updated_at', 'creator_id', 'plan_id'}
         
@@ -663,19 +803,23 @@ class ModifyTool(BaseTool):
                     continue
                 
                 actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
-                # 字段名映射
                 field_name = self._map_field_name(field, target)
-                print(f"[MODIFY] 字段映射: '{field}' -> '{field_name}'")
                 
                 # 用户相关字段：解析用户名到用户ID
                 # Bug/TestCase 使用 assignee_id（外键），BadCase 使用 assignee（字符串）
-                if field in ['assignee', '负责人', 'creator', '创建人', 'owner']:
-                    resolved_value = self._resolve_user_value(actual_value, project_id)
+                # 用户相关字段：assignee_id 也可能被前端直接传入（但值仍是“用户名/展示名”，不能当作ID直接写）
+                if field in ['assignee', 'assignee_id', '负责人', 'creator', '创建人', 'owner']:
+                    try:
+                        resolved_value = self._resolve_user_value(actual_value, project_id)
+                    except Exception as e:
+                        # 解析失败：直接中止，避免把“33”误写进 assignee_id 造成未指派
+                        print(f"[MODIFY] ❌ 用户解析失败: value={actual_value}, err={e}")
+                        raise
                     if resolved_value != actual_value:
                         print(f"[MODIFY] 用户解析: '{actual_value}' -> 用户ID={resolved_value}")
                         actual_value = resolved_value
                     # BadCase 的 assignee 存储字符串形式的用户ID
-                    if target == 'badcase' and field in ['assignee', '负责人', 'owner']:
+                    if target == 'badcase' and field in ['assignee', 'assignee_id', '负责人', 'owner']:
                         actual_value = str(actual_value)
                 
                 # 保存解析后的值
@@ -687,48 +831,9 @@ class ModifyTool(BaseTool):
                     set_clauses.append(f"{field_name}改为{actual_value}")
             
             modify_desc = "、".join(set_clauses)
-            
-            # 优先使用 Text2SQL 生成更新 SQL
-            if self.text2sql:
-                print(f"[MODIFY] ✅ Text2SQL Agent 可用，使用 Text2SQL 执行")
-                try:
-                    # 构建自然语言更新请求
-                    nl_query = f"更新{table_name}表中ID为{target_id}的记录，将{modify_desc}"
-                    context = f"项目ID: {project_id}"
-                    
-                    print(f"[MODIFY] 📝 自然语言请求: {nl_query}")
-                    
-                    # 生成 SQL
-                    sql_result = self.text2sql.generate_sql(nl_query, context)
-                    
-                    if sql_result.get('success'):
-                        sql = sql_result['sql']
-                        print(f"[MODIFY] 🔧 生成的SQL: {sql}")
-                        
-                        # 检查 SQL 是否是 UPDATE 语句
-                        if sql.strip().upper().startswith('UPDATE'):
-                            # 直接执行 UPDATE（不经过沙箱，沙箱是只读的）
-                            exec_result = self.text2sql.execute_sql(sql)
-                            if exec_result.get('success'):
-                                print(f"[MODIFY] ✅ 通过 Text2SQL 执行成功")
-                                print(f"{'='*60}\n")
-                                return True
-                            else:
-                                print(f"[MODIFY] ❌ Text2SQL执行失败: {exec_result.get('error')}")
-                        else:
-                            print(f"[MODIFY] ❌ Text2SQL生成的不是UPDATE语句: {sql}")
-                    else:
-                        print(f"[MODIFY] ❌ Text2SQL生成失败: {sql_result.get('error')}")
-                        
-                except Exception as e:
-                    print(f"[MODIFY] ❌ Text2SQL处理异常: {e}")
-            else:
-                print(f"[MODIFY] ⚠️ Text2SQL Agent 不可用，回退到 ORM")
-            
-            # 回退到 ORM 方式
-            print(f"[MODIFY] 🔄 回退到 ORM 方式执行")
+            print(f"[MODIFY] 正在写入 ORM（commit）…")
             result = await self._apply_modifications_orm(target, target_id, resolved_modifications, project_id)
-            print(f"{'='*60}\n")
+            print(f"[MODIFY] ORM 写入结果: success={result}")
             return result
             
         except Exception as e:
@@ -736,37 +841,53 @@ class ModifyTool(BaseTool):
             return False
     
     def _map_field_name(self, field: str, target: str) -> str:
-        """字段名映射 - 将用户输入的字段名映射到数据库字段名"""
+        """字段名映射 - 将用户/LLM 输入的字段名（含中文）映射到数据库字段名"""
         # Bug 模型使用 assignee_id（外键）
         # BadCase 模型使用 assignee（字符串）
         # TestCase 模型使用 assignee_id（外键）
         
         # 通用映射：owner -> assignee
         common_mapping = {
-            'owner': 'assignee',  # LLM 可能返回 owner
+            'owner': 'assignee',
             '负责人': 'assignee',
+        }
+        # 详情字段中文 -> 英文（保证 before/after 用同一 key，diff 能取到真实旧值）
+        label_to_field = {
+            '期望结果': 'expected_result',
+            '预期结果': 'expected_result',
+            '实际结果': 'actual_result',
+            '复现步骤': 'steps_to_reproduce',
+            '描述': 'description',
+            '标题': 'title',
+            '状态': 'status',
+            '优先级': 'priority',
+            '严重程度': 'severity',
+            '相似问题': 'base_problem',
+            '答案': 'answer',
+            '正确答案': 'correct_answer',
+            'BadCase结果': 'badcase_result',
+            '解决方式': 'solution',
+            '问题原因': 'problem_reason',
+            '前置条件': 'preconditions',
+            '测试步骤': 'steps',
+            '备注': 'remark',
+            '基线': 'baseline',
         }
         
         if target == 'badcase':
-            # BadCase 不需要映射 assignee，保持原字段名
             field_mapping = {
                 **common_mapping,
+                **label_to_field,
                 'creator': 'creator_id',
                 '创建人': 'creator_id',
-                # 对话层字段命名统一：
-                # - answer         -> 数据库 answer
-                # - correct_answer -> 数据库 correct_answer
-                'answer': 'answer',
-                '答案': 'answer',
-                'conect_answer': 'answer',  # 常见拼写纠错
-                'correct_answer': 'correct_answer',
-                '正确答案': 'correct_answer',
+                'conect_answer': 'answer',
                 '最终正确答案': 'correct_answer',
             }
         else:
-            # Bug 和 TestCase 使用 assignee_id
+            # bug / testcase
             field_mapping = {
                 **common_mapping,
+                **label_to_field,
                 'assignee': 'assignee_id',
                 'creator': 'creator_id',
                 '创建人': 'creator_id',
@@ -811,13 +932,22 @@ class ModifyTool(BaseTool):
             # 找不到用户，尝试解析为整数ID
             try:
                 int_value = int(value)
-                print(f"[MODIFY] ⚠️ 未找到用户名 '{value}'，尝试作为ID使用: {int_value}")
-                return int_value
+                # 只有当该 ID 确实存在时，才允许按 ID 解析；否则会把“33”(展示名)误当作 id=33 写入，导致未指派
+                try:
+                    from app import app, User
+                    with app.app_context():
+                        exists = User.query.get(int_value) is not None
+                except Exception:
+                    exists = False
+                if exists:
+                    print(f"[MODIFY] ⚠️ 未找到用户名 '{value}'，但存在 user.id={int_value}，按ID使用")
+                    return int_value
+                raise ValueError(f"用户 '{value}' 既不是用户名，也不是有效的用户ID")
             except ValueError:
                 pass
             
-            print(f"[MODIFY] ❌ 无法解析用户: '{value}'")
-            return value
+            # 明确失败：让上层中止写入，避免把错误值写进 assignee_id
+            raise ValueError(f"无法解析用户: '{value}'（请使用用户名/邮箱前缀，或有效的用户ID）")
         
         return value
     
@@ -898,10 +1028,7 @@ class ModifyTool(BaseTool):
                         # 值已经在 _apply_modifications 中解析过了
                         actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
                         
-                        print(f"[MODIFY] 设置字段 {field} -> {actual_field} = {actual_value}")
                         setattr(bug, actual_field, actual_value)
-                    else:
-                        print(f"[MODIFY] 字段不存在: {field} (映射后: {actual_field})")
                 
                 flask_db.session.commit()
                 return True
@@ -915,21 +1042,13 @@ class ModifyTool(BaseTool):
                 
                 if not badcase:
                     return False
-                
                 for field, value in modifications.items():
-                    # 应用字段映射
                     actual_field = field_mapping.get(field, field)
-                    
                     if hasattr(badcase, actual_field):
-                        # 值已经在 _apply_modifications 中解析过了
                         actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
-                        
-                        print(f"[MODIFY] 设置字段 {field} -> {actual_field} = {actual_value}")
                         setattr(badcase, actual_field, actual_value)
-                    else:
-                        print(f"[MODIFY] 字段不存在: {field} (映射后: {actual_field})")
-                
                 flask_db.session.commit()
+                
                 return True
             
             elif target == 'testcase':
@@ -941,19 +1060,11 @@ class ModifyTool(BaseTool):
                 
                 if not testcase:
                     return False
-                
                 for field, value in modifications.items():
-                    # 应用字段映射
                     actual_field = field_mapping.get(field, field)
-                    
                     if hasattr(testcase, actual_field):
-                        # 值已经在 _apply_modifications 中解析过了
                         actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
-                        
-                        print(f"[MODIFY] 设置字段 {field} -> {actual_field} = {actual_value}")
                         setattr(testcase, actual_field, actual_value)
-                    else:
-                        print(f"[MODIFY] 字段不存在: {field} (映射后: {actual_field})")
                 
                 flask_db.session.commit()
                 return True

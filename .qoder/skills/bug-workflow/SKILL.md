@@ -41,9 +41,9 @@ grep -> 搜索关键词
 ```
 
 **适用场景**：
-- 修改 Bug 状态、优先级、严重程度
-- 修改 Bug 标题、描述
-- 批量修改多个 Bug
+- 修改 Bug 状态、优先级、严重程度、标题、描述
+- 修改 BadCase 状态、标题、负责人等
+- 修改测试用例的标题、状态、负责人、前置条件等（modify 支持 target=testcase）
 
 **示例**：
 
@@ -51,6 +51,7 @@ grep -> 搜索关键词
 |---------|-----------------|
 | 修改登录Bug的状态为关闭 | 1. 使用 grep 工具搜索定位登录Bug，keywords=登录，target=bug<br>2. 使用 modify 工具将Bug状态修改为closed |
 | 把高优先级的Bug都改成P1 | 1. 使用 grep 工具搜索高优先级Bug，keywords=高优先级，target=bug<br>2. 使用 modify 工具批量修改优先级为P1 |
+| 修改创建测试用例7的负责人为33 | 1. 使用 grep 工具搜索标题为「创建测试用例7」的测试用例，keywords=创建测试用例7，target=testcase<br>2. 使用 modify 工具将该测试用例的负责人修改为33 |
 
 ### 创建操作（单步流程）
 
@@ -71,7 +72,7 @@ create -> 创建新的 Bug/BadCase/测试用例
 ```json
 {
   "keywords": "搜索关键词（必填）",
-  "target": "bug | badcase | all（必填）",
+  "target": "bug | badcase | testcase | all（必填）",
   "project_id": "项目ID（可选）"
 }
 ```
@@ -79,13 +80,14 @@ create -> 创建新的 Bug/BadCase/测试用例
 **target 参数说明**：
 - `bug`: 只搜索 Bug
 - `badcase`: 只搜索 BadCase
+- `testcase`: 只搜索测试用例
 - `all`: 搜索所有类型
 
 ## modify 工具参数规范
 
 ```json
 {
-  "target": "bug | badcase | test_case",
+  "target": "bug | badcase | testcase",
   "target_id": "目标ID",
   "modifications": {
     "status": "新状态值",

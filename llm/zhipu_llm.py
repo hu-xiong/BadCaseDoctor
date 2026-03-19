@@ -8,7 +8,9 @@ import json
 import asyncio
 from typing import Any, Dict, Optional, List
 import requests
+import os
 from config import Config
+from .http_session import get_session
 
 
 class ZhipuLLM:
@@ -18,6 +20,8 @@ class ZhipuLLM:
         self.model = model or Config.ZHIPU_MODEL
         self.api_key = Config.ZHIPU_API_KEY
         self.base_url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        # 运行时开关：进入 modify 流程时强制“不带思考”
+        self.force_disable_thinking = False
 
     async def parse_intent(self, user_input: str, history: list = None) -> Optional[dict]:
         """解析意图"""
@@ -54,8 +58,8 @@ class ZhipuLLM:
             "temperature": Config.ZHIPU_TEMPERATURE
         }
         
-        # GLM-5 支持思考模式
-        if self.model == "glm-5" and Config.ZHIPU_ENABLE_THINKING:
+        # GLM-5 支持思考模式（modify 流程强制关闭）
+        if self.model == "glm-5" and Config.ZHIPU_ENABLE_THINKING and not getattr(self, "force_disable_thinking", False):
             payload["thinking"] = {"type": "enabled"}
 
         headers = {
@@ -64,7 +68,12 @@ class ZhipuLLM:
         }
 
         def _do_request():
-            return requests.post(self.base_url, headers=headers, json=payload, timeout=120)
+            # 连接池 + keep-alive
+            timeout = (
+                float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+                float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+            )
+            return get_session().post(self.base_url, headers=headers, json=payload, timeout=timeout)
 
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(None, _do_request)
@@ -104,12 +113,16 @@ class ZhipuLLM:
         }
 
         try:
-            response = requests.post(
+            timeout = (
+                float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+                float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+            )
+            response = get_session().post(
                 self.base_url, 
                 headers=headers, 
                 json=payload, 
                 stream=True,
-                timeout=120
+                timeout=timeout
             )
             
             for line in response.iter_lines():

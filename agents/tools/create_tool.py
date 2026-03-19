@@ -8,7 +8,7 @@ from config import Config
 
 # Text2SQL Agent
 try:
-    from .sqlcoder_agent import Text2SQLAgent, LLMBackend
+    from .sqlcoder_agent import LLMBackend, get_cached_text2sql_agent
     TEXT2SQL_AVAILABLE = True
 except ImportError:
     TEXT2SQL_AVAILABLE = False
@@ -42,18 +42,21 @@ class CreateTool(BaseTool):
 """
         
         # 初始化 Text2SQL Agent
-        if TEXT2SQL_AVAILABLE:
-            try:
-                self.text2sql = Text2SQLAgent(
-                    database_path='instance/badcase_doctor.db',
-                    llm_backend=LLMBackend.GLM_5,
-                    debug=False
-                )
-            except Exception as e:
-                self.text2sql = None
-                print(f"[CREATE] Text2SQL初始化失败: {e}")
-        else:
+        self.text2sql = None
+    
+    def _ensure_text2sql(self):
+        if not TEXT2SQL_AVAILABLE or self.text2sql is not None:
+            return
+        try:
+            self.text2sql = get_cached_text2sql_agent(
+                database_path='instance/badcase_doctor.db',
+                llm_backend=LLMBackend.GLM_5.value,
+                debug=False,
+                execution_mode="direct",
+            )
+        except Exception as e:
             self.text2sql = None
+            print(f"[CREATE] Text2SQL懒加载初始化失败: {e}")
     
     async def execute(
         self,
@@ -77,6 +80,8 @@ class CreateTool(BaseTool):
         print(f"[CREATE] 开始处理创建请求: target={target}, confirm={confirm}")
         
         # 如果提供了自然语言描述，尝试智能填充字段
+        if natural_query:
+            self._ensure_text2sql()
         if natural_query and self.text2sql:
             smart_fields = await self._smart_fill_fields(target, natural_query, project_id)
             if smart_fields:

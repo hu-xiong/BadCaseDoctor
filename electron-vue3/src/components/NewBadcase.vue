@@ -105,43 +105,6 @@
     <div class="main-content">
       <!-- 左侧主要内容区 -->
       <div class="content-left">
-        <!-- 待采纳改动（show_diff 模式） -->
-        <div
-          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
-          class="pending-diff-panel"
-        >
-          <div class="pending-diff-header">
-            <div class="pending-diff-title">待采纳改动</div>
-            <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
-          </div>
-
-          <div
-            v-for="(data, field) in pendingDiff.modifications"
-            :key="field"
-            v-show="!String(field).startsWith('_') && !inlineDiffFields.includes(String(field))"
-            class="pending-diff-item"
-            :id="`diff-field-${field}`"
-          >
-            <div class="pending-diff-item-head">
-              <div class="pending-diff-field">
-                <span class="pending-diff-field-label">{{ field }}</span>
-              </div>
-              <div class="pending-diff-actions">
-                <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
-                <button class="btn-icon-reject" title="拒绝该字段" @click="cancelFieldChange(field)">✗</button>
-              </div>
-            </div>
-            <MonacoDiffEditor
-              :original="String(data?.old ?? '')"
-              :modified="String(data?.new ?? '')"
-              language="markdown"
-              theme="vs-dark"
-              height="160px"
-              :renderSideBySide="false"
-            />
-          </div>
-        </div>
-
         <!-- 标题区域 -->
         <div class="title-section">
           <input 
@@ -457,7 +420,7 @@
             <div class="diff-header">
               <span class="diff-label">修改预览:</span>
               <div class="diff-actions">
-                <button @click="confirmFieldChange('base_problem')" class="btn-confirm" title="确认">✓</button>
+                <button @click="applyFieldChange('base_problem')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('base_problem')" class="btn-cancel" title="取消">✗</button>
               </div>
             </div>
@@ -485,7 +448,7 @@
         </div>
                 
         <!-- 复现步骤编辑器 -->
-        <div class="editor-section">
+        <div class="editor-section" :class="{ 'has-diff': pendingDiff?.modifications?.reproduction_steps }">
           <div class="editor-toolbar">
             <button class="toolbar-btn" title="插入" @click="addAttachment">📎</button>
             <button class="toolbar-btn" title="撤销" @click="formatSteps('undo')">↶</button>
@@ -511,9 +474,31 @@
                 
           <div class="editor-content">
             <h3 class="editor-title">BadCase复现步骤:</h3>
+            <!-- diff 显示区域 -->
+            <div v-if="pendingDiff?.modifications?.reproduction_steps" class="field-diff-panel">
+              <div class="diff-header">
+                <span class="diff-label">修改预览:</span>
+                <div class="diff-actions">
+                  <button @click="applyFieldChange('reproduction_steps')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                  <button @click="cancelFieldChange('reproduction_steps')" class="btn-cancel" title="取消">✗</button>
+                </div>
+              </div>
+              <div class="diff-content">
+                <div class="diff-old">
+                  <span class="diff-tag old">原值</span>
+                  <span class="diff-value">{{ pendingDiff.modifications.reproduction_steps.old || '未设置' }}</span>
+                </div>
+                <div class="diff-arrow">→</div>
+                <div class="diff-new">
+                  <span class="diff-tag new">新值</span>
+                  <span class="diff-value">{{ pendingDiff.modifications.reproduction_steps.new }}</span>
+                </div>
+              </div>
+            </div>
             <div 
               ref="stepsEditor" 
               class="editor-textarea" 
+              :class="{ 'field-with-diff': pendingDiff?.modifications?.reproduction_steps }"
               contenteditable="true"
               @input="updateSteps"
               placeholder="请详细描述BadCase的复现步骤..."
@@ -530,7 +515,7 @@
             <div class="diff-header">
               <span class="diff-label">修改预览:</span>
               <div class="diff-actions">
-                <button @click="confirmFieldChange('answer')" class="btn-confirm" title="确认">✓</button>
+                <button @click="applyFieldChange('answer')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('answer')" class="btn-cancel" title="取消">✗</button>
               </div>
             </div>
@@ -564,7 +549,7 @@
             <div class="diff-header">
               <span class="diff-label">修改预览:</span>
               <div class="diff-actions">
-                <button @click="confirmFieldChange('correct_answer')" class="btn-confirm" title="确认">✓</button>
+                <button @click="applyFieldChange('correct_answer')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('correct_answer')" class="btn-cancel" title="取消">✗</button>
               </div>
             </div>
@@ -592,9 +577,21 @@
                 
         <!-- 问题分类和优先级 -->
         <div class="category-section">
-          <div class="form-row">
+          <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.case_category }">
             <label class="form-label required">问题分类:</label>
-            <select v-model="badcase.case_category" class="form-select">
+            <!-- diff 显示区域 -->
+            <div v-if="pendingDiff?.modifications?.case_category" class="field-diff-panel-inline">
+              <div class="diff-content">
+                <span class="diff-old">{{ pendingDiff.modifications.case_category.old || '未设置' }}</span>
+                <span class="diff-arrow">→</span>
+                <span class="diff-new">{{ pendingDiff.modifications.case_category.new }}</span>
+                <div class="diff-actions">
+                  <button @click="applyFieldChange('case_category')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
+                  <button @click="cancelFieldChange('case_category')" class="btn-cancel-sm" title="取消">✗</button>
+                </div>
+              </div>
+            </div>
+            <select v-model="badcase.case_category" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.case_category }">
               <option value="">请选择问题分类</option>
               <option value="功能缺陷">功能缺陷</option>
               <option value="性能问题">性能问题</option>
@@ -604,17 +601,29 @@
               <option value="其他">其他</option>
             </select>
           </div>
-          <div class="form-row">
+          <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
             <label class="form-label required">优先级:</label>
-            <select v-model="badcase.priority" class="form-select">
+            <!-- diff 显示区域 -->
+            <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel-inline">
+              <div class="diff-content">
+                <span class="diff-old">{{ pendingDiff.modifications.priority.old || '未设置' }}</span>
+                <span class="diff-arrow">→</span>
+                <span class="diff-new">{{ pendingDiff.modifications.priority.new }}</span>
+                <div class="diff-actions">
+                  <button @click="applyFieldChange('priority')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
+                  <button @click="cancelFieldChange('priority')" class="btn-cancel-sm" title="取消">✗</button>
+                </div>
+              </div>
+            </div>
+            <select v-model="badcase.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
               <option value="">请选择优先级</option>
               <option value="p1">P1 - 紧急</option>
               <option value="p2">P2 - 高</option>
               <option value="p3">P3 - 中</option>
               <option value="p4">P4 - 低</option>
             </select>
-                    </div>
-                  </div>
+          </div>
+        </div>
 
         <!-- 底部操作区 -->
         <div class="footer-section">
@@ -911,7 +920,7 @@ export default {
     const pendingDiff = ref(null)
 
     // 这些字段使用“就地 diff”（显示在对应文本域内部），不在顶部 MonacoDiffEditor 列表重复展示
-    const inlineDiffFields = ['base_problem', 'answer', 'correct_answer']
+    const inlineDiffFields = ['base_problem', 'answer', 'correct_answer', 'reproduction_steps', 'case_category', 'priority']
     
     const badcase = reactive({
       title: '',
@@ -1177,13 +1186,37 @@ export default {
       try {
         // 优先使用 props，其次使用路由参数
         const query = route.query
-        console.log('=== 初始化BadCase开始 ===')
-        console.log('路由查询参数:', query)
-        console.log('Props 参数:', props)
+        console.log('=== [NewBadcase] 初始化BadCase开始 ===')
+        console.log('[NewBadcase] 路由查询参数:', query)
+        console.log('[NewBadcase] Props 参数:', props)
+        console.log('[NewBadcase] props.id:', props.id, 'type:', typeof props.id)
+        console.log('[NewBadcase] props.edit:', props.edit, 'type:', typeof props.edit)
+        console.log('[NewBadcase] props.show_diff:', props.show_diff, 'type:', typeof props.show_diff)
+        console.log('[NewBadcase] pendingDiff 初始值:', pendingDiff.value)
         
-        // 判断是否编辑模式
-        const isEditMode = props.edit || query.edit === 'true'
-        const itemId = props.id ?? query.id
+        // 判断是否编辑模式：
+        // 1）显式传入 edit=true
+        // 2）路由 query.edit=true
+        // 3）存在明确的 id（优先使用 props.id，其次 pendingDiff.targetId）
+        const showDiffMode = props.show_diff || query.show_diff === 'true'
+        // 注意：props.id 是最可靠的来源，因为它是由父组件传递的
+        const rawId = props.id ?? query.id ?? (pendingDiff.value?.targetId ?? null)
+        // 编辑模式判断：props.edit 为 true 时直接进入编辑模式
+        const isEditMode = props.edit === true || query.edit === 'true' || !!rawId
+        console.log('[NewBadcase] 计算编辑模式参数:', {
+          props_id: props.id,
+          props_id_type: typeof props.id,
+          query_id: query.id,
+          pending_target_id: pendingDiff.value?.targetId,
+          rawId,
+          rawId_type: typeof rawId,
+          props_edit: props.edit,
+          props_edit_type: typeof props.edit,
+          query_edit: query.edit,
+          isEditMode,
+          showDiffMode
+        })
+        const itemId = rawId
         const itemProjectId = props.project_id || query.project_id
         
         // 防御：避免把 undefined/null 的字符串当成有效 id
@@ -1193,14 +1226,19 @@ export default {
           !normalizedItemId || normalizedItemId === 'undefined' || normalizedItemId === 'null'
             ? null
             : normalizedItemId
+        console.log('[NewBadcase] 处理后的 ID:', {
+          itemId,
+          normalizedItemId,
+          effectiveItemId
+        })
 
         if (isEditMode && effectiveItemId) {
           console.log('编辑模式，BadCase ID:', itemId)
           isEdit.value = true
           badcaseId.value = effectiveItemId
           loading.value = true
-        
-        try {
+
+          try {
           const response = await getBadcaseDetail(effectiveItemId)
           if (response.data.success && response.data.badcase) {
             console.log('=== BadCase详情API响应 ===')
@@ -1337,64 +1375,89 @@ export default {
         } finally {
           loading.value = false
         }
-      } else if (query.project_id) {
-        console.log('新建模式，项目ID:', query.project_id)
-        console.log('query.project_id类型:', typeof query.project_id)
-        console.log('availableProjects:', availableProjects.value)
-        
-        // 新建模式，设置项目ID
-        badcase.project_id = query.project_id
-        console.log('设置badcase.project_id:', badcase.project_id)
-        console.log('设置后badcase.project_id类型:', typeof badcase.project_id)
-        
-        // 获取项目信息
-        const project = availableProjects.value.find(p => p.id == query.project_id)
-        if (project) {
-          projectInfo.value = project
-          console.log('找到项目信息:', project.name)
+        } else if (pendingDiff.value?.targetId) {
+          // 兜底：如果上面没走编辑分支，但存在 pendingDiff.targetId，仍然强制按编辑逻辑处理
+          const fallbackId = String(pendingDiff.value.targetId).trim()
+          if (fallbackId && fallbackId !== 'undefined' && fallbackId !== 'null') {
+            console.log('兜底编辑模式，BadCase ID 来自 pendingDiff.targetId:', fallbackId)
+            isEdit.value = true
+            badcaseId.value = fallbackId
+            loading.value = true
+            try {
+              const response = await getBadcaseDetail(fallbackId)
+              if (response.data.success && response.data.badcase) {
+                Object.assign(badcase, response.data.badcase)
+                console.log('兜底编辑模式：BadCase信息加载成功:', badcase)
+              } else {
+                alert('获取BadCase信息失败')
+                goBack()
+              }
+            } catch (error) {
+              console.error('兜底编辑模式：获取BadCase信息失败:', error)
+              alert('获取BadCase信息失败: ' + error.message)
+              goBack()
+            } finally {
+              loading.value = false
+            }
+          }
+        } else if (query.project_id) {
+          console.log('新建模式，项目ID:', query.project_id)
+          console.log('query.project_id类型:', typeof query.project_id)
+          console.log('availableProjects:', availableProjects.value)
+
+          // 新建模式，设置项目ID
+          badcase.project_id = query.project_id
+          console.log('设置badcase.project_id:', badcase.project_id)
+          console.log('设置后badcase.project_id类型:', typeof badcase.project_id)
+
+          // 获取项目信息
+          const project = availableProjects.value.find(p => p.id == query.project_id)
+          if (project) {
+            projectInfo.value = project
+            console.log('找到项目信息:', project.name)
+          } else {
+            console.log('未找到项目信息，availableProjects:', availableProjects.value)
+            console.log('尝试查找项目，query.project_id:', query.project_id)
+            console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
+          }
+
+          // 获取当前项目的计划列表和成员列表
+          console.log('开始获取项目计划，项目ID:', query.project_id)
+          await fetchProjectPlans(query.project_id)
+          await fetchProjectMembers(query.project_id)
+
+          // 确保数据同步
+          console.log('初始化完成后，当前状态:')
+          console.log('- badcase.project_id:', badcase.project_id)
+          console.log('- projectMembers.length:', projectMembers.value.length)
+          console.log('- availablePlans.length:', availablePlans.value.length)
         } else {
-          console.log('未找到项目信息，availableProjects:', availableProjects.value)
-          console.log('尝试查找项目，query.project_id:', query.project_id)
-          console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
+          console.log('没有项目ID参数')
+          console.log('所有查询参数:', query)
         }
-        
-        // 获取当前项目的计划列表和成员列表
-        console.log('开始获取项目计划，项目ID:', query.project_id)
-        await fetchProjectPlans(query.project_id)
-        await fetchProjectMembers(query.project_id)
-        
-        // 确保数据同步
-        console.log('初始化完成后，当前状态:')
-        console.log('- badcase.project_id:', badcase.project_id)
-        console.log('- projectMembers.length:', projectMembers.value.length)
-        console.log('- availablePlans.length:', availablePlans.value.length)
-      } else {
-        console.log('没有项目ID参数')
-        console.log('所有查询参数:', query)
+
+        console.log('=== 初始化BadCase完成 ===')
+
+        // 最终状态检查
+        if (isEdit.value) {
+          console.log('=== 编辑模式最终状态检查 ===')
+          console.log('badcase对象:', badcase)
+          console.log('badcase.project_id:', badcase.project_id)
+          console.log('badcase.plan:', badcase.plan)
+          console.log('badcase.associate_project:', badcase.associate_project)
+          console.log('availableProjects:', availableProjects.value)
+          console.log('availablePlans:', availablePlans.value)
+          console.log('projectInfo:', projectInfo.value)
+        }
+      } catch (initError) {
+        console.error('=== initBadcase函数执行失败 ===')
+        console.error('错误类型:', initError.name)
+        console.error('错误消息:', initError.message)
+        console.error('错误堆栈:', initError.stack)
+        alert('BadCase初始化失败: ' + initError.message)
+        loading.value = false
       }
-      
-      console.log('=== 初始化BadCase完成 ===')
-      
-      // 最终状态检查
-      if (isEdit.value) {
-        console.log('=== 编辑模式最终状态检查 ===')
-        console.log('badcase对象:', badcase)
-        console.log('badcase.project_id:', badcase.project_id)
-        console.log('badcase.plan:', badcase.plan)
-        console.log('badcase.associate_project:', badcase.associate_project)
-        console.log('availableProjects:', availableProjects.value)
-        console.log('availablePlans:', availablePlans.value)
-        console.log('projectInfo:', projectInfo.value)
-      }
-    } catch (initError) {
-      console.error('=== initBadcase函数执行失败 ===')
-      console.error('错误类型:', initError.name)
-      console.error('错误消息:', initError.message)
-      console.error('错误堆栈:', initError.stack)
-      alert('BadCase初始化失败: ' + initError.message)
-      loading.value = false
     }
-  }
 
     // 保存BadCase
     const saveBadcase = async () => {
@@ -1909,7 +1972,8 @@ export default {
         delete pendingDiff.value.modifications[field]
         
         // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
-        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+        const remainingFields = Object.keys(pendingDiff.value.modifications || {}).filter(k => !String(k).startsWith('_'))
+        if (remainingFields.length === 0) {
           sessionStorage.removeItem('pendingModifyDiff')
           // 通知对话区修改已确认
           const event = new CustomEvent('modify-confirmed', {
@@ -1917,6 +1981,14 @@ export default {
             bubbles: true
           })
           window.dispatchEvent(event)
+          
+          // 通知列表页面清除 pendingModifications 标记
+          const clearEvent = new CustomEvent('clear-pending-modification', {
+            detail: { targetId: pendingDiff.value.targetId },
+            bubbles: true
+          })
+          window.dispatchEvent(clearEvent)
+          
           pendingDiff.value = null
         }
       }
@@ -1936,7 +2008,8 @@ export default {
         delete pendingDiff.value.modifications[field]
         
         // 如果所有字段都已取消，清除 sessionStorage
-        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+        const remainingFields = Object.keys(pendingDiff.value.modifications || {}).filter(k => !String(k).startsWith('_'))
+        if (remainingFields.length === 0) {
           sessionStorage.removeItem('pendingModifyDiff')
           pendingDiff.value = null
         }
@@ -1964,7 +2037,6 @@ export default {
       }
 
       try {
-        await scrollToDiffField(field)
         const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2084,28 +2156,40 @@ export default {
       console.log('=== 组件挂载开始 ===')
       
       try {
-        // 先尝试读取待确认 diff（不依赖 show_diff，避免“跳转过去但不显示”）
-        const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
-        if (diffDataStrEarly) {
-          try {
-            pendingDiff.value = JSON.parse(diffDataStrEarly)
-            console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
-            // 兼容旧字段名/旧版本 diff：统一到 answer / correct_answer
-            if (pendingDiff.value && pendingDiff.value.modifications && typeof pendingDiff.value.modifications === 'object') {
-              const mods = { ...pendingDiff.value.modifications }
-              if (mods.correct_answer_final && !mods.correct_answer) {
-                mods.correct_answer = mods.correct_answer_final
-                delete mods.correct_answer_final
+        // 仅在 show_diff 模式下读取待确认 diff；普通“编辑详情”一律忽略并清理历史 diff
+        const query = route.query
+        const showDiffMode = props.show_diff || query.show_diff === 'true'
+        if (showDiffMode) {
+          const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+          console.log('[DIFF] showDiffMode:', showDiffMode)
+          console.log('[DIFF] sessionStorage.pendingModifyDiff:', diffDataStrEarly)
+          if (diffDataStrEarly) {
+            try {
+              pendingDiff.value = JSON.parse(diffDataStrEarly)
+              console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
+              console.log('[DIFF] pendingDiff.modifications:', pendingDiff.value?.modifications)
+              console.log('[DIFF] modifications keys:', pendingDiff.value?.modifications ? Object.keys(pendingDiff.value.modifications) : [])
+              // 兼容旧字段名/旧版本 diff：统一到 answer / correct_answer
+              if (pendingDiff.value && pendingDiff.value.modifications && typeof pendingDiff.value.modifications === 'object') {
+                const mods = { ...pendingDiff.value.modifications }
+                if (mods.correct_answer_final && !mods.correct_answer) {
+                  mods.correct_answer = mods.correct_answer_final
+                  delete mods.correct_answer_final
+                }
+                if (mods.correct_answer_text && !mods.answer) {
+                  mods.answer = mods.correct_answer_text
+                  delete mods.correct_answer_text
+                }
+                pendingDiff.value.modifications = mods
               }
-              if (mods.correct_answer_text && !mods.answer) {
-                mods.answer = mods.correct_answer_text
-                delete mods.correct_answer_text
-              }
-              pendingDiff.value.modifications = mods
+            } catch (e) {
+              console.error('[DIFF] 预读取 diff 失败:', e)
             }
-          } catch (e) {
-            console.error('[DIFF] 预读取 diff 失败:', e)
           }
+        } else {
+          // 普通编辑模式：防止历史 diff 污染任意 BadCase 详情
+          sessionStorage.removeItem('pendingModifyDiff')
+          pendingDiff.value = null
         }
 
         // embedded 模式下尽量少请求（ProjectDetail 已有大量上下文），提升进入编辑页速度
@@ -2131,6 +2215,10 @@ export default {
             if (resp.data?.success) {
               projectInfo.value = resp.data.project || projectInfo.value
               projectMembers.value = resp.data.members || projectMembers.value
+              // 将当前项目添加到 availableProjects 中，确保下拉框能显示
+              if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
+                availableProjects.value.push(resp.data.project)
+              }
               // 直接用 edit-context 返回的 plans，避免额外请求 /plans
               await setAvailablePlansFromTree(resp.data.plans || [])
             }
@@ -2139,6 +2227,40 @@ export default {
           }
         }
         
+        // 如果是 show_diff 场景：过滤掉已采纳的字段（当前 DB 值已等于 diff 的 new 值）
+        const queryForPrefill = route.query
+        const showDiffModeForPrefill = props.show_diff || queryForPrefill.show_diff === 'true'
+        if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
+          const mods = pendingDiff.value.modifications
+          for (const [field, data] of Object.entries(mods)) {
+            if (String(field).startsWith('_')) continue
+            const newVal = data?.new != null ? String(data.new).trim() : ''
+            const curVal = badcase[field] != null ? String(badcase[field]).trim() : ''
+            if (newVal && curVal === newVal) {
+              delete mods[field]
+            }
+          }
+          const remaining = Object.keys(mods).filter(k => !String(k).startsWith('_'))
+          if (remaining.length === 0) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+          }
+        }
+        if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (
+              badcase.hasOwnProperty(field) &&
+              data &&
+              typeof data === 'object' &&
+              'new' in data &&
+              data.new !== undefined &&
+              String(data.new).trim() !== ''
+            ) {
+              badcase[field] = data.new
+            }
+          }
+        }
+
         // 等待DOM更新完成后再设置步骤编辑器内容
         await nextTick()
         console.log('DOM更新完成，开始设置编辑器内容')
@@ -2163,15 +2285,6 @@ export default {
         // 延迟检查并更新编辑器内容
         setTimeout(checkAndUpdateEditor, 500)
         setTimeout(checkAndUpdateEditor, 1000)
-        
-        // 无论 show_diff 是否为 true，只要 pendingDiff 存在就预填充（确保红框内 diff/✓✗ 一定出现）
-        if (pendingDiff.value?.modifications) {
-          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-            if (badcase.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
-              badcase[field] = data.new
-            }
-          }
-        }
         
         // 添加全局点击事件监听器，点击外部关闭下拉框
         document.addEventListener('click', (event) => {
@@ -2276,7 +2389,8 @@ export default {
       deactivateCommentEditor,
       preventDeactivate,
       updateComment,
-      updateSteps
+      updateSteps,
+      inlineDiffFields
     }
   }
 }
@@ -4342,5 +4456,79 @@ export default {
 .field-with-diff {
   border-color: #f59e0b !important;
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2) !important;
+}
+
+/* 内联 diff 面板样式（用于下拉框等） */
+.field-diff-panel-inline {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 2px solid #f59e0b;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.field-diff-panel-inline .diff-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.field-diff-panel-inline .diff-old {
+  color: #991b1b;
+  font-weight: 500;
+  text-decoration: line-through;
+}
+
+.field-diff-panel-inline .diff-new {
+  color: #166534;
+  font-weight: 600;
+}
+
+.field-diff-panel-inline .diff-arrow {
+  color: #9ca3af;
+  font-weight: bold;
+}
+
+.field-diff-panel-inline .diff-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.btn-confirm-sm,
+.btn-cancel-sm {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-confirm-sm {
+  background: #10b981;
+  color: white;
+}
+
+.btn-confirm-sm:hover {
+  background: #059669;
+  transform: scale(1.1);
+}
+
+.btn-cancel-sm {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-cancel-sm:hover {
+  background: #dc2626;
+  transform: scale(1.1);
 }
 </style> 

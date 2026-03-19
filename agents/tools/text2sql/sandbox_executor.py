@@ -47,9 +47,9 @@ LLM_SANDBOX_AVAILABLE = False
 try:
     from llm_sandbox import SandboxSession
     LLM_SANDBOX_AVAILABLE = True
-    print("[SANDBOX] ✅ llm-sandbox 已安装，将使用 Docker 沙箱模式")
+    print("[SANDBOX] llm-sandbox 已安装，将使用 Docker 沙箱模式")
 except ImportError:
-    print("[SANDBOX] ⚠️ llm-sandbox 未安装，将使用本地执行模式（不安全）")
+    print("[SANDBOX] llm-sandbox 未安装，将使用本地执行模式（不安全）")
     print("[SANDBOX] 💡 安装: pip install llm-sandbox")
 
 
@@ -317,16 +317,16 @@ class SandboxExecutor:
         self.security_checker = SecurityChecker(self.security_config)
         
         if LLM_SANDBOX_AVAILABLE:
-            print(f"[SANDBOX] ✅ 初始化完成")
-            print(f"[SANDBOX] 📊 资源限制: CPU={self.security_config.cpu_limit}核, "
+            print(f"[SANDBOX] 初始化完成")
+            print(f"[SANDBOX] 资源限制: CPU={self.security_config.cpu_limit}核, "
                   f"内存={self.security_config.memory_limit}, "
                   f"超时={self.security_config.timeout}s")
-            print(f"[SANDBOX] 🔒 网络隔离: {'已启用' if self.security_config.network_disabled else '未启用'}")
+            print(f"[SANDBOX] 网络隔离: {'已启用' if self.security_config.network_disabled else '未启用'}")
             print(f"[SANDBOX] 🗄️ 数据库隔离: 只读={self.security_config.db_read_only}, 副本={self.security_config.db_use_copy}")
         elif fallback_to_local:
-            print("[SANDBOX] ⚠️ 使用本地执行模式（不安全）")
+            print("[SANDBOX] 使用本地执行模式（不安全）")
         else:
-            print("[SANDBOX] ❌ 沙箱不可用且未启用本地回退")
+            print("[SANDBOX] 沙箱不可用且未启用本地回退")
     
     def _build_isolation_code(self, language: str) -> str:
         """
@@ -427,8 +427,8 @@ class SandboxExecutor:
         from llm_sandbox import SandboxSession
         
         start_time = time.time()
-        print(f"[SANDBOX] 🚀 执行 {language} 代码（超时: {timeout}s）...")
-        print(f"[SANDBOX] 🔒 数据隔离: 网络={'禁用' if self.security_config.network_disabled else '启用'}, "
+        print(f"[SANDBOX] 执行 {language} 代码（超时: {timeout}s）...")
+        print(f"[SANDBOX] 数据隔离: 网络={'禁用' if self.security_config.network_disabled else '启用'}, "
               f"文件系统={'只读' if self.security_config.read_only_root else '可写'}, "
               f"用户={self.security_config.sandbox_user}")
         
@@ -497,7 +497,7 @@ class SandboxExecutor:
                         output['success'] = False
                         output['error'] = f'执行超时（>{timeout}s）'
                     
-                    print(f"[SANDBOX] ✅ 执行完成，耗时: {execution_time:.2f}s")
+                    print(f"[SANDBOX] 执行完成，耗时: {execution_time:.2f}s")
                     return output
                     
             except Exception as inner_e:
@@ -516,7 +516,7 @@ class SandboxExecutor:
                 raise
                 
         except Exception as e:
-            print(f"[SANDBOX] ❌ 执行失败: {str(e)}")
+            print(f"[SANDBOX] 执行失败: {str(e)}")
             return {
                 'success': False,
                 'error': str(e),
@@ -527,7 +527,7 @@ class SandboxExecutor:
     def _execute_local(self, code: str, language: str, timeout: int) -> Dict[str, Any]:
         """本地执行代码（不安全，仅作备选）"""
         start_time = time.time()
-        print(f"[SANDBOX] ⚠️ 本地执行 {language} 代码（超时: {timeout}s）...")
+        print(f"[SANDBOX] 本地执行 {language} 代码（超时: {timeout}s）...")
         
         try:
             # 写入临时文件
@@ -579,11 +579,11 @@ class SandboxExecutor:
                 except json.JSONDecodeError:
                     pass
             
-            print(f"[SANDBOX] ✅ 本地执行完成，耗时: {execution_time:.2f}s")
+            print(f"[SANDBOX] 本地执行完成，耗时: {execution_time:.2f}s")
             return output
             
         except subprocess.TimeoutExpired:
-            print(f"[SANDBOX] ❌ 执行超时（>{timeout}s）")
+            print(f"[SANDBOX] 执行超时（>{timeout}s）")
             return {
                 'success': False,
                 'error': f'执行超时（>{timeout}s），可能存在死循环',
@@ -592,7 +592,7 @@ class SandboxExecutor:
                 'timeout': True
             }
         except Exception as e:
-            print(f"[SANDBOX] ❌ 本地执行失败: {str(e)}")
+            print(f"[SANDBOX] 本地执行失败: {str(e)}")
             return {
                 'success': False,
                 'error': str(e),
@@ -647,7 +647,7 @@ class SandboxExecutor:
         
         from .sql_code_wrapper import get_sql_code_wrapper, CodeLanguage
         
-        print(f"[SANDBOX] 📝 将 SQL 封装为 {language} 代码...")
+        print(f"[SANDBOX] 将 SQL 封装为 {language} 代码...")
         
         # ==================== 数据库副本处理 ====================
         actual_db_config = db_config.copy() if db_config else {}
@@ -662,7 +662,7 @@ class SandboxExecutor:
                 actual_db_config['is_copy'] = True
                 print(f"[SANDBOX] 📋 已创建数据库副本: {db_copy_path}")
             else:
-                print(f"[SANDBOX] ⚠️ 数据库副本创建失败: {db_copy_result.get('error')}")
+                print(f"[SANDBOX] 数据库副本创建失败: {db_copy_result.get('error')}")
                 # 继续使用原数据库（但会受只读限制）
         
         # 封装 SQL 为代码

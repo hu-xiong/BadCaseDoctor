@@ -18,7 +18,86 @@
             <span class="message-author">我</span>
             <span class="message-time">{{ message.time }}</span>
           </div>
-          <div class="user-message-bubble">{{ message.content }}</div>
+          <div v-if="editingUserMessageId !== message.id" class="user-message-bubble" tabindex="0" @click="beginEditUserMessage(message)">
+            {{ message.content }}
+          </div>
+
+          <!-- 点击用户消息后：变成与底部一致的可编辑输入框 + 控件条 -->
+          <div v-else class="inline-composer">
+            <div class="input-box-wrapper">
+              <textarea
+                ref="inlineTextareaRef"
+                v-model="inlineInputMessage"
+                @keydown.enter.exact="handleInlineSend"
+                @keydown.enter.shift.exact="addNewLineInline"
+                @keydown.esc.exact="cancelEditUserMessage"
+                placeholder="输入消息... (Enter发送，Shift+Enter换行)"
+                class="message-input"
+                rows="1"
+              ></textarea>
+
+              <div class="input-footer">
+                <div class="footer-left">
+                  <div class="selector-item">
+                    <select v-model="selectedAgent" class="footer-select">
+                      <option value="agent">Agent</option>
+                      <option value="chat">智能问答</option>
+                    </select>
+                  </div>
+                  <div class="selector-item model-select-wrapper">
+                    <img
+                      v-if="isQwenModel"
+                      :src="qwenIcon"
+                      alt="Qwen"
+                      class="model-icon"
+                    />
+                    <img
+                      v-else-if="isErnieModel"
+                      :src="ernieIcon"
+                      alt="Ernie"
+                      class="model-icon model-icon--ernie"
+                    />
+                    <img
+                      v-else-if="isGlmModel"
+                      :src="glmIcon"
+                      alt="GLM"
+                      class="model-icon"
+                    />
+                    <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
+                      <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
+                      <option value="qwen-max-thinking">Qwen-Max</option>
+                      <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
+                      <option value="ernie-x1-turbo-32k">Ernie-X1</option>
+                      <option value="glm-4-flash">GLM-4-Flash</option>
+                      <option value="glm-5">GLM-5</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="footer-right">
+                  <button
+                    v-if="!isSending"
+                    @click="handleInlineSend"
+                    class="send-icon-button"
+                    :disabled="!inlineInputMessage.trim()"
+                    title="发送 (Enter)"
+                  >
+                    <img class="send-icon-img" :src="sendCursorIcon" alt="send" />
+                  </button>
+                  <button
+                    v-else
+                    @click="handleStop"
+                    class="stop-icon-button"
+                    title="停止生成"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         
         <!-- AI消息 -->
@@ -28,18 +107,41 @@
             <span class="message-time">{{ message.time }}</span>
           </div>
                     
-          <!-- AI理解意图 - 历史消息直接显示，新消息打字机效果 -->
+          <!-- AI等待占位（...） - 深度思考 / Todo / 结果出来前的短暂状态 -->
           <div v-if="message.understanding" class="ai-understanding">
-            <TypewriterText 
-              :text="message.understanding"
-              :speed="20"
-              :autoPlay="true"
-              :instant="message.isHistorical"
-            />
+            <div class="ai-understanding-text">
+              {{ message.understanding }}
+            </div>
           </div>
                     
 
                     
+          <!-- 思考过程（文心 X1 等带推理模型）- 极简深色风格，打字机效果 -->
+          <div v-if="message.reasoningContent" class="reasoning-section">
+            <details class="reasoning-details">
+              <summary class="reasoning-summary">
+                <img class="reasoning-icon" :src="deepThinkingIcon" alt="深度思考" />
+                <span class="reasoning-title">深度思考</span>
+                <img
+                  class="reasoning-toggle reasoning-toggle--right"
+                  :src="chevronRightIcon"
+                  alt="toggle-right"
+                />
+                <img
+                  class="reasoning-toggle reasoning-toggle--down"
+                  :src="chevronDownIcon"
+                  alt="toggle"
+                />
+              </summary>
+              <div class="reasoning-content">
+                <div
+                  class="reasoning-text reasoning-markdown"
+                  v-html="formatReasoningMarkdown(message.reasoningContent)"
+                ></div>
+              </div>
+            </details>
+          </div>
+          
           <!-- 待办列表 - Qoder 风格（步骤+evidence整合） -->
           <TodoTimeline 
             v-if="message.steps && message.steps.length > 0" 
@@ -81,43 +183,23 @@
             </div>
           </div>
           
-          <!-- 关键发现 - 在所有工具执行完成后展示 -->
-          <div v-if="message.agentResult && message.agentResult.findings && message.agentResult.findings.length > 0" class="findings-section">
-            <div class="findings-card">
-              <div class="findings-header">
-                <span class="findings-icon">📊</span>
-                <span class="findings-title">关键发现</span>
-                <span class="findings-count">{{ message.agentResult.findings.length }} 项</span>
-              </div>
-              <div class="findings-list">
-                <div v-for="(finding, index) in message.agentResult.findings" :key="index" class="finding-item">
-                  <span class="finding-bullet">•</span>
-                  <span class="finding-text">{{ finding }}</span>
-                </div>
-                
-                <!-- 如果有create预览，显示创建表单 -->
-                <CreatePreview 
-                  v-if="message.createPreview && message.createPreview.preview" 
-                  :previewData="message.createPreview"
-                  @confirm="handleConfirmCreate"
-                  @cancel="handleCancelCreate"
+          <!-- 修改预览导航区域 - 沙箱预览：整行点击=跳转，下三角=展开/收起，无单独跳转按钮 -->
+          <div v-if="message.modifyGroups && message.modifyGroups.length > 0" class="modify-navigation-section">
+            <div v-for="(group, groupIdx) in message.modifyGroups" :key="groupIdx" class="collapsible-card findings-card sandbox-card" style="margin-bottom: 12px;">
+              <div class="collapsible-header sandbox-header" @click="handleShowGroupInList(group, message.id)">
+                <span class="card-icon">📝</span>
+                <span class="card-title">沙箱预览</span>
+                <span class="card-count">{{ group.items.length }} 项</span>
+                <span v-if="group.plan_id" class="plan-badge">计划 #{{ group.plan_id }}</span>
+                <img
+                  class="sandbox-toggle"
+                  :class="{ expanded: isSandboxExpanded(message.id, groupIdx) }"
+                  :src="isSandboxExpanded(message.id, groupIdx) ? chevronDownIcon : chevronRightIcon"
+                  alt="toggle"
+                  @click.stop="toggleSandboxExpand(message.id, groupIdx)"
                 />
               </div>
-            </div>
-          </div>
-          
-          <!-- 修改预览导航区域 - 沙箱预览模式需要用户确认 -->
-          <!-- 支持 modifyGroups 多分组显示 -->
-          <div v-if="message.modifyGroups && message.modifyGroups.length > 0" class="modify-navigation-section">
-            <div v-for="(group, groupIdx) in message.modifyGroups" :key="groupIdx" class="findings-card" style="margin-bottom: 12px;">
-              <div class="findings-header">
-                <span class="findings-icon">📝</span>
-                <span class="findings-title">沙箱预览</span>
-                <span class="findings-count">{{ group.items.length }} 项</span>
-                <span v-if="group.plan_id" class="plan-badge">计划 #{{ group.plan_id }}</span>
-              </div>
-              <div class="modify-navigation-content">
-                <!-- 显示该组第一个项的修改字段对比 -->
+              <div v-show="isSandboxExpanded(message.id, groupIdx)" class="collapsible-content modify-navigation-content">
                 <template v-if="group.items[0]?.diff">
                   <div v-for="(fieldDiff, idx) in group.items[0].diff" :key="idx" class="modify-field-preview">
                     <span class="field-label">{{ fieldDiff.field_label }}:</span>
@@ -128,29 +210,30 @@
                     <span class="new-value">{{ getFieldNewValue(fieldDiff) || '-' }}</span>
                   </div>
                 </template>
-                <!-- 如果有多项，显示提示 -->
                 <div v-if="group.items.length > 1" class="group-items-hint">
                   共 {{ group.items.length }} 条连续记录待确认
-                </div>
-                <!-- 只有在列表中显示按钮 -->
-                <div class="modify-actions">
-                  <button @click="handleShowGroupInList(group, message.id)" class="btn-primary">在列表中显示</button>
                 </div>
               </div>
             </div>
           </div>
           
-          <!-- 兼容旧版本：单个 modifyNavigation -->
+          <!-- 兼容旧版本：单个 modifyNavigation，同样整行点击=跳转、下三角=展开 -->
           <div v-else-if="message.modifyNavigation && !message.modifyNavigation.batch_modify" class="modify-navigation-section">
-            <div class="findings-card">
-              <div class="findings-header">
-                <span class="findings-icon">📝</span>
-                <span class="findings-title">沙箱预览</span>
-                <span class="findings-count">{{ message.modifyNavigation.diff?.length || 1 }} 项</span>
+            <div class="collapsible-card findings-card sandbox-card">
+              <div class="collapsible-header sandbox-header" @click="handleShowModifyInList(message.modifyNavigation, message.id)">
+                <span class="card-icon">📝</span>
+                <span class="card-title">沙箱预览</span>
+                <span class="card-count">{{ message.modifyNavigation.diff?.length || 1 }} 项</span>
+                <img
+                  class="sandbox-toggle"
+                  :class="{ expanded: isSandboxExpanded(message.id, null) }"
+                  :src="isSandboxExpanded(message.id, null) ? chevronDownIcon : chevronRightIcon"
+                  alt="toggle"
+                  @click.stop="toggleSandboxExpand(message.id, null)"
+                />
               </div>
-              <div class="modify-navigation-content">
-                <!-- 显示修改字段对比 -->
-                <div v-for="(fieldDiff, idx) in message.modifyNavigation.diff" :key="idx" class="modify-field-preview">
+              <div v-show="isSandboxExpanded(message.id, null)" class="collapsible-content modify-navigation-content">
+                <div v-for="(fieldDiff, idx) in (message.modifyNavigation.diff || [])" :key="idx" class="modify-field-preview">
                   <span class="field-label">{{ fieldDiff.field_label }}:</span>
                   <span :class="['old-value', { 'empty-value': !fieldDiff.lines?.find(l => l.type === 'delete')?.content }]">
                     {{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || '未设置' }}
@@ -158,45 +241,55 @@
                   <span class="arrow">→</span>
                   <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
                 </div>
-                <!-- 只有在列表中显示按钮，跳转到左侧列表进行二次确认 -->
-                <div class="modify-actions">
-                  <button @click="handleShowModifyInList(message.modifyNavigation, message.id)" class="btn-primary">在列表中显示</button>
-                </div>
               </div>
             </div>
           </div>
           
-          <!-- Bug导航区域 - 独立于findings之外 -->
+          <!-- Bug 导航区域 - 独立于 findings 之外（可折叠深色背景） -->
           <div v-if="message.navigation && message.navigation.type === 'multiple'" class="bug-navigation-section">
-            <div class="findings-card">
-              <div class="findings-header">
-                <span class="findings-icon">🐛</span>
-                <span class="findings-title">点击跳转到Bug</span>
-                <span class="findings-count">{{ message.navigation.items.length }} 条</span>
-              </div>
-              <div class="bug-navigation-list">
-                <div 
-                  v-for="(item, idx) in message.navigation.items" 
-                  :key="idx"
-                  class="bug-nav-item"
-                  @click="handleNavigation(item)"
-                >
-                  <span class="bug-nav-icon">➤</span>
-                  <span class="bug-nav-title">{{ item.bug_title }}</span>
-                  <span v-if="item.plan_name" class="bug-nav-plan">{{ item.plan_name }}</span>
+            <div class="collapsible-card findings-card">
+              <details :open="true">
+                <summary class="collapsible-header">
+                  <span class="card-icon">🐛</span>
+                  <span class="card-title">点击跳转到 Bug</span>
+                  <span class="card-count">{{ message.navigation.items.length }} 条</span>
+                  <span class="card-arrow">▼</span>
+                </summary>
+                <div class="collapsible-content bug-navigation-list">
+                  <div
+                    v-for="(item, idx) in message.navigation.items"
+                    :key="idx"
+                    class="bug-nav-item"
+                    @click="handleNavigation(item)"
+                  >
+                    <span class="bug-nav-icon">➤</span>
+                    <span class="bug-nav-title">{{ item.bug_title }}</span>
+                    <span v-if="item.plan_name" class="bug-nav-plan">{{ item.plan_name }}</span>
+                  </div>
                 </div>
-              </div>
+              </details>
             </div>
           </div>
                     
-          <!-- 最终回复 - 历史消息直接显示，新消息打字机效果 -->
-          <div v-if="message.finalResponse" class="ai-response">
-            <TypewriterText 
-              :text="message.finalResponse" 
-              :speed="15"
-              :autoPlay="true"
-              :instant="message.isHistorical"
-            />
+          <!-- 最终回复（无统一总结时展示） -->
+          <div v-if="message.finalResponse && !hasUnifiedSummary(message)" class="ai-response">
+            <div class="ai-response-text">
+              {{ message.finalResponse }}
+            </div>
+          </div>
+          
+          <!-- 统一总结：放在最后，Cursor 式「思考 Xs」+ 打字机（思考秒数，非总耗时） -->
+          <div v-if="hasUnifiedSummary(message)" class="unified-summary-section">
+            <div class="unified-summary-header">总结 {{ (message.agentResult.thinking_time ?? message.agentResult.execution_time ?? 0).toFixed(2) }}s</div>
+            <div class="unified-summary-content reasoning-content">
+              <div class="reasoning-text unified-summary-text">{{ getUnifiedSummaryBody(message) }}</div>
+              <CreatePreview 
+                v-if="message.createPreview && message.createPreview.preview" 
+                :previewData="message.createPreview"
+                @confirm="handleConfirmCreate"
+                @cancel="handleCancelCreate"
+              />
+            </div>
           </div>
                     
           <!-- Bug 保存按钮（仅当有 Bug 结果时显示） -->
@@ -234,14 +327,34 @@
               </select>
             </div>
             <!-- 移除 ReAct/执行选择器 - 统一使用 ReAct 模式 -->
-            <div class="selector-item">
-              <select v-model="selectedModel" class="footer-select">
-                <option value="ernie-4.5-turbo-128k">🤖 文心 4.5 Turbo</option>
-                <option value="qwen-turbo">🤖 通义千问 Turbo</option>
-                <option value="qwen-plus">🤖 通义千问 Plus</option>
-                <option value="qwen-max">🤖 通义千问 Max</option>
-              </select>
-            </div>
+          <div class="selector-item model-select-wrapper">
+            <img
+              v-if="isQwenModel"
+              :src="qwenIcon"
+              alt="Qwen"
+              class="model-icon"
+            />
+            <img
+              v-else-if="isErnieModel"
+              :src="ernieIcon"
+              alt="Ernie"
+              class="model-icon model-icon--ernie"
+            />
+            <img
+              v-else-if="isGlmModel"
+              :src="glmIcon"
+              alt="GLM"
+              class="model-icon"
+            />
+            <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
+              <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
+              <option value="qwen-max-thinking">Qwen-Max</option>
+              <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
+              <option value="ernie-x1-turbo-32k">Ernie-X1</option>
+              <option value="glm-4-flash">GLM-4-Flash</option>
+              <option value="glm-5">GLM-5</option>
+            </select>
+          </div>
           </div>
           <div class="footer-right">
             <button 
@@ -251,10 +364,7 @@
               :disabled="!inputMessage.trim()"
               title="发送 (Enter)"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-              </svg>
+              <img class="send-icon-img" :src="sendCursorIcon" alt="send" />
             </button>
             <button 
               v-else
@@ -274,15 +384,22 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, nextTick, onMounted, onUnmounted, watch, computed } from 'vue'
+import { marked } from 'marked'
 import { BACKEND_BASE_URL, getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
-import TypewriterText from './TypewriterText.vue'
 import StreamingMessage from './StreamingMessage.vue'
 import TodoTimeline from './TodoTimeline.vue'
 import ExecutionResult from './ExecutionResult.vue'
 import CreatePreview from './CreatePreview.vue'
+import deepThinkingIcon from '../assets/deep-thinking-icon.svg'
+import chevronRightIcon from '../assets/chevron-right-qoder.png'
+import chevronDownIcon from '../assets/chevron-down-qoder.png'
+import qwenIcon from '../assets/qwen-icon.png'
+import ernieIcon from '../assets/ernie-icon.png'
+import glmIcon from '../assets/glm-icon.png'
+import sendCursorIcon from '../assets/send-cursor.png'
 
 // Props
 const props = defineProps({
@@ -300,17 +417,64 @@ const props = defineProps({
 
 const emit = defineEmits(['title-updated'])
 
-const messages = ref([])
+  const messages = ref([])
+
+  // 详情字段列表（不在列表中显示的字段，用于沙箱预览分组）
+  const DETAIL_FIELDS = [
+    'base_problem',
+    'reproduction_steps',
+    'answer',
+    'correct_answer',
+    'badcase_result',
+    'solution',
+    'problem_reason',
+    'description',
+    'steps_to_reproduce',
+    'expected_result',
+    'actual_result',
+    'preconditions',
+    'steps',
+    'remark',
+    'baseline',
+    'reproduce_steps'
+  ]
 
 const inputMessage = ref('')
+const editingUserMessageId = ref(null)
+const inlineInputMessage = ref('')
+const inlineTextareaRef = ref(null)
+
+const handleDocumentPointerDown = (e) => {
+  // 处于内联编辑态时：点到编辑区外面 -> 自动退出恢复原样
+  if (!editingUserMessageId.value) return
+  const target = e?.target
+  if (!target) return
+  // 点击在内联编辑器内部则不处理
+  if (target.closest && target.closest('.inline-composer')) return
+  cancelEditUserMessage()
+}
 const selectedAgent = ref('agent')
-const selectedModel = ref('ernie-4.5-turbo-128k')  // 默认使用文心 4.5 Turbo
+// 从 localStorage 读取上次选择的模型，如果没有则使用默认值
+const savedModel = localStorage.getItem('selectedChatModel')
+const selectedModel = ref(savedModel || 'ernie-4.5-turbo-128k')  // 默认文心；可选 qwen3.5-plus / ernie-4.5-turbo-128k / glm-5
+const isQwenModel = computed(() => selectedModel.value && selectedModel.value.startsWith('qwen'))
+const isErnieModel = computed(() => selectedModel.value && selectedModel.value.startsWith('ernie'))
+const isGlmModel = computed(() => selectedModel.value && selectedModel.value.startsWith('glm'))
 const messagesContainer = ref(null)
 const textareaRef = ref(null)
 const isSending = ref(false)
 const isComposing = ref(false)  // 输入法组合状态
 const abortController = ref(null)  // 用于终止请求
 const currentProjectId = ref(null)
+// 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`，点击下三角切换
+const sandboxExpanded = ref({})
+const getSandboxKey = (messageId, groupIdx) => (groupIdx == null ? `${messageId}-single` : `${messageId}-${groupIdx}`)
+const isSandboxExpanded = (messageId, groupIdx) => sandboxExpanded.value[getSandboxKey(messageId, groupIdx)] !== false
+const toggleSandboxExpand = (messageId, groupIdx) => {
+  const key = getSandboxKey(messageId, groupIdx)
+  sandboxExpanded.value = { ...sandboxExpanded.value, [key]: sandboxExpanded.value[key] === false }
+}
+
 
 // 将运行中状态收敛（停止/异常时用）
 const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
@@ -348,6 +512,22 @@ const formatMessage = (content) => {
     .replace(/\n/g, '<br>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+}
+
+// 思考过程：使用 marked 做完整 Markdown 渲染（换行、加粗、列表、代码块等）
+marked.setOptions({ gfm: true, breaks: true })
+const formatReasoningMarkdown = (content) => {
+  if (!content || typeof content !== 'string') return ''
+  try {
+    let text = content.trim()
+    // 若模型未输出换行，在中文句号/分号后插入换行，便于展示段落
+    if (!/\n/.test(text) && /[。；]/.test(text)) {
+      text = text.replace(/([。；])/g, '$1\n')
+    }
+    return marked.parse(text, { gfm: true, breaks: true })
+  } catch (e) {
+    return content.replace(/\n/g, '<br>')
+  }
 }
 
 // 获取工具层级
@@ -565,7 +745,8 @@ const formatTodosForTimeline = (steps, message) => {
           resultSummary = '修改完成，无结果返回'
         }
       } else if (isRunning) {
-        resultSummary = '修改中...'
+        // 实时显示后端下发的进度文案（流式）
+        resultSummary = step.description || '修改中...'
       }
     } else {
       // 其他工具，使用原始title
@@ -580,11 +761,12 @@ const formatTodosForTimeline = (steps, message) => {
     
     return {
       text: friendlyText,
-      resultSummary: resultSummary,  // 结果摘要
+      resultSummary: resultSummary,  // 结果摘要（modify 运行中时为最新进度）
       status: step.status || 'pending',
       showTypewriter: step.status === 'running',
       toolCall: step.toolCall,  // 保留toolCall供展开
-      evidence: relatedEvidence?.data  // 关联的evidence数据
+      evidence: relatedEvidence?.data,  // 关联的evidence数据
+      progressLog: step.progressLog || []  // modify 等实时进度日志，用于流式多行展示
     }
   })
 }
@@ -645,6 +827,41 @@ const hasRunningSteps = (message) => {
   return message.steps?.some(s => s.status === 'running') || false
 }
 
+// 是否显示「统一总结」块（关键发现 + 执行统计合并，Cursor 式耗时 Xs）
+const hasUnifiedSummary = (message) => {
+  const r = message.agentResult
+  if (!r || r.status !== 'success') return false
+  return (r.findings && r.findings.length > 0) || r.execution_time != null || (r.steps_count != null && r.steps_count > 0)
+}
+
+// 统一总结正文：优先使用后端大模型生成的 summaryText（Cursor 式一段话），否则回退为 findings + 执行统计
+const getUnifiedSummaryBody = (message) => {
+  const r = message.agentResult
+  if (r?.summaryText && typeof r.summaryText === 'string' && r.summaryText.trim()) {
+    return r.summaryText.trim()
+  }
+  const lines = []
+  if (r?.findings && r.findings.length > 0) {
+    r.findings.forEach(f => lines.push('• ' + (typeof f === 'string' ? f : String(f))))
+  }
+  const stepsCount = r?.steps_count ?? message.steps?.length ?? 0
+  const duration = Number(r?.execution_time ?? 0)
+  if (stepsCount > 0 || duration > 0) {
+    if (lines.length) lines.push('')
+    lines.push(`完成步骤: ${stepsCount} 个`)
+    lines.push(`耗时: ${duration.toFixed(2)}s`)
+    lines.push('任务执行成功')
+  }
+  const body = lines.join('\n')
+  // 有思考耗时但无思考内容时提示（qwen-max 等模型可能不返回 reasoning_content）
+  const thinkingTime = (r?.thinking_time ?? r?.execution_time ?? 0)
+  if (thinkingTime > 0 && !(message.reasoningContent && message.reasoningContent.trim())) {
+    const hint = '思考过程未返回（当前模型或接口可能不返回思考内容）。'
+    return body ? `${hint}\n\n${body}` : hint
+  }
+  return body
+}
+
 // 处理导航指令（展开计划并定位Bug）
 const handleNavigation = (navigation) => {
   if (!navigation) return
@@ -703,7 +920,15 @@ const handleConfirmModify = async (modifyData) => {
   }
 }
 
-// 在列表中显示修改
+// 沙箱预览按钮文案：按目标类型显示「跳转到Bug/BadCase/测试用例详情」
+const getModifyJumpButtonLabel = (target) => {
+  if (target === 'bug') return '跳转到Bug详情'
+  if (target === 'badcase') return '跳转到BadCase详情'
+  if (target === 'testcase') return '跳转到测试用例详情'
+  return '在列表中显示'
+}
+
+// 在列表中显示修改（并跳转到对应详情页）
 // 处理分组跳转到列表
 const handleShowGroupInList = (group, messageId) => {
   console.log('[MODIFY] 分组跳转到列表:', group, 'messageId:', messageId)
@@ -721,14 +946,15 @@ const handleShowGroupInList = (group, messageId) => {
   // 为该组的每个记录发送事件
   group.items.forEach((item, index) => {
     // 防御性检查
-    if (!item || item.target_id === undefined) {
+    const rawId = item?.target_id ?? item?.targetId ?? item?.id
+    if (!item || rawId === undefined || rawId === null) {
       console.warn('[MODIFY] 跳过无效 item:', item)
       return
     }
     
-    const intTargetId = parseInt(item.target_id)
+    const intTargetId = parseInt(rawId)
     if (isNaN(intTargetId)) {
-      console.warn('[MODIFY] 跳过无效 target_id:', item.target_id)
+      console.warn('[MODIFY] 跳过无效 target_id:', rawId)
       return
     }
     
@@ -757,11 +983,12 @@ const handleShowGroupInList = (group, messageId) => {
       bubbles: true
     })
     window.dispatchEvent(event)
+    console.log('[DEBUG-show-modify-in-list from SimpleChatPanel]', JSON.stringify(event.detail, null, 2))
   })
 }
 
 const handleShowModifyInList = (modifyData, messageId) => {
-  console.log('[MODIFY] 在列表中显示修改:', modifyData, 'messageId:', messageId)
+  console.log('[MODIFY] 在列表中显示修改(来自后端结果):', modifyData, 'messageId:', messageId)
   
   // 防御性检查
   if (!modifyData) {
@@ -785,7 +1012,14 @@ const handleShowModifyInList = (modifyData, messageId) => {
         return
       }
       
-      const alreadyProcessed = result.confirmation_required === false || result.success === true
+      // 对于预览结果：success 只表示“预览成功”，不代表已经执行修改
+      // 只有 confirmation_required === false 才表示修改已真正应用
+      const alreadyProcessed = result.confirmation_required === false
+      console.log('[MODIFY] 发送批量 show-modify-in-list 事件:', {
+        intTargetId,
+        target: result.target || 'badcase',
+        executed: alreadyProcessed
+      })
       
       const event = new CustomEvent('show-modify-in-list', {
         detail: {
@@ -805,15 +1039,21 @@ const handleShowModifyInList = (modifyData, messageId) => {
   }
   
   // 单个修改
-  const intTargetId = parseInt(modifyData.target_id)
+  const rawId = modifyData.target_id ?? modifyData.targetId ?? modifyData.id
+  const intTargetId = parseInt(rawId)
   if (isNaN(intTargetId)) {
-    console.error('[MODIFY] 无效的 target_id:', modifyData.target_id)
+    console.error('[MODIFY] 无效的 target_id:', rawId)
     return
   }
   
-  const alreadyProcessed = modifyData.success === true || 
-                          modifyData.cancelled === true || 
+  // 对于单条修改：success 只表示预览或检查成功，不代表已经落库
+  const alreadyProcessed = modifyData.cancelled === true || 
                           modifyData.confirmation_required === false
+  console.log('[MODIFY] 发送单条 show-modify-in-list 事件:', {
+    intTargetId,
+    target: modifyData.target || 'badcase',
+    executed: alreadyProcessed
+  })
   
   const event = new CustomEvent('show-modify-in-list', {
     detail: {
@@ -995,6 +1235,7 @@ const loadSessionMessages = async () => {
             id: msg.id,
             isUser: false,
             understanding: msg.understanding,
+            reasoningContent: msg.reasoning,  // 历史消息的思考过程
             steps: msg.steps ? JSON.parse(msg.steps) : [],
             executionResults: msg.execution_results ? JSON.parse(msg.execution_results) : [],
             agentResult: msg.agent_result ? JSON.parse(msg.agent_result) : { findings: [], recommendations: [], status: 'success' },
@@ -1017,6 +1258,17 @@ const loadSessionMessages = async () => {
   } catch (error) {
     console.error('加载会话消息失败:', error)
   }
+}
+
+// 保存模型选择到 localStorage
+const saveModelSelection = () => {
+  localStorage.setItem('selectedChatModel', selectedModel.value)
+  console.log('[MODEL] 已保存模型选择:', selectedModel.value)
+}
+
+// 切换思考过程的展开/收起状态
+const toggleReasoning = (message) => {
+  message.showReasoning = !message.showReasoning
 }
 
 // 检查历史 modifyNavigation 的执行状态
@@ -1129,15 +1381,10 @@ const saveMessageToDb = async (messageData) => {
   }
 }
 
-// 发送消息
-const handleSend = async (e) => {
-  e?.preventDefault()
-  
-  // 输入法组合状态下不发送
-  if (isComposing.value) return
-  
-  if (!inputMessage.value.trim() || isSending.value) return
-  
+const sendText = async (rawText) => {
+  const text = (rawText || '').trim()
+  if (!text || isSending.value) return
+
   // 创建新的 AbortController
   abortController.value = new AbortController()
   isSending.value = true
@@ -1149,7 +1396,7 @@ const handleSend = async (e) => {
   // 添加用户消息
   const userMessage = {
     id: Date.now(),
-    content: inputMessage.value.trim(),
+    content: text,
     isUser: true,
     time: new Date().toLocaleTimeString()
   }
@@ -1177,8 +1424,7 @@ const handleSend = async (e) => {
   }
   
   // 清空输入框
-  const messageContent = inputMessage.value
-  inputMessage.value = ''
+  const messageContent = text
   
   // 重置textarea高度
   nextTick(() => {
@@ -1200,6 +1446,54 @@ const handleSend = async (e) => {
   abortController.value = null  // 清除 AbortController
 }
 
+// 发送消息（底部输入框）
+const handleSend = async (e) => {
+  e?.preventDefault()
+  // 输入法组合状态下不发送
+  if (isComposing.value) return
+  const text = inputMessage.value
+  inputMessage.value = ''
+  await sendText(text)
+}
+
+const beginEditUserMessage = (msg) => {
+  if (!msg) return
+  editingUserMessageId.value = msg.id
+  inlineInputMessage.value = msg.content || ''
+  nextTick(() => {
+    try {
+      inlineTextareaRef.value?.focus?.()
+    } catch (e) {}
+  })
+}
+
+const cancelEditUserMessage = () => {
+  editingUserMessageId.value = null
+  inlineInputMessage.value = ''
+}
+
+const handleInlineSend = async (e) => {
+  e?.preventDefault()
+  if (isComposing.value) return
+  const text = inlineInputMessage.value
+  inlineInputMessage.value = ''
+  editingUserMessageId.value = null
+  await sendText(text)
+}
+
+const addNewLineInline = (e) => {
+  // 保持 textarea 默认换行行为
+  // 这里无需阻止默认
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown, true)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
+})
+
 // 停止生成
 const handleStop = () => {
   // 先把 UI 状态收敛（即使网络层 abort 还没抛异常）
@@ -1217,15 +1511,19 @@ const handleStop = () => {
 
 // ReAct Agent 模式 - 调用后端 ReAct 接口 (流式处理)
 const handleReactAgentMode = async (userMessage) => {
+  console.log('[MODEL-DEBUG] 当前选择的模型:', selectedModel.value)
+  
   const aiMessage = reactive({
     id: Date.now() + 1,
     isUser: false,
     content: '',
     time: new Date().toLocaleTimeString(),
-    // 不在对话中暴露推理方式（如 ReAct），只展示通用处理状态
-    understanding: '正在处理中...',
+    // 初始仅显示省略号「...」，等待 ReAct 流式事件接管
+    understanding: '...',
     steps: [],
     finalResponse: '',
+    reasoningContent: '',  // 思考过程内容
+    showReasoning: true,   // 默认展开思考过程
     agentResult: { findings: [], recommendations: [], status: 'running' },
     allObservations: [],
     evidences: [],
@@ -1238,6 +1536,7 @@ const handleReactAgentMode = async (userMessage) => {
   
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
+    console.log('[MODEL-DEBUG] 请求参数 model:', selectedModel.value)
     const response = await fetch(`${BACKEND_BASE_URL}/api/agent/react`, {
       method: 'POST',
       headers: {
@@ -1249,7 +1548,7 @@ const handleReactAgentMode = async (userMessage) => {
         user_input: userMessage,
         model: selectedModel.value,
         stream: true,
-        project_id: currentProjectId.value || props.projectId  // 传入项目ID
+        project_id: currentProjectId.value || props.projectId  // 传入项目 ID
       })
     })
     
@@ -1289,22 +1588,45 @@ const handleReactAgentMode = async (userMessage) => {
           // 处理不同类型的事件
           switch (chunk.type) {
             case 'status':
-              // 不在 UI 中展示“ReAct推理”等内部实现细节
-              aiMessage.understanding = chunk.message || '正在处理中...'
+              // 仅用省略号表示「正在思考」，不展示具体中文文案
+              if (!aiMessage.understanding) {
+                aiMessage.understanding = '...'
+              }
               break
 
             case 'intent':
-              aiMessage.understanding = `✅ 意图: ${chunk.intent || '分析中'}`
+              // 不在 UI 里展示“意图”，避免干扰用户；仅保留 todo/执行结果
+              // 可按需在 console 里查看 chunk.intent
               break
             
             case 'step':
+              // 一旦进入具体步骤，清理顶部省略号状态
+              if (aiMessage.understanding === '...') {
+                aiMessage.understanding = ''
+              }
               const stepEvent = chunk.data
               if (!stepEvent) break
               console.log('[CHAT-STREAM] 收到 step 事件:', stepEvent.event, stepEvent)
 
               if (stepEvent.event === 'thought') {
-                // thought 仅用于内部调试，不在对话中展示推理过程
-                // 保留当前 understanding，不覆盖
+                // thought 事件只用于内部状态更新，不展示
+                // 不创建思考过程卡片
+              } else if (stepEvent.event === 'reasoning') {
+                // 文心 X1 / Qwen3 Max Thinking 等：流式追加思考过程，不截取
+                const content = stepEvent.content ?? stepEvent.data ?? ''
+                if (content !== '') {
+                  aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + content
+                }
+              } else if (stepEvent.event === 'immutable_field_rejection') {
+                // 用户请求修改不可修改字段（如类型），后端已提前拦截，直接展示提示
+                const msg = stepEvent.message || '该字段不可修改。可修改的字段包括：状态、期望结果、标题、优先级、复现步骤、负责人等。'
+                aiMessage.agentResult.findings = [msg]
+                aiMessage.finalResponse = `⚠️ ${msg}`
+                aiMessage.agentResult.status = 'success'
+                aiMessage.steps.forEach(s => {
+                  s.status = 'skipped'
+                  s.description = '已跳过（该字段不可修改）'
+                })
               } else if (stepEvent.event === 'todos') {
                 // 初始化 Todo 列表
                 console.log('[CHAT-STREAM] 收到 todos 数据:', stepEvent.data)
@@ -1335,7 +1657,8 @@ const handleReactAgentMode = async (userMessage) => {
                     title: friendlyTitle,
                     originalTodo: todoText, // 保存原始 todo 文本
                     status: 'pending',
-                    description: ''
+                    description: '',
+                    progressLog: []  // modify 等工具实时进度日志，用于流式展示
                   }
                 })
                 console.log('[CHAT-STREAM] 处理后的 steps:', aiMessage.steps)
@@ -1346,8 +1669,22 @@ const handleReactAgentMode = async (userMessage) => {
               } else if (stepEvent.event === 'executing') {
                 const runningStep = aiMessage.steps.find(s => s.status === 'running')
                 if (runningStep) {
-                  runningStep.description = `正在执行: ${stepEvent.tool}`
-                  runningStep.toolCall = { name: stepEvent.tool, output: '执行中...' }
+                  if (!runningStep.progressLog) runningStep.progressLog = []
+                  // 后端 message 优先，用于流式进度/心跳
+                  if (stepEvent.message) {
+                    runningStep.description = stepEvent.message
+                    runningStep.progressLog.push(stepEvent.message)
+                    if (runningStep.progressLog.length > 20) runningStep.progressLog.shift()
+                  }
+                  // 无 message 时用工具名或字段列表做描述，避免一直只显示“修改中...”
+                  if (stepEvent.tool === 'modify' && Array.isArray(stepEvent.fields) && stepEvent.fields.length > 0) {
+                    const fieldText = stepEvent.fields.join('、')
+                    if (!stepEvent.message) runningStep.description = `正在执行: modify（字段：${fieldText}）`
+                    runningStep.toolCall = { name: `modify: ${fieldText}`, output: '执行中...' }
+                  } else {
+                    if (!stepEvent.message) runningStep.description = `正在执行: ${stepEvent.tool}`
+                    runningStep.toolCall = { name: stepEvent.tool, output: '执行中...' }
+                  }
                 }
               } else if (stepEvent.event === 'observation') {
                 console.log('[CHAT-STREAM] === 触发 observation 事件 ===')
@@ -1438,17 +1775,46 @@ const handleReactAgentMode = async (userMessage) => {
                             }
                             
                             // 检查是否有 diff
-                            const diff = r.diff || (r.result && r.result.diff) || []
-                            
-                            allItems.push({
+                            const rawDiff = r.diff || (r.result && r.result.diff) || []
+                            console.log('[MODIFY-DEBUG] rawDiff:', rawDiff)
+                            console.log('[MODIFY-DEBUG] r.modifications:', r.modifications)
+
+                            // 按列表字段 / 详情字段拆分 diff
+                            const listFieldDiff = []
+                            const detailFieldDiff = []
+                            rawDiff.forEach(fieldDiff => {
+                              if (!fieldDiff || !fieldDiff.field) return
+                              console.log('[MODIFY-DEBUG] fieldDiff.field:', fieldDiff.field, 'isDetail:', DETAIL_FIELDS.includes(fieldDiff.field))
+                              if (DETAIL_FIELDS.includes(fieldDiff.field)) {
+                                detailFieldDiff.push(fieldDiff)
+                              } else {
+                                listFieldDiff.push(fieldDiff)
+                              }
+                            })
+                            console.log('[MODIFY-DEBUG] detailFieldDiff:', detailFieldDiff.length, 'listFieldDiff:', listFieldDiff.length)
+
+                            const baseItemInfo = {
                               target_id: itemId,
                               plan_id: itemPlanId,
-                              target: toolData.target || 'badcase',
-                              diff: diff,
+                              target: r.target || toolData.target || 'badcase',
                               modifications: r.modifications || (r.result && r.result.modifications) || {},
                               confirmation_required: r.confirmation_required !== false,
                               success: r.success === true
-                            })
+                            }
+
+                            // 如果同一条记录同时修改了列表和详情字段，则拆成两个 item
+                            if (listFieldDiff.length > 0) {
+                              allItems.push({
+                                ...baseItemInfo,
+                                diff: listFieldDiff
+                              })
+                            }
+                            if (detailFieldDiff.length > 0) {
+                              allItems.push({
+                                ...baseItemInfo,
+                                diff: detailFieldDiff
+                              })
+                            }
                           })
                           
                           if (allItems.length === 0) {
@@ -1511,7 +1877,8 @@ const handleReactAgentMode = async (userMessage) => {
                             aiMessage.modifyNavigation = {
                               batch_modify: true,
                               batch_results: [...allItems],
-                              batch_count: allItems.length
+                              batch_count: allItems.length,
+                              target: allItems[0]?.target || toolData.target || 'badcase'
                             }
                             console.log('[MODIFY] 生成 modifyGroups:', modifyGroups.length, '个分组, 共', allItems.length, '项')
                           }
@@ -1678,6 +2045,12 @@ const handleReactAgentMode = async (userMessage) => {
                 aiMessage.agentResult.status = 'success'
                 aiMessage.agentResult.execution_time = stepEvent.duration
                 aiMessage.agentResult.steps_count = stepEvent.steps_count || 0
+                if (stepEvent.thinking_time != null && stepEvent.thinking_time >= 0) {
+                  aiMessage.agentResult.thinking_time = stepEvent.thinking_time
+                }
+                if (stepEvent.summary && typeof stepEvent.summary === 'string') {
+                  aiMessage.agentResult.summaryText = stepEvent.summary.trim()
+                }
                 
                 // 确保所有步骤状态都更新为 completed
                 aiMessage.steps.forEach((step, idx) => {
@@ -1752,13 +2125,16 @@ const handleReactAgentMode = async (userMessage) => {
                   aiMessage.agentResult.findings = displayFindings
                 }
                 
-                // 添加执行统计
-                finalResp += `📈 执行统计:\n`
-                finalResp += `  • 完成步骤: ${stepEvent.steps_count || aiMessage.steps.length} 个\n`
-                finalResp += `  • 耗时: ${Number(stepEvent.duration || 0).toFixed(2)}s\n`
-                finalResp += `\n✅ 任务执行成功`
-                
-                aiMessage.finalResponse = finalResp
+                // 若为提前拦截（如不可修改字段），steps_count 为 0，直接展示 findings 作为最终说明
+                if ((stepEvent.steps_count === 0 || !stepEvent.steps_count) && displayFindings.length > 0) {
+                  aiMessage.finalResponse = '⚠️ ' + displayFindings[0]
+                } else {
+                  finalResp += `执行统计:\n`
+                  finalResp += `  • 完成步骤: ${stepEvent.steps_count || aiMessage.steps.length} 个\n`
+                  finalResp += `  • 耗时: ${Number(stepEvent.duration || 0).toFixed(2)}s\n`
+                  finalResp += `\n任务执行成功`
+                  aiMessage.finalResponse = finalResp
+                }
               } else if (stepEvent.event === 'error') {
                 aiMessage.finalResponse = `❌ 错误: ${stepEvent.message}`
                 aiMessage.agentResult.status = 'failed'
@@ -1805,6 +2181,7 @@ const handleReactAgentMode = async (userMessage) => {
     is_user: false,
     content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
     understanding: aiMessage.understanding,
+    reasoning: aiMessage.reasoningContent || '',
     steps: JSON.stringify(aiMessage.steps),
     execution_results: JSON.stringify(aiMessage.executionResults || []),
     agent_result: JSON.stringify(aiMessage.agentResult || {}),
@@ -1822,7 +2199,7 @@ const handleAgentMode = async (userMessage) => {
     id: Date.now() + 1,
     isUser: false,
     time: new Date().toLocaleTimeString(),
-    understanding: '正在理解你的输入...',
+    understanding: '...',
     steps: [],
     finalResponse: '',
     agentResult: null
@@ -1965,11 +2342,16 @@ const handleChatMode = async (userMessage) => {
           const chunk = JSON.parse(jsonStr)
           
           if (chunk.type === 'start') {
-            aiMessage.understanding = chunk.message
+            // 统一用「...」做占位，不展示具体中文提示
+            aiMessage.understanding = '...'
           } else if (chunk.type === 'chunk') {
+            if (aiMessage.understanding === '...') {
+              aiMessage.understanding = ''
+            }
             aiMessage.finalResponse += chunk.content
           } else if (chunk.type === 'agent_start') {
-            aiMessage.understanding = `正在调用 Agent: ${chunk.agent}`
+            // 不再在 UI 展示「正在调用 Agent」，只作为内部事件
+            aiMessage.understanding = '...'
           } else if (chunk.type === 'result') {
             // Agent 执行结果处理
             const result = chunk.data
@@ -2266,12 +2648,31 @@ watch(() => props.sessionId, (newSessionId) => {
   margin-bottom: 8px;
 }
 
-/* AI理解意图loading动画 */
+/* AI理解意图loading动画：左侧三个点，尽量弱化卡片感 */
 .ai-understanding {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-start;
+  padding: 0;
+  background: transparent;
+  margin: 4px 0;
 }
+
+.ai-understanding-text {
+  min-width: 18px;
+  text-align: left;
+  color: #e5e7eb;
+  font-size: 12px;
+  letter-spacing: 2px;
+  animation: thinkingPulse 1s ease-in-out infinite;
+}
+
+@keyframes thinkingPulse {
+  0% { opacity: 0.3; }
+  50% { opacity: 1; }
+  100% { opacity: 0.3; }
+}
+
 
 .loading-dots {
   display: inline-flex;
@@ -2321,20 +2722,56 @@ watch(() => props.sessionId, (newSessionId) => {
 .user-message-block {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: stretch; /* 让“用户输入条”占满整行 */
+  width: 100%;
 }
 
 .user-message-bubble {
-  max-width: 70%;
+  width: 100%;
+  max-width: 100%;
   padding: 12px 16px;
-  background: #007acc;
-  color: #fff;
-  border-radius: 12px;
-  border-top-right-radius: 4px;
+  background: rgba(148, 163, 184, 0.10); /* 未选中：更轻的浅灰底 */
+  color: #e5e7eb;
+  border: 1px solid rgba(148, 163, 184, 0.18); /* 未选中：更淡的细边框 */
+  border-radius: 10px; /* 接近输入框的圆角 */
   line-height: 1.5;
   white-space: pre-wrap;
+  overflow: visible; /* 避免底部阴影/截断观感 */
   word-wrap: break-word;
+  word-break: break-word;
   font-size: 14px;
+  box-shadow: none; /* 不要阴影 */
+  outline: none; /* 交给 focus 样式 */
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/* 选中态（点击获得焦点）——对齐你第二张图的“更亮底色 + 更清晰边框” */
+.user-message-bubble:focus {
+  background: rgba(148, 163, 184, 0.16);
+  border-color: rgba(148, 163, 184, 0.32);
+}
+
+/* 键盘导航时给一个更明确的可见焦点（不影响鼠标点击观感） */
+.user-message-bubble:focus-visible {
+  border-color: rgba(96, 165, 250, 0.55);
+}
+
+/* 用户消息进入编辑态：容器占满整行，并与底部输入框统一背景/边框 */
+.inline-composer {
+  width: 100%;
+}
+
+.inline-composer .input-box-wrapper {
+  width: 100%;
+  background: #252526;
+  border: 1px solid #3e3e3e;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.inline-composer .input-box-wrapper:focus-within {
+  border-color: #007acc;
+  box-shadow: 0 0 0 1px #007acc;
 }
 
 /* AI消息样式 */
@@ -2342,20 +2779,6 @@ watch(() => props.sessionId, (newSessionId) => {
   display: flex;
   flex-direction: column;
   width: 100%;
-}
-
-.ai-understanding {
-  padding: 12px 16px;
-  background: #2d2d2d;
-  border-left: 3px solid #007acc;
-  border-radius: 6px;
-  margin-bottom: 12px;
-}
-
-.understanding-text {
-  color: #d4d4d4;
-  line-height: 1.6;
-  font-size: 14px;
 }
 
 /* 步骤列表 */
@@ -2537,10 +2960,13 @@ watch(() => props.sessionId, (newSessionId) => {
   border-radius: 6px;
 }
 
-.response-text {
+.response-text,
+.ai-response-text {
   color: #d4d4d4;
   line-height: 1.6;
   font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .input-container {
@@ -2592,14 +3018,14 @@ watch(() => props.sessionId, (newSessionId) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 12px;
-  background: #2d2d2d;
-  border-top: 1px solid #3e3e3e;
+  padding: 2px 8px;               /* 进一步压缩高度 */
+  background: transparent;         /* 去掉浅灰载体 */
+  border-top: none;               /* 去掉细线 */
 }
 
 .footer-left {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
 }
 
@@ -2607,7 +3033,7 @@ watch(() => props.sessionId, (newSessionId) => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #888;
+  color: rgba(226, 232, 240, 0.7);
   font-size: 11px;
 }
 
@@ -2618,19 +3044,33 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .footer-select {
-  background: #3e3e42;
-  border: none;
-  color: #ccc;
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
+  /* 默认（未选中）：更浅灰，更像 Cursor 输入区工具条 */
+  background: rgba(148, 163, 184, 0.10);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #e5e7eb;
+  font-size: 12px;        /* 选择器更大一点 */
+  padding: 2px 10px;      /* 增大可点区域 */
+  border-radius: 8px;
   outline: none;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .footer-select:hover {
-  background: #454545;
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+.footer-select:focus {
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.32);
+}
+
+/* 下拉菜单（Electron/Chromium 下通常可生效） */
+.footer-select option {
+  /* 展开菜单保持 Cursor：深色底 + 白字 */
+  background: #1f1f1f;
+  color: #e6e6e6;
 }
 
 .footer-right {
@@ -2639,21 +3079,21 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .send-icon-button {
-  background: #007acc;
-  color: white;
-  border: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: transform 0.12s ease, opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease;
 }
 
 .send-icon-button:hover:not(:disabled) {
-  background: #0098ff;
+  background: #f8fafc;
+  border-color: #f8fafc;
   transform: scale(1.05);
 }
 
@@ -2662,18 +3102,26 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .send-icon-button:disabled {
-  background: #3e3e3e;
-  color: #666;
+  background: rgba(255, 255, 255, 0.30);
+  border-color: rgba(255, 255, 255, 0.30);
   cursor: not-allowed;
-  opacity: 0.5;
+  opacity: 1;
+}
+
+.send-icon-img {
+  width: 11px;
+  height: 11px;
+  display: block;
+  filter: brightness(0) saturate(100%);
+  opacity: 0.95;
 }
 
 .stop-icon-button {
   background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
   color: white;
   border: none;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -2757,6 +3205,48 @@ watch(() => props.sessionId, (newSessionId) => {
   padding: 12px 0;
   border-top: 1px solid #e5e7eb;
 }
+
+.reasoning-section {
+  margin: 10px 0;
+}
+.reasoning-details {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.reasoning-summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #6b7280;
+  list-style: none;
+}
+.reasoning-summary::-webkit-details-marker { display: none; }
+.reasoning-content {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #374151;
+  word-break: break-word;
+  border-top: 1px solid #e5e7eb;
+}
+.reasoning-content.reasoning-markdown {
+  white-space: normal;
+}
+.reasoning-markdown p { margin: 0.4em 0; line-height: 1.6; }
+.reasoning-markdown p:first-child { margin-top: 0; }
+.reasoning-markdown h1, .reasoning-markdown h2, .reasoning-markdown h3 { font-weight: 600; margin: 0.75em 0 0.25em; }
+.reasoning-markdown h1 { font-size: 1.2em; }
+.reasoning-markdown h2 { font-size: 1.1em; }
+.reasoning-markdown h3 { font-size: 1em; }
+.reasoning-markdown ul, .reasoning-markdown ol { margin: 0.4em 0; padding-left: 1.5em; }
+.reasoning-markdown li { margin: 0.2em 0; }
+.reasoning-markdown strong { font-weight: 700; }
+.reasoning-markdown code { background: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+.reasoning-markdown pre { background: #f1f5f9; padding: 10px; border-radius: 6px; overflow-x: auto; margin: 0.5em 0; font-size: 0.85em; white-space: pre-wrap; }
+.reasoning-markdown pre code { background: none; padding: 0; }
 
 .findings-section {
   margin: 16px 0;
@@ -2882,12 +3372,34 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .plan-badge {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
+  background: transparent;
+  color: #ffffff;
+  font-size: 12px;
+  padding: 0;
+  border-radius: 0;
   margin-left: 8px;
+  font-weight: 600;
+  opacity: 0.95;
+}
+
+.sandbox-toggle {
+  width: 10px;
+  height: 10px;
+  display: block;
+  flex-shrink: 0;
+  cursor: pointer;
+  /* 让 chevron 图片呈现灰白（深色背景下接近 Qoder 风格） */
+  filter: brightness(0) saturate(100%) invert(73%) sepia(11%) saturate(326%) hue-rotate(176deg) brightness(90%) contrast(86%);
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+.sandbox-header:hover .sandbox-toggle {
+  opacity: 0.95;
+}
+
+.sandbox-toggle.expanded {
+  opacity: 0.95;
 }
 
 .group-items-hint {
@@ -3105,5 +3617,387 @@ watch(() => props.sessionId, (newSessionId) => {
   line-height: 1.4;
   word-break: break-word;
 }
-</style>
 
+/* 思考过程样式 - 极简深色风格 */
+.reasoning-section {
+  margin: 8px 0;
+}
+
+.reasoning-details {
+  background: transparent; /* 和对话面板融为一体 */
+  border: none;
+  border-radius: 6px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.reasoning-details[open] {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22); /* 与待办一致：细边框线包起来 */
+}
+
+.reasoning-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: #ccc;
+  user-select: none;
+  transition: background 0.2s;
+  border-bottom: none; /* 由内容区的 border-top 做分隔，避免双线 */
+}
+
+/* 未展开时：不要展示边框线 */
+.reasoning-details:not([open]) .reasoning-summary {
+  border-bottom: none;
+}
+
+/* 行背景保持和对话面板一致：不做 hover/选中变色 */
+.reasoning-summary:hover {
+  background: transparent;
+}
+
+.reasoning-summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning-toggle {
+  width: 10px;
+  height: 10px;
+  display: block;
+  flex-shrink: 0;
+  margin-left: 6px; /* 在“深度思考”右侧一点 */
+  /* 让图标颜色更接近 Qoder 的灰蓝 */
+  filter: brightness(0) saturate(100%) invert(73%) sepia(11%) saturate(326%) hue-rotate(176deg) brightness(90%) contrast(86%);
+  opacity: 0; /* 默认不显示 */
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+
+/* 两个图标根据 open 状态切换 */
+.reasoning-toggle--down { display: none; }
+
+/* 折叠：hover 才显示向右 */
+.reasoning-details:not([open]) .reasoning-summary:hover .reasoning-toggle--right {
+  opacity: 0.95;
+}
+
+/* 展开：常显向下，隐藏向右 */
+.reasoning-details[open] .reasoning-toggle--right { display: none; }
+.reasoning-details[open] .reasoning-toggle--down {
+  display: block;
+  opacity: 0.95;
+}
+
+.reasoning-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  filter: invert(1); /* 深色背景下反相成浅色/白色 */
+}
+
+.reasoning-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+}
+
+/* 旧的倒三角箭头不再使用 */
+.reasoning-arrow { display: none; }
+
+.reasoning-content {
+  padding: 12px 16px;
+  background: transparent; /* 不要深色底，保持轻量 */
+  border-top: 1px solid rgba(148, 163, 184, 0.22); /* 标题/内容分隔线 */
+  font-size: 13px;
+  line-height: 1.6;
+  color: #fff;
+  overflow-x: auto;
+}
+
+.reasoning-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  color: #cbd5e1; /* Cursor 风格：正文偏灰 */
+  animation: reasoningTyping 0.03s steps(1) infinite;
+}
+
+.reasoning-text.reasoning-markdown {
+  white-space: normal; /* 交给 markdown 的标签排版 */
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif;
+  color: #cbd5e1;
+}
+
+/* Cursor 风格：Markdown 分层配色 */
+.reasoning-text.reasoning-markdown :deep(p) {
+  margin: 0 0 10px;
+  line-height: 1.65;
+}
+.reasoning-text.reasoning-markdown :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.reasoning-text.reasoning-markdown :deep(strong) {
+  color: #f8fafc;
+  font-weight: 600;
+}
+.reasoning-text.reasoning-markdown :deep(em) {
+  color: #e5e7eb;
+}
+.reasoning-text.reasoning-markdown :deep(h1),
+.reasoning-text.reasoning-markdown :deep(h2),
+.reasoning-text.reasoning-markdown :deep(h3) {
+  margin: 14px 0 8px;
+  color: #f1f5f9;
+  font-weight: 600;
+  font-size: 13px;
+}
+.reasoning-text.reasoning-markdown :deep(ul),
+.reasoning-text.reasoning-markdown :deep(ol) {
+  margin: 8px 0 10px 18px;
+  padding: 0;
+}
+.reasoning-text.reasoning-markdown :deep(li) {
+  margin: 4px 0;
+}
+.reasoning-text.reasoning-markdown :deep(code) {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+.reasoning-text.reasoning-markdown :deep(pre) {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  overflow: auto;
+}
+.reasoning-text.reasoning-markdown :deep(pre code) {
+  background: transparent;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+  color: #e5e7eb;
+}
+.reasoning-text.reasoning-markdown :deep(a) {
+  color: #93c5fd;
+  text-decoration: none;
+}
+.reasoning-text.reasoning-markdown :deep(a:hover) {
+  text-decoration: underline;
+}
+
+@keyframes reasoningTyping {
+  from {
+    caret-color: #00ff00;
+  }
+  to {
+    caret-color: transparent;
+  }
+}
+
+/* 统一总结：Cursor 式「耗时 Xs」+ 打字机，无图标 */
+.unified-summary-section {
+  margin: 12px 0;
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.unified-summary-header {
+  padding: 6px 12px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+}
+.unified-summary-content.unified-summary-content {
+  padding: 12px 16px;
+}
+.unified-summary-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  color: #fff;
+  animation: reasoningTyping 0.03s steps(1) infinite;
+}
+
+/* 通用可折叠卡片样式 - 与深度思考一致：深色背景、白色字体（关键发现、沙箱预览、Bug 导航） */
+.collapsible-card {
+  background: transparent; /* 跟随对话面板底色 */
+  border: 1px solid rgba(148, 163, 184, 0.22); /* 细小边框线区分 */
+  border-radius: 6px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+  margin-bottom: 12px;
+}
+
+.collapsible-card[open] {
+  background: transparent;
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+.collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  user-select: none;
+  transition: none;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.collapsible-header:hover {
+  background: transparent;
+}
+
+.collapsible-header::-webkit-details-marker {
+  display: none;
+}
+
+.card-icon {
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.card-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.card-count {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: #ccc;
+}
+
+.card-arrow {
+  font-size: 10px;
+  transition: transform 0.2s ease;
+  opacity: 0.6;
+  color: #888;
+}
+
+.collapsible-card[open] .card-arrow {
+  transform: rotate(180deg);
+}
+
+.sandbox-card .sandbox-header {
+  cursor: pointer;
+}
+.sandbox-card .card-arrow.expanded {
+  transform: rotate(180deg);
+}
+
+.collapsible-content {
+  padding: 12px 16px;
+  background: transparent;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  font-size: 13px;
+  line-height: 1.6;
+  color: #fff;
+  overflow-x: auto;
+}
+
+/* 关键发现/沙箱预览/Bug 导航内部内容 - 与深度思考一致的白字深色 */
+.collapsible-content .finding-item,
+.collapsible-content .finding-text {
+  color: #fff;
+}
+.collapsible-content .finding-bullet {
+  color: #888;
+}
+.collapsible-content .bug-navigation-list {
+  border-top-color: rgba(148, 163, 184, 0.22);
+}
+.collapsible-content .bug-nav-item {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #fff;
+}
+.collapsible-content .bug-nav-item:hover {
+  background: transparent;
+}
+.collapsible-content .bug-nav-icon {
+  color: #888;
+}
+.collapsible-content .bug-nav-title {
+  color: #fff;
+}
+.collapsible-content .bug-nav-plan {
+  color: #aaa;
+  background: rgba(255, 255, 255, 0.08);
+}
+.collapsible-content .modify-field-preview .field-label {
+  color: #ccc;
+}
+.collapsible-content .modify-field-preview .old-value {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.15);
+}
+.collapsible-content .modify-field-preview .old-value.empty-value {
+  color: #888;
+  background: transparent;
+}
+.collapsible-content .modify-field-preview .arrow {
+  color: #666;
+}
+.collapsible-content .modify-field-preview .new-value {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.15);
+}
+.collapsible-content .modify-actions {
+  border-top-color: rgba(148, 163, 184, 0.22);
+}
+.collapsible-content .group-items-hint {
+  color: #aaa;
+}
+.collapsible-content .btn-primary {
+  background: #333;
+  color: #fff;
+  border: 1px solid #444;
+}
+.collapsible-content .btn-primary:hover {
+  background: #444;
+}
+
+.model-select-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.model-icon--ernie {
+  width: 16px;
+  height: 16px;
+}
+</style>

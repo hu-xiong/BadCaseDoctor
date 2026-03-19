@@ -19,12 +19,28 @@ class Config:
     REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
     REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
     REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', None)
-    QWEN_API_KEY = os.getenv('QWEN_API_KEY', "sk-063e4252653c4d629c2355a90dd186b1")
+    # ==================== Qwen (阿里云/通义千问) ====================
+    # API Key 配置
+    QWEN_API_KEY = os.getenv('QWEN_API_KEY', "sk-ae78f45927654500ab070de1addb4156")
     QWEN_API_URL = os.getenv('QWEN_API_URL', None)
+    
+    # 默认模型配置
     QWEN_API_MODEL = os.getenv('QWEN_API_MODEL', 'qwen-plus')
     QWEN_API_TEMPERATURE = float(os.getenv('QWEN_API_TEMPERATURE', 0.7))
     
-    # 百度千帆大模型配置
+    # DashScope 专用配置（步骤推理 ReAct / 对话 Agent）
+    # 复用 QWEN_API_KEY，可指定不同模型
+    DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', QWEN_API_KEY)
+    DASHSCOPE_MODEL = os.getenv('DASHSCOPE_MODEL', 'qwen3.5-plus')
+    
+    # Qwen 可选模型列表：
+    # - qwen-turbo: 快速响应
+    # - qwen-plus: 均衡性能
+    # - qwen3.5-plus: 增强版（默认）
+    # 千问 Max 思考：模型 id qwen3-max-2026-01-23，enable_thinking 开启思考
+    QWEN3_MAX_THINKING_MODEL = os.getenv('QWEN3_MAX_THINKING_MODEL', 'qwen3-max-2026-01-23')
+    
+    # ==================== Qianfan (百度/文心一言) ====================
     QIANFAN_API_KEY = os.getenv(
         'QIANFAN_API_KEY',
         'bce-v3/ALTAK-o11nAoKmuL7qDdZL3CQMD/62c7691269aa3fb33674cdb022f17a6f03280078'
@@ -36,13 +52,17 @@ class Config:
     QIANFAN_USE_BEARER_TOKEN = os.getenv('QIANFAN_USE_BEARER_TOKEN', 'True').lower() == 'true'
     
     # 千帆模型配置
-    QIANFAN_MODEL = os.getenv('QIANFAN_MODEL', 'ernie-4.5-turbo-128k')
+    # 可选模型列表：
+    # - ernie-4.5-turbo-128k: 长上下文（128K）
+    # - ernie-x1-turbo-32k: 强推理模型（默认，32K 上下文）
+    # - ernie-4.0: 旗舰版
+    QIANFAN_MODEL = os.getenv('QIANFAN_MODEL', 'ernie-x1-turbo-32k')
     QIANFAN_TEMPERATURE = float(os.getenv('QIANFAN_TEMPERATURE', '0.7'))
     QIANFAN_TOP_P = float(os.getenv('QIANFAN_TOP_P', '0.8'))
     QIANFAN_MAX_RETRIES = int(os.getenv('QIANFAN_MAX_RETRIES', '3'))
     
-    # 默认 LLM 配置
-    DEFAULT_LLM = os.getenv('DEFAULT_LLM', 'qianfan')  # agent文本推理用文心4.5turbo
+    # 默认 LLM 配置（步骤推理 ReAct / 对话 Agent）
+    DEFAULT_LLM = os.getenv('DEFAULT_LLM', 'qianfan')  # 默认文心；千问需配置 DASHSCOPE_API_KEY
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
     OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
     
@@ -53,8 +73,12 @@ class Config:
     STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_xxx')  # 替换为真实密钥
     STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', 'whsec_xxx')  # Webhook 签名密钥
 
-    # 智谱GLM配置
+    # ==================== GLM (智谱 AI/智谱清言) ====================
     ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY', 'b6185f3bac97489da843602537da8cec.cFBNLM2wRxb8lBwJ')
+        
+    # 可选模型列表：
+    # - glm-4-flash: 快速响应（文本对话，默认）
+    # - glm-5: 强推理模型（复杂推理、Text2SQL）
     ZHIPU_MODEL = os.getenv('ZHIPU_MODEL', 'glm-4-flash')  # 文本对话用 glm-4-flash
     ZHIPU_MODEL_REASONING = os.getenv('ZHIPU_MODEL_REASONING', 'glm-5')  # 复杂推理用 glm-5
     ZHIPU_MAX_TOKENS = int(os.getenv('ZHIPU_MAX_TOKENS', '65536'))

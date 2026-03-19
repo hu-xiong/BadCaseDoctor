@@ -5,6 +5,8 @@ Skill 集成模块 - 提供统一的Skill功能调用
 
 import os
 import sys
+import time
+import threading
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 
@@ -33,68 +35,58 @@ class SkillIntegration:
         """
         self.skill_loader = SkillLoader(skill_dir)
         self.load_all_skills()
-        print(f"[SKILL_INTEGRATION] 🚀 技能集成管理器已初始化")
-        print(f"[SKILL_INTEGRATION] 📊 共加载 {len(self.list_skills())} 个技能")
+        print(f"[SKILL_INTEGRATION] 技能集成管理器已初始化")
+        print(f"[SKILL_INTEGRATION] 共加载 {len(self.list_skills())} 个技能")
     
     def load_all_skills(self) -> Dict[str, Skill]:
         """加载所有技能"""
+        perf = (os.getenv("PERF_LOG") == "1")
+        t0 = time.perf_counter()
         skills = self.skill_loader.load_all()
         
         # 注册所有技能到全局注册中心
         for skill_name, skill in skills.items():
             if not skill_registry.has_skill(skill_name):
                 skill_registry.register(skill)
+        if perf:
+            dt_ms = (time.perf_counter() - t0) * 1000
+            print(f"[PERF][skill] load_all_skills_ms={dt_ms:.1f} count={len(skills)} dir={self.skill_loader.skill_dir}")
         
         return skills
-    
+
     def match_skill(self, user_input: str, context: Dict[str, Any] = None) -> tuple[Optional[Skill], float]:
         """
         为输入匹配合适的技能
-        
-        Args:
-            user_input: 用户输入文本
-            context: 上下文信息
-            
+
         Returns:
             (匹配的技能, 匹配分数)
         """
         return self.skill_loader.match_skill(user_input, context)
-    
+
     def get_skill(self, skill_name: str) -> Optional[Skill]:
         """获取指定名称的技能"""
         # 首先从注册中心获取
         skill = skill_registry.get_skill(skill_name)
         if skill:
             return skill
-        
+
         # 如果注册中心没有，尝试从加载器获取
         skill = self.skill_loader.get_skill(skill_name)
         if skill:
             skill_registry.register(skill)
-        
+
         return skill
-    
+
     def list_skills(self) -> List[Dict[str, Any]]:
         """列出所有可用技能"""
         return self.skill_loader.list_skills()
-    
+
     def get_skill_prompt(self, skill_name: str) -> str:
         """获取技能提示词"""
         return self.skill_loader.get_skill_prompt(skill_name)
-    
-    def execute_skill_workflow(self, skill: Skill, context: Dict[str, Any], 
-                              tool_executor: Callable) -> Dict[str, Any]:
-        """
-        执行技能工作流
-        
-        Args:
-            skill: 技能对象
-            context: 执行上下文
-            tool_executor: 工具执行函数 (tool_name, params) -> result
-            
-        Returns:
-            执行结果
-        """
+
+    def execute_skill_workflow(self, skill: Skill, context: Dict[str, Any], tool_executor: Callable) -> Dict[str, Any]:
+        """执行技能工作流"""
         results = {
             'skill_name': skill.name,
             'steps': [],
@@ -102,37 +94,37 @@ class SkillIntegration:
             'success': True,
             'error_messages': []
         }
-        
+
         print(f"[SKILL_WORKFLOW] 🚀 开始执行技能: {skill.name}")
         print(f"[SKILL_WORKFLOW] 📋 工作流步骤: {len(skill.workflow)}")
-        
+
         for workflow_step in skill.workflow:
             tool_name = workflow_step.tool
-            
+
             # 查找对应的工具定义
             tool_def = None
             for tool in skill.tools:
                 if tool.name == tool_name:
                     tool_def = tool
                     break
-            
+
             if not tool_def:
                 error_msg = f"未找到工具定义: {tool_name}"
                 print(f"[SKILL_WORKFLOW] ❌ {error_msg}")
                 results['error_messages'].append(error_msg)
                 results['success'] = False
                 continue
-            
+
             # 生成参数
             params = self._generate_params_from_skill_tool(tool_def, context, results)
-            
+
             print(f"[SKILL_WORKFLOW] 🎯 执行步骤 {workflow_step.step}: {workflow_step.description}")
             print(f"[SKILL_WORKFLOW] 🔧 工具: {tool_name}, 参数: {params}")
-            
+
             # 执行工具
             try:
                 step_result = tool_executor(tool_name, params)
-                
+
                 # 记录步骤结果
                 step_record = {
                     'step': workflow_step.step,
@@ -142,38 +134,49 @@ class SkillIntegration:
                     'result': step_result,
                     'timestamp': datetime.now().isoformat()
                 }
-                
+
                 results['steps'].append(step_record)
-                
+
                 # 更新上下文
                 if step_result and isinstance(step_result, dict):
-                    # 提取关键信息到上下文
                     key_name = f"{tool_name}_result"
                     results['context'][key_name] = step_result
-                    
-                    # 自动提取常见字段
                     if 'data' in step_result:
                         results['context'][f'{tool_name}_data'] = step_result['data']
                     if 'bugs_found' in step_result:
                         results['context']['bugs_found'] = step_result['bugs_found']
                     if 'badcase_analysis' in step_result:
                         results['context']['badcase_analysis'] = step_result['badcase_analysis']
-                
+
                 print(f"[SKILL_WORKFLOW] ✅ 步骤 {workflow_step.step} 完成")
-                
+
             except Exception as e:
                 error_msg = f"步骤 {workflow_step.step} 执行失败: {str(e)}"
                 print(f"[SKILL_WORKFLOW] ❌ {error_msg}")
                 results['error_messages'].append(error_msg)
                 results['success'] = False
                 break
-        
-        # 增加技能使用计数
+
         if results['success']:
             skill_registry.increment_usage(skill.name)
-        
+
         print(f"[SKILL_WORKFLOW] 📊 工作流执行完成: 成功={results['success']}, 步骤数={len(results['steps'])}")
         return results
+
+
+_skill_integration_lock = threading.Lock()
+_skill_integration_singleton: Optional[SkillIntegration] = None
+
+
+def get_skill_integration(skill_dir: str = ".qoder/skills") -> SkillIntegration:
+    """懒加载 SkillIntegration，避免 import 即扫描技能目录。"""
+    global _skill_integration_singleton
+    if _skill_integration_singleton is not None:
+        return _skill_integration_singleton
+    with _skill_integration_lock:
+        if _skill_integration_singleton is None:
+            _skill_integration_singleton = SkillIntegration(skill_dir=skill_dir)
+    return _skill_integration_singleton
     
     def _generate_params_from_skill_tool(self, tool_def, context: Dict[str, Any], 
                                         results: Dict[str, Any]) -> Dict[str, Any]:
@@ -350,4 +353,5 @@ class SkillIntegration:
 
 
 # 全局集成管理器实例
-skill_integration = SkillIntegration()
+# 兼容旧引用：避免 import 阶段触发磁盘扫描
+skill_integration = None

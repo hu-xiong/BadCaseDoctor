@@ -604,5 +604,14 @@ export default {
   color: #666;
   font-size: 13px;
 }
+
+/* 空状态：在表格可视区域居中显示 */
+.empty-row {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
 </style>
 

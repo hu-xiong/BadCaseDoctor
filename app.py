@@ -51,6 +51,7 @@ from routers.sandbox import sandbox_bp
 from routers.sandbox_client import sandbox_client_bp
 from routers.proposal import proposal_bp
 from routers.sql_preview import sql_preview_bp
+from routers.summary import summary_bp
 
 # 导入 Prometheus
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -88,7 +89,17 @@ class ExecutionResult(enum.Enum):
     BLOCKED = 'blocked'
     SKIP = 'skip'
 
+class EnumJSONEncoder(json.JSONEncoder):
+    """处理 Enum、datetime/date 等不可直接序列化的类型"""
+    def default(self, obj):
+        if isinstance(obj, enum.Enum):
+            return obj.value
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        return super().default(obj)
+
 app = Flask(__name__)
+app.json_encoder = EnumJSONEncoder
 app.config.from_object(Config)
 
 # Flask应用配置
@@ -141,6 +152,7 @@ app.register_blueprint(sandbox_bp)
 app.register_blueprint(sandbox_client_bp)
 app.register_blueprint(proposal_bp)
 app.register_blueprint(sql_preview_bp)
+app.register_blueprint(summary_bp)
 
 # MinIO配置
 MINIO_CONFIG = {
@@ -867,7 +879,7 @@ class TestCase(db.Model):
     # 缺陷（执行信息）
     last_executed = db.Column(db.DateTime)  # 最后执行时间
     executed_by = db.Column(db.Integer, db.ForeignKey('user.id'))  # 执行人
-    execution_result = db.Column(Enum(ExecutionResult, values_callable=lambda obj: [e.value for e in obj]))  # 执行结果
+    execution_result = db.Column(Enum(ExecutionResult, values_callable=lambda obj: [e.value for e in obj]), nullable=True)  # 执行结果：pass/fail/blocked/skip，NULL 表示未执行
     
     # 执行（测试集）
     baseline = db.Column(db.String(100))  # 基线管理
@@ -1028,6 +1040,7 @@ class ChatMessage(db.Model):
     is_user = db.Column(db.Boolean, default=True)
     content = db.Column(db.Text)
     understanding = db.Column(db.Text)
+    reasoning = db.Column(db.Text)  # 思考过程（推理内容）
     steps = db.Column(db.Text)  # JSON格式存储
     execution_results = db.Column(db.Text)  # JSON格式存储executionResults
     agent_result = db.Column(db.Text)  # JSON格式存储agentResult
@@ -1139,6 +1152,14 @@ def _cache_get(key, ttl_s: float):
 
 def _cache_set(key, value):
     _PROJECT_CTX_CACHE[key] = (time.time(), value)
+
+
+def _cache_invalidate_plans(project_id: int):
+    """测试用例/Bug/BadCase 变更后使计划列表缓存失效"""
+    to_del = [k for k in _PROJECT_CTX_CACHE if isinstance(k, tuple) and len(k) >= 2 and k[0] == 'plans' and k[1] == project_id]
+    for k in to_del:
+        _PROJECT_CTX_CACHE.pop(k, None)
+
 
 # 路由
 @app.route('/')
@@ -1972,13 +1993,44 @@ def api_agent_change_bug_status():
         print(f"修改 Bug 状态失败: {e}")
         return jsonify({"error": f"修改 Bug 状态失败: {str(e)}"}), 500
 
+def _run_modify_in_background(project_id, target, target_id, modifications, message_id, db_uri):
+    """后台线程执行采纳落库，使用独立 app_context 和 db.session，避免阻塞主请求"""
+    import asyncio
+    import json
+    with app.app_context():
+        try:
+            from agents.tools.modify_tool import ModifyTool
+            modify_tool = ModifyTool(db.session, database_uri=db_uri)
+            result = asyncio.run(modify_tool.execute(
+                target=target,
+                target_id=int(target_id),
+                modifications=modifications,
+                project_id=project_id,
+                confirm=True
+            ))
+            if result.get('success') and message_id:
+                try:
+                    message = ChatMessage.query.get(message_id)
+                    if message:
+                        # 采纳后：清理预览 diff，避免刷新后仍显示
+                        message.modify_groups = None
+                        message.modify_navigation = None
+                        db.session.commit()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[MODIFY-BG] 后台采纳失败: {e}")
+
+
 @app.route('/api/projects/<int:project_id>/modify', methods=['POST'])
 @login_required
 def api_project_modify(project_id):
-    """沙箱确认后应用修改 - 使用 ModifyTool"""
+    """沙箱确认后应用修改 - 采纳时异步落库，避免阻塞"""
     import asyncio
     import json
+    import threading
     from agents.tools.modify_tool import ModifyTool
+    from flask import current_app
     
     try:
         data = request.get_json()
@@ -1986,29 +2038,36 @@ def api_project_modify(project_id):
         target_id = data.get('target_id')
         modifications = data.get('modifications', {})
         confirm = data.get('confirm', True)
-        message_id = data.get('message_id')  # 获取消息 ID
+        message_id = data.get('message_id')
         
         if not target_id or not modifications:
             return jsonify({"success": False, "error": "target_id 和 modifications 不能为空"}), 400
         
-        print(f"[MODIFY-API] 收到确认修改请求: target={target}, target_id={target_id}, modifications={modifications}")
+        db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
         
-        # 使用 ModifyTool 修改
-        modify_tool = ModifyTool(db.session)
-        
-        async def run_modify():
-            result = await modify_tool.execute(
-                target=target,
-                target_id=target_id,
-                modifications=modifications,
-                project_id=project_id,
-                confirm=confirm
+        if confirm:
+            # 采纳即落库：后台异步执行 ModifyTool，立即返回
+            thread = threading.Thread(
+                target=_run_modify_in_background,
+                args=(project_id, target, target_id, dict(modifications), message_id, db_uri),
+                daemon=True
             )
-            return result
+            thread.start()
+            return jsonify({
+                "success": True,
+                "message": "正在保存",
+                "async": True,
+                "before": None, "after": None, "diff": None
+            })
         
+        # 沙箱预览：同步执行
+        modify_tool = ModifyTool(db.session, database_uri=db_uri)
+        async def run_modify():
+            return await modify_tool.execute(
+                target=target, target_id=target_id, modifications=modifications,
+                project_id=project_id, confirm=False
+            )
         result = asyncio.run(run_modify())
-        
-        print(f"[MODIFY-API] 修改结果: success={result.get('success')}")
         
         if result.get('success'):
             # 更新数据库中消息的 modify_navigation 字段
@@ -2980,6 +3039,7 @@ def api_get_project_edit_context(project_id):
         plan_ids = list(plan_by_id.keys())
         badcase_counts = {}
         bug_counts = {}
+        testcase_counts = {}
         if plan_ids:
             badcase_counts = dict(
                 db.session.query(BadCase.plan_id, func.count(BadCase.id))
@@ -2993,6 +3053,12 @@ def api_get_project_edit_context(project_id):
                 .group_by(Bug.plan_id)
                 .all()
             )
+            testcase_counts = dict(
+                db.session.query(TestCase.plan_id, func.count(TestCase.id))
+                .filter(TestCase.plan_id.in_(plan_ids))
+                .group_by(TestCase.plan_id)
+                .all()
+            )
 
         def _sort_key(p: Plan):
             pinned = 1 if getattr(p, "is_pinned", False) else 0
@@ -3001,6 +3067,13 @@ def api_get_project_edit_context(project_id):
 
         def build_plan_tree(plan: Plan):
             children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
+            bc = int(badcase_counts.get(plan.id, 0))
+            bug = int(bug_counts.get(plan.id, 0))
+            tc = int(testcase_counts.get(plan.id, 0))
+            for c in children:
+                bc += c.get('badcase_count', 0)
+                bug += c.get('bug_count', 0)
+                tc += c.get('test_case_count', 0)
             return {
                 'id': plan.id,
                 'name': plan.name,
@@ -3017,8 +3090,9 @@ def api_get_project_edit_context(project_id):
                 'created_at': plan.created_at.isoformat() if plan.created_at else None,
                 'updated_at': plan.updated_at.isoformat() if plan.updated_at else None,
                 'children': children,
-                'badcase_count': int(badcase_counts.get(plan.id, 0)),
-                'bug_count': int(bug_counts.get(plan.id, 0)),
+                'badcase_count': bc,
+                'bug_count': bug,
+                'test_case_count': tc,
             }
 
         root_plans = sorted(children_map.get(None, []), key=_sort_key)
@@ -4016,6 +4090,7 @@ def sync_database_schema():
                     'is_user BOOLEAN DEFAULT 1',
                     'content TEXT NOT NULL',
                     'understanding TEXT',
+                    'reasoning TEXT',
                     'steps TEXT',
                     'execution_results TEXT',
                     'agent_result TEXT',
@@ -4501,13 +4576,10 @@ def api_get_project_plans(project_id):
     """获取项目的计划树"""
     try:
         t_total0 = time.perf_counter()
-        cached = _cache_get(('plans', project_id, current_user.id), ttl_s=3.0)
-        if cached is not None:
-            print(
-                f"[PERF] GET /api/projects/{project_id}/plans cache_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
-                flush=True,
-            )
-            return jsonify(cached)
+        # 计划列表不再使用缓存，确保 test_case_count 等数量实时正确
+        # cached = _cache_get(('plans', project_id, current_user.id), ttl_s=3.0)
+        # if cached is not None:
+        #     return jsonify(cached)
 
         # 检查项目权限
         t0 = time.perf_counter()
@@ -4528,15 +4600,23 @@ def api_get_project_plans(project_id):
             .group_by(Bug.plan_id)
             .subquery()
         )
+        tc_sub = (
+            db.session.query(TestCase.plan_id.label('plan_id'), func.count(TestCase.id).label('test_case_count'))
+            .filter(TestCase.plan_id.isnot(None))
+            .group_by(TestCase.plan_id)
+            .subquery()
+        )
 
         plan_rows = (
             db.session.query(
                 Plan,
                 func.coalesce(bc_sub.c.badcase_count, 0),
                 func.coalesce(bug_sub.c.bug_count, 0),
+                func.coalesce(tc_sub.c.test_case_count, 0),
             )
             .outerjoin(bc_sub, bc_sub.c.plan_id == Plan.id)
             .outerjoin(bug_sub, bug_sub.c.plan_id == Plan.id)
+            .outerjoin(tc_sub, tc_sub.c.plan_id == Plan.id)
             .filter(Plan.project_id == project_id)
             .all()
         )
@@ -4555,9 +4635,23 @@ def api_get_project_plans(project_id):
         # 构建 parent_id -> [child_plan] 映射，顺便准备 count map
         children_map = {}
         count_map = {}
-        for plan, badcase_cnt, bug_cnt in plan_rows:
+        for plan, badcase_cnt, bug_cnt, tc_cnt in plan_rows:
             children_map.setdefault(plan.parent_id, []).append(plan)
-            count_map[plan.id] = (int(badcase_cnt or 0), int(bug_cnt or 0))
+            count_map[plan.id] = (int(badcase_cnt or 0), int(bug_cnt or 0), int(tc_cnt or 0))
+
+        # 测试用例数量：按 plan_id 统计（不限制 project_id，避免数据不一致导致漏数）
+        plan_ids = list(count_map.keys())
+        if plan_ids:
+            tc_rows = (
+                db.session.query(TestCase.plan_id, func.count(TestCase.id))
+                .filter(TestCase.plan_id.in_(plan_ids))
+                .group_by(TestCase.plan_id)
+                .all()
+            )
+            tc_direct = {int(pid): int(cnt) for pid, cnt in tc_rows}
+            for pid in count_map:
+                a, b, _ = count_map[pid]
+                count_map[pid] = (a, b, tc_direct.get(int(pid), 0))
 
         def _sort_key(p: Plan):
             # 置顶优先，其次创建时间倒序（与原接口保持一致）
@@ -4566,14 +4660,28 @@ def api_get_project_plans(project_id):
             return (-pinned, -(created.timestamp() if created else 0))
 
         def build_plan_tree(plan: Plan):
-            """递归构建计划树（children 从 children_map 取，避免触发 ORM lazy load）"""
+            """递归构建计划树（children 从 children_map 取）；数量含自身+所有子计划"""
             children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
+            bc = count_map.get(plan.id, (0, 0, 0))[0]
+            bug = count_map.get(plan.id, (0, 0, 0))[1]
+            tc = count_map.get(plan.id, (0, 0, 0))[2]
+            # 测试用例数：优先用直接查询结果（与「计划下测试用例列表」一致），避免 join/覆盖逻辑导致为 0
+            direct_tc = db.session.query(func.count(TestCase.id)).filter(TestCase.plan_id == plan.id).scalar()
+            direct_tc = int(direct_tc) if direct_tc is not None else 0
+            tc = max(int(tc), direct_tc)
+            for c in children:
+                bc += c.get('badcase_count', 0)
+                bug += c.get('bug_count', 0)
+                tc += c.get('test_case_count', 0)
+            st = plan.status or 'active'
+            st_type = 'in_progress' if st == 'active' else ('archived' if st == 'archived' else 'unplanned')
             return {
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
                 'plan_type': plan.plan_type,
-                'status': plan.status,
+                'status': st,
+                'status_type': st_type,
                 'priority': plan.priority,
                 'is_pinned': plan.is_pinned,
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
@@ -4584,21 +4692,48 @@ def api_get_project_plans(project_id):
                 'created_at': plan.created_at.isoformat() if plan.created_at else None,
                 'updated_at': plan.updated_at.isoformat() if plan.updated_at else None,
                 'children': children,
-                'badcase_count': count_map.get(plan.id, (0, 0))[0],
-                'bug_count': count_map.get(plan.id, (0, 0))[1],
+                'badcase_count': bc,
+                'bug_count': bug,
+                'test_case_count': tc,
             }
 
         # 顶级计划：parent_id=None
         root_plans = sorted(children_map.get(None, []), key=_sort_key)
         plans_tree = [build_plan_tree(p) for p in root_plans]
         t_build = (time.perf_counter() - t0) * 1000
-        
+
+        # 二次校验：用一次 GROUP BY 拿到所有 plan 的 test_case 数，再写回树，确保与 DB 一致
+        def _collect_ids(nodes, out):
+            for n in (nodes if isinstance(nodes, list) else [nodes]):
+                if n.get('id') is not None:
+                    out.append(n['id'])
+                if n.get('children'):
+                    _collect_ids(n['children'], out)
+        plan_ids_tree = []
+        _collect_ids(plans_tree, plan_ids_tree)
+        if plan_ids_tree:
+            tc_patch = dict(
+                db.session.query(TestCase.plan_id, func.count(TestCase.id))
+                .filter(TestCase.plan_id.in_(plan_ids_tree))
+                .group_by(TestCase.plan_id)
+                .all()
+            )
+            def _patch(nodes):
+                for n in (nodes if isinstance(nodes, list) else [nodes]):
+                    pid = n.get('id')
+                    if pid is not None:
+                        n['test_case_count'] = int(tc_patch.get(pid, 0))
+                    if n.get('children'):
+                        _patch(n['children'])
+            _patch(plans_tree)
+
         t0 = time.perf_counter()
         payload = {
             'success': True,
             'plans': plans_tree
         }
-        _cache_set(('plans', project_id, current_user.id), payload)
+        # 不再写回缓存，保证数量实时
+        # _cache_set(('plans', project_id, current_user.id), payload)
         t_payload = (time.perf_counter() - t0) * 1000
         print(
             f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build={t_build:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms rows={len(plan_rows)}",
@@ -5257,26 +5392,28 @@ def api_add_bug_comment(bug_id):
 @login_required
 def api_create_testcase():
     """创建TestCase"""
+    print('[TESTCASE-CREATE] 请求进入 (新代码已加载)')
     try:
         data = request.get_json()
         
         # 验证必填字段
         if not data.get('title'):
+            print('[TESTCASE] 400: 缺少 title, data=', {k: v for k, v in (data or {}).items() if k in ('title', 'project_id')})
             return jsonify({'success': False, 'error': '缺少必填字段: title'}), 400
         if not data.get('project_id'):
+            print('[TESTCASE] 400: 缺少 project_id, data=', {k: v for k, v in (data or {}).items() if k in ('title', 'project_id')})
             return jsonify({'success': False, 'error': '缺少必填字段: project_id'}), 400
         
         # 检查项目权限
         if not has_project_permission(current_user.id, data['project_id']):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
-        # 如果指定了plan_id，检查计划是否为testcase类型
-        if data.get('plan_id'):
-            plan = Plan.query.get(data['plan_id'])
+        # plan_id：若存在则使用，不校验 plan_type（测试用例可挂任意类型计划）
+        plan_id = data.get('plan_id')
+        if plan_id:
+            plan = Plan.query.get(plan_id)
             if not plan:
-                return jsonify({'success': False, 'error': '计划不存在'}), 404
-            if plan.plan_type != 'testcase':
-                return jsonify({'success': False, 'error': '只能在testcase类型计划中创建测试用例'}), 400
+                plan_id = None
         
         # 创建TestCase
         testcase = TestCase(
@@ -5293,7 +5430,7 @@ def api_create_testcase():
             baseline=data.get('baseline', ''),
             estimated_time=data.get('estimated_time', 0),
             version=data.get('version', 'v1'),
-            plan_id=data.get('plan_id'),
+            plan_id=plan_id,
             project_id=data['project_id'],
             creator_id=current_user.id,
             assignee_id=data.get('assignee_id')
@@ -5301,23 +5438,30 @@ def api_create_testcase():
         
         db.session.add(testcase)
         db.session.commit()
+        _cache_invalidate_plans(data['project_id'])
         
+        # 确保枚举/日期等可 JSON 序列化
+        _s = testcase.status
+        _st = getattr(_s, 'value', None) or str(_s) if _s else 'draft'
+        _ct = testcase.created_at.isoformat() if testcase.created_at else None
         return jsonify({
             'success': True,
             'message': '测试用例创建成功',
             'testcase': {
                 'id': testcase.id,
-                'title': testcase.title,
-                'status': testcase.status,
-                'priority': testcase.priority,
-                'created_at': testcase.created_at.isoformat()
+                'title': str(testcase.title),
+                'status': _st,
+                'priority': str(testcase.priority) if testcase.priority else 'P3',
+                'created_at': _ct
             }
         })
         
     except Exception as e:
         db.session.rollback()
-        print(f"创建TestCase失败: {e}")
-        return jsonify({'success': False, 'error': '创建TestCase失败'}), 500
+        import traceback
+        err_msg = str(e)
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'创建TestCase失败: {err_msg}'}), 500
 
 @app.route('/api/testcases/<int:testcase_id>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
@@ -5333,12 +5477,18 @@ def api_testcase_detail(testcase_id):
             if not has_project_permission(current_user.id, testcase.project_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
+            _status = testcase.status
+            if hasattr(_status, 'value'):
+                _status = _status.value
+            _exec = testcase.execution_result
+            if _exec is not None and hasattr(_exec, 'value'):
+                _exec = _exec.value
             return jsonify({
                 'success': True,
                 'testcase': {
                     'id': testcase.id,
                     'title': testcase.title,
-                    'status': testcase.status,
+                    'status': _status,
                     'case_type': testcase.case_type,
                     'priority': testcase.priority,
                     'test_type': testcase.test_type,
@@ -5353,7 +5503,7 @@ def api_testcase_detail(testcase_id):
                     'remaining_time': testcase.remaining_time,
                     'last_executed': testcase.last_executed.isoformat() if testcase.last_executed else None,
                     'executed_by': testcase.executed_by,
-                    'execution_result': testcase.execution_result,
+                    'execution_result': _exec,
                     'version': testcase.version,
                     'plan_id': testcase.plan_id,
                     'project_id': testcase.project_id,
@@ -5414,7 +5564,14 @@ def api_testcase_detail(testcase_id):
             if 'executed_by' in data:
                 testcase.executed_by = data['executed_by']
             if 'execution_result' in data:
-                testcase.execution_result = data['execution_result']
+                er = data['execution_result']
+                if er is None or (isinstance(er, str) and er.strip() == ''):
+                    testcase.execution_result = None
+                else:
+                    try:
+                        testcase.execution_result = ExecutionResult(er) if isinstance(er, str) else er
+                    except (ValueError, TypeError):
+                        testcase.execution_result = None
             if 'version' in data:
                 testcase.version = data['version']
             if 'plan_id' in data:
@@ -5424,6 +5581,12 @@ def api_testcase_detail(testcase_id):
             
             testcase.updated_at = datetime.now()
             db.session.commit()
+            _cache_invalidate_plans(testcase.project_id)
+            
+            # 处理 status 枚举值
+            status_val = testcase.status
+            if hasattr(status_val, 'value'):
+                status_val = status_val.value
             
             return jsonify({
                 'success': True,
@@ -5431,15 +5594,16 @@ def api_testcase_detail(testcase_id):
                 'testcase': {
                     'id': testcase.id,
                     'title': testcase.title,
-                    'status': testcase.status,
+                    'status': status_val,
                     'updated_at': testcase.updated_at.isoformat()
                 }
             })
             
         except Exception as e:
             db.session.rollback()
+            err_msg = str(e)
             print(f"更新TestCase失败: {e}")
-            return jsonify({'success': False, 'error': '更新TestCase失败'}), 500
+            return jsonify({'success': False, 'error': f'更新TestCase失败: {err_msg}'}), 500
     
     elif request.method == 'DELETE':
         try:
@@ -5451,8 +5615,10 @@ def api_testcase_detail(testcase_id):
             if not has_project_permission(current_user.id, testcase.project_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
+            pid = testcase.project_id
             db.session.delete(testcase)
             db.session.commit()
+            _cache_invalidate_plans(pid)
             
             return jsonify({
                 'success': True,
@@ -5467,7 +5633,7 @@ def api_testcase_detail(testcase_id):
 @app.route('/api/plans/<int:plan_id>/testcases', methods=['GET'])
 @login_required
 def api_get_plan_testcases(plan_id):
-    """获取计划下的所有测试用例"""
+    """获取计划下的所有测试用例（支持 count_only=1 仅返回数量）"""
     try:
         plan = Plan.query.get(plan_id)
         if not plan:
@@ -5476,6 +5642,16 @@ def api_get_plan_testcases(plan_id):
         # 检查项目权限
         if not has_project_permission(current_user.id, plan.project_id):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 仅返回数量，避免 405 等路由问题
+        count_only = request.args.get('count_only')
+        if count_only in ('1', 1) or str(count_only) == '1':
+            try:
+                n = TestCase.query.filter_by(plan_id=plan_id).count()
+                return jsonify({'success': True, 'count': n})
+            except Exception as ce:
+                print(f"获取计划{plan_id}测试用例数量失败: {ce}")
+                return jsonify({'success': False, 'error': str(ce)}), 500
         
         testcases = TestCase.query.filter_by(plan_id=plan_id).all()
         
@@ -5500,8 +5676,10 @@ def api_get_plan_testcases(plan_id):
         })
         
     except Exception as e:
+        import traceback
         print(f"获取计划TestCase列表失败: {e}")
-        return jsonify({'success': False, 'error': '获取TestCase列表失败'}), 500
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/plans/<int:plan_id>/bugs', methods=['GET'])
@@ -5632,6 +5810,7 @@ def api_get_chat_session(session_id):
                 'is_user': msg.is_user,
                 'content': msg.content,
                 'understanding': msg.understanding,
+                'reasoning': msg.reasoning,
                 'steps': msg.steps,
                 'execution_results': msg.execution_results,
                 'agent_result': msg.agent_result,
@@ -5795,6 +5974,7 @@ def api_add_chat_message(session_id):
             is_user=data.get('is_user', True),
             content=data.get('content'),
             understanding=data.get('understanding'),
+            reasoning=data.get('reasoning'),
             steps=data.get('steps'),
             execution_results=data.get('execution_results'),
             agent_result=data.get('agent_result'),

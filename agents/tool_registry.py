@@ -7,6 +7,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 import json
+import os
 
 
 class BaseTool(ABC):
@@ -54,7 +55,8 @@ class ToolRegistry:
             raise TypeError(f"tool 必须是 BaseTool 的实例，得到 {type(tool)}")
         
         self.tools[tool.name] = tool
-        print(f"[REGISTRY] ✅ 工具已注册: {tool.name}")
+        if os.getenv("QUIET_LOG") != "1":
+            print(f"[REGISTRY] ✅ 工具已注册: {tool.name}")
     
     def get(self, name: str) -> Optional[BaseTool]:
         """

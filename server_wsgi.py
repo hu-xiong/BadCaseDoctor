@@ -65,20 +65,20 @@ def _run_gunicorn(host: str, port: int) -> int:
         return 1
 
 
+def _run_flask_dev(host: str, port: int) -> int:
+    """开发模式：Flask 自带热重载，修改代码自动重启"""
+    from app import app as flask_app
+    print(f"[WSGI] 开发模式 (FLASK_DEBUG=1)：使用 Flask 开发服务器 http://{host}:{port}，支持热重载")
+    flask_app.run(host=host, port=port, debug=True)
+    return 0
+
+
 def main() -> int:
     host = os.getenv("WSGI_HOST", "127.0.0.1")
     port = int(os.getenv("WSGI_PORT", "5000"))
 
-    if _is_windows():
-        return _run_waitress(host, port)
-
-    # 非 Windows 优先 gunicorn；如未安装可用 waitress 兜底
-    try:
-        import gunicorn  # noqa: F401
-
-        return _run_gunicorn(host, port)
-    except Exception:
-        return _run_waitress(host, port)
+    # 强制使用开发模式，以便看到日志输出
+    return _run_flask_dev(host, port)
 
 
 if __name__ == "__main__":

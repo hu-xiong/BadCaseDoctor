@@ -112,6 +112,7 @@
                       <span class="plan-info">
                         <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
                         <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
+                        <span v-if="(plan.content_type || plan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count ?? 0 }}</span>
                       </span>
                       
                       <!-- 操作按钮 -->
@@ -139,6 +140,7 @@
                         <span class="plan-info">
                           <span v-if="childPlan.badcase_count > 0" class="count-badge badcase">{{ childPlan.badcase_count }}</span>
                           <span v-if="childPlan.bug_count > 0" class="count-badge bug">{{ childPlan.bug_count }}</span>
+                          <span v-if="(childPlan.content_type || childPlan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count ?? 0 }}</span>
                         </span>
                         
                         <!-- 操作按钮 -->
@@ -190,7 +192,7 @@
                           @click.stop="togglePlanExpansion(plan.id)"
                         >▶</span>
                         <span v-else class="expand-placeholder"></span>
-                        <span class="plan-icon">{{ getPlanIcon(plan.content_type || 'badcase') }}</span>
+                        <span class="plan-icon">{{ getPlanIcon(plan.content_type || plan.plan_type || 'badcase') }}</span>
                         <span class="plan-name">
                           {{ plan.name }}
                           <span v-if="plan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
@@ -198,6 +200,7 @@
                         <span class="plan-info">
                           <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
                           <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
+                          <span v-if="(plan.content_type || plan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count ?? 0 }}</span>
                         </span>
                         
                         <!-- 操作按钮 -->
@@ -274,6 +277,7 @@
                             <span class="plan-info">
                               <span v-if="childPlan.badcase_count > 0" class="count-badge badcase">{{ childPlan.badcase_count }}</span>
                               <span v-if="childPlan.bug_count > 0" class="count-badge bug">{{ childPlan.bug_count }}</span>
+                              <span v-if="(childPlan.content_type || childPlan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count ?? 0 }}</span>
                             </span>
                             
                             <!-- 操作按钮 -->
@@ -345,6 +349,7 @@
                               <span class="plan-info">
                                 <span v-if="grandChildPlan.badcase_count > 0" class="count-badge badcase">{{ grandChildPlan.badcase_count }}</span>
                                 <span v-if="grandChildPlan.bug_count > 0" class="count-badge bug">{{ grandChildPlan.bug_count }}</span>
+                                <span v-if="(grandChildPlan.content_type || grandChildPlan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(grandChildPlan.id)] ?? grandChildPlan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(grandChildPlan.id)] ?? grandChildPlan.test_case_count ?? 0 }}</span>
                               </span>
                               
                               <!-- 操作按钮 -->
@@ -440,6 +445,7 @@
                         <span class="plan-info">
                           <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
                           <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
+                          <span v-if="(plan.content_type || plan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count ?? 0 }}</span>
                         </span>
                         
                         <!-- 操作按钮 -->
@@ -500,6 +506,7 @@
           :toggleTaskSelection="toggleTaskSelection"
           :editItem="editBadcase"
           :pendingModifications="pendingModifications"
+          :pendingCreates="pendingCreates"
           :expandedDetailRows="expandedDetailRows"
           :hasDetailFieldModifications="hasDetailFieldModifications"
           :toggleDetailExpand="toggleDetailExpand"
@@ -507,6 +514,8 @@
           :getConsecutiveGroupSize="getConsecutiveGroupSize"
           :confirmConsecutiveGroup="confirmConsecutiveGroup"
           :cancelConsecutiveGroup="cancelConsecutiveGroup"
+          :confirmCreate="confirmCreate"
+          :cancelCreate="cancelCreate"
           :getBadcaseStatusText="getBadcaseStatusText"
           :getAssigneeDisplayText="getAssigneeDisplayText"
           :createNewBadcase="createNewBadcase"
@@ -944,7 +953,7 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
 import { getBadCaseStatusText } from '../constants/status.js'
@@ -1074,6 +1083,8 @@ export default {
     const projectPlans = ref([])
     const filteredPlans = ref([])
     const loading = ref(false)
+    // 计划下测试用例数量（单独接口拉取，与列表一致，保证侧边栏显示正确）
+    const planTestCaseCounts = ref({})
 
     // 悬停和上下文菜单状态
     const hoveredPlan = ref(null)
@@ -1173,6 +1184,7 @@ export default {
     const badcasePerPage = ref(20)
     const totalBadcases = ref(0)
     const pendingModifications = ref({}) // 存储待确认的修改
+    const pendingCreates = ref([]) // 存储待确认的新建（无 before diff）
     const expandedDetailRows = ref([]) // 展开的详情行
     
     // 详情字段列表（不在列表中显示的字段）
@@ -1220,7 +1232,21 @@ export default {
       'remark': '备注',
       'baseline': '基线'
     }
-    
+    // 标签/中文 -> 英文 key（用于 diff 里传中文字段名时识别为详情字段）
+    const LABEL_TO_FIELD = {}
+    Object.entries(FIELD_LABELS).forEach(([key, label]) => {
+      LABEL_TO_FIELD[label] = key
+    })
+    LABEL_TO_FIELD['期望结果'] = 'expected_result' // 常见说法
+
+    // 列表字段（在表格列中即可直接看到/编辑的字段）
+    const LIST_FIELDS = [
+      'title',
+      'status',
+      'priority',
+      'assignee'
+    ]
+
     // 计算属性
     const selectedBaselinePlanName = computed(() => {
       if (!selectedBaselinePlan.value) return ''
@@ -1343,6 +1369,9 @@ export default {
         if (currentPlanType.value === 'bug') {
           console.log('🔍 检测到当前计划类型为 bug，调用 getProjectBugs')
           response = await getProjectBugs(projectId.value, page, badcasePerPage.value, additionalParams)
+        } else if (currentPlanType.value === 'test_case') {
+          console.log('🔍 检测到当前计划类型为 test_case，调用 getProjectTestCases')
+          response = await getProjectTestCases(projectId.value, page, badcasePerPage.value, additionalParams)
         } else {
           console.log('🔍 调用 getProjectBadcases')
           response = await getProjectBadcases(projectId.value, page, badcasePerPage.value, additionalParams)
@@ -1721,19 +1750,21 @@ export default {
       return breadcrumb.join(' / ')
     }
     
-    // 处理计划数据，添加图标和格式化
+    // 处理计划数据，添加图标和格式化；保证 test_case_count 等数量字段必为数字
     const processPlanData = (plans) => {
       if (!plans) return []
       return plans.map(plan => {
         const contentType = plan.content_type || plan.plan_type || 'badcase'
-        console.log('🔍 处理计划:', plan.name, '，plan_type:', plan.plan_type, '，content_type:', plan.content_type, '，最终使用:', contentType)
+        const children = plan.children ? processPlanData(plan.children) : []
         return {
           ...plan,
-          // 兼容后端返回的 plan_type 和前端使用的 content_type
           content_type: contentType,
           icon: getPlanIcon(contentType),
           statusText: getPlanStatusText(plan.status),
-          children: plan.children ? processPlanData(plan.children) : []
+          children,
+          badcase_count: Number(plan.badcase_count ?? 0),
+          bug_count: Number(plan.bug_count ?? 0),
+          test_case_count: Number(plan.test_case_count ?? 0)
         }
       })
     }
@@ -1775,27 +1806,21 @@ export default {
         console.log('响应数据:', response.data)
         if (response && response.data && response.data.success) {
           projectPlans.value = processPlanData(response.data.plans)
-          console.log('处理后的计划数据:', projectPlans.value)
-          console.log('计划层级结构检查:')
-          projectPlans.value.forEach((plan, index) => {
-            console.log(`计划${index + 1}: ${plan.name} (ID: ${plan.id})`)
-            if (plan.children && plan.children.length > 0) {
-              plan.children.forEach((child, childIndex) => {
-                console.log(`  子计划${childIndex + 1}: ${child.name} (ID: ${child.id}, 父ID: ${child.parent_id})`)
-              })
-            }
-          })
-          // 初始化过滤后的计划列表
+          // 后端 plans 接口已用 GROUP BY 聚合返回每个计划的 test_case_count，无需单独请求
+          const agg = {}
+          const setAgg = (plans) => {
+            if (!plans?.length) return
+            plans.forEach(p => {
+              // 确保 key 和 value 都是正确的类型
+              agg[Number(p.id)] = Number(p.test_case_count ?? 0)
+              if (p.children?.length) setAgg(p.children)
+            })
+          }
+          setAgg(projectPlans.value)
+          planTestCaseCounts.value = agg
           filterPlans()
-          console.log('过滤后的计划数据:', filteredPlans.value)
-          
-          // 强制触发Vue响应式更新
-          console.log('强制更新响应式数据...')
           projectPlans.value = [...projectPlans.value]
           filteredPlans.value = [...filteredPlans.value]
-          
-          // 已禁用自动创建未计划BadCase计划
-          // await ensureUnplannedBadcasePlan()
         } else {
           console.error('获取项目计划失败:', response?.data?.error || '未知错误')
         }
@@ -2457,6 +2482,7 @@ export default {
     // 在主区域挂载 Editor（替代 overlay）
     const openMainEditor = (itemId, itemType, showDiff = false) => {
       console.log('[MAIN-EDITOR] 打开主区域编辑:', { itemId, itemType, showDiff })
+      console.log('[MAIN-EDITOR] itemId type:', typeof itemId, 'value:', itemId)
       if (itemType === 'bug') {
         mainEditorComponent.value = NewBug
       } else if (itemType === 'test_case' || itemType === 'testcase') {
@@ -2468,6 +2494,8 @@ export default {
       mainEditorShowDiff.value = showDiff
       mainEditorKey.value++
       showMainEditor.value = true
+      console.log('[MAIN-EDITOR] 设置后 mainEditorItemId:', mainEditorItemId.value)
+      console.log('[MAIN-EDITOR] 设置后 showMainEditor:', showMainEditor.value)
     }
 
     const closeMainEditor = () => {
@@ -2477,6 +2505,7 @@ export default {
       mainEditorItemId.value = null
       mainEditorShowDiff.value = false
       refreshBadcases()
+      fetchProjectPlans()  // 刷新计划列表，更新侧边栏数量徽章
     }
     
     const goToDashboard = () => {
@@ -2525,6 +2554,9 @@ export default {
       delete newPending[bugId]
       pendingModifications.value = newPending
       
+      console.log('[MODIFY] 已清除 pendingModifications，bugId:', bugId)
+      console.log('[MODIFY] 清除后的 pendingModifications:', pendingModifications.value)
+      
       // 3. 立即通知对话区更新状态
       const event = new CustomEvent('modify-confirmed', {
         detail: { targetId: bugId },
@@ -2538,6 +2570,7 @@ export default {
       fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/modify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',  // 携带 cookies
         body: JSON.stringify({
           target: targetType,
           target_id: bugId,
@@ -3777,12 +3810,22 @@ export default {
 
     onMounted(async () => {
       console.log('=== ProjectDetail onMounted ===')
-                  
-      // 监听grep导航事件
+                      
+      // 监听 grep 导航事件
       window.addEventListener('grep-navigate', handleGrepNavigate)
-      
-      // 监听modify显示事件
+          
+      // 监听 modify 显示事件
       window.addEventListener('show-modify-in-list', handleShowModifyInList)
+                
+      // 监听清除 pendingModifications 事件
+      window.addEventListener('clear-pending-modification', handleClearPendingModification)
+          
+      // 监听 modify-confirmed 事件（来自对话区）
+      window.addEventListener('modify-confirmed', handleModifyConfirmed)
+          
+      // 监听 modify-cancelled 事件（来自对话区）
+      window.addEventListener('modify-cancelled', handleModifyCancelled)
+      window.addEventListener('create-pending', handleCreatePending)
                   
       // 检查URL参数，如果有expand_plan参数，先设置选中的计划ID
       // 这样后续的manualRefreshPlans中的fetchBadcases就能带上正确的plan_id
@@ -3890,31 +3933,155 @@ export default {
       }
     })
     
-    // 处理grep导航事件
+    // 组件卸载时清理事件监听器
+    onUnmounted(() => {
+      console.log('=== ProjectDetail onUnmounted ===')
+      window.removeEventListener('grep-navigate', handleGrepNavigate)
+      window.removeEventListener('show-modify-in-list', handleShowModifyInList)
+      window.removeEventListener('clear-pending-modification', handleClearPendingModification)
+      window.removeEventListener('modify-confirmed', handleModifyConfirmed)
+      window.removeEventListener('modify-cancelled', handleModifyCancelled)
+      window.removeEventListener('create-pending', handleCreatePending)
+    })
+
+    const handleCreatePending = (event) => {
+      const detail = event?.detail || {}
+      const target = detail.target
+      const preview = detail.preview
+      if (!target || !preview) return
+      // 只保留当前 projectId 的待新增
+      if (preview.project_id && Number(preview.project_id) !== Number(projectId.value)) return
+      // 生成临时 id
+      const tempId = `create_${Date.now()}_${Math.random().toString(16).slice(2)}`
+      pendingCreates.value = [
+        ...pendingCreates.value,
+        { tempId, target, preview, messageId: detail.messageId || null, createdAt: Date.now() }
+      ]
+      // 刷新列表，让虚拟行能显示在顶部
+      refreshBadcases()
+
+      // 轻量定位：滚动到该“待新增”行
+      setTimeout(() => {
+        const el = document.querySelector(`[data-create-id="${tempId}"]`)
+        if (el && el.scrollIntoView) {
+          el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        }
+      }, 50)
+    }
+
+    const confirmCreate = async (tempId) => {
+      const item = pendingCreates.value.find(x => x.tempId === tempId)
+      if (!item) return
+      const target = item.target
+      const preview = item.preview || {}
+      // 先乐观移除
+      pendingCreates.value = pendingCreates.value.filter(x => x.tempId !== tempId)
+      try {
+        if (target === 'testcase' || target === 'test_case') {
+          await fetch(`${BACKEND_BASE_URL}/api/testcases`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(preview)
+          }).then(r => r.json())
+        } else if (target === 'bug') {
+          await fetch(`${BACKEND_BASE_URL}/api/bugs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(preview)
+          }).then(r => r.json())
+        } else if (target === 'badcase') {
+          await fetch(`${BACKEND_BASE_URL}/api/badcases`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(preview)
+          }).then(r => r.json())
+        }
+        await refreshBadcases()
+        await fetchProjectPlans()
+      } catch (e) {
+        console.error('[CREATE] 创建失败:', e)
+      }
+    }
+
+    const cancelCreate = (tempId) => {
+      pendingCreates.value = pendingCreates.value.filter(x => x.tempId !== tempId)
+    }
+    
+    // 处理 grep 导航事件
+    const handleClearPendingModification = (event) => {
+      const { targetId } = event.detail
+      console.log('[MODIFY] 收到清除 pendingModifications 指令:', targetId)
+          
+      // 清除 pendingModifications 中的标记
+      const newPending = { ...pendingModifications.value }
+      delete newPending[targetId]
+      pendingModifications.value = newPending
+      console.log('[MODIFY] 已清除 pendingModifications:', pendingModifications.value)
+    }
+    
+    // 处理 modify-confirmed 事件（来自对话区）
+    const handleModifyConfirmed = (event) => {
+      const { targetId } = event.detail
+      console.log('[MODIFY] 收到 modify-confirmed 事件:', targetId)
+      
+      // 清除 pendingModifications 中的标记
+      const newPending = { ...pendingModifications.value }
+      delete newPending[targetId]
+      pendingModifications.value = newPending
+      console.log('[MODIFY] 已清除 pendingModifications:', pendingModifications.value)
+    }
+    
+    // 处理 modify-cancelled 事件（来自对话区）
+    const handleModifyCancelled = (event) => {
+      const { targetId } = event.detail
+      console.log('[MODIFY] 收到 modify-cancelled 事件:', targetId)
+      
+      // 清除 pendingModifications 中的标记
+      const newPending = { ...pendingModifications.value }
+      delete newPending[targetId]
+      pendingModifications.value = newPending
+      console.log('[MODIFY] 已清除 pendingModifications:', pendingModifications.value)
+    }
+        
+    const highlightRowId = ref(null) // 高亮的列表行，用于滚动&样式
+
     const handleShowModifyInList = async (event) => {
           const { targetId, target, diff, modifications, plan_id, executed, messageId, batchIndex } = event.detail
+          console.log('[DEBUG-show-modify-in-list at ProjectDetail]', JSON.stringify(event.detail, null, 2))
           // 确保 targetId 是整数
           const intTargetId = parseInt(targetId)
-          console.log('[MODIFY] 收到列表显示指令:', { targetId, intTargetId, target, diff, plan_id, executed, messageId, batchIndex })
-          
+          console.log('[MODIFY] 收到列表显示指令 (原始事件):', event.detail)
+          console.log('[MODIFY] 解析后的 targetId/intTargetId:', { targetId, intTargetId })
+          console.log('[MODIFY] diff 内容:', diff)
+          console.log('[MODIFY] diff 类型:', typeof diff, '是否数组:', Array.isArray(diff), '长度:', diff?.length)
+          console.log('[MODIFY] modifications 内容:', modifications)
+          console.log('[MODIFY] modifications 类型:', typeof modifications, 'keys:', modifications ? Object.keys(modifications) : [])
+              
           // 构造待修改数据结构
           const modifyData = {}
           
           // 优先使用 diff，如果没有 diff 则从 modifications 生成
-          if (diff && Array.isArray(diff)) {
+          if (diff && Array.isArray(diff) && diff.length > 0) {
+            console.log('[MODIFY] 使用 diff 构造 modifyData, diff.length:', diff.length)
             diff.forEach(fieldDiff => {
-              const field = fieldDiff.field
+              const rawField = fieldDiff.field ?? fieldDiff.field_label
+              // 负责人：后端可能返回 assignee_id，统一存为 assignee 便于列表展示 diff
+              const fieldKey = (LABEL_TO_FIELD[rawField] || rawField) === 'assignee_id' ? 'assignee' : (LABEL_TO_FIELD[rawField] || rawField)
+              console.log('[MODIFY] diff 字段:', rawField, '-> key:', fieldKey)
               const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
               const newLine = fieldDiff.lines?.find(l => l.type === 'add')
               const unchangedLine = fieldDiff.lines?.find(l => l.type === 'unchanged')
               
               if (oldLine && newLine) {
-                modifyData[field] = {
+                modifyData[fieldKey] = {
                   old: oldLine.content,
                   new: newLine.content
                 }
               } else if (unchangedLine) {
-                modifyData[field] = {
+                modifyData[fieldKey] = {
                   old: unchangedLine.content,
                   new: unchangedLine.content,
                   unchanged: true
@@ -3922,40 +4089,99 @@ export default {
               }
             })
           } else if (modifications && typeof modifications === 'object') {
+            console.log('[MODIFY] 使用 modifications 构造 modifyData')
             for (const [field, value] of Object.entries(modifications)) {
-              modifyData[field] = {
-                old: '',
-                new: value
+              // 处理 modifications 中值可能是对象的情况
+              if (value && typeof value === 'object' && 'new' in value) {
+                modifyData[field] = value
+              } else {
+                modifyData[field] = {
+                  old: '',
+                  new: value
+                }
               }
             }
           }
           
-          // 检查是否修改的是详情字段（非列表字段）
-          const hasDetailFields = Object.keys(modifyData).some(field => DETAIL_FIELDS.includes(field))
-          console.log('[MODIFY] 是否有详情字段修改:', hasDetailFields, '修改字段:', Object.keys(modifyData))
-          
-          // 如果修改的是详情字段，打开编辑视图
-          if (hasDetailFields && !executed) {
-            console.log('[MODIFY] 检测到详情字段修改，跳转到编辑页面')
-            
-            // 将 diff 数据存储到 sessionStorage，供编辑页面使用
-            const diffData = {
-              targetId: intTargetId,
-              target: target,
-              diff: diff,
-              modifications: modifyData,
-              messageId: messageId,
-              batchIndex: batchIndex
+          console.log('[MODIFY] 构造后的 modifyData:', modifyData)
+          const fieldKeys = Object.keys(modifyData)
+          console.log('[MODIFY] modifyData 的 keys:', fieldKeys)
+
+          // 是否包含详情字段（只能在详情页编辑）；assignee_id 按 assignee 视为列表字段
+          const hasDetailFields = fieldKeys.some(field => {
+            const normalized = (LABEL_TO_FIELD[field] || field) === 'assignee_id' ? 'assignee' : (LABEL_TO_FIELD[field] || field)
+            return DETAIL_FIELDS.includes(normalized)
+          })
+
+          // 是否全部都是列表字段（可只在列表展示 diff，跳转列表不高亮详情）
+          const allListFields = fieldKeys.length > 0 && fieldKeys.every(field => {
+            const normalized = (LABEL_TO_FIELD[field] || field) === 'assignee_id' ? 'assignee' : (LABEL_TO_FIELD[field] || field)
+            return LIST_FIELDS.includes(normalized)
+          })
+
+          // 只要有 diff 就先缓存到 sessionStorage，后续无论跳列表还是详情都可复用
+          if (diff && Array.isArray(diff) && diff.length > 0) {
+            const hasPendingModification = pendingModifications.value[intTargetId]
+            if (!hasPendingModification || executed) {
+              sessionStorage.removeItem('pendingModifyDiff')
+              const diffData = {
+                targetId: intTargetId,
+                target: target,
+                diff: diff,
+                modifications: modifyData,
+                messageId: messageId,
+                batchIndex: batchIndex
+              }
+              sessionStorage.setItem('pendingModifyDiff', JSON.stringify(diffData))
+              console.log('[MODIFY] 存储 diff 数据:', diffData)
             }
-            sessionStorage.setItem('pendingModifyDiff', JSON.stringify(diffData))
-            
-            // 优先在主区域挂载编辑页面，减少 overlay/顶栏重复
-            console.log('[MODIFY] 使用主区域挂载编辑页面')
-            openMainEditor(intTargetId, target, true)
-            return
+
+            // 如果都是列表字段（例如标题/状态/优先级/负责人），只跳到列表并高亮那一行，不打开编辑详情
+            if (allListFields && !hasDetailFields) {
+              console.log('[MODIFY] 仅列表字段修改，跳转列表并高亮行，不打开详情')
+              // 只有在「尚未采纳」（executed === false）时，才在列表上展示 diff
+              // 一旦采纳成功（executed === true），列表应只显示最新值，不再有黄色 diff 行
+              if (!executed) {
+                pendingModifications.value = {
+                  ...pendingModifications.value,
+                  [intTargetId]: {
+                    ...(pendingModifications.value[intTargetId] || {}),
+                    ...Object.fromEntries(
+                      fieldKeys.map(field => {
+                        const v = modifyData[field]
+                        // 统一成 { old, new } 结构，便于 BadcaseListPanel 直接使用
+                        return [field, typeof v === 'object' && 'new' in v ? v : { old: '', new: v }]
+                      })
+                    )
+                  }
+                }
+              } else {
+                // executed === true：若列表上还有残留的 pendingModifications，清理掉
+                if (pendingModifications.value[intTargetId]) {
+                  const clone = { ...pendingModifications.value }
+                  delete clone[intTargetId]
+                  pendingModifications.value = clone
+                }
+              }
+              // 类型切换
+              if (target === 'bug') {
+                urlContentType.value = 'bug'
+              } else if (target === 'badcase') {
+                urlContentType.value = 'badcase'
+              } else if (target === 'testcase') {
+                urlContentType.value = 'test_case'
+              }
+              highlightRowId.value = intTargetId
+              // 下面已有的 plan_id 推导和 fetchBadcases 逻辑会负责切计划和刷新列表
+            } else {
+              // 包含详情字段：需要在详情页里编辑
+              console.log('[MODIFY] 包含详情字段，打开编辑详情页')
+              openMainEditor(intTargetId, target, true)
+              return
+            }
           }
           
-          // 切换到正确的内容类型
+          // 切换到正确的内容类型（无 diff 时仅切列表）
           if (target === 'bug') {
             urlContentType.value = 'bug'
           } else if (target === 'badcase') {
@@ -3967,10 +4193,11 @@ export default {
           // 获取 plan_id（优先使用传递过来的，其次从 diff 或列表中查找）
           let targetPlanId = plan_id ? parseInt(plan_id) : null
           console.log('[MODIFY] 传入的 plan_id:', plan_id, '解析后:', targetPlanId)
+          console.log('[MODIFY] 当前 badcases 列表:', badcases.value.map(b => ({ id: b.id, plan_id: b.plan_id, title: b.title })))
           
           // 方式2: 从 diff 中查找 plan_id 字段
           if (!targetPlanId && diff) {
-            const planIdDiff = diff.find(d => d.field === 'plan_id')
+            const planIdDiff = diff.find(d => (d.field ?? d.field_label) === 'plan_id')
             if (planIdDiff) {
               const newLine = planIdDiff.lines.find(l => l.type === 'add')
               if (newLine) {
@@ -3979,23 +4206,42 @@ export default {
             }
           }
           
-          // 方式3: 从当前列表中查找
+          // 方式 3: 从当前列表中查找
           if (!targetPlanId) {
             const item = badcases.value.find(b => b.id == intTargetId)
             if (item) {
               targetPlanId = item.plan_id
               console.log('[MODIFY] 从列表中找到 plan_id:', targetPlanId)
+            } else {
+              // 列表中找不到，说明当前列表可能不是正确的计划列表
+              // 先刷新全量列表（不传 plan_id）再查找
+              console.log('[MODIFY] 当前列表找不到 targetId，先刷新全量列表')
+              const oldSelectedPlan = selectedPlan.value
+              selectedPlan.value = null  // 清除选中状态以加载全量数据
+              await fetchBadcases()
+              await nextTick()
+                        
+              // 重新查找
+              const newItem = badcases.value.find(b => b.id == intTargetId)
+              if (newItem) {
+                targetPlanId = newItem.plan_id
+                console.log('[MODIFY] 从刷新后的列表中找到 plan_id:', targetPlanId)
+              }
+                        
+              // 恢复原来的选中状态（如果找到了 plan_id 则使用新的）
+              if (targetPlanId) {
+                selectedPlan.value = targetPlanId
+              } else {
+                selectedPlan.value = oldSelectedPlan
+              }
             }
           }
           
-          // 如果找到了计划，选中并展开
+          // 如果找到了计划，先设置 selectedPlan，等待 fetchBadcases 完成后再展开
           // 注意：targetPlanId 可能是 null（未计划），需要清除 selectedPlan 来显示所有记录
           if (targetPlanId) {
             selectedPlan.value = targetPlanId
-            // 确保计划树展开
-            if (!expandedPlans.value.includes(targetPlanId)) {
-              expandedPlans.value.push(targetPlanId)
-            }
+            console.log('[MODIFY] 已设置 selectedPlan:', targetPlanId)
           } else {
             // plan_id 为 null 表示未计划，清除 selectedPlan 显示所有记录
             selectedPlan.value = null
@@ -4005,41 +4251,72 @@ export default {
           // 重新加载数据（会使用 selectedPlan 和 urlContentType）
           await fetchBadcases()
           
+          // fetchBadcases 完成后，展开对应的计划节点
+          if (targetPlanId) {
+            // 等待计划树渲染完成
+            await nextTick()
+            await new Promise(resolve => setTimeout(resolve, 100))
+            if (!expandedPlans.value.includes(targetPlanId)) {
+              expandedPlans.value.push(targetPlanId)
+            }
+            console.log('[MODIFY] 已展开计划节点:', targetPlanId)
+          }
+          
           // 只有未执行时才重新设置 pendingModifications
           if (!executed) {
-            // 重新设置 pendingModifications（使用新对象触发响应式更新）
+            // 检查 sessionStorage 中是否有旧的 diff
+            const oldDiffDataStr = sessionStorage.getItem('pendingModifyDiff')
+            if (oldDiffDataStr) {
+              try {
+                const oldDiffData = JSON.parse(oldDiffDataStr)
+                // 如果 sessionStorage 中的 targetId 与当前相同，但 pendingModifications 中不存在
+                // 说明已经处理过了，应该清除 sessionStorage
+                if (oldDiffData.targetId === intTargetId && !pendingModifications.value[intTargetId]) {
+                  console.log('[MODIFY] sessionStorage 中存在但 pendingModifications 不存在，说明已处理，清除旧数据')
+                  sessionStorage.removeItem('pendingModifyDiff')
+                  // 不再重新设置 pendingModifications，但继续执行后续逻辑（如展开计划等）
+                  console.log('[MODIFY] 跳过重新设置 pendingModifications')
+                } else {
+                  // 需要重新设置 pendingModifications
+                  setupPendingModifications()
+                }
+              } catch (e) {
+                console.error('[MODIFY] 解析 sessionStorage 失败:', e)
+                sessionStorage.removeItem('pendingModifyDiff')
+                setupPendingModifications()
+              }
+            } else {
+              // sessionStorage 为空，需要重新设置
+              setupPendingModifications()
+            }
+          }
+          
+          // 设置 pendingModifications 的辅助函数
+          const setupPendingModifications = () => {
             const modifyData = {}
             
             // 优先使用 diff，如果没有 diff 则从 modifications 生成
             if (diff && Array.isArray(diff)) {
               diff.forEach(fieldDiff => {
-                const field = fieldDiff.field
+                const rawField = fieldDiff.field
+                const fieldKey = LABEL_TO_FIELD[rawField] || rawField
                 const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
                 const newLine = fieldDiff.lines?.find(l => l.type === 'add')
-                // 兼容 unchanged 类型（值没有实际变化）
                 const unchangedLine = fieldDiff.lines?.find(l => l.type === 'unchanged')
-                
                 if (oldLine && newLine) {
-                  modifyData[field] = {
-                    old: oldLine.content,
-                    new: newLine.content
-                  }
+                  modifyData[fieldKey] = { old: oldLine.content, new: newLine.content }
                 } else if (unchangedLine) {
-                  // unchanged 表示值已经是目标值，显示为确认状态
-                  modifyData[field] = {
+                  modifyData[fieldKey] = {
                     old: unchangedLine.content,
                     new: unchangedLine.content,
-                    unchanged: true  // 标记为未变化
+                    unchanged: true
                   }
                 }
               })
             } else if (modifications && typeof modifications === 'object') {
-              // 从 modifications 生成 modifyData
               for (const [field, value] of Object.entries(modifications)) {
-                modifyData[field] = {
-                  old: '',
-                  new: value
-                }
+                const fieldKey = LABEL_TO_FIELD[field] || field
+                modifyData[fieldKey] = { old: '', new: value }
               }
             }
             
@@ -4049,7 +4326,7 @@ export default {
                 ...pendingModifications.value,
                 [intTargetId]: modifyData
               }
-              console.log('[MODIFY] fetchBadcases 后重新设置 pendingModifications:', pendingModifications.value)
+              console.log('[MODIFY] setupPendingModifications 设置 pendingModifications:', pendingModifications.value)
             }
           }
           
@@ -4143,6 +4420,7 @@ export default {
       badcaseLoading,
       totalBadcases,
       loading,
+      planTestCaseCounts,
       hoveredPlan,
       contextMenu,
       planCollapsed,
@@ -5552,6 +5830,11 @@ export default {
 .count-badge.bug {
   background: #fff3cd;
   color: #856404;
+}
+
+.count-badge.testcase {
+  background: #e8f5e9;
+  color: #2e7d32;
 }
 
 .count-badge.unplanned {

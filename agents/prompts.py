@@ -1,7 +1,9 @@
 # agents/prompts.py
 """
-ReAct Prompt 工程 - Claude Code 强约束模板
-适配文心一言 (Qwen) 模型
+ReAct Prompt 工程 - 公用强约束模板
+
+提示词为公用：所有模型（GLM5、文心、Qwen、OpenAI 等）使用同一套 think/decide/observe 等模板，
+仅底层调用的模型实例不同，不做按模型分支的差异化提示。
 
 核心设计原则：
 1. 长而精准 - 明确的系统上下文
@@ -11,7 +13,12 @@ ReAct Prompt 工程 - Claude Code 强约束模板
 """
 
 import json
+import re
 from typing import Any, List, Dict, Union, Optional
+try:
+    import xml.etree.ElementTree as ET
+except ImportError:
+    ET = None
 
 
 class ReactPromptTemplates:
@@ -40,9 +47,21 @@ class ReactPromptTemplates:
         return f"""你是一个任务规划专家。根据用户请求，生成一个精准的 Todo 列表。
 
 <system>
-你的角色：分析用户请求，拆分成可执行的任务步骤
+你的角色：分析用户请求，拆分成可执行的任务步骤。
+
+【输出格式说明】本任务只需返回 <todo_list>...</todo_list>，不要额外输出思考说明或其它文字。若系统在别处展示「给用户看的简短说明」时，应为一两句话（如「先查找再修改」），且不写参数名；但本次回复中你只输出 XML 格式的 Todo 列表即可。
+
+【项目名称转换规则】
+- 如果上下文中提供了 project_name（项目名称），使用「在 XXX 项目中」而不是「在 project_id=1 中」
+- 如果上下文中提供了 plan_name（计划名称），使用「在 XXX 计划下」而不是「在 plan_id=34 中」
+- 示例：
+  - ❌ 错误：「在 project_id=1 中搜索」→ ✅ 正确：「在 A 计划项目中搜索」
+  - ❌ 错误：「plan_id=34 的记录」→ ✅ 正确：「在一个测试用例的计划下的记录」
+  - ❌ 错误：「target_id=6 的 Bug」→ ✅ 正确：「创建测试用例这条记录」
+- 如果上下文中**只有 project_id 而没有 project_name**，可以使用「当前项目」或直接省略项目描述，绝不能编造项目名称，也不要在文案里出现「project_id=1」等内部字段。
+
 约束条件：
-1. 最多 3 项 Todo（保持简洁）
+1. Todo 总数不超过 3 项（保持简洁）
 2. 每项 Todo 必须对应一个可用工具
 3. 使用明确的、可测量的语言
 
@@ -60,10 +79,16 @@ class ReactPromptTemplates:
    - 使用 grep工具搜索关键词
    - 查询意图关键词：查询、搜索、查看、找、列出、显示、单个关键字
 
-   **修改操作（两步流程）**：
-   - 第1步：使用 grep工具搜索定位目标
-   - 第2步：使用 modify工具执行修改
-   - 修改意图关键词：修改、改、更新、设为、改成、调整
+   **修改操作（两步流程，缺一不可）**：
+   - 第1步：使用 grep 工具搜索定位目标（必选）
+   - 第2步：使用 modify 工具执行修改（必选）
+   - 修改意图关键词：修改、改、更新、设为、改成、调整、期望结果、状态、优先级、负责人、标题
+   - **不可修改的字段**：类型(type)、id、project_id、plan_id 等为系统固定字段，modify 无法修改；若用户要求修改这些字段，系统会单独提示并拒绝执行。
+   - **重要**：
+     - modify 工具支持的目标类型为 bug / badcase / testcase，不要因为早期文档误写而认为不支持 testcase。
+     - 只要用户请求涉及「修改」Bug/BadCase/测试用例（改状态、期望结果、优先级、负责人、标题等），**通常**输出 2 条 Todo（先 grep 再 modify）；如确有必要增加额外校验/说明，总数也不得超过 3 条，且绝不能只输出 1 条（禁止跳过 grep）。
+     - 当用户话语中明确出现「测试用例」「用例」等词时，应将目标类型视为 testcase，而不是随意改写为 Bug 或 BadCase。
+     - 第二步 modify 会自动使用第一步 grep 定位到的 target_id，Todo 描述中只需写「将该测试用例/该Bug/该BadCase 的 XXX 修改为 YYY」，无需写 target_id。
 
    **创建操作（单步流程）**：
    - 使用 create 工具创建新的 Bug/BadCase/测试用例
@@ -71,13 +96,19 @@ class ReactPromptTemplates:
 
 【grep 工具参数规范】：
 - keywords: 搜索关键词（必填，如果要查询所有，设置为空字符串 "" 或 "*"）
-- target: 分析目标 - bug/badcase/all（必填）
-- project_id: 项目ID（可选）
-- **keywords 由你从用户话里识别**：用户若提到具体 BadCase/Bug 标题（如「雪碧和七喜」），必须把用户说的**完整标题原文**作为 keywords，不要将「和」等字替换成空格或省略，否则会查不到记录。例：用户说「修改雪碧和七喜的正确答案」→ keywords=雪碧和七喜（不要写成 keywords=雪碧 七喜）。
+- target: 分析目标 - bug/badcase/testcase/all（必填）
+- project_id: 项目 ID（可选）
+- **keywords 由你从用户话里识别**：
+  - 用户若提到具体 BadCase/Bug/测试用例标题（如「雪碧和七喜」「创建测试用例」），必须把用户说的**完整标题原文**作为 keywords，不要将「和」等字替换成空格或省略，否则会查不到记录。
+  - **区分字段名和标题**：用户若说的是字段名（如"前缀条件"、"前置条件"、"步骤"、"预期结果"、"期望结果"、"状态"等），**不要将字段名作为 keywords**，而应该从用户输入中提取**实际的标题**。例如：
+    - 用户说「修改创建测试用例的前缀条件」→ 标题是「创建测试用例」→ keywords=创建测试用例
+    - 用户说「修改登录 bug 的期望结果」→ 标题是「登录 bug」→ keywords=登录 bug
+    - 用户说「修改雪碧和七喜的答案」→ 标题是「雪碧和七喜」→ keywords=雪碧和七喜
 
-示例：使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug
+示例：使用 grep 工具搜索登录相关的 Bug，keywords=登录，target=bug
 示例：用户说「修改雪碧和七喜的状态」→ 使用 grep 工具定位该 BadCase，keywords=雪碧和七喜，target=badcase
-示例：使用 grep 工具查询所有BadCase，keywords="" 或 keywords="*"，target=badcase
+示例：用户说「修改创建测试用例的前缀条件」→ 使用 grep 工具定位该测试用例，keywords=创建测试用例，target=testcase
+示例：使用 grep 工具查询所有 BadCase，keywords="" 或 keywords="*"，target=badcase
 </system>
 
 <user_request>
@@ -99,9 +130,7 @@ class ReactPromptTemplates:
 <good_example>
 <request>界面</request>
 <todo_list>
-[
-  "使用 grep 工具搜索界面相关的Bug，keywords=界面，target=bug"
-]
+<item>使用 grep 工具搜索界面相关的Bug，keywords=界面，target=bug</item>
 </todo_list>
 说明：单关键字按查询意图处理，只需一步
 </good_example>
@@ -109,9 +138,7 @@ class ReactPromptTemplates:
 <good_example>
 <request>查询登录相关的Bug</request>
 <todo_list>
-[
-  "使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug"
-]
+<item>使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug</item>
 </todo_list>
 说明：查询操作只需一步
 </good_example>
@@ -119,10 +146,8 @@ class ReactPromptTemplates:
 <good_example>
 <request>修改登录Bug的状态为关闭</request>
 <todo_list>
-[
-  "使用 grep 工具搜索定位登录Bug，keywords=登录，target=bug",
-  "使用 modify 工具将Bug状态修改为closed"
-]
+<item>使用 grep 工具搜索定位登录Bug，keywords=登录，target=bug</item>
+<item>使用 modify 工具将Bug状态修改为closed</item>
 </todo_list>
 说明：修改操作必须两步：grep -> modify
 </good_example>
@@ -130,10 +155,8 @@ class ReactPromptTemplates:
 <good_example>
 <request>把高优先级的Bug都改成P1</request>
 <todo_list>
-[
-  "使用 grep 工具搜索高优先级Bug，keywords=高优先级，target=bug",
-  "使用 modify 工具批量修改优先级为P1"
-]
+<item>使用 grep 工具搜索高优先级Bug，keywords=高优先级，target=bug</item>
+<item>使用 modify 工具批量修改优先级为P1</item>
 </todo_list>
 说明：批量修改也是两步流程
 </good_example>
@@ -141,10 +164,8 @@ class ReactPromptTemplates:
 <good_example>
 <request>把所有的BadCase都修改成已关闭状态</request>
 <todo_list>
-[
-  "使用 grep 工具查询所有BadCase，keywords=\"\"，target=badcase",
-  "使用 modify 工具批量修改所有BadCase的状态为closed"
-]
+<item>使用 grep 工具查询所有BadCase，keywords=""，target=badcase</item>
+<item>使用 modify 工具批量修改所有BadCase的状态为closed</item>
 </todo_list>
 说明：批量修改只需两个任务：grep 查询所有记录，然后一个 modify 任务批量修改。后端会自动处理所有记录。不要为每个记录生成单独的 modify 任务！
 </good_example>
@@ -152,20 +173,34 @@ class ReactPromptTemplates:
 <good_example>
 <request>所有Bug的状态都改成已解决</request>
 <todo_list>
-[
-  "使用 grep 工具查询所有Bug，keywords=\"\"，target=bug",
-  "使用 modify 工具批量修改所有Bug的状态为resolved"
-]
+<item>使用 grep 工具查询所有Bug，keywords=""，target=bug</item>
+<item>使用 modify 工具批量修改所有Bug的状态为resolved</item>
 </todo_list>
 说明：批量修改只需一个 modify 任务，后端会自动处理全部记录
 </good_example>
 
 <good_example>
+<request>修改创建测试用例7的负责人为33</request>
+<todo_list>
+<item>使用 grep 工具搜索标题为「创建测试用例7」的测试用例，keywords=创建测试用例7，target=testcase</item>
+<item>使用 modify 工具将该测试用例的负责人修改为33</item>
+</todo_list>
+说明：修改测试用例也必须两步，grep 时 target=testcase；modify 会使用上一步 grep 定位到的 target_id，无需在 Todo 中写 target_id。
+</good_example>
+
+<good_example>
+<request>修改创建测试用例6的标题为创建测试用例8</request>
+<todo_list>
+<item>使用 grep 工具搜索标题为「创建测试用例6」的测试用例，keywords=创建测试用例6，target=testcase</item>
+<item>使用 modify 工具将该测试用例的标题修改为创建测试用例8</item>
+</todo_list>
+说明：修改测试用例标题同样先 grep 再 modify，target=testcase。
+</good_example>
+
+<good_example>
 <request>创建一个登录失败的Bug</request>
 <todo_list>
-[
-  "使用 create 工具创建Bug，标题=登录失败，优先级=高"
-]
+<item>使用 create 工具创建Bug，标题=登录失败，优先级=高</item>
 </todo_list>
 说明：创建操作只需一步
 </good_example>
@@ -173,9 +208,7 @@ class ReactPromptTemplates:
 <good_example>
 <request>帮我测试登录功能</request>
 <todo_list>
-[
-  "使用 browser_test 工具执行登录功能测试"
-]
+<item>使用 browser_test 工具执行登录功能测试</item>
 </todo_list>
 说明：browser_test 一次调用即可完成所有测试步骤
 </good_example>
@@ -184,9 +217,7 @@ class ReactPromptTemplates:
 <bad_example>
 <request>界面</request>
 <todo_list>
-[
-  "界面"
-]
+<item>界面</item>
 </todo_list>
 原因：单关键字应生成 grep 查询步骤
 </bad_example>
@@ -194,22 +225,21 @@ class ReactPromptTemplates:
 <bad_example>
 <request>修改这个Bug的状态</request>
 <todo_list>
-[
-  "使用 modify 工具修改Bug状态"
-]
+<item>使用 modify 工具修改Bug状态</item>
 </todo_list>
 原因：修改操作必须先 grep 定位，再 modify
 </bad_example>
 </examples>
 
 <format>
-必须返回以下格式（仅返回 XML 和 JSON，无其他文本）：
+必须返回以下格式（仅返回 XML，无其他文本）：
+- 只输出 <todo_list>...</todo_list>，不要输出任何思考说明、解释或前缀/后缀文字。
+- 每一项任务用 <item>...</item> 包裹，多条即多个 <item>，格式稳定、易解析。
+示例：
 <todo_list>
-[
-  "第一项任务（具体且可执行）",
-  "第二项任务（具体且可执行）",
-  "第三项任务（具体且可执行）"
-]
+<item>第一项任务（具体且可执行）</item>
+<item>第二项任务（具体且可执行）</item>
+<item>第三项任务（具体且可执行）</item>
 </todo_list>
 </format>
 
@@ -242,12 +272,19 @@ class ReactPromptTemplates:
 <system>
 你的角色：根据 Todo 和当前上下文，做出执行决策
 决策原则（严格按以下规则）：
-1. 如果 Todo 包含工具操作词汇（search、搜索、查询、测试、browser、数据库等），必须执行（execute: true）
-2. 如果 Todo 涉及外部信息获取或用户请求验证，必须执行（execute: true）
-3. 仅当 Todo 是纯分析/整理且完全不涉及工具调用时，才考虑跳过（execute: false）
-4. 优先执行而非跳过 - 当有疑问时，必须 execute: true
-5. 提供清晰的决策理由
-6. 工具参数应该具体且可执行
+1. 强制绑定规则（优先级最高，绝不能违反）：
+   - 如果 Todo 文本中明确包含「使用 grep 工具」或 \"use grep tool\"，则 tool 字段必须为 \"grep\"。
+   - 如果 Todo 文本中明确包含「使用 modify 工具」或 \"use modify tool\"，则 tool 字段必须为 \"modify\"。
+   - 如果 Todo 文本中明确包含「使用 create 工具」或 \"use create tool\"，则 tool 字段必须为 \"create\"。
+   - 如果 Todo 文本中明确包含「使用 browser_test 工具」或 \"use browser_test tool\"，则 tool 字段必须为 \"browser_test\"。
+   - 当存在上述绑定时，绝对禁止选择其他工具（例如：Todo 里写了「使用 modify 工具」，决策结果却给出 browser_test，这是错误的）。
+2. 在没有明确「使用 XXX 工具」字样时，再根据 Todo 内容选择最合适的工具。
+3. 如果 Todo 包含工具操作词汇（search、搜索、查询、测试、browser、数据库等），必须执行（execute: true）
+4. 如果 Todo 涉及外部信息获取或用户请求验证，必须执行（execute: true）
+5. 仅当 Todo 是纯分析/整理且完全不涉及工具调用时，才考虑跳过（execute: false）
+6. 优先执行而非跳过 - 当有疑问时，必须 execute: true
+7. 提供清晰的决策理由
+8. 工具参数应该具体且可执行
 
 ⭐ 人类式先检索再阅读（modify 前必读）：
 - 流程：先 grep 检索出候选列表（badcase_list/bug_list/testcase_location），对候选做 rerank，**分高的**作为 target_id；支持 BadCase、Bug、测试用例( testcase )。
@@ -1090,12 +1127,37 @@ def parse_xml_todos(text: Any) -> list:
                 todos.append(item)
         return todos if todos else ['分析用户请求并生成解决方案']
 
-    # 方案 1: 正常 XML 格式
+    # 方案 1: <todo_list> 内按 XML 解析（<item>/<todo>/<step>），不再优先 json.loads
     todo_str = extract_xml_field(text, 'todo_list')
-    if todo_str:
+    if todo_str and todo_str.strip():
+        s = todo_str.strip()
+        # 先按 XML 解析
+        if ET is not None:
+            try:
+                root = ET.fromstring(f"<root>{s}</root>")
+                items = []
+                for node in root.iter():
+                    tag = (node.tag or "").lower()
+                    if tag in ("todo", "item", "step"):
+                        content = (node.text or "").strip()
+                        if content:
+                            items.append(content)
+                if items:
+                    return items
+            except Exception:
+                pass
+        # 无标签时按行兜底
+        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+        if lines:
+            cleaned = [re.sub(r'^[-*•\d\.\)]+\s*', '', ln).strip() for ln in lines if re.sub(r'^[-*•\d\.\)]+\s*', '', ln).strip()]
+            if cleaned:
+                return cleaned
+        # 兼容旧版：内容恰为 JSON 数组字符串时再试
         try:
-            return json.loads(todo_str) if todo_str else []
-        except:
+            out = json.loads(s)
+            if isinstance(out, list) and out:
+                return [str(x).strip() for x in out if str(x).strip()]
+        except Exception:
             pass
     
     # 方案 2: 字符串包含 JSON 格式

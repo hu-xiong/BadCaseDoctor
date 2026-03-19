@@ -51,7 +51,8 @@ class SkillRegistry:
         self.skill_load_time[skill.name] = datetime.now()
         self.skill_usage_count[skill.name] = 0
         
-        print(f"[SKILL_REGISTRY] ✅ 注册技能: {skill.name}")
+        # Windows 默认控制台编码可能是 GBK，避免输出不可编码字符导致初始化失败
+        print(f"[SKILL_REGISTRY] 注册技能: {skill.name}")
         return True
     
     def unregister(self, skill_name: str) -> bool:

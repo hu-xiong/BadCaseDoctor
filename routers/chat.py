@@ -93,5 +93,5 @@ def chat_stream():
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Connection'] = 'keep-alive'
+    # 不显式设置 Connection，交由服务器/代理处理，以兼容 waitress 等 WSGI 服务器
     return response

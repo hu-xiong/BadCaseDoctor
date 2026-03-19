@@ -28,11 +28,14 @@ class SkillLoader:
             self.skill_dir = skill_dir
         else:
             self.skill_dir = os.path.join(os.getcwd(), skill_dir)
-        
+                
         self.skills: Dict[str, Skill] = {}
         self.skill_files: Dict[str, str] = {}  # skill_name -> file_path
         self.last_reload_time: Optional[datetime] = None
-        print(f"[SKILL_LOADER] 技能目录: {self.skill_dir}")
+        try:
+            print(f"[SKILL_LOADER] 技能目录：{self.skill_dir}")
+        except:
+            pass  # 忽略日志输出错误
     
     def load_all(self, force_reload: bool = False) -> Dict[str, Skill]:
         """

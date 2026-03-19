@@ -48,11 +48,20 @@ class EvidenceExtractor:
                     evidence['execution_time_ms'] = int(time_val * 1000) if time_val < 1000 else int(time_val)
                 break
         
-        # 3. 提取结果内容（按优先级）
+        # 3. 提取结果内容（按优先级）；人类可读的 summary 优先，供「关键发现」展示
+        if observation.get('summary') and isinstance(observation['summary'], str):
+            evidence['results'].append(observation['summary'].strip())
+        data = observation.get('data')
+        if isinstance(data, dict) and data.get('summary') and isinstance(data['summary'], str):
+            if data['summary'].strip() not in evidence['results']:
+                evidence['results'].insert(0, data['summary'].strip())
         result_keys = ['bugs_found', 'elements_found', 'issues_found', 'data', 'results', 'output']
         for key in result_keys:
             if key in observation and observation[key]:
                 value = observation[key]
+                if key == 'data' and isinstance(value, dict):
+                    # 已在上方提取 data.summary，不再把整个 data 塞入 results（避免冗长 JSON）
+                    continue
                 if isinstance(value, list):
                     evidence['results'].extend([str(item) for item in value])
                 elif isinstance(value, dict):

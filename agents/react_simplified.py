@@ -8,6 +8,11 @@ import asyncio
 import concurrent.futures
 import json
 import time
+import os
+import threading
+import queue
+import re
+import xml.etree.ElementTree as ET
 from typing import Dict, Any, List
 
 #原依赖
@@ -20,7 +25,7 @@ from .evidence_extractor import EvidenceExtractor
 from .skill_loader import SkillLoader
 from .skill_registry import skill_registry
 from .skill import Skill
-from .skill_integration import skill_integration  # Skill 集成管理器
+from .skill_integration import get_skill_integration  # Skill 集成管理器（懒加载）
 
 # Text2SQL
 try:
@@ -32,18 +37,127 @@ except ImportError:
 
 
 def get_text2sql_tool(db_path="instance/badcase_doctor.db"):
-    """获取 Text2SQL 工具实例"""
-    if TEXT2SQL_AVAILABLE:
-        try:
-            return Text2SQLAgent(
-                database_path=db_path,
-                llm_backend=LLMBackend.GLM_5,
-                debug=False
-            )
-        except Exception as e:
-            print(f"[REACT] Text2SQL初始化失败: {e}")
-            return None
-    return None
+    """获取 Text2SQL 工具实例（进程级缓存 + 懒加载）。"""
+    if not TEXT2SQL_AVAILABLE:
+        return None
+    try:
+        from .tools.sqlcoder_agent import get_cached_text2sql_agent
+        backend_env = (os.getenv("TEXT2SQL_LLM_BACKEND", "glm-4-flash") or "").strip().lower()
+        backend = "glm-5" if backend_env in ("glm-5", "glm5") else "glm-4-flash"
+        return get_cached_text2sql_agent(
+            database_path=db_path,
+            llm_backend=backend,
+            debug=False,
+            execution_mode="direct",
+        )
+    except Exception as e:
+        print(f"[REACT] Text2SQL初始化失败: {e}")
+        return None
+
+
+def robust_parse_todos(raw: Any) -> List[str]:
+    """
+    健壮解析 LLM 返回的 todos：
+    1）优先走现有的 XML 解析（parse_xml_todos）
+    2）若失败或为空，再尝试：
+       - 解析 <todo_list>...</todo_list> 里的 XML 结构
+       - 从文本中用正则抽取 JSON 数组并 json.loads
+       - 最后兜底：按行/项目符号提取
+    返回：todo 文本列表（字符串列表）
+    """
+    # 已经是列表就直接兜底规范化
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    if raw is None:
+        return []
+
+    text = raw if isinstance(raw, str) else str(raw)
+    if not text.strip():
+        return []
+
+    todos: List[str] = []
+
+    # 1. 先走原有 XML 解析（保持兼容）
+    try:
+        base = parse_xml_todos(text)
+        if base:
+            # parse_xml_todos 目前可能返回列表 / dict，这里只关心列表
+            if isinstance(base, list):
+                todos = [str(x).strip() for x in base if str(x).strip()]
+                if todos:
+                    return todos
+    except Exception as e:
+        print(f"[REACT-TODO] parse_xml_todos 解析失败，继续尝试增强解析: {e}")
+
+    # 2. 解析 <todo_list>...</todo_list> 里的简单 XML
+    try:
+        m = re.search(r'<todo_list[^>]*>([\s\S]*?)</todo_list>', text, re.IGNORECASE)
+        if m:
+            inner = m.group(1).strip()
+            # 包一层根节点，容忍模型直接输出 <item> / <todo>
+            xml_str = f"<root>{inner}</root>"
+            root = ET.fromstring(xml_str)
+            xml_todos: List[str] = []
+            for node in root.iter():
+                tag = (node.tag or "").lower()
+                if tag in ("todo", "item", "step"):
+                    content = (node.text or "").strip()
+                    if content:
+                        xml_todos.append(content)
+            if xml_todos:
+                print(f"[REACT-TODO] 从 XML 提取 {len(xml_todos)} 条 todos")
+                return xml_todos
+    except Exception as e:
+        print(f"[REACT-TODO] XML todo_list 解析失败，将继续尝试 JSON/文本兜底: {e}")
+
+    # 3. 从文本中抽取 JSON 数组（支持前后有其他文本/标签）
+    try:
+        # 尽量匹配第一段较“干净”的数组，避免把整个大长串都吃进去
+        json_match = re.search(r'\[[\s\S]*?\]', text)
+        if json_match:
+            json_part = json_match.group(0)
+            # 简单剪裁过长内容，防止极端情况
+            if len(json_part) > 8000:
+                json_part = json_part[:8000]
+            arr = json.loads(json_part)
+            if isinstance(arr, list):
+                json_todos = [str(x).strip() for x in arr if str(x).strip()]
+                if json_todos:
+                    print(f"[REACT-TODO] 从 JSON 数组提取 {len(json_todos)} 条 todos")
+                    return json_todos
+    except Exception as e:
+        print(f"[REACT-TODO] JSON 数组解析失败，将继续文本兜底: {e}")
+
+    # 4. 文本兜底：从 <todo_list> 块里按行抽取
+    try:
+        block = ""
+        m = re.search(r'<todo_list[^>]*>([\s\S]*?)</todo_list>', text, re.IGNORECASE)
+        if m:
+            block = m.group(1)
+        else:
+            block = text
+        lines = [ln.strip() for ln in block.splitlines()]
+        for ln in lines:
+            if not ln:
+                continue
+            # 过滤 XML/HTML 标签行
+            if ln.startswith("<") and ln.endswith(">"):
+                continue
+            # 项目符号 / 编号行
+            if re.match(r'^[-*•\d]+\s*', ln):
+                # 去掉前缀符号
+                ln = re.sub(r'^[-*•\d\.\)]+\s*', '', ln).strip()
+            if ln:
+                todos.append(ln)
+        if todos:
+            print(f"[REACT-TODO] 文本兜底提取 {len(todos)} 条 todos")
+            return todos
+    except Exception as e:
+        print(f"[REACT-TODO] 文本兜底解析失败: {e}")
+
+    # 全部失败时，返回空列表，交由上层兜底
+    return []
 
 
 class SimplifiedReActEngine:
@@ -62,42 +176,169 @@ class SimplifiedReActEngine:
         print(f"[REACT]💡引擎已初始化，Skill目录: {skill_dir}")
         
         # Text2SQL
+        # Text2SQL 懒加载：只在真正需要自然语言SQL时再初始化（避免每次请求前置 1s+）
+        self.text2sql_tool = None
         if TEXT2SQL_AVAILABLE:
-            self.text2sql_tool = get_text2sql_tool("instance/badcase_doctor.db")
-            print("[REACT] ✅ Text2SQL已启用")
+            print("[REACT] ✅ Text2SQL可用（懒加载）")
         else:
-            self.text2sql_tool = None
             print("[REACT] ⚠️  Text2SQL 不可用")
         # 线程池：modify 等工具内部有同步 DB（Flask/SQLAlchemy），在事件循环中会阻塞，导致流式“修改中...”卡住
         self._tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="react_tool")
     
     async def run_stream(self, user_input: str, project_id: int = None, plan_id: int = None):
-        """流式执行 ReAct循环（使用Skill工具）。plan_id 为当前迭代计划ID，传入则 grep 可只检索该计划下的记录（人类式先看本迭代）。"""
+        """流式执行 ReAct 循环（使用 Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下的记录（人类式先看本迭代）。"""
         print(f"\n[REACT] ReAct Stream Loop Start")
+        perf = (os.getenv("PERF_LOG") == "1")
+        t0 = time.perf_counter()
         self.project_id = project_id
         self.plan_id = plan_id  # 当前迭代计划，供 grep 按计划检索
         start_time = time.time()
-        
+            
+        # 获取项目名称和计划名称（用于思考过程展示，必须在 Flask app_context 内查库）
+        # 优化：与 tools_info 构造并行，减少 THINK 前置耗时
+        async def _load_names():
+            project_name = None
+            plan_name = None
+            try:
+                from app import app, db, Project, Plan
+                with app.app_context():
+                    t_db0 = time.perf_counter()
+                    if project_id:
+                        project = db.session.query(Project).filter(Project.id == project_id).first()
+                        if project:
+                            project_name = project.name
+                    if plan_id:
+                        plan = db.session.query(Plan).filter(Plan.id == plan_id).first()
+                        if plan:
+                            plan_name = plan.name
+                    if perf:
+                        print(f"[PERF][react] project_plan_lookup_ms={(time.perf_counter()-t_db0)*1000:.1f}")
+            except Exception as e:
+                print(f"[REACT] 获取项目/计划名称失败：{e}")
+            return project_name, plan_name
+
         result_context = {}
+        project_name, plan_name = await _load_names()
         if plan_id is not None:
             result_context['plan_id'] = plan_id  # 供 LLM 传给 grep，先检索本计划再阅读
+            if plan_name:
+                result_context['plan_name'] = plan_name
+
+        # modify 流程要求不带思考：为支持的 LLM 提供一个临时开关
+        def _set_force_disable_thinking(v: bool):
+            try:
+                if hasattr(self.llm, "force_disable_thinking"):
+                    setattr(self.llm, "force_disable_thinking", bool(v))
+            except Exception:
+                pass
+
+        class _NoThinking:
+            def __enter__(self_nonlocal):
+                _set_force_disable_thinking(True)
+                return self_nonlocal
+            def __exit__(self_nonlocal, exc_type, exc, tb):
+                _set_force_disable_thinking(False)
+                return False
+        if project_id is not None:
+            result_context['project_id'] = project_id
+            if project_name:
+                result_context['project_name'] = project_name
+            
         findings = []
         steps = []
+        thinking_start_time = time.time()  # 用于统计「思考了多少秒」
         
         try:
             # ===== STEP 1: THINK =====
-            yield {'event': 'thought', 'message': '正在规划任务步骤...'}
-            
-            tools_info = format_tools_for_prompt(self.tools)
+            # 不再发送 thought 事件，直接让 LLM 生成 reasoning 内容
+            # 关键体验优化：在 LLM 首 token 前先推一个不可见字符，让前端立刻出现「深度思考」块
+            # （前端 v-if=reasoningContent；\u200b 为零宽空格，用户不可见但可触发渲染）
+            yield {"event": "reasoning", "content": "\u200b"}
+            t_tools0 = time.perf_counter()
+            tools_info = await asyncio.to_thread(format_tools_for_prompt, self.tools)
+            if perf:
+                print(f"[PERF][react] format_tools_for_prompt_ms={(time.perf_counter()-t_tools0)*1000:.1f}")
             prompt = ReactPromptTemplates.think_prompt(
                 user_input,
                 tools_info,
                 result_context,
                 []
             )
+            if perf:
+                print(f"[PERF][react] think_prompt_build_ms={(time.perf_counter()-t0)*1000:.1f}")
             
-            response = await self.llm.parse_intent(prompt)
-            todos = parse_xml_todos(response)
+            # 若 LLM 支持返回思考过程（如文心 X1），优先使用"流式思考"接口实时下发 reasoning 事件
+            response = None
+            print(f"[REACT-STREAM] 检查 LLM 方法：chat_stream_with_reasoning={hasattr(self.llm, 'chat_stream_with_reasoning')}, chat_with_reasoning={hasattr(self.llm, 'chat_with_reasoning')}")
+            if hasattr(self.llm, 'chat_stream_with_reasoning'):
+                try:
+                    content_parts = []
+                    # 真正实时：在后台线程读取流式结果，通过队列逐段推送到 SSE
+                    q: "queue.Queue[object]" = queue.Queue()
+                    DONE = object()
+
+                    def _worker():
+                        try:
+                            for it in self.llm.chat_stream_with_reasoning(prompt):
+                                q.put(it)
+                        except Exception as e:
+                            q.put({"type": "content_delta", "delta": f"Error: {e}"})
+                        finally:
+                            q.put(DONE)
+
+                    t = threading.Thread(target=_worker, daemon=True)
+                    t.start()
+                    
+                    # 实时流式下发思考过程，不缓冲
+                    # 每收到一段 reasoning_delta 就立即通过 yield 发送到前端
+                    reasoning_buffer = ""
+                    first_reasoning_sent = False
+                    
+                    while True:
+                        item = q.get()
+                        if item is DONE:
+                            break
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") == "reasoning_delta":
+                            delta = item.get("delta")
+                            if delta is not None and isinstance(delta, str):
+                                reasoning_buffer += delta
+                                # 实时下发思考过程（保留换行等，不 strip 以便前端正确展示）
+                                if perf and not first_reasoning_sent:
+                                    first_reasoning_sent = True
+                                    print(f"[PERF][react] first_reasoning_delta_ms={(time.perf_counter()-t0)*1000:.1f}")
+                                yield {"event": "reasoning", "content": delta}
+                        elif item.get("type") == "content_delta":
+                            delta = item.get("delta") or ""
+                            if delta:
+                                content_parts.append(delta)
+
+                    # 用流式汇总的 content 作为 response，避免再调 parse_intent
+                    response = "".join(content_parts).strip() if content_parts else None
+                except Exception as e:
+                    print(f"[REACT-STREAM] chat_stream_with_reasoning 失败，回退 parse_intent: {e}")
+                    import traceback
+                    traceback.print_exc()
+            elif hasattr(self.llm, 'chat_with_reasoning'):
+                try:
+                    raw = await self.llm.chat_with_reasoning(prompt)
+                    response = raw.get('content') or raw.get('result') or ''
+                    reasoning = raw.get('reasoning_content')
+                    # 如果有思考过程，实时下发（虽然是非流式，但可以模拟逐字效果）
+                    if reasoning and isinstance(reasoning, str) and reasoning.strip():
+                        # 将思考过程按字符逐字下发，模拟打字机效果
+                        for char in reasoning.strip():
+                            yield {'event': 'reasoning', 'content': char}
+                            # 短暂延迟，模拟打字速度
+                            await asyncio.sleep(0.02)
+                except Exception as e:
+                    print(f"[REACT-STREAM] chat_with_reasoning 失败，回退 parse_intent: {e}")
+            if response is None:
+                response = await self.llm.parse_intent(prompt)
+            # 使用健壮版解析，优先 XML，其次 JSON/文本兜底
+            todos = robust_parse_todos(response)
+            thinking_time = time.time() - thinking_start_time  # 思考阶段耗时（不是总过程）
             
             print(f"[REACT-STREAM] 生成的Todos: {todos}")
             
@@ -105,13 +346,38 @@ class SimplifiedReActEngine:
                 yield {'event': 'error', 'message': '无法生成任务列表'}
                 return
             
+            if perf:
+                print(f"[PERF][react] todos_ready_ms={(time.perf_counter()-t0)*1000:.1f} count={len(todos)}")
             yield {'event': 'todos', 'data': todos}
             
+            # 提前拦截：用户要求修改「类型」时直接提示不可修改，不执行 grep/modify，避免长时间无意义执行
+            if self._user_requested_type_modification(user_input) and any('modify' in (t or '').lower() or '修改' in (t or '') for t in todos):
+                msg = '「类型」(type) 为系统固定字段，不可修改。可修改的字段包括：状态、期望结果、标题、优先级、复现步骤、负责人等。'
+                yield {'event': 'immutable_field_rejection', 'message': msg}
+                yield {'event': 'done', 'findings': [msg], 'steps_count': 0, 'duration': time.time() - start_time, 'thinking_time': thinking_time, 'summary': msg}
+                return
+            
             # ===== SKILL 匹配：检查是否有匹配的技能工作流 =====
-            matched_skill, skill_score = skill_integration.match_skill(user_input, result_context)
+            matched_skill, skill_score = get_skill_integration().match_skill(user_input, result_context)
             
             if matched_skill and skill_score >= 0.3:
                 print(f"[REACT-STREAM] 🎯 匹配到技能: {matched_skill.name} (分数: {skill_score:.2f})")
+                fallback_workflow_tools = []
+                try:
+                    wf = sorted(getattr(matched_skill, 'workflow', []) or [], key=lambda s: getattr(s, 'step', 0))
+                    fallback_workflow_tools = [((getattr(s, 'tool', '') or '').strip()) for s in wf if (getattr(s, 'tool', '') or '').strip()]
+                except Exception as e:
+                    print(f"[REACT-STREAM] ⚠️ 读取技能 workflow 失败: {e}")
+
+                # 技能捆绑了多步（如 grep + modify）时，若 LLM 只生成了少于步骤数的 todo（如 GLM5 只生成了 1 条），
+                # 则用技能工作流生成的 todos 替换，保证会执行完整流程
+                if len(fallback_workflow_tools) >= 2 and len(todos) < len(fallback_workflow_tools):
+                    workflow_todos = self._generate_todos_from_skill_workflow(matched_skill, user_input)
+                    if len(workflow_todos) >= len(fallback_workflow_tools):
+                        todos = workflow_todos
+                        yield {'event': 'todos', 'data': todos}
+                        print(f"[REACT-STREAM] 📋 已按技能工作流补全 todos，共 {len(todos)} 个任务: {todos}")
+
                 print(f"[REACT-STREAM] 📋 将按 todos 逐个执行，共 {len(todos)} 个任务")
                 yield {'event': 'skill_matched', 'skill': matched_skill.name, 'score': skill_score}
                 
@@ -126,6 +392,38 @@ class SimplifiedReActEngine:
                     # 从 todo 中提取关键词和状态
                     todo_params = await self._extract_todo_params(todo, user_input)
                     tool_name = todo_params['tool']
+
+                    # 兜底：如果 todo 解析不出工具，用技能 workflow 的对应步骤工具补齐（不改 todo 文本，只改执行工具）
+                    if tool_name == 'unknown' and fallback_workflow_tools:
+                        mapped = fallback_workflow_tools[i] if i < len(fallback_workflow_tools) else fallback_workflow_tools[-1]
+                        if mapped in ('grep', 'modify'):
+                            tool_name = mapped
+                            todo_params['tool'] = mapped
+                            # 尽量补齐 grep/modify 的必要参数
+                            params = todo_params.get('params') or {}
+                            inferred_target = params.get('target')
+                            if not inferred_target:
+                                skill_name_lower = (matched_skill.name or '').lower()
+                                if 'bug' in skill_name_lower:
+                                    inferred_target = 'bug'
+                                elif 'testcase' in skill_name_lower or 'test_case' in skill_name_lower:
+                                    inferred_target = 'testcase'
+                                elif user_input and ('测试用例' in user_input or 'test case' in user_input.lower()):
+                                    inferred_target = 'testcase'
+                                elif user_input and ('bug' in user_input or '缺陷' in user_input or 'Bug' in user_input):
+                                    inferred_target = 'all'  # 兜底：在所有计划、不分类型查一遍
+                                else:
+                                    inferred_target = 'badcase'
+                                params['target'] = inferred_target
+                            if mapped == 'grep':
+                                params.setdefault('mode', 'locate')
+                                params.setdefault('keywords', self._extract_title_keywords_for_grep(user_input, todo) or '')
+                            elif mapped == 'modify':
+                                params.setdefault('confirm', False)
+                                if 'modifications' not in params or not params.get('modifications'):
+                                    params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+                            todo_params['params'] = params
+                            print(f"[REACT-STREAM] 🔧 todo 工具兜底映射: index={i}, unknown -> {mapped}")
                     
                     print(f"[REACT-STREAM] Todo[{i}] 提取参数: tool={tool_name}, params={todo_params}")
                     
@@ -135,11 +433,16 @@ class SimplifiedReActEngine:
                         params['project_id'] = project_id
                     if 'userId' not in params:
                         params['userId'] = 'system_agent'
+                    # 兜底：grep target=all 时在所有迭代计划查，不传 plan_id
+                    if tool_name == 'grep' and params.get('target') == 'all':
+                        params.pop('plan_id', None)
                     
                     # 如果是 modify 工具，需要从 grep 结果中获取 target_id（含 testcase）
+                    # 用户说「修改bug」时必须用 target=bug 和 first_bug_id，不能默认 badcase 导致改错
                     if tool_name == 'modify':
                         grep_result = result_context.get('grep_result', {})
-                        target_type = params.get('target', 'badcase')
+                        target_type = params.get('target') or self._infer_modify_target(user_input, todo)
+                        params['target'] = target_type
                         if target_type == 'bug':
                             target_id = grep_result.get('first_bug_id')
                         elif target_type == 'testcase':
@@ -148,15 +451,78 @@ class SimplifiedReActEngine:
                             target_id = grep_result.get('first_badcase_id')
                         if target_id:
                             params['target_id'] = target_id
-                            print(f"[REACT-STREAM] 从 grep 结果获取 target_id={target_id}")
+                            print(f"[REACT-STREAM] 从 grep 结果获取 target_id={target_id}, target={target_type}")
                         else:
-                            print(f"[REACT-STREAM] ⚠️ 无法从 grep 结果获取 target_id")
+                            print(f"[REACT-STREAM] ⚠️ 无法从 grep 结果获取 target_id (target={target_type})")
+                        
+                        # 思考意图 + 探索记录（类似 Cursor 探索文件）：有 target_id 时先探索当前记录与用户列表，再让大模型基于探索结果确认 modifications
+                        if target_id and (not params.get('modifications') or len(params.get('modifications', {})) == 0):
+                            modify_tool = self.tools.get('modify')
+                            if modify_tool and getattr(modify_tool, 'explore_record', None):
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    exploration = await asyncio.wait_for(
+                                        loop.run_in_executor(
+                                            self._tool_executor,
+                                            lambda: modify_tool.explore_record(target_type, target_id, params.get('project_id') or self.project_id),
+                                        ),
+                                        timeout=15,
+                                    )
+                                    if exploration and exploration.get('current_record'):
+                                        yield {'event': 'exploring', 'message': '正在结合当前记录确认修改意图…'}
+                                        # modify 步骤：所有模型都强制不带思考
+                                        with _NoThinking():
+                                            params['modifications'] = await self._extract_modifications_with_llm(todo, user_input, exploration=exploration)
+                                        if not params.get('modifications') and user_input:
+                                            params['modifications'] = self._extract_modifications_with_regex(user_input)
+                                        print(f"[REACT-STREAM] 探索后提取的 modifications: {params.get('modifications')}")
+                                except Exception as e:
+                                    print(f"[REACT-STREAM] 探索记录失败，回退到仅 LLM 提取: {e}")
+                                    if not params.get('modifications'):
+                                        with _NoThinking():
+                                            params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+                                        if not params.get('modifications'):
+                                            params['modifications'] = self._extract_modifications_with_regex(user_input)
+                            elif not params.get('modifications'):
+                                with _NoThinking():
+                                    params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+                                if not params.get('modifications'):
+                                    params['modifications'] = self._extract_modifications_with_regex(user_input)
                     
                     # 执行工具
                     decision = {'execute': True, 'tool': tool_name, 'params': params}
-                    yield {'event': 'executing', 'tool': tool_name, 'reason': f'Todo步骤 {i+1}'}
-                    
-                    observation = await self._execute_tool(decision)
+                    exec_payload = {'event': 'executing', 'tool': tool_name, 'reason': f'Todo步骤 {i+1}'}
+                    if tool_name == 'modify':
+                        exec_payload['message'] = '正在应用修改到数据库…'
+                        print(f"[REACT-STREAM] modify 即将执行（探索/参数已就绪），进入线程池…")
+                    yield exec_payload
+
+                    # modify 可能执行较久：持续下发分步进度/心跳事件，避免前端“卡住没输出”
+                    if tool_name == 'modify':
+                        started = time.time()
+                        task = asyncio.create_task(self._execute_tool(decision))
+                        # 尽快轮询 progress_queue，缩短首条进度/心跳的延迟
+                        await asyncio.sleep(0.1)
+                        while not task.done():
+                            waited = time.time() - started
+                            got_any = False
+                            try:
+                                pq = (decision.get('params') or {}).get('progress_queue')
+                                if pq:
+                                    while True:
+                                        msg = pq.get_nowait()
+                                        got_any = True
+                                        yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'message': str(msg)}
+                                        print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
+                            except Exception:
+                                pass
+                            if not got_any:
+                                yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'message': f'修改中…已等待 {waited:.0f}s'}
+                            # 有进度 0.2s 轮询，无进度 0.4s 心跳，让前端尽快看到变化
+                            await asyncio.sleep(0.2 if got_any else 0.4)
+                        observation = await task
+                    else:
+                        observation = await self._execute_tool(decision)
                     print(f"[REACT-STREAM] Todo[{i}] 工具 {tool_name} 结果: success={observation.get('success')}")
                     
                     # 更新上下文（供后续步骤使用，含 testcase；id 用 rerank 取分高的）
@@ -184,16 +550,26 @@ class SimplifiedReActEngine:
                         result_context['testcase_list'] = testcase_list
                         print(f"[REACT-STREAM] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, {len(testcase_list)} testcase")
                     
-                    # 如果是 modify，收集结果（含 testcase）
+                    # 如果是 modify，收集结果（含 testcase）；类型与 params.target 一致，避免误标为 badcase
                     if tool_name == 'modify':
-                        target_list = (result_context.get('badcase_list') or result_context.get('bug_list') or result_context.get('testcase_list') or [])
-                        target_type = 'badcase' if result_context.get('badcase_list') else ('bug' if result_context.get('bug_list') else 'testcase')
+                        pt = params.get('target') or self._infer_modify_target(user_input, todo)
+                        if pt == 'bug' and result_context.get('bug_list'):
+                            target_list, target_type = result_context['bug_list'], 'bug'
+                        elif pt == 'testcase' and result_context.get('testcase_list'):
+                            target_list, target_type = result_context['testcase_list'], 'testcase'
+                        elif result_context.get('badcase_list'):
+                            target_list, target_type = result_context['badcase_list'], 'badcase'
+                        else:
+                            target_list = (result_context.get('badcase_list') or result_context.get('bug_list') or result_context.get('testcase_list') or [])
+                            target_type = 'badcase' if result_context.get('badcase_list') else ('bug' if result_context.get('bug_list') else 'testcase')
                         
                         if observation.get('success'):
+                            # 优先用 modify 工具返回的 target，避免 params 被推断成 badcase 时误标
+                            actual_target = observation.get('target') or target_type
                             batch_results.append({
                                 'target_id': params.get('target_id'),
-                                'target': target_type,
-                                'plan_id': None,
+                                'target': actual_target,
+                                'plan_id': (observation.get('before') or {}).get('plan_id'),
                                 'diff': observation.get('diff', []),
                                 'modifications': params.get('modifications', {}),
                                 'before': observation.get('before', {}),
@@ -212,33 +588,48 @@ class SimplifiedReActEngine:
                 # 汇总结果
                 workflow_findings = []
                 if batch_results:
-                    # 批量修改结果
-                    target_name = 'BadCase'
+                    # 批量修改结果（target 从结果中取，避免一律标为 badcase）
+                    bt = batch_results[0].get('target', 'badcase') if batch_results else 'badcase'
+                    target_name = 'Bug' if bt == 'bug' else ('测试用例' if bt == 'testcase' else 'BadCase')
                     mod_summaries = []
+                    field_labels = {'status': '状态', 'expected_result': '期望结果', 'title': '标题', 'priority': '优先级', 'base_problem': '相似问题'}
                     for r in batch_results:
-                        mods = r.get('modifications', {})
-                        status = mods.get('status', '')
-                        if status:
-                            mod_summaries.append(f"ID={r['target_id']} 状态={status}")
-                    
+                        mods = r.get('modifications', {}) or {}
+                        parts = []
+                        for k, v in mods.items():
+                            if v is None or v == '':
+                                continue
+                            label = field_labels.get(k, k)
+                            val_str = str(v)[:30] + ('…' if len(str(v)) > 30 else '')
+                            parts.append(f"{label}={val_str}")
+                        if parts:
+                            mod_summaries.append(f"ID={r['target_id']} " + "；".join(parts))
+                    summary_text = "、".join(mod_summaries) if mod_summaries else f"已对 {len(batch_results)} 条记录生成修改预览"
                     observation = {
                         'success': all(r.get('success') for r in batch_results),
                         'message': f'已生成 {len(batch_results)} 条修改预览',
-                        'summary': f'批量修改预览：{"、".join(mod_summaries)}',
+                        'summary': f'批量修改预览：{summary_text}',
                         'batch_modify': True,
                         'batch_results': batch_results,
                         'batch_count': len(batch_results),
-                        'target': 'badcase'
+                        'target': bt
                     }
                     workflow_findings.append(observation['summary'])
+                    # 关键发现：再补一条简短说明，避免只有「批量修改预览：」时显得空
+                    if not mod_summaries:
+                        workflow_findings.append(f"已定位并生成 {len(batch_results)} 条{target_name}的修改预览，请在下方沙箱预览中查看详情。")
                     yield {'event': 'observation', 'data': observation}
                 
-                # 发送 done 事件
+                # 发送 done 事件（带统一总结；thinking_time 为上面 THINK 阶段已算好的）
+                duration = time.time() - start_time
+                summary = f"已生成 {len(batch_results)} 条修改预览，完成 {len(todos)} 步，耗时 {duration:.2f}s。请在下方沙箱预览中确认。"
                 yield {
-                    'event': 'done', 
-                    'findings': workflow_findings, 
+                    'event': 'done',
+                    'findings': workflow_findings,
                     'steps_count': len(todos),
-                    'duration': time.time() - start_time
+                    'duration': duration,
+                    'thinking_time': thinking_time,
+                    'summary': summary
                 }
                 return
             
@@ -250,7 +641,12 @@ class SimplifiedReActEngine:
                 decision_prompt = ReactPromptTemplates.decide_prompt(
                     todo, user_input, tools_info, result_context
                 )
-                decision_response = await self.llm.parse_intent(decision_prompt)
+                # 进入 modify 步骤：传递参数给所有的模型传递不开启思考
+                if 'modify' in (todo or '').lower() or '修改' in (todo or ''):
+                    with _NoThinking():
+                        decision_response = await self.llm.parse_intent(decision_prompt)
+                else:
+                    decision_response = await self.llm.parse_intent(decision_prompt)
                 print(f"[REACT-STREAM] LLM决策原始响应: {decision_response}")
                 decision = parse_xml_decision(decision_response)
                 
@@ -275,20 +671,47 @@ class SimplifiedReActEngine:
                 # Text2SQL 优化：数据库查询优先使用自然语言
                 if decision['execute'] and decision['tool'] == 'database_query':
                     natural_query = self._extract_natural_query(todo, user_input)
+                    if natural_query and self.text2sql_tool is None:
+                        self.text2sql_tool = get_text2sql_tool("instance/badcase_doctor.db")
                     if natural_query and self.text2sql_tool:
                         print(f"[REACT-STREAM] 优先使用 Text2SQL执行: {natural_query}")
                         decision['params']['natural_query'] = natural_query
                 
                 print(f"[REACT-STREAM] 执行工具: {decision['tool']}")
-                yield {'event': 'executing', 'tool': decision['tool'], 'reason': decision.get('reason', '')}
+
+                # 如果是 modify，尝试从参数里提取要修改的字段，并带上首条进度文案，避免前端一直只显示“修改中...”
+                executing_payload = {
+                    'event': 'executing',
+                    'tool': decision['tool'],
+                    'reason': decision.get('reason', ''),
+                }
+                if decision['tool'] == 'modify':
+                    mods = (decision.get('params') or {}).get('modifications') or {}
+                    if isinstance(mods, dict) and mods:
+                        executing_payload['fields'] = list(mods.keys())
+                    executing_payload['message'] = '正在启动修改（进入线程池）…'
+
+                yield executing_payload
                 
                 # 批量修改逻辑：如果是 modify 工具，检查是否有候选列表（badcase/bug/testcase）
+                # 按用户意图选择类型：说「修改bug」用 bug_list，避免误用 badcase_list
                 if decision['tool'] == 'modify':
                     badcase_list = result_context.get('badcase_list', [])
                     bug_list = result_context.get('bug_list', [])
                     testcase_list = result_context.get('testcase_list', [])
-                    target_list = badcase_list or bug_list or testcase_list
-                    target_type = 'badcase' if badcase_list else ('bug' if bug_list else 'testcase')
+                    mod_target = (decision.get('params') or {}).get('target') or self._infer_modify_target(user_input, (decision.get('reason') or ''))
+                    if mod_target == 'bug' and bug_list:
+                        target_list, target_type = bug_list, 'bug'
+                    elif mod_target == 'testcase' and testcase_list:
+                        target_list, target_type = testcase_list, 'testcase'
+                    elif badcase_list:
+                        target_list, target_type = badcase_list, 'badcase'
+                    elif bug_list:
+                        target_list, target_type = bug_list, 'bug'
+                    elif testcase_list:
+                        target_list, target_type = testcase_list, 'testcase'
+                    else:
+                        target_list, target_type = [], 'badcase'
                     
                     if target_list and len(target_list) > 1:
                         # 批量修改所有记录
@@ -321,10 +744,54 @@ class SimplifiedReActEngine:
                             'target': target_type
                         }
                     else:
-                        # 单个修改
-                        observation = await self._execute_tool(decision)
+                        # 单个修改：modify 可能执行较久，持续下发分步进度/心跳
+                        if decision.get('tool') == 'modify':
+                            started = time.time()
+                            task = asyncio.create_task(self._execute_tool(decision))
+                            await asyncio.sleep(0.1)
+                            while not task.done():
+                                waited = time.time() - started
+                                got_any = False
+                                try:
+                                    pq = (decision.get('params') or {}).get('progress_queue')
+                                    if pq:
+                                        while True:
+                                            msg = pq.get_nowait()
+                                            got_any = True
+                                            yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'message': str(msg)}
+                                            print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
+                                except Exception:
+                                    pass
+                                if not got_any:
+                                    yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'message': f'修改中…已等待 {waited:.0f}s'}
+                                await asyncio.sleep(0.2 if got_any else 0.4)
+                            observation = await task
+                        else:
+                            observation = await self._execute_tool(decision)
                 else:
-                    observation = await self._execute_tool(decision)
+                    if decision.get('tool') == 'modify':
+                        started = time.time()
+                        task = asyncio.create_task(self._execute_tool(decision))
+                        await asyncio.sleep(0.1)
+                        while not task.done():
+                            waited = time.time() - started
+                            got_any = False
+                            try:
+                                pq = (decision.get('params') or {}).get('progress_queue')
+                                if pq:
+                                    while True:
+                                        msg = pq.get_nowait()
+                                        got_any = True
+                                        yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'message': str(msg)}
+                                        print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
+                            except Exception:
+                                pass
+                            if not got_any:
+                                yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'message': f'修改中…已等待 {waited:.0f}s'}
+                            await asyncio.sleep(0.2 if got_any else 0.4)
+                        observation = await task
+                    else:
+                        observation = await self._execute_tool(decision)
                 
                 print(f"[REACT-STREAM] 工具执行结果:")
                 print(f"[REACT-STREAM]   成功: {observation.get('success', False)}")
@@ -357,17 +824,16 @@ class SimplifiedReActEngine:
                     suggested_params = observation.get('suggested_params', {})
                     # 从用户输入/ todo 中提取要查找的标题作为 keywords（拆分模糊匹配由 grep 内部处理）
                     keywords = self._extract_title_keywords_for_grep(user_input, todo)
+                    # 兜底：在所有迭代计划、不分类型查一遍（target=all，不传 plan_id）
                     grep_params = {
-                        'target': suggested_params.get('target', 'badcase'),
+                        'target': 'all',
                         'project_id': suggested_params.get('project_id', self.project_id),
                         'userId': 'system_agent'
                     }
                     if keywords:
                         grep_params['keywords'] = keywords
                         print(f"[REACT-STREAM] 从用户输入提取 grep keywords: '{keywords}'")
-                    # 若有当前迭代计划，只查该计划下的记录（人类式先检索本迭代）
-                    if result_context.get('plan_id') is not None or getattr(self, 'plan_id', None) is not None:
-                        grep_params['plan_id'] = result_context.get('plan_id') or self.plan_id
+                    # 不传 plan_id，grep 查全项目所有计划
                     grep_decision = {
                         'execute': True,
                         'tool': 'grep',
@@ -401,9 +867,24 @@ class SimplifiedReActEngine:
                         
                         yield {'event': 'observation', 'data': grep_observation}
                         
-                        target_list = result_context.get('badcase_list') or result_context.get('bug_list') or result_context.get('testcase_list')
+                        # 按用户意图选类型：说「修改bug」用 bug_list
+                        suggested = (decision.get('params') or {}).get('target') or suggested_params.get('target')
+                        if not suggested:
+                            suggested = self._infer_modify_target(user_input, '')
+                        if suggested == 'bug' and result_context.get('bug_list'):
+                            target_list, target_type = result_context['bug_list'], 'bug'
+                        elif suggested == 'testcase' and result_context.get('testcase_list'):
+                            target_list, target_type = result_context['testcase_list'], 'testcase'
+                        elif result_context.get('badcase_list'):
+                            target_list, target_type = result_context['badcase_list'], 'badcase'
+                        elif result_context.get('bug_list'):
+                            target_list, target_type = result_context['bug_list'], 'bug'
+                        elif result_context.get('testcase_list'):
+                            target_list, target_type = result_context['testcase_list'], 'testcase'
+                        else:
+                            target_list = []
+                            target_type = 'badcase'
                         if target_list:
-                            target_type = 'badcase' if result_context.get('badcase_list') else ('bug' if result_context.get('bug_list') else 'testcase')
                             best_match = self._pick_best_match_from_list(target_list, keywords, key_title='title')
                             target_list = [best_match]
                             result_context['first_badcase_id' if target_type == 'badcase' else ('first_bug_id' if target_type == 'bug' else 'first_testcase_id')] = best_match.get('id')
@@ -603,8 +1084,46 @@ class SimplifiedReActEngine:
             
             # 使用总结后的findings
             final_findings = summarized_findings if summarized_findings else findings
+            # 兜底：若关键发现仍为空，从各步的 observation 中提取 summary，避免前端「关键发现」无内容
+            if not final_findings and steps:
+                for s in steps:
+                    obs = s.get('observation') or {}
+                    if not isinstance(obs, dict):
+                        continue
+                    summary = obs.get('summary')
+                    if not summary and isinstance(obs.get('data'), dict):
+                        summary = (obs['data'] or {}).get('summary')
+                    if summary and isinstance(summary, str) and summary.strip():
+                        summary = summary.strip()
+                        if summary not in final_findings:
+                            final_findings.append(summary)
             
-            yield {'event': 'done', 'findings': final_findings, 'steps_count': len(steps), 'duration': time.time() - start_time}
+            duration = time.time() - start_time
+            # 大模型统一总结：一段话概括关键发现+执行统计（Cursor 式，供前端「耗时 Xs」下打字机展示）
+            summary_text = ""
+            try:
+                summary_prompt = f"""将以下执行结果总结为一段话，2-4 句即可，像 Cursor 的 Thought 总结那样简洁自然。
+
+关键发现/执行结果：
+{chr(10).join(f"- {f}" for f in (final_findings[:8] or ["无"]))}
+
+执行统计：完成 {len(steps)} 步，耗时 {duration:.2f}s。
+
+要求：纯中文、无 emoji、无列表符号，直接一段话。"""
+                summary_text = (await self.llm.chat(summary_prompt) or "").strip()
+                if summary_text:
+                    print(f"[REACT] 统一总结: {summary_text[:80]}...")
+            except Exception as e:
+                print(f"[REACT] 统一总结失败: {e}")
+            
+            yield {
+                'event': 'done',
+                'findings': final_findings,
+                'steps_count': len(steps),
+                'duration': duration,
+                'thinking_time': thinking_time,
+                'summary': summary_text
+            }
 
         except Exception as e:
             yield {'event': 'error', 'message': str(e)}
@@ -640,7 +1159,8 @@ class SimplifiedReActEngine:
             )
             
             response = await self.llm.parse_intent(prompt)
-            todos = parse_xml_todos(response)
+            # 统一使用健壮版解析
+            todos = robust_parse_todos(response)
             
             if not todos:
                 result['error'] = 'LLM 无法生成 Todo'
@@ -761,6 +1281,8 @@ class SimplifiedReActEngine:
         # Text2SQL优化：数据库查询优先使用自然语言
         if tool_name == 'database_query':
             natural_query = self._extract_natural_query(user_input, user_input)
+            if natural_query and self.text2sql_tool is None:
+                self.text2sql_tool = get_text2sql_tool("instance/badcase_doctor.db")
             if natural_query and self.text2sql_tool:
                 print(f"[REACT-STREAM]📊优先使用 Text2SQL执行: {natural_query}")
                 decision['params']['natural_query'] = natural_query
@@ -781,9 +1303,10 @@ class SimplifiedReActEngine:
         return todos
     
     def _generate_todos_from_skill_workflow(self, skill: Skill, user_input: str) -> List[str]:
-        """根据技能工作流生成 Todo列表"""
+        """根据技能工作流生成 Todo列表（按 step 排序，与 fallback_workflow_tools 一致）"""
         todos = []
-        for workflow_step in skill.workflow:
+        wf = sorted(getattr(skill, 'workflow', []) or [], key=lambda s: getattr(s, 'step', 0))
+        for workflow_step in wf:
             # 生成人性化的 Todo描述
             if workflow_step.description and workflow_step.description != workflow_step.tool:
                 todo_desc = workflow_step.description
@@ -797,6 +1320,8 @@ class SimplifiedReActEngine:
     
     async def _execute_tool_with_text2sql(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """使用 Text2SQL执行数据库工具"""
+        if tool_name == 'database_query' and self.text2sql_tool is None:
+            self.text2sql_tool = get_text2sql_tool("instance/badcase_doctor.db")
         if tool_name == 'database_query' and self.text2sql_tool:
             natural_query = params.get('natural_query')
             if natural_query:
@@ -866,6 +1391,21 @@ class SimplifiedReActEngine:
         picked = self._rerank_and_pick(items, keywords, key_title, top_k=1)
         return picked[0] if picked else {}
 
+    def _infer_modify_target(self, user_input: str, todo: str) -> str:
+        """
+        从用户输入/todo 推断 modify 的 target：用户说「修改bug」则用 bug，避免误改 BadCase。
+        """
+        text = ((user_input or '') + ' ' + (todo or '')).lower()
+        if not text.strip():
+            return 'badcase'
+        if 'bug' in text and 'badcase' not in text and 'bad case' not in text:
+            return 'bug'
+        if '测试用例' in text or 'testcase' in text or 'test_case' in text:
+            return 'testcase'
+        if 'badcase' in text or 'bad case' in text:
+            return 'badcase'
+        return 'badcase'
+
     def _extract_title_keywords_for_grep(self, user_input: str, todo: str) -> str:
         """
         从用户输入或 todo 中提取要修改的 BadCase/Bug 标题，用于 grep 的 keywords 参数。
@@ -913,7 +1453,7 @@ class SimplifiedReActEngine:
             return result
         
         #先尝匹配技能
-        matched_skill, score = skill_integration.match_skill(todo, context)
+        matched_skill, score = get_skill_integration().match_skill(todo, context)
         
         if matched_skill and score >= 0.3:
             #使用技能工作流参数
@@ -1190,13 +1730,15 @@ class SimplifiedReActEngine:
             
         return modifications
     
-    async def _extract_modifications_with_llm(self, todo: str, user_input: str = '') -> Dict[str, Any]:
+    async def _extract_modifications_with_llm(self, todo: str, user_input: str = '', exploration: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        使用大模型从 todo 中提取修改参数
+        使用大模型从 todo 中提取修改参数。可选传入 exploration（当前记录+用户列表），
+        让模型先「探索」再思考意图（类似 Cursor 探索文件后再决定修改）。
         
         Args:
             todo: todo 描述文本
-            user_input: 原始用户输入（用于更准确识别字段）
+            user_input: 原始用户输入
+            exploration: 可选，{ current_record, users }，来自 modify_tool.explore_record
             
         Returns:
             modifications: {字段名: 新值}
@@ -1204,39 +1746,97 @@ class SimplifiedReActEngine:
         import re
         import json
         
-        # 构建上下文，包含原始用户输入
+        # 兜底：从用户输入直接解析「标题为/改成/改为 XXX」，避免 LLM 返回空
+        text = (user_input or '').strip()
+        if text:
+            m = re.search(r'标题[为改成改为]+[：:\s]*([^\s，,。]+(?:\s+[^\s，,。]+)*)', text)
+            if m:
+                title_val = m.group(1).strip()
+                if title_val and len(title_val) <= 200:
+                    fallback = {'title': title_val}
+                    print(f"[REACT-LLM] 从用户输入兜底解析标题: {fallback}")
+                    return self._normalize_modifications_for_bug_expected_result(fallback, user_input)
+        
+        # 由大模型识别用户修改意图，归纳为工具参数。若有 exploration，先结合「当前记录+表可修改字段+用户列表」思考再输出。
+        exploration_block = ""
+        if exploration:
+            cur = exploration.get('current_record') or {}
+            users = exploration.get('users') or []
+            fields = exploration.get('modifiable_fields') or []
+            users_str = ", ".join([f"id={u.get('id')} name={u.get('name', '')}" for u in users[:30]])
+            fields_str = "、".join([f"{f.get('field', '')}({f.get('label', '')})" for f in fields])
+            exploration_block = f"""
+【探索到的上下文】（类似 Cursor 探索文件：先看表记录与字段再决定改什么）
+当前记录：{json.dumps(cur, ensure_ascii=False)}
+本表可修改字段（仅可输出以下 field 名）：{fields_str}
+可选用户（id/名称）：{users_str}
+请结合上述记录、可修改字段与用户列表思考用户意图（例如负责人「33」对应用户列表中的谁）；只输出上述可修改字段中的 field 名作为 key，负责人用 assignee、值为用户名称，系统会按名称解析为 id。
+"""
+        
         prompt = f"""
 原始用户请求：{user_input}
 任务步骤描述：{todo}
+{exploration_block}
+请由你识别用户的具体修改意图，将意图归纳为「修改字段 → 值」的 JSON，作为 modify 工具的参数。
 
-请根据原始用户请求识别要修改的字段，返回JSON格式。
+识别规则：用户表述方式多样（如「为」「改为」「改成」「设为」「调整为」等），只要语义是「把某字段改成某值」就输出对应字段与值。只返回与用户所述类型相符的字段（改 Bug 只出现 Bug 字段，改 BadCase 只出现 BadCase 字段，改测试用例只出现 TestCase 字段）。负责人：用户说的值一律视为对外属性（名称/展示名），输出 assignee 键即可，如「负责人为33」「的负责人为33」「负责人改成33」均输出 {{"assignee": "33"}}；系统会按名称解析为 id。不可修改字段勿返回：类型、id、project_id、plan_id、created_at、updated_at、creator_id；若用户仅要求改「类型」则返回 {{}}。
 
-【重要】字段名映射规则：
-- "相似问题"、"具体问题"、"问题" -> 必须映射为 base_problem
+【Bug 字段映射】仅当用户明确在改 Bug 时使用：
 - "标题" -> title
-- "状态" -> status (值：new/pending/resolved/closed/reopened/hold)
-- "优先级" -> priority (值：p1/p2/p3)
+- "描述" -> description
+- "状态" -> status（值：new/assigned/in_progress/resolved/closed/reopened）
+- "优先级" -> priority（值：p1/p2/p3）
+- "严重程度" -> severity
+- "负责人" -> assignee（内部映射为 assignee_id）
+- "复现步骤" -> steps_to_reproduce
+- "期望结果"、"预期结果" -> expected_result
+- "实际结果" -> actual_result
+
+【BadCase 字段映射】仅当用户明确在改 BadCase 时使用：
+- "标题" -> title
+- "状态" -> status
+- "优先级" -> priority
 - "负责人" -> assignee
+- "相似问题"、"具体问题"、"问题" -> base_problem
 - "复现步骤" -> reproduction_steps
+- "答案" -> answer（注意：不是"正确答案"）
 - "正确答案" -> correct_answer
+- "BadCase结果" -> badcase_result
 - "解决方式" -> solution
 - "问题原因" -> problem_reason
 
-示例：
-- 用户说"修改相似问题为XXX" -> {{"base_problem": "XXX"}}
-- 用户说"状态改为已解决" -> {{"status": "resolved"}}
-- 用户说"标题改成测试标题" -> {{"title": "测试标题"}}
+【TestCase 字段映射】仅当用户明确在改测试用例时使用：
+- "标题" -> title
+- "状态" -> status（值：draft/review/active/archived）
+- "优先级" -> priority
+- "负责人" -> assignee（内部映射为 assignee_id）
+- "前置条件" -> preconditions
+- "测试步骤" -> steps
+- "备注" -> remark
+- "基线" -> baseline
+- "用例类型" -> case_type
+- "测试类型" -> test_type
+- "执行结果" -> execution_result
+- "预估工时" -> estimated_time
+- "实际工时" -> actual_time
 
-请直接返回JSON，不要包含其他内容："""
+示例（意图 → JSON）：
+- "修改登录bug的期望结果为能正常登录" -> {{"expected_result": "能正常登录"}}
+- "修改相似问题为XXX" -> {{"base_problem": "XXX"}}
+- "状态改为已解决" -> {{"status": "resolved"}}
+- "标题改成测试标题" -> {{"title": "测试标题"}}
+- "修改创建测试用例7的负责人为33" / "的负责人为33" / "负责人改成33" -> {{"assignee": "33"}}
+
+请直接返回 JSON，不要包含其他内容。"""
         
         try:
             response = await self.llm.parse_intent(prompt)
             print(f"[REACT-LLM] 提取修改参数响应: {response}")
             
-            # 如果 parse_intent 已经返回字典，直接使用
+            # 如果 parse_intent 已经返回字典，直接使用（并做期望结果兜底）
             if isinstance(response, dict):
                 print(f"[REACT-LLM] 提取的修改参数: {response}")
-                return response
+                return self._normalize_modifications_for_bug_expected_result(response, user_input)
             
             # 如果是字符串，提取 JSON 部分
             if isinstance(response, str):
@@ -1244,11 +1844,175 @@ class SimplifiedReActEngine:
                 if json_match:
                     modifications = json.loads(json_match.group())
                     print(f"[REACT-LLM] 提取的修改参数: {modifications}")
-                    return modifications
+                    return self._normalize_modifications_for_bug_expected_result(modifications, user_input)
         except Exception as e:
             print(f"[REACT-LLM] 提取修改参数失败: {e}")
         
         return {}
+    
+    def _user_facing_reasoning_summary(self, user_input: str, raw_reasoning: str) -> str:
+        """将模型内部思考转为给用户看的说明。不截取深度思考文本，仅做 ID 转名称与内部词过滤。
+        若包含工具名等内部词则回退为根据用户意图生成的简短说明。
+        """
+        if not raw_reasoning or not isinstance(raw_reasoning, str):
+            return self._reasoning_summary_from_user_input(user_input)
+        
+        raw = raw_reasoning.strip()
+        converted_reasoning = self._convert_ids_to_names(raw)
+        
+        internal_jargon = (
+            'grep', 'modify', 'create', 'keywords', 'target', 'project_id', 'modifications',
+            'Todo', 'todo', 'JSON', '必填', '可选', 'skill', '技能', 'workflow'
+        )
+        if any(j in converted_reasoning for j in internal_jargon):
+            return self._reasoning_summary_from_user_input(user_input)
+        cleaned = converted_reasoning.strip()
+        return cleaned if cleaned else self._reasoning_summary_from_user_input(user_input)
+    
+    def _convert_ids_to_names(self, reasoning_text: str) -> str:
+        """将 reasoning 中的内部 ID（project_id, plan_id, target_id）转换为用户可读的名称。
+        
+        转换规则：
+        - project_id=1 → "A 计划项目"
+        - plan_id=34 → "一个测试用例的计划"
+        - target_id=6 → "创建测试用例"（从数据库中查找标题）
+        """
+        if not reasoning_text:
+            return reasoning_text
+        
+        result = reasoning_text
+        
+        # 1. 转换 project_id（需在 app_context 内查库）
+        # 2. 转换 plan_id
+        import re
+        try:
+            from app import app, db, Project, Plan
+            with app.app_context():
+                if self.project_id:
+                    project = db.session.query(Project).filter(Project.id == self.project_id).first()
+                    if project:
+                        result = re.sub(
+                            rf'project_id[=：\s]*{self.project_id}',
+                            f'"{project.name}"项目',
+                            result
+                        )
+                        result = re.sub(
+                            rf'项目 ID[=：\s]*{self.project_id}',
+                            f'"{project.name}"项目',
+                            result
+                        )
+                if self.plan_id:
+                    plan = db.session.query(Plan).filter(Plan.id == self.plan_id).first()
+                    if plan:
+                        result = re.sub(
+                            rf'plan_id[=：\s]*{self.plan_id}',
+                            f'"{plan.name}"计划',
+                            result
+                        )
+                        result = re.sub(
+                            rf'迭代计划 ID[=：\s]*{self.plan_id}',
+                            f'"{plan.name}"计划',
+                            result
+                        )
+        except Exception as e:
+            print(f"[REACT] 转换 project_id/plan_id 失败：{e}")
+        
+        # 3. 转换 target_id（需在 app_context 内查库）
+        target_id_matches = re.findall(r'target_id[=：\s]*(\d+)', result)
+        if target_id_matches:
+            try:
+                from app import app, db, Bug, BadCase, TestCase
+                with app.app_context():
+                    for match in target_id_matches:
+                        target_id = int(match)
+                        title = None
+                        bug = db.session.query(Bug).filter(Bug.id == target_id).first()
+                        if bug:
+                            title = bug.title
+                        else:
+                            badcase = db.session.query(BadCase).filter(BadCase.id == target_id).first()
+                            if badcase:
+                                title = badcase.title
+                            else:
+                                testcase = db.session.query(TestCase).filter(TestCase.id == target_id).first()
+                                if testcase:
+                                    title = testcase.title
+                        if title:
+                            result = re.sub(
+                                rf'target_id[=：\s]*{target_id}',
+                                f'"{title}"记录',
+                                result
+                            )
+            except Exception as e:
+                print(f"[REACT] 转换 target_id 失败：{e}")
+        
+        return result
+    
+    def _user_requested_type_modification(self, user_input: str) -> bool:
+        """检测用户是否在要求修改「类型」字段（类型不可修改，需提前拦截）。"""
+        if not user_input or not isinstance(user_input, str):
+            return False
+        u = user_input.strip()
+        # 修改...类型 / 类型改为 / 类型改成 / 把类型 / 将类型 / type 改为
+        if '类型' in u and any(k in u for k in ('修改', '改', '改成', '改为', '设为', '更新')):
+            return True
+        if 'type' in u.lower() and any(k in u for k in ('修改', '改', '改成', '改为', '设为', '更新')):
+            return True
+        return False
+    
+    def _reasoning_summary_from_user_input(self, user_input: str) -> str:
+        """根据用户输入生成一句给用户看的思考说明（不暴露内部参数）。"""
+        if not user_input:
+            return "正在分析您的请求并规划操作步骤。"
+        u = user_input.strip()
+        if any(k in u for k in ('修改', '改', '更新', '改成', '设为')):
+            if any(k in u for k in ('期望结果', '预期结果')):
+                return "先查找相关 Bug，再修改其期望结果。"
+            if any(k in u for k in ('状态', '关闭', '解决', 'resolved', 'closed')):
+                return "先定位相关记录，再修改状态。"
+            if 'bug' in u.lower() or '缺陷' in u:
+                return "先查找相关 Bug，再执行修改。"
+            if 'badcase' in u.lower() or 'bad case' in u:
+                return "先查找相关 BadCase，再执行修改。"
+            return "先定位相关记录，再执行修改。"
+        if any(k in u for k in ('查询', '搜索', '找', '列出', '显示')):
+            return "正在查找相关记录。"
+        if any(k in u for k in ('创建', '新建', '添加')):
+            return "正在准备创建新记录。"
+        return "正在分析您的请求并规划操作步骤。"
+    
+    def _normalize_modifications_for_bug_expected_result(self, modifications: Dict[str, Any], user_input: str) -> Dict[str, Any]:
+        """兜底：用户说的是「期望结果」但 LLM 误提成 base_problem 时，改为 expected_result，避免沙箱预览显示为「相似问题」。"""
+        if not modifications or not user_input:
+            return modifications
+        if 'expected_result' in modifications:
+            return modifications
+        if 'base_problem' not in modifications:
+            return modifications
+        if '期望结果' in user_input or '预期结果' in user_input:
+            modifications = dict(modifications)
+            modifications['expected_result'] = modifications.pop('base_problem')
+            print(f"[REACT-LLM] 兜底：用户说期望结果，将 base_problem 改为 expected_result")
+        return modifications
+    
+    def _extract_modifications_with_regex(self, user_input: str) -> Dict[str, Any]:
+        """
+        LLM 失败时的极简兜底（如解析异常、网络错误），仅做最宽松的匹配。
+        主路径应由大模型识别意图并归纳为工具参数，不依赖写死的句式。
+        """
+        import re
+        modifications = {}
+        if not (user_input or '').strip():
+            return modifications
+        # 仅当明显包含「某字段 + 为/改为/改成 + 值」时，取最后一个这样的片段做极简推断，避免写死多种说法
+        loose = re.search(r'(负责人|标题|状态)[为改成设为调整为]*\s*[：:\s]*([^\s，,。]+)', user_input)
+        if loose:
+            field_name = loose.group(1)
+            value = loose.group(2).strip().rstrip('。，')
+            key = 'assignee' if field_name == '负责人' else ('title' if field_name == '标题' else 'status')
+            modifications[key] = value
+            print(f"[REACT-REGEX] 兜底（极简）：{field_name} -> {key} = {value}")
+        return modifications
     
     async def _extract_todo_params(self, todo: str, user_input: str) -> Dict[str, Any]:
         """
@@ -1262,29 +2026,38 @@ class SimplifiedReActEngine:
         result = {'tool': None, 'params': {}}
         
         # 1. 确定工具类型 - 优先匹配 modify，因为 modify 的 todo 中可能包含"搜索"关键词
-        # 例如："使用 modify 工具将搜索到的BadCase状态修改为resolved"
-        
-        # 先检查是否明确指定了 modify 工具
-        if 'modify' in todo.lower() or ('修改' in todo and 'grep' not in todo.lower()):
+        # 例如："使用 modify 工具将搜索到的 BadCase 状态修改为 resolved"
+                
+        # 先检查是否明确指定了 modify 工具或包含修改意图
+        modify_keywords = ['modify', '修改', '改成', '改为', '更新', '设为', '调整']
+        has_modify_intent = any(kw in todo.lower() for kw in modify_keywords)
+                
+        if has_modify_intent and 'grep' not in todo.lower():
             result['tool'] = 'modify'
-            
+                    
             # 使用大模型提取修改参数（更准确）
             modifications = await self._extract_modifications_with_llm(todo, user_input)
-            
-            # 提取目标类型
-            if 'bug' in todo.lower():
+                    
+            # 如果 LLM 调用失败，使用正则表达式兜底提取
+            if not modifications and user_input:
+                modifications = self._extract_modifications_with_regex(user_input)
+                    
+            # 提取目标类型：优先检查 testcase，再检查 bug，最后 badcase
+            if 'testcase' in todo.lower() or 'test_case' in todo.lower() or '测试用例' in todo:
+                target = 'testcase'
+            elif 'bug' in todo.lower() or '缺陷' in todo or 'Bug' in todo:
                 target = 'bug'
-            elif 'badcase' in todo.lower():
+            elif 'badcase' in todo.lower() or 'bad case' in todo.lower() or 'bad 案例' in todo:
                 target = 'badcase'
             else:
                 target = 'badcase'  # 默认
-            
+                    
             result['params'] = {
                 'target': target,
                 'modifications': modifications,
                 'confirm': False,
             }
-            print(f"[REACT] 从 todo 提取 modify 参数: modifications={modifications}, target={target}")
+            print(f"[REACT] 从 todo 提取 modify 参数：modifications={modifications}, target={target}")
         
         # 再检查 grep 工具
         elif 'grep' in todo.lower() or '搜索' in todo or '查找' in todo or '定位' in todo:
@@ -1298,20 +2071,34 @@ class SimplifiedReActEngine:
                 # 回退：匹配“标题为XXX”格式
                 title_match = re.search(r'标题[是为]([^，。,]+)', todo)
                 keywords = title_match.group(1).strip() if title_match else ''
+            # 关键词兜底：从用户输入提取（如「修改登录bug的期望结果」->「登录」）
+            if not keywords and user_input:
+                keywords = self._extract_title_keywords_for_grep(user_input, todo)
             
-            # 提取目标类型
-            if 'bug' in todo.lower():
+            # 提取目标类型：todo 优先，否则结合用户输入（用户说「修改创建测试用例的前提条件」应查测试用例表）
+            if 'bug' in todo.lower() or 'target=bug' in todo.lower():
                 target = 'bug'
-            elif 'badcase' in todo.lower():
+            elif 'testcase' in todo.lower() or 'test_case' in todo.lower() or 'target=testcase' in todo.lower():
+                target = 'testcase'
+            elif 'badcase' in todo.lower() or 'bad case' in todo.lower():
                 target = 'badcase'
+            elif user_input and ('测试用例' in user_input or 'test case' in user_input.lower()):
+                # 兜底：用户提到测试用例但 todo 未写 target=testcase 时，按测试用例查
+                target = 'testcase'
+            elif user_input and ('bug' in user_input or '缺陷' in user_input or 'Bug' in user_input):
+                # 兜底：用户提到 bug/缺陷但 todo 未写类型时，在所有迭代计划、不分类型查一遍（target=all，不限定 plan_id）
+                target = 'all'
             else:
                 target = 'badcase'  # 默认
             
             result['params'] = {
                 'target': target,
                 'mode': 'locate',
-                'keywords': keywords,
+                'keywords': keywords or None,
             }
+            # 兜底时查全部计划：target=all 时不传 plan_id，由 grep 查全项目
+            if target == 'all':
+                result['params'].pop('plan_id', None)
             print(f"[REACT] 从 todo 提取 grep 参数: keywords='{keywords}', target={target}")
         
         else:
@@ -1343,8 +2130,10 @@ class SimplifiedReActEngine:
             return {'success': False, 'error': f"工具不存在：{tool_name}"}
         
         try:
-            # 确保传入 userId 和 project_id
-            params = decision.get('params', {})
+            # 确保传入 userId 和 project_id；并保证 params 与 decision['params'] 同引用，便于 run_stream 轮询 progress_queue
+            params = decision.get('params') or {}
+            if 'params' not in decision:
+                decision['params'] = params
             if 'userId' not in params:
                 params['userId'] = 'system_agent'
             if self.project_id and 'project_id' not in params:
@@ -1352,18 +2141,46 @@ class SimplifiedReActEngine:
             
             print(f"[REACT] 工具参数: {params}")
             print(f"[REACT] 正在执行工具: {tool_name}")
+
             # modify 工具内部使用 Flask/SQLAlchemy 同步 DB，会阻塞 asyncio 事件循环，导致流式一直“修改中...”
-            # 放到线程池中执行，在独立线程里跑新事件循环，避免阻塞主循环
+            # 放到线程池中执行，在独立线程里跑新事件循环，避免阻塞主循环，并增加超时保护
             if tool_name == 'modify':
+                print(f"[REACT] modify 进入线程池执行（target_id={params.get('target_id')}, target={params.get('target')}）…")
                 loop = asyncio.get_event_loop()
+                import queue as _queue
+                progress_q: "_queue.Queue[str]" = _queue.Queue()
+                # 暴露给上层 run_stream 轮询，向前端实时下发分步进度
+                params['progress_queue'] = progress_q
+
+                def _progress_cb(msg: str):
+                    try:
+                        progress_q.put(str(msg))
+                    except Exception:
+                        pass
+
                 def _run_modify_in_thread():
                     thread_loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(thread_loop)
                     try:
+                        # 把进度回调传给 modify_tool（工具内分步上报）
+                        params['progress_callback'] = _progress_cb
                         return thread_loop.run_until_complete(tool.execute(**params))
                     finally:
                         thread_loop.close()
-                res = await loop.run_in_executor(self._tool_executor, _run_modify_in_thread)
+
+                # 工具级超时时间（秒），可通过环境变量调整，默认 120s
+                tool_timeout = int(os.getenv("AGENT_TOOL_TIMEOUT", "120"))
+                try:
+                    res = await asyncio.wait_for(
+                        loop.run_in_executor(self._tool_executor, _run_modify_in_thread),
+                        timeout=tool_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[REACT] ❌ modify 工具执行超时（>{tool_timeout}s）")
+                    return {
+                        "success": False,
+                        "error": f"modify 工具执行超时（>{tool_timeout}s），请检查后端数据库或网络状态后重试。",
+                    }
             else:
                 res = await tool.execute(**params)
             

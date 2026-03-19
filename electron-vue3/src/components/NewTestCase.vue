@@ -1,5 +1,5 @@
 <template>
-  <div class="testcase-detail-wrapper">
+  <div class="testcase-detail-wrapper" :class="{ 'is-embedded': embedded }">
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
       <div class="loading-spinner"></div>
@@ -25,8 +25,9 @@
     </div>
 
     <div class="main-content">
-      <!-- 左侧主要内容区 -->
+      <!-- 左侧主要内容区：可滚动内容 + 底部固定操作栏 -->
       <div class="content-left">
+        <div class="content-left-scroll">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
           v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
@@ -248,7 +249,7 @@
                 <div class="diff-header">
                   <span class="diff-label">修改预览:</span>
                   <div class="diff-actions">
-                    <button @click="confirmFieldChange('preconditions')" class="btn-confirm" title="确认">✓</button>
+                    <button @click="applyFieldChange('preconditions')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button @click="cancelFieldChange('preconditions')" class="btn-cancel" title="取消">✗</button>
                   </div>
                 </div>
@@ -381,7 +382,7 @@
                 <div class="diff-header">
                   <span class="diff-label">备注修改预览:</span>
                   <div class="diff-actions">
-                    <button @click="confirmFieldChange('remark')" class="btn-confirm" title="确认">✓</button>
+                    <button @click="applyFieldChange('remark')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button @click="cancelFieldChange('remark')" class="btn-cancel" title="取消">✗</button>
                   </div>
                 </div>
@@ -443,12 +444,15 @@
           </div>
         </div>
 
-        <!-- 保存和取消按钮 -->
-        <div class="save-actions">
-          <button @click="saveTestCase" class="btn-save" :disabled="saving">
-            {{ saving ? '保存中...' : '保存' }}
-          </button>
-          <button @click="goBack" class="btn-cancel">取消</button>
+        </div>
+        <!-- 保存和取消按钮：固定在底部，始终可见可点 -->
+        <div class="footer-section">
+          <div class="footer-actions">
+            <button class="action-btn cancel-btn" @click="goBack">取消</button>
+            <button class="action-btn save-btn" @click="saveTestCase" :disabled="saving">
+              {{ saving ? '保存中...' : '保存' }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -631,7 +635,7 @@
                     <span class="expand-icon" :class="{ expanded: plan.expanded }">▶</span>
                     <span class="plan-icon">{{ plan.icon }}</span>
                     <span class="plan-name">{{ plan.label }}</span>
-                    <span class="bug-count">({{ plan.bugs?.length || 0 }})</span>
+                    <span class="bug-count">({{ plan.bug_count ?? (plan.bugs?.length || 0) }})</span>
                   </div>
                   <div v-if="plan.expanded" class="tree-children">
                     <!-- 子计划 -->
@@ -641,7 +645,7 @@
                           <span class="expand-icon" :class="{ expanded: childPlan.expanded }">▶</span>
                           <span class="plan-icon">{{ childPlan.icon }}</span>
                           <span class="plan-name">{{ childPlan.label }}</span>
-                          <span class="bug-count">({{ childPlan.bugs?.length || 0 }})</span>
+                          <span class="bug-count">({{ childPlan.bug_count ?? (childPlan.bugs?.length || 0) }})</span>
                         </div>
                         <div v-if="childPlan.expanded && childPlan.bugs !== null" class="tree-children">
                           <div v-if="childPlan.bugs && childPlan.bugs.length > 0">
@@ -710,7 +714,7 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjectEditContext, getProjectPlans, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
 import { defineAsyncComponent } from 'vue'
@@ -747,8 +751,8 @@ export default {
     const route = useRoute()
     const router = useRouter()
 
-    // 优先使用 props，其次使用路由参数
-    const projectId = props.project_id ? Number(props.project_id) : (route.query.project_id ? Number(route.query.project_id) : null)
+    // 从测试用例计划“快速新建”跳转时，route 含 project_id/plan_id，应优先使用
+    const projectId = (route.query.project_id ? Number(route.query.project_id) : null) || (props.project_id ? Number(props.project_id) : null)
     const testcaseId = props.id ? Number(props.id) : (route.query.id ? Number(route.query.id) : null)
     const isEdit = !!testcaseId
 
@@ -807,9 +811,10 @@ export default {
     const showPlanDropdown = ref(false)
 
     const availableStatuses = [
-      { value: 'ready', label: '就绪' },
-      { value: 'abandoned', label: '废弃' },
-      { value: 'design', label: '设计' }
+      { value: 'draft', label: '草稿' },
+      { value: 'review', label: '评审' },
+      { value: 'active', label: '生效' },
+      { value: 'archived', label: '归档' }
     ]
 
     const getStatusText = (status) => {
@@ -884,7 +889,7 @@ export default {
         if (response.data.success) {
           const allPlans = response.data.plans || []
           console.log('fetchProjectPlans: 所有计划:', allPlans)
-          const plans = allPlans.filter(p => p.plan_type === 'test_case')
+          const plans = allPlans.filter(p => (p.plan_type === 'test_case' || p.plan_type === 'testcase'))
           console.log('fetchProjectPlans: 过滤后的test_case类型计划:', plans)
           testcasePlans.value = [
             { value: 'unplanned', label: '未计划', icon: '📋' },
@@ -905,7 +910,7 @@ export default {
       const result = []
       const walk = (nodes) => {
         ;(nodes || []).forEach(p => {
-          if (p.plan_type === 'test_case') result.push(p)
+          if (p.plan_type === 'test_case' || p.plan_type === 'testcase') result.push(p)
           if (p.children && p.children.length) walk(p.children)
         })
       }
@@ -1071,6 +1076,7 @@ export default {
               icon: '📋',
               expanded: false,
               bugs: null,
+              bug_count: p.bug_count || 0,  // 使用后端返回的 bug_count
               children: p.children && p.children.length > 0 ? processPlanTree(p.children) : []
             }))
           }
@@ -1278,6 +1284,9 @@ export default {
         return
       }
 
+      // 保存前从富文本编辑器同步前置条件，避免未触发的 @input 导致提交空值
+      updatePreconditions()
+
       saving.value = true
       try {
         // 处理 related_defects：提取 bug id 数组
@@ -1288,11 +1297,33 @@ export default {
           ? testcase.assignee[0] 
           : testcase.assignee_id
         
-        // 处理 plan：如果是 'unplanned' 则 plan_id 为 null
-        const planId = testcase.plan && testcase.plan !== 'unplanned' 
-          ? parseInt(testcase.plan) 
-          : testcase.plan_id
-        
+        // plan_id：从测试用例计划“快速新建”时 route 带 plan_id（必为 test_case 计划），优先使用；否则用表单选中
+        let planId = null
+        const routePlanId = route.query.plan_id ? parseInt(route.query.plan_id) : null
+        if (isEdit) {
+          if (testcase.plan && testcase.plan !== 'unplanned') {
+            const pid = parseInt(testcase.plan)
+            if (testcasePlans.value.some(p => p.value !== 'unplanned' && parseInt(p.value) === pid)) planId = pid
+          } else {
+            planId = testcase.plan_id
+          }
+        } else if (routePlanId && !isNaN(routePlanId)) {
+          // 新建且 URL 有 plan_id：来自测试用例迭代计划“快速新建”，该计划必为 test_case 类型
+          planId = routePlanId
+        } else if (testcase.plan && testcase.plan !== 'unplanned') {
+          const pid = parseInt(testcase.plan)
+          if (testcasePlans.value.some(p => p.value !== 'unplanned' && parseInt(p.value) === pid)) planId = pid
+        }
+
+        // 创建时 project_id：关联项目时用选中的，否则用路由的 project_id；后端必填
+        const rawProjectId = testcase.associate_project ? (testcase.project_id || projectId) : projectId
+        const finalProjectId = rawProjectId != null && rawProjectId !== '' ? parseInt(rawProjectId) : null
+        if (!isEdit && (!finalProjectId || isNaN(finalProjectId))) {
+          alert('请选择所属项目，或从项目详情页进入新建')
+          saving.value = false
+          return
+        }
+
         const payload = {
           title: testcase.title,
           status: testcase.status,
@@ -1308,9 +1339,9 @@ export default {
           estimated_time: testcase.estimated_time,
           version: testcase.version,
           plan_id: planId,
-          project_id: projectId,
-          assignee_id: assigneeId,
-          execution_result: testcase.execution_result
+          project_id: isEdit ? (projectId || testcase.project_id) : finalProjectId,
+          assignee_id: assigneeId || null,
+          execution_result: (testcase.execution_result && String(testcase.execution_result).trim()) ? testcase.execution_result : null
         }
 
         if (isEdit) {
@@ -1323,7 +1354,9 @@ export default {
         goBack()
       } catch (error) {
         console.error('保存失败:', error)
-        alert('保存失败')
+        console.error('后端返回:', error?.response?.data)
+        const msg = error?.response?.data?.error || error?.message || '保存失败'
+        alert(msg)
       } finally {
         saving.value = false
       }
@@ -1400,7 +1433,6 @@ export default {
       }
 
       try {
-        await scrollToDiffField(field)
         const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1472,29 +1504,44 @@ export default {
             if (resp.data?.success) {
               projectInfo.value = resp.data.project || projectInfo.value
               projectMembers.value = resp.data.members || projectMembers.value
+              // 将当前项目添加到 availableProjects 中，确保下拉框能显示
+              if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
+                availableProjects.value.push(resp.data.project)
+              }
               await setTestcasePlansFromTree(resp.data.plans || [])
             }
           } catch (e) {
             console.error('获取编辑页上下文失败:', e)
           }
         }
+
+        // 新建且 URL 带 plan_id：从测试用例迭代计划“快速新建”进入，自动关联所属计划
+        if (!isEdit && route.query.plan_id) {
+          const rid = String(route.query.plan_id)
+          const planIdNum = parseInt(rid)
+          if (!isNaN(planIdNum)) {
+            testcase.plan = rid
+            testcase.plan_id = planIdNum
+          }
+        }
         
         // projectInfo 由 edit-context 返回
         
         // 如果是编辑模式，加载测试用例详情
-        if (isEdit) {
+        if (isEdit && testcaseId) {
           const response = await getTestCaseDetail(testcaseId)
           console.log('loadTestCase: 响应:', response)
-          if (response.success || (response.data && response.data.success)) {
-            const data = response.testcase || response.data.testcase
+          const res = response?.data || response
+          if (res && (res.success === true) && res.testcase) {
+            const data = res.testcase
             // 基本字段赋值
             testcase.title = data.title || ''
-            testcase.status = data.status || 'draft'
+            testcase.status = (data.status != null && data.status !== undefined) ? String(data.status) : 'draft'
             testcase.case_type = data.case_type || '功能测试'
             testcase.priority = data.priority || 'P3'
             testcase.test_type = data.test_type || '手动'
             testcase.preconditions = data.preconditions || ''
-            testcase.steps = data.steps || [{ step: '', expected: '' }]
+            testcase.steps = Array.isArray(data.steps) ? data.steps : [{ step: '', expected: '' }]
             testcase.remark = data.remark || ''
             testcase.requirement_id = data.requirement_id
             testcase.baseline = data.baseline || ''
@@ -1525,13 +1572,32 @@ export default {
           }
         }
 
-        // 如果有预读到 diff，预填充新值到表单（确保内联 diff/✓✗ 立即可见）
+        // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
+        if (pendingDiff.value?.modifications) {
+          const mods = pendingDiff.value.modifications
+          for (const [field, data] of Object.entries(mods)) {
+            if (String(field).startsWith('_')) continue
+            const newVal = data?.new != null ? String(data.new).trim() : ''
+            const curVal = testcase[field] != null ? String(testcase[field]).trim() : ''
+            if (newVal && curVal === newVal) delete mods[field]
+          }
+          if (Object.keys(mods).filter(k => !String(k).startsWith('_')).length === 0) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+          }
+        }
         if (pendingDiff.value?.modifications) {
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (testcase.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
               testcase[field] = data.new
             }
           }
+        }
+
+        // 将前置条件同步到富文本编辑器（编辑器是 contenteditable，不会自动绑定 testcase.preconditions）
+        await nextTick()
+        if (preconditionsEditor.value && testcase.preconditions != null) {
+          preconditionsEditor.value.innerHTML = testcase.preconditions
         }
 
         // 后台等待全量请求完成（不阻塞首屏）；忽略失败
@@ -1545,6 +1611,44 @@ export default {
         console.log('=== NewTestCase onMounted 完成 ===')
       }
     })
+
+    // 嵌入模式下 id 可能由父组件稍后传入，监听后补拉详情
+    watch(() => props.id, async (newId) => {
+      const id = newId ? Number(newId) : null
+      if (!id || !props.embedded) return
+      loading.value = true
+      try {
+        const response = await getTestCaseDetail(id)
+        const res = response?.data || response
+        if (res && res.success === true && res.testcase) {
+          const data = res.testcase
+          testcase.title = data.title || ''
+          testcase.status = (data.status != null && data.status !== undefined) ? String(data.status) : 'draft'
+          testcase.case_type = data.case_type || '功能测试'
+          testcase.priority = data.priority || 'P3'
+          testcase.test_type = data.test_type || '手动'
+          testcase.preconditions = data.preconditions || ''
+          testcase.steps = Array.isArray(data.steps) ? data.steps : [{ step: '', expected: '' }]
+          testcase.remark = data.remark || ''
+          testcase.plan_id = data.plan_id
+          testcase.project_id = data.project_id
+          testcase.execution_result = data.execution_result || ''
+          if (data.assignee_id) {
+            testcase.assignee = [String(data.assignee_id)]
+            testcase.assignee_id = data.assignee_id
+          }
+          if (data.plan_id) testcase.plan = String(data.plan_id)
+          await nextTick()
+          if (preconditionsEditor.value && testcase.preconditions != null) {
+            preconditionsEditor.value.innerHTML = testcase.preconditions
+          }
+        }
+      } catch (e) {
+        console.error('watch id 加载测试用例失败:', e)
+      } finally {
+        loading.value = false
+      }
+    }, { immediate: false })
 
     return {
       loading,
@@ -1630,6 +1734,13 @@ export default {
   flex-direction: column;
 }
 
+/* 嵌入在 ProjectDetail 时占满父容器，避免底部被裁切导致保存/取消看不见 */
+.testcase-detail-wrapper.is-embedded {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
 .header-bar {
   height: 56px;
   background: #fff;
@@ -1704,9 +1815,17 @@ export default {
 
 .content-left {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: #fff;
-  padding: 24px;
+  overflow: hidden;
+}
+
+.content-left-scroll {
+  flex: 1;
   overflow-y: auto;
+  padding: 24px;
 }
 
 .sidebar-right {
@@ -2195,41 +2314,65 @@ export default {
   background: #fff;
 }
 
-/* 保存按钮样式 */
-.save-actions {
-  margin-top: 24px;
+/* 底部操作区：固定在左侧区域底部，始终可见可点 */
+.footer-section {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  padding: 16px 24px;
+  border-top: 1px solid #e9ecef;
+  background: #fff;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.footer-actions {
+  display: flex;
   gap: 12px;
 }
 
-.btn-save,
-.btn-cancel {
-  padding: 12px 24px;
-  border: none;
-  border-radius: 4px;
+.action-btn {
+  padding: 10px 24px;
+  border-radius: 6px;
   font-size: 14px;
-  cursor: pointer;
   font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
 }
 
-.btn-save {
-  background: #409eff;
+.footer-actions .cancel-btn {
+  background: #f8f9fa;
+  color: #666;
+  border: 1px solid #e9ecef;
+}
+
+.footer-actions .cancel-btn:hover {
+  background: #e9ecef;
+}
+
+.footer-actions .save-btn {
+  background: #667eea !important;
   color: #fff;
 }
 
-.btn-save:hover {
-  background: #66b1ff;
+.footer-actions .save-btn:hover:not(:disabled) {
+  background: #5a6fd8 !important;
 }
 
-.btn-save:disabled {
-  background: #a0cfff;
+.footer-actions .save-btn:disabled {
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
 .btn-cancel {
-  background: #fff;
+  padding: 12px 24px;
   border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  font-weight: 500;
+  background: #fff;
   color: #606266;
 }
 

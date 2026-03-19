@@ -1,51 +1,52 @@
 <template>
-  <div class="qoder-todo-list">
-    <div v-for="(todo, index) in todos" :key="index" class="qoder-todo-item">
-      <div class="qoder-todo-icon"></div>
-      <div v-if="index < todos.length - 1" class="qoder-todo-line"></div>
-      <div class="qoder-todo-content-wrapper">
-        <!-- 步骤头部：工具名称 + 结果摘要 -->
-        <div class="qoder-todo-header" @click="toggleExpand(index)">
-          <div class="header-content">
+  <div v-if="todos && todos.length" class="todo-panel" :class="{ expanded: allExpanded }">
+    <!-- 顶部汇总栏：弱化卡片感，左侧图标 + 待办步骤标题 -->
+    <div class="todo-panel-header" @click="toggleAll">
+      <div class="todo-panel-title">
+        <img class="todo-panel-icon" :src="todoListIcon" alt="待办步骤" />
+        <span class="todo-title-text">待办步骤</span>
+        <span class="todo-title-count">
+          已完成 {{ completedCount }} / 共 {{ totalCount }}
+        </span>
+      </div>
+      <div class="todo-panel-meta">
+        <span v-if="runningCount > 0" class="todo-running-text">
+          正在执行 {{ runningCount }} 个步骤…
+        </span>
+        <img
+          class="todo-panel-toggle"
+          :src="allExpanded ? chevronDownIcon : chevronRightIcon"
+          alt="toggle"
+        />
+      </div>
+    </div>
+
+    <!-- 具体步骤列表 -->
+    <div v-show="allExpanded" class="qoder-todo-list">
+      <div v-for="(todo, index) in todos" :key="index" class="qoder-todo-item">
+        <div class="qoder-todo-check" :class="todo.status" aria-hidden="true"></div>
+        <div class="qoder-todo-content-wrapper">
+          <div
+            class="qoder-todo-row"
+            :class="{
+              completed: todo.status === 'completed',
+              running: todo.status === 'running',
+              error: todo.status === 'error'
+            }"
+          >
             <div class="qoder-todo-text">{{ todo.text }}</div>
-            <div v-if="todo.resultSummary" class="qoder-todo-result">{{ todo.resultSummary }}</div>
-            <!-- loading动画（步骤running时） -->
-            <span v-if="todo.status === 'running'" class="loading-dots">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
-            </span>
           </div>
-          <span v-if="hasExpandableContent(todo)" class="expand-icon" :class="{ expanded: expandedItems[index] }">▶</span>
         </div>
-        
-        <!-- 工具执行输出 + evidence卡片 -->
-        <transition name="expand">
-          <div v-if="expandedItems[index] && hasExpandableContent(todo)" class="qoder-todo-details">
-            <!-- Evidence卡片显示 -->
-            <div v-if="todo.evidence" class="evidence-card">
-              <div class="evidence-header">
-                <span class="evidence-icon">📊</span>
-                <span class="evidence-title">执行证据</span>
-              </div>
-              <div class="evidence-content">
-                <pre>{{ formatEvidence(todo.evidence) }}</pre>
-              </div>
-            </div>
-            
-            <!-- 原始输出（如果evidence不存在） -->
-            <div v-else-if="todo.toolCall && todo.toolCall.output" class="qoder-todo-output">
-              <pre>{{ formatOutput(todo.toolCall.output) }}</pre>
-            </div>
-          </div>
-        </transition>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import todoListIcon from '../assets/todo-list-icon.svg'
+import chevronRightIcon from '../assets/chevron-right-qoder.png'
+import chevronDownIcon from '../assets/chevron-down-qoder.png'
 
 const props = defineProps({
   todos: {
@@ -54,60 +55,46 @@ const props = defineProps({
   }
 })
 
-const expandedItems = ref({})
+const allExpanded = ref(true)
+
+const totalCount = computed(() => props.todos.length)
+const completedCount = computed(() =>
+  props.todos.filter(t => t.status === 'completed').length
+)
+const runningCount = computed(() =>
+  props.todos.filter(t => t.status === 'running').length
+)
 
 const toggleExpand = (index) => {
   expandedItems.value[index] = !expandedItems.value[index]
 }
 
-// 判断是否有可展开内容
-const hasExpandableContent = (todo) => {
-  return todo.evidence || (todo.toolCall && todo.toolCall.output)
-}
-
-// 格式化evidence
-const formatEvidence = (evidence) => {
-  if (typeof evidence === 'string') {
-    try {
-      const parsed = JSON.parse(evidence)
-      return JSON.stringify(parsed, null, 2)
-    } catch {
-      return evidence
-    }
-  }
-  return JSON.stringify(evidence, null, 2)
-}
-
-const formatOutput = (output) => {
-  if (typeof output === 'string') {
-    try {
-      const parsed = JSON.parse(output)
-      return JSON.stringify(parsed, null, 2)
-    } catch {
-      return output
-    }
-  }
-  return JSON.stringify(output, null, 2)
+const toggleAll = () => {
+  allExpanded.value = !allExpanded.value
 }
 </script>
 
 <style scoped>
-.qoder-todo-list {
-  position: relative;
-  padding: 8px 0;
-}
-
 .qoder-todo-item {
   display: flex;
-  gap: 16px;
-  margin-bottom: 8px;
-  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 0;
+  padding: 8px 10px;
+  align-items: center;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
 }
 
-.qoder-todo-icon {
-  width: 36px;
-  height: 36px;
-  background: #3b82f6;
+.qoder-todo-item:last-child {
+  border-bottom: none;
+}
+
+/* 圆形复选框：完成=对号，进行中=转圈，待办=空心圆 */
+.qoder-todo-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-sizing: border-box;
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
@@ -116,23 +103,44 @@ const formatOutput = (output) => {
   justify-content: center;
 }
 
-.qoder-todo-icon::after {
-  content: '▶';
-  color: white;
-  font-size: 14px;
+.qoder-todo-check.completed {
+  border-color: rgba(74, 222, 128, 0.55);
 }
 
-.qoder-todo-line {
-  position: absolute;
-  width: 2px;
-  background: #d1d5db;
-  left: 17px;
-  top: 44px;
-  height: 20px;
+.qoder-todo-check.completed::after {
+  content: '✓';
+  font-size: 12px;
+  line-height: 1;
+  color: #ffffff;
 }
 
-.qoder-todo-item:last-child .qoder-todo-line {
-  display: none;
+.qoder-todo-check.running {
+  border-color: rgba(59, 130, 246, 0.65);
+}
+
+.qoder-todo-check.running::after {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid rgba(148, 163, 184, 0.22);
+  border-top-color: rgba(59, 130, 246, 0.95);
+  animation: todoSpin 0.8s linear infinite;
+}
+
+.qoder-todo-check.error {
+  border-color: rgba(248, 113, 113, 0.6);
+}
+.qoder-todo-check.error::after {
+  content: '!';
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(248, 113, 113, 0.95);
+}
+
+@keyframes todoSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 .qoder-todo-content-wrapper {
@@ -140,136 +148,32 @@ const formatOutput = (output) => {
   min-width: 0;
 }
 
-.qoder-todo-header {
+.qoder-todo-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  background: #374151;
-  color: #e5e7eb;
-  padding: 12px 16px;
-  border-radius: 8px;
+  color: #ffffff;
   font-size: 13px;
   line-height: 1.5;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.qoder-todo-header:hover {
-  background: #4b5563;
-}
-
-.header-content {
-  flex: 1;
-  min-width: 0;
 }
 
 .qoder-todo-text {
   font-weight: 500;
-  margin-bottom: 4px;
   word-wrap: break-word;
 }
 
-.qoder-todo-result {
-  font-size: 12px;
-  color: #9ca3af;
-  margin-top: 4px;
+.qoder-todo-row.completed .qoder-todo-text {
+  text-decoration: line-through;
+  opacity: 0.7;
 }
 
-/* loading动画（步骤执行中） */
-.loading-dots {
-  display: inline-flex;
-  gap: 4px;
-  margin-left: 8px;
-  align-items: center;
-}
-
-.loading-dots .dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background-color: #888;
-  animation: dotPulse 1.4s infinite ease-in-out both;
-}
-
-.loading-dots .dot:nth-child(1) {
-  animation-delay: -0.32s;
-}
-
-.loading-dots .dot:nth-child(2) {
-  animation-delay: -0.16s;
-}
-
-@keyframes dotPulse {
-  0%, 80%, 100% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-  40% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-.expand-icon {
-  font-size: 10px;
-  color: #9ca3af;
-  transition: transform 0.2s;
-  margin-left: 8px;
-  flex-shrink: 0;
-}
-
-.expand-icon.expanded {
-  transform: rotate(90deg);
-}
-
-.qoder-todo-details {
-  margin-top: 8px;
-}
-
-/* Evidence卡片样式 */
-.evidence-card {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.evidence-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  background: #e0f2fe;
-  border-bottom: 1px solid #bae6fd;
-}
-
-.evidence-icon {
-  font-size: 16px;
-}
-
-.evidence-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #0369a1;
-}
-
-.evidence-content {
-  padding: 12px;
-}
-
-.evidence-content pre {
-  margin: 0;
-  color: #1e293b;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+.qoder-todo-row.error .qoder-todo-text {
+  color: #fecaca;
 }
 
 /* 原始输出样式 */
 .qoder-todo-output {
-  background: #1f2937;
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 6px;
   padding: 12px;
   max-height: 400px;
@@ -284,6 +188,100 @@ const formatOutput = (output) => {
   white-space: pre-wrap;
   word-wrap: break-word;
   font-family: 'Courier New', monospace;
+}
+
+/* 顶部 Todo 汇总栏：弱化卡片，背景与对话面板一致 */
+.todo-panel {
+  margin: 8px 0 12px;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent; /* 跟随对话面板底色 */
+  border: none;
+}
+
+.todo-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: transparent;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+  cursor: pointer;
+}
+
+/* 未展开时：不要展示边框线 */
+.todo-panel:not(.expanded) .todo-panel-header {
+  border-bottom: none;
+}
+
+.todo-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f9fafb;
+  font-size: 12px;
+}
+
+.todo-panel-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  filter: invert(1); /* 深色背景下反相成浅色/白色 */
+}
+
+.todo-title-text {
+  font-weight: 500;
+}
+
+.todo-title-count {
+  font-size: 11px;
+  color: #e5e7eb;
+  opacity: 0.9;
+}
+
+.todo-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.todo-running-text {
+  font-size: 11px;
+  color: #93c5fd;
+}
+
+.todo-panel-toggle {
+  width: 10px;
+  height: 10px;
+  display: block;
+  flex-shrink: 0;
+  /* 颜色/观感与深度思考箭头一致 */
+  filter: brightness(0) saturate(100%) invert(73%) sepia(11%) saturate(326%) hue-rotate(176deg) brightness(90%) contrast(86%);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+
+/* 折叠：hover 才显示 */
+.todo-panel-header:hover .todo-panel-toggle {
+  opacity: 0.95;
+}
+
+/* 展开：常显 */
+.todo-panel.expanded .todo-panel-toggle {
+  opacity: 0.95;
+}
+
+.qoder-todo-list {
+  position: relative;
+  padding: 6px 0 0;
+}
+
+/* 列表整体分割线（顶部/底部更自然） */
+.qoder-todo-list {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .expand-enter-active,

@@ -11,6 +11,7 @@ import re
 import sqlite3
 from typing import Dict, Any, Optional
 from enum import Enum
+import threading
 
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit, create_sql_agent
@@ -83,12 +84,12 @@ class Text2SQLAgent:
         try:
             from .text2sql.sandbox_executor import get_sandbox_executor
             self._sandbox_executor = get_sandbox_executor(fallback_to_local=True)
-            print(f"[Text2SQLAgent] ✅ 沙箱执行器已初始化")
+            print(f"[Text2SQLAgent] 沙箱执行器已初始化")
         except ImportError as e:
-            print(f"[Text2SQLAgent] ⚠️ 沙箱执行器初始化失败: {e}")
+            print(f"[Text2SQLAgent] 沙箱执行器初始化失败: {e}")
             self._sandbox_executor = None
         except Exception as e:
-            print(f"[Text2SQLAgent] ⚠️ 沙箱执行器初始化异常: {e}")
+            print(f"[Text2SQLAgent] 沙箱执行器初始化异常: {e}")
             self._sandbox_executor = None
     
     def _get_api_key_from_config(self) -> str:
@@ -100,12 +101,12 @@ class Text2SQLAgent:
             raise ValueError("未找到ZHIPU_API_KEY，请配置环境变量或在config.py中设置")
     
     def _resolve_database_path(self, database_path: str) -> str:
-        """解析数据库路径"""
+        """解析数据库路径或 URI"""
         if os.path.isabs(database_path):
             return database_path
         
-        # 检查是否是MySQL连接字符串
-        if database_path.startswith('mysql') or database_path.startswith('postgresql'):
+        # 完整 URI：MySQL/PostgreSQL/SQLite，直接返回
+        if database_path.startswith(('mysql', 'postgresql', 'postgres', 'sqlite:///')):
             return database_path
         
         # 相对路径转绝对路径
@@ -121,48 +122,82 @@ class Text2SQLAgent:
         return database_path
     
     def _init_llm(self):
-        """初始化LLM - 使用智谱AI OpenAI兼容接口"""
+        """初始化LLM（OpenAI兼容接口）。
+
+        支持：
+        - 智谱（默认）：https://open.bigmodel.cn/api/paas/v4
+        - 阿里云百炼（DashScope OpenAI 兼容模式）：https://dashscope.aliyuncs.com/compatible-mode/v1
+
+        通过环境变量控制：
+        - TEXT2SQL_PROVIDER: zhipu | bailian
+        - TEXT2SQL_API_BASE: 覆盖 base_url
+        - TEXT2SQL_API_KEY: 覆盖 api_key
+        - TEXT2SQL_MODEL: 覆盖 model（默认用 llm_backend.value，例如 glm-4-flash/glm-5）
+        """
         try:
             from langchain_openai import ChatOpenAI
             
-            model_name = self.llm_backend.value
-            
-            # 智谱AI OpenAI兼容接口
+            import os
+            from config import Config
+
+            provider = (os.getenv("TEXT2SQL_PROVIDER", "zhipu") or "zhipu").strip().lower()
+            # 兼容：用户习惯把“百炼/通义”写成 qwen
+            is_bailian = provider in ("bailian", "dashscope", "aliyun", "qwen")
+            model_name = (os.getenv("TEXT2SQL_MODEL", "") or "").strip() or self.llm_backend.value
+
+            api_base = (os.getenv("TEXT2SQL_API_BASE", "") or "").strip()
+            api_key = (os.getenv("TEXT2SQL_API_KEY", "") or "").strip()
+
+            if not api_base:
+                if is_bailian:
+                    api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                else:
+                    api_base = "https://open.bigmodel.cn/api/paas/v4"
+
+            if not api_key:
+                if is_bailian:
+                    api_key = getattr(Config, "DASHSCOPE_API_KEY", None) or getattr(Config, "QWEN_API_KEY", None)
+                else:
+                    api_key = self.api_key
+
+            if not api_key:
+                raise ValueError("TEXT2SQL API key 未配置（百炼/通义用 DASHSCOPE_API_KEY/QWEN_API_KEY，智谱用 ZHIPU_API_KEY）")
+
             llm = ChatOpenAI(
                 model=model_name,
-                openai_api_key=self.api_key,
-                openai_api_base="https://open.bigmodel.cn/api/paas/v4",
+                openai_api_key=api_key,
+                openai_api_base=api_base,
                 temperature=0.1,  # SQL生成使用低温度
                 max_tokens=4096,
             )
             
-            print(f"[Text2SQLAgent] ✅ LLM初始化成功: {model_name}")
+            # Windows 控制台可能是 gbk，避免 emoji 导致 UnicodeEncodeError
+            print(f"[Text2SQLAgent] LLM初始化成功: provider={provider}, model={model_name}, base={api_base}")
             return llm
             
         except ImportError as e:
-            print(f"[Text2SQLAgent] ❌ 缺少依赖: {str(e)}")
+            print(f"[Text2SQLAgent] 缺少依赖: {str(e)}")
             print("[Text2SQLAgent] 请安装: pip install langchain-openai")
             raise
         except Exception as e:
-            print(f"[Text2SQLAgent] ❌ LLM初始化失败: {str(e)}")
+            print(f"[Text2SQLAgent] LLM初始化失败: {str(e)}")
             raise
     
     def _init_database(self) -> SQLDatabase:
         """初始化数据库连接"""
         try:
-            # 判断数据库类型
-            if self.database_path.startswith(('mysql://', 'postgresql://', 'mysql+pymysql://')):
-                # MySQL/PostgreSQL连接字符串
+            # 完整 URI：MySQL/PostgreSQL/SQLite，直接使用
+            if self.database_path.startswith(('mysql://', 'mysql+pymysql://', 'postgresql://', 'postgres://', 'sqlite:///')):
                 db = SQLDatabase.from_uri(self.database_path)
             else:
-                # SQLite数据库
+                # 本地文件路径
                 db = SQLDatabase.from_uri(f"sqlite:///{self.database_path}")
             
-            print(f"[Text2SQLAgent] ✅ 数据库连接成功")
+            print(f"[Text2SQLAgent] 数据库连接成功")
             return db
             
         except Exception as e:
-            print(f"[Text2SQLAgent] ❌ 数据库连接失败: {str(e)}")
+            print(f"[Text2SQLAgent] 数据库连接失败: {str(e)}")
             raise
     
     def _load_schema_info(self) -> Dict[str, Any]:
@@ -215,7 +250,7 @@ class Text2SQLAgent:
             return schema_info
             
         except Exception as e:
-            print(f"[Text2SQLAgent] ⚠️ 加载schema失败: {str(e)}，使用空schema")
+            print(f"[Text2SQLAgent] 加载schema失败: {str(e)}，使用空schema")
             return schema_info
     
     def generate_sql(self, question: str, context: str = "", **kwargs) -> Dict[str, Any]:
@@ -231,7 +266,7 @@ class Text2SQLAgent:
             Dict: 包含生成的SQL和元数据
         """
         if self.debug:
-            print(f"[Text2SQLAgent] 📝 生成SQL: {question}")
+            print(f"[Text2SQLAgent] 生成SQL: {question}")
         
         try:
             # 构建提示词
@@ -443,7 +478,7 @@ SQL查询语句:"""
             Dict: 执行结果
         """
         if self.debug:
-            print(f"[Text2SQLAgent] 🚀 执行SQL: {sql[:200]}...")
+            print(f"[Text2SQLAgent] 执行SQL: {sql[:200]}...")
         
         # 安全验证
         is_safe, safety_info = self._validate_sql_safety(sql)
@@ -474,7 +509,7 @@ SQL查询语句:"""
         3. 返回结果
         """
         if self.debug:
-            print(f"[Text2SQLAgent] 🔒 通过沙箱执行SQL...")
+            print(f"[Text2SQLAgent] 通过沙箱执行SQL...")
         
         try:
             # 数据库配置
@@ -491,12 +526,12 @@ SQL查询语句:"""
             result = self._sandbox_executor.execute_sql(sql, db_config)
             
             if not result.get('success'):
-                print(f"[Text2SQLAgent] ❌ 沙箱执行失败: {result.get('error')}")
+                print(f"[Text2SQLAgent] 沙箱执行失败: {result.get('error')}")
             
             return result
                 
         except Exception as e:
-            print(f"[Text2SQLAgent] ❌ 沙箱执行失败: {e}")
+            print(f"[Text2SQLAgent] 沙箱执行失败: {e}")
             return {
                 'success': False,
                 'error': f'沙箱执行失败: {str(e)}',
@@ -518,7 +553,11 @@ SQL查询语句:"""
             # 解析结果
             # 如果是SQLite，直接连接执行
             if not self.database_path.startswith(('mysql', 'postgres')):
-                conn = sqlite3.connect(self.database_path)
+                # 支持 sqlite:/// 或 文件路径
+                db_path = self.database_path
+                if db_path.startswith('sqlite:///'):
+                    db_path = self.database_path[10:]  # 去掉 sqlite:///
+                conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -549,7 +588,7 @@ SQL查询语句:"""
                     conn.commit()
                     affected_rows = cursor.rowcount
                     conn.close()
-                    print(f"[SQL-EXEC] ✅ UPDATE/DELETE 执行成功，影响 {affected_rows} 行")
+                    print(f"[SQL-EXEC] UPDATE/DELETE 执行成功，影响 {affected_rows} 行")
                     return {
                         'success': True,
                         'affected_rows': affected_rows,
@@ -639,6 +678,63 @@ def get_text2sql_agent(database_path: str = "instance/badcase_doctor.db",
         debug=debug,
         execution_mode=mode_enum
     )
+
+
+_TEXT2SQL_CACHE_LOCK = threading.Lock()
+_TEXT2SQL_CACHE: Dict[str, object] = {}
+_TEXT2SQL_NONE = object()
+
+
+def get_cached_text2sql_agent(
+    database_path: str = "instance/badcase_doctor.db",
+    llm_backend: str = "glm-4-flash",
+    api_key: str = None,
+    debug: bool = False,
+    execution_mode: str = "direct",
+) -> Optional[Text2SQLAgent]:
+    """
+    进程级缓存 Text2SQLAgent，避免每次请求/每个工具重复初始化（连接DB/加载schema/初始化沙箱等）。
+    """
+    key = f"{database_path}|{llm_backend}|{execution_mode}|{int(bool(debug))}|{api_key or ''}"
+    cached = _TEXT2SQL_CACHE.get(key, None)
+    if cached is _TEXT2SQL_NONE:
+        return None
+    if isinstance(cached, Text2SQLAgent):
+        return cached
+    with _TEXT2SQL_CACHE_LOCK:
+        cached2 = _TEXT2SQL_CACHE.get(key, None)
+        if cached2 is _TEXT2SQL_NONE:
+            return None
+        if isinstance(cached2, Text2SQLAgent):
+            return cached2
+        try:
+            agent = get_text2sql_agent(
+                database_path=database_path,
+                llm_backend=llm_backend,
+                api_key=api_key,
+                debug=debug,
+                execution_mode=execution_mode,
+            )
+        except Exception as e:
+            msg = str(e)
+            # glm-5 常见失败：429/1113（配额/资源不足）；自动降级到 glm-4-flash
+            if ("429" in msg or "1113" in msg) and llm_backend in ("glm-5", "glm5"):
+                try:
+                    agent = get_text2sql_agent(
+                        database_path=database_path,
+                        llm_backend="glm-4-flash",
+                        api_key=api_key,
+                        debug=debug,
+                        execution_mode=execution_mode,
+                    )
+                except Exception as e2:
+                    agent = None
+                    print(f"[Text2SQLAgent] 缓存初始化失败（降级也失败）: {e2}")
+            else:
+                agent = None
+                print(f"[Text2SQLAgent] 缓存初始化失败: {e}")
+        _TEXT2SQL_CACHE[key] = agent if agent is not None else _TEXT2SQL_NONE
+        return agent
 
 
 # 兼容旧API

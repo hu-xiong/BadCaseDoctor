@@ -7,12 +7,13 @@
 """
 
 import json
+import os
 from typing import Dict, Any, List
 from ..tool_registry import BaseTool
 
 # Text2SQL Agent
 try:
-    from .sqlcoder_agent import Text2SQLAgent, LLMBackend, ExecutionMode
+    from .sqlcoder_agent import LLMBackend, ExecutionMode, get_cached_text2sql_agent
     TEXT2SQL_AVAILABLE = True
 except ImportError:
     TEXT2SQL_AVAILABLE = False
@@ -39,23 +40,25 @@ class DatabaseTool(BaseTool):
         self.db = db_session
         self.execution_mode = execution_mode
         
-        # 初始化 Text2SQL Agent
-        if TEXT2SQL_AVAILABLE:
-            try:
-                mode_enum = ExecutionMode(execution_mode)
-                self.text2sql_agent = Text2SQLAgent(
-                    database_path='instance/badcase_doctor.db',
-                    llm_backend=LLMBackend.GLM_5,
-                    debug=False,
-                    execution_mode=mode_enum
-                )
-                print(f"[DB_TOOL] ✅ Text2SQL Agent 已启用 (执行模式: {execution_mode})")
-            except Exception as e:
-                self.text2sql_agent = None
-                print(f"[DB_TOOL] ⚠️ Text2SQL Agent 初始化失败: {str(e)}")
-        else:
+        # Text2SQL 懒加载：仅在 natural_query 场景才初始化（并使用进程级缓存）
+        self.text2sql_agent = None
+
+    def _ensure_text2sql(self, exec_mode: str):
+        if not TEXT2SQL_AVAILABLE or self.text2sql_agent is not None:
+            return
+        backend_env = (os.getenv("TEXT2SQL_LLM_BACKEND", "glm-4-flash") or "").strip().lower()
+        backend = "glm-5" if backend_env in ("glm-5", "glm5") else "glm-4-flash"
+        try:
+            mode_enum = ExecutionMode(exec_mode)
+            self.text2sql_agent = get_cached_text2sql_agent(
+                database_path='instance/badcase_doctor.db',
+                llm_backend=backend,
+                debug=False,
+                execution_mode=mode_enum.value,
+            )
+        except Exception as e:
             self.text2sql_agent = None
-            print("[DB_TOOL] ⚠️ Text2SQL Agent 不可用，使用传统查询模式")
+            print(f"[DB_TOOL] ⚠️ Text2SQL 懒加载初始化失败: {str(e)}")
     
     async def execute(
         self,
@@ -90,6 +93,8 @@ class DatabaseTool(BaseTool):
         exec_mode = sandbox_mode or self.execution_mode
         
         # 优先处理自然语言查询
+        if natural_query:
+            self._ensure_text2sql(exec_mode)
         if natural_query and self.text2sql_agent:
             print(f"[DB_QUERY] 🗣️ 自然语言查询: {natural_query}")
             print(f"[DB_QUERY] 🔒 执行模式: {exec_mode}")

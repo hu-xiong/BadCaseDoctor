@@ -14,14 +14,25 @@ class RedisAgent(BaseAgent):
     name = "redis"
 
     def __init__(self):
-        self.redis_client=current_app.redis_client
-
-        print("初始化RedisAgent")
+        print("初始化 RedisAgent")
+        self._redis_client = None  # 延迟加载
         self.client = redis.Redis(
             host=Config.REDIS_HOST,
             port=Config.REDIS_PORT,
             decode_responses=True
         )
+
+    @property
+    def redis_client(self):
+        """延迟加载 redis_client，避免在应用启动前访问 current_app"""
+        if self._redis_client is None:
+            try:
+                from flask import current_app
+                self._redis_client = current_app.redis_client
+            except Exception as e:
+                print(f"[RedisAgent] 获取 redis_client 失败：{e}")
+                self._redis_client = None
+        return self._redis_client
 
 
     def get_user_redis(self, userId: str) -> Optional[dict]:

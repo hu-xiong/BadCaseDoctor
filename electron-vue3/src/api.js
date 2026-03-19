@@ -293,6 +293,11 @@ export function deleteTestCase(id) {
   return api.delete(`/api/testcases/${id}`)
 }
 
+// 获取计划下的TestCase数量（与列表统计一致）
+export function getPlanTestCaseCount(planId) {
+  return api.get(`/api/plans/${planId}/testcases`, { params: { count_only: 1 } })
+}
+
 // 获取计划下的TestCase列表
 export function getPlanTestCases(planId) {
   return api.get(`/api/plans/${planId}/testcases`)

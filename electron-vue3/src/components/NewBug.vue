@@ -380,7 +380,7 @@
             <div class="diff-header">
               <span class="diff-label">复现步骤修改预览:</span>
               <div class="diff-actions">
-                <button @click="confirmFieldChange('reproduction_steps')" class="btn-confirm" title="确认">✓</button>
+                <button @click="applyFieldChange('reproduction_steps')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('reproduction_steps')" class="btn-cancel" title="取消">✗</button>
               </div>
             </div>
@@ -439,7 +439,7 @@
             <div class="diff-header">
               <span class="diff-label">期望结果修改预览:</span>
               <div class="diff-actions">
-                <button @click="confirmFieldChange('expected_result')" class="btn-confirm" title="确认">✓</button>
+                <button @click="applyFieldChange('expected_result')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('expected_result')" class="btn-cancel" title="取消">✗</button>
               </div>
             </div>
@@ -471,7 +471,7 @@
             <div class="diff-header">
               <span class="diff-label">实际结果修改预览:</span>
               <div class="diff-actions">
-                <button @click="confirmFieldChange('actual_result')" class="btn-confirm" title="确认">✓</button>
+                <button @click="applyFieldChange('actual_result')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('actual_result')" class="btn-cancel" title="取消">✗</button>
               </div>
             </div>
@@ -688,7 +688,7 @@
 <script>
 import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
+import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
 import user from '../store/user.js'
 import { defineAsyncComponent } from 'vue'
 
@@ -1032,6 +1032,22 @@ export default {
         expandedPlans.value.push(planId)
       }
       console.log('展开/收起计划:', planId, '当前展开状态:', expandedPlans.value)
+    }
+    
+    // 获取项目列表
+    const fetchProjects = async () => {
+      try {
+        console.log('=== 开始获取项目列表 ===')
+        const response = await getProjects()
+        if (response.data.success) {
+          availableProjects.value = response.data.projects || []
+          console.log('获取项目列表成功:', availableProjects.value.length, '个项目')
+        } else {
+          console.error('获取项目列表失败:', response.data)
+        }
+      } catch (error) {
+        console.error('获取项目列表异常:', error)
+      }
     }
     
     // 获取当前项目的计划列表
@@ -1836,6 +1852,14 @@ export default {
             bubbles: true
           })
           window.dispatchEvent(event)
+          
+          // 通知列表页面清除 pendingModifications 标记
+          const clearEvent = new CustomEvent('clear-pending-modification', {
+            detail: { targetId: pendingDiff.value.targetId },
+            bubbles: true
+          })
+          window.dispatchEvent(clearEvent)
+          
           pendingDiff.value = null
         }
       }
@@ -1879,7 +1903,6 @@ export default {
       }
 
       try {
-        await scrollToDiffField(field)
         const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1961,6 +1984,10 @@ export default {
             if (resp.data?.success) {
               projectInfo.value = resp.data.project || projectInfo.value
               projectMembers.value = resp.data.members || projectMembers.value
+              // 将当前项目添加到 availableProjects 中，确保下拉框能显示
+              if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
+                availableProjects.value.push(resp.data.project)
+              }
               await setAvailablePlansFromTree(resp.data.plans || [])
             }
           } catch (e) {
@@ -1968,7 +1995,20 @@ export default {
           }
         }
 
-        // 如果有预读到 diff，预填充新值到表单（确保内联 diff/✓✗ 立即可见）
+        // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
+        if (pendingDiff.value?.modifications) {
+          const mods = pendingDiff.value.modifications
+          for (const [field, data] of Object.entries(mods)) {
+            if (String(field).startsWith('_')) continue
+            const newVal = data?.new != null ? String(data.new).trim() : ''
+            const curVal = bug[field] != null ? String(bug[field]).trim() : ''
+            if (newVal && curVal === newVal) delete mods[field]
+          }
+          if (Object.keys(mods).filter(k => !String(k).startsWith('_')).length === 0) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+          }
+        }
         if (pendingDiff.value?.modifications) {
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (bug.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {

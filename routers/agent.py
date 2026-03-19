@@ -10,6 +10,8 @@ import json
 import asyncio
 import queue
 import threading
+import os
+import uuid
 from datetime import datetime
 from llm.factory import get_llm
 from agents.browser_use_agent import BrowserUseAgent
@@ -26,6 +28,41 @@ from utils.metrics import (
 )
 
 agent_bp = Blueprint('agent', __name__, url_prefix='/api/agent')
+
+_REACT_AGENT_CACHE_LOCK = threading.Lock()
+_REACT_AGENT_CACHE: dict[str, IntelligentDevOpsAgent] = {}
+_REACT_LLM_CACHE: dict[str, object] = {}
+
+
+def _get_cached_llm(model_name: str):
+    key = (model_name or "").strip() or "__default__"
+    llm = _REACT_LLM_CACHE.get(key)
+    if llm is not None:
+        return llm
+    with _REACT_AGENT_CACHE_LOCK:
+        llm2 = _REACT_LLM_CACHE.get(key)
+        if llm2 is not None:
+            return llm2
+        llm2 = get_llm(model=model_name)
+        _REACT_LLM_CACHE[key] = llm2
+        return llm2
+
+
+def _get_cached_react_agent(model_name: str, db_session):
+    key = (model_name or "").strip() or "__default__"
+    agent = _REACT_AGENT_CACHE.get(key)
+    if agent is not None:
+        agent.set_db_session(db_session)
+        return agent
+    with _REACT_AGENT_CACHE_LOCK:
+        agent2 = _REACT_AGENT_CACHE.get(key)
+        if agent2 is not None:
+            agent2.set_db_session(db_session)
+            return agent2
+        llm = _get_cached_llm(model_name)
+        agent2 = IntelligentDevOpsAgent(llm=llm, db_session=db_session)
+        _REACT_AGENT_CACHE[key] = agent2
+        return agent2
 
 
 @agent_bp.route('/execute', methods=['POST'])
@@ -181,10 +218,11 @@ def _detect_intent(user_input: str, conversation_history: list, llm) -> dict:
 识别规则：
 - browser_use: 用户要求测试、执行测试用例、模拟用户操作等
 - test_agent: 用户要求运行测试集、生成测试报告等
-- bug_management: 用户要求查询 Bug、创建 Bug、搜索问题等
+- bug_management: 用户要求查询 Bug、创建 Bug、搜索问题、修改 Bug(包括修改期望结果、复现步骤、描述等)、删除 Bug 等
 - test_execution: 用户提供了具体的测试步骤
 - bug_search: 用户要求查找/搜索 Bug 相关信息
 - badcase_reproduction: 用户要求重现/定位某个 BadCase
+- bug_modify: 用户要求修改 Bug 的字段 (期望结果、复现步骤、描述、状态、优先级等)
 - general: 其他通用对话
 """
         
@@ -449,21 +487,43 @@ def react_agent():
     综合型 AI 运维 Agent - ReAct 推理循环 (支持流式)
     """
     try:
-        print(f"\n[REACT] ReAct Agent Request (Stream)")
+        perf = (os.getenv("PERF_LOG") == "1")
+        t_req0 = time.perf_counter()
+        req_id = str(uuid.uuid4())[:8]
+        print(f"\n{'='*60}")
+        print(f"[REACT] ReAct Agent Request (Stream) - START")
+        print(f"{'='*60}")
+        print(f"[REACT] 请求时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         data = request.get_json() or {}
+        if perf:
+            print(f"[PERF][react_api][{req_id}] parse_json_ms={(time.perf_counter()-t_req0)*1000:.1f}")
         user_input = data.get('user_input', '')
         stream_mode = data.get('stream', True)  # 默认开启流式
         model_name = data.get('model')  # 获取模型名称
-        project_id = data.get('project_id')  # 获取项目ID
-        plan_id = data.get('plan_id')  # 当前迭代计划ID，传入则 grep 只查该计划下的记录（人类式先看本迭代）
+        project_id = data.get('project_id')  # 获取项目 ID
+        plan_id = data.get('plan_id')  # 当前迭代计划 ID，传入则 grep 只查该计划下的记录（人类式先看本迭代）
+        
+        print(f"[REACT] 请求参数:")
+        print(f"  - user_input: {user_input}")
+        print(f"  - model: {model_name}")
+        print(f"  - stream: {stream_mode}")
+        print(f"  - project_id: {project_id}")
+        print(f"  - plan_id: {plan_id}")
+        print(f"[REACT] JSON 数据：{data}")
         
         if not user_input.strip():
             return jsonify({'code': 400, 'message': '输入不能为空'}), 400
         
-        llm = get_llm(model=model_name)
+        t_llm0 = time.perf_counter()
+        llm = _get_cached_llm(model_name)
+        if perf:
+            print(f"[PERF][react_api][{req_id}] get_llm_ms={(time.perf_counter()-t_llm0)*1000:.1f} model={model_name}")
         from app import db
-        agent = IntelligentDevOpsAgent(llm=llm, db_session=db.session)
+        t_agent0 = time.perf_counter()
+        agent = _get_cached_react_agent(model_name, db.session)
+        if perf:
+            print(f"[PERF][react_api][{req_id}] agent_init_ms={(time.perf_counter()-t_agent0)*1000:.1f}")
         
         if not stream_mode:
             # 非流式模式
@@ -474,9 +534,12 @@ def react_agent():
         from flask import stream_with_context
         
         def generate():
+            t_first_yield0 = time.perf_counter()
             # 发送初始字节以“破解”代理缓冲 (2KB 空白)
             yield ":" + " " * 2048 + "\n\n"
             yield f"data: {json.dumps({'type': 'status', 'message': '连接已建立，准备执行...'})}\n\n"
+            if perf:
+                print(f"[PERF][react_api][{req_id}] first_yield_ms={(time.perf_counter()-t_first_yield0)*1000:.1f}")
             
             q = queue.Queue()
             done = object()
@@ -513,10 +576,12 @@ def react_agent():
 
             while True:
                 try:
-                    item = q.get(timeout=10) # 缩短超时，更频繁地发送心跳
+                    item = q.get(timeout=10)  # 缩短超时，更频繁地发送心跳
                     if item is done:
                         break
-                    yield f"data: {json.dumps(item)}\n\n"
+                    # 每条 data 后带一个注释，促使部分 WSGI 服务器尽快刷新，避免“修改中”长时间不更新
+                    payload = json.dumps(item, ensure_ascii=False)
+                    yield f"data: {payload}\n\n: \n\n"
                 except queue.Empty:
                     # 只有当线程还在运行时才发送心跳
                     if t.is_alive():
@@ -528,7 +593,8 @@ def react_agent():
         response.headers['Cache-Control'] = 'no-cache'
         response.headers['X-Accel-Buffering'] = 'no'
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['Connection'] = 'keep-alive'
+        # 注意：不再显式设置 Connection 头，避免在 waitress 等严格 WSGI 服务器下触发
+        # “hop-by-hop header” 的断言错误；是否 keep-alive 由服务器 / 反向代理自行控制。
         return response
         
     except Exception as e:
