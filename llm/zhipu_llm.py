@@ -6,7 +6,7 @@
 
 import json
 import asyncio
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Iterator
 import requests
 import os
 from config import Config
@@ -89,12 +89,12 @@ class ZhipuLLM:
             return error_msg
 
     def chat_stream(self, prompt: str, history: list = None):
-        """流式对话"""
+        """流式对话（逐 token 字符串）"""
         messages = []
         if history:
             for msg in history:
                 messages.append({
-                    "role": msg.get("role", "user"), 
+                    "role": msg.get("role", "user"),
                     "content": msg.get("content", "")
                 })
         messages.append({"role": "user", "content": prompt})
@@ -118,13 +118,13 @@ class ZhipuLLM:
                 float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
             )
             response = get_session().post(
-                self.base_url, 
-                headers=headers, 
-                json=payload, 
+                self.base_url,
+                headers=headers,
+                json=payload,
                 stream=True,
                 timeout=timeout
             )
-            
+
             for line in response.iter_lines():
                 if line:
                     line = line.decode('utf-8')
@@ -143,3 +143,60 @@ class ZhipuLLM:
                             continue
         except Exception as e:
             yield f"[Error] {str(e)}"
+
+    def chat_stream_with_reasoning(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
+        """
+        与 Qwen/千帆对齐：统一产出 reasoning_delta / content_delta / done。
+        智谱 GLM 流式当前仅映射到 content_delta。
+        """
+        for piece in self.chat_stream(prompt, history):
+            if not isinstance(piece, str) or not piece:
+                continue
+            if piece.startswith("[Error]"):
+                yield {"type": "content_delta", "delta": piece}
+                yield {"type": "done"}
+                return
+            yield {"type": "content_delta", "delta": piece}
+        yield {"type": "done"}
+
+    def chat_stream_fallback_chunks(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
+        """非流式整段后分块 yield（与 parse_intent 解耦）；同步 HTTP，避免事件循环嵌套。"""
+        messages = []
+        if history:
+            for msg in history:
+                messages.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", ""),
+                })
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": Config.ZHIPU_MAX_TOKENS,
+            "temperature": Config.ZHIPU_TEMPERATURE,
+        }
+        if self.model == "glm-5" and Config.ZHIPU_ENABLE_THINKING and not getattr(self, "force_disable_thinking", False):
+            payload["thinking"] = {"type": "enabled"}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        timeout = (
+            float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+            float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+        )
+        text = ""
+        try:
+            response = get_session().post(self.base_url, headers=headers, json=payload, timeout=timeout)
+            if response.status_code == 200:
+                res_json = response.json()
+                if "choices" in res_json and len(res_json["choices"]) > 0:
+                    text = res_json["choices"][0]["message"]["content"] or ""
+            else:
+                text = f"Error: {response.text}"
+        except Exception as e:
+            text = f"Error: {e}"
+        chunk = 56
+        for i in range(0, len(text), chunk):
+            yield {"type": "content_delta", "delta": text[i : i + chunk]}
+        yield {"type": "done"}

@@ -1,0 +1,52 @@
+name: modify_testcase
+description: 修改测试用例信息（标题、状态、负责人、前置条件、步骤、预期结果等）
+trigger:
+  intents: [修改, 更新, 编辑, 调整, 改, 改成, 改为, 设为]
+  entities: [测试用例, testcase, test case, 用例]
+  patterns:
+    - 修改测试用例
+    - 更新测试用例
+    - 编辑测试用例
+    - 把测试用例改成
+
+tools:
+  - name: grep
+    purpose: 定位目标测试用例
+    params:
+      mode: locate
+      target: testcase
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+
+  - name: modify
+    purpose: 修改测试用例字段
+    params:
+      target: testcase
+      target_id: ${target_id}
+      modifications: ${user_modifications}
+      project_id: ${project_id}
+      confirm: false
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具定位要修改的测试用例
+    depends_on: null
+
+  - step: 2
+    tool: modify
+    description: 使用 modify 工具执行字段修改
+    depends_on: step_1
+
+examples:
+  - 修改测试用例“登录成功”的前置条件为用户已注册
+  - 把测试用例7的标题改成登录失败重试校验
+  - 更新测试用例状态为resolved
+  - 修改测试用例负责人为33
+
+metadata:
+  category: testcase_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-03-19
+  author: BadCase Doctor Team

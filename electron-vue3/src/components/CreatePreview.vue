@@ -6,9 +6,18 @@
     </div>
     
     <div class="preview-fields">
-      <div v-for="(value, key) in displayFields" :key="key" class="field-row">
+      <div
+        v-for="([key, value], idx) in displayFieldEntries"
+        :key="key + '_' + idx"
+        class="field-row"
+      >
         <span class="field-label">{{ getFieldLabel(key) }}：</span>
         <span class="field-value">{{ formatValue(value) }}</span>
+      </div>
+
+      <div v-if="restFieldCount > 0" class="field-row field-row--more">
+        <span class="field-label">…</span>
+        <span class="field-value">其余 {{ restFieldCount }} 项将在列表中查看</span>
       </div>
     </div>
     
@@ -40,16 +49,24 @@ const props = defineProps({
 
 const emit = defineEmits(['confirm', 'cancel'])
 
-// 过滤掉不需要显示的字段
-const displayFields = computed(() => {
+const filteredFieldEntries = computed(() => {
   const fields = props.previewData.preview || {}
-  const filtered = {}
+  const filteredEntries = []
   for (const [key, value] of Object.entries(fields)) {
     if (value && key !== 'project_id' && key !== 'created_at' && key !== 'updated_at') {
-      filtered[key] = value
+      filteredEntries.push([key, value])
     }
   }
-  return filtered
+  return filteredEntries
+})
+
+const displayFieldEntries = computed(() => {
+  // 无论处于“展开/收起”，预览都只展示前三项
+  return filteredFieldEntries.value.slice(0, 3)
+})
+
+const restFieldCount = computed(() => {
+  return Math.max(filteredFieldEntries.value.length - 3, 0)
 })
 
 const getTargetLabel = (target) => {
@@ -114,6 +131,7 @@ const handleCancel = () => {
   margin-bottom: 16px;
   padding-bottom: 12px;
   border-bottom: 2px solid #bfdbfe;
+  gap: 10px;
 }
 
 .preview-icon {
@@ -125,6 +143,7 @@ const handleCancel = () => {
   font-size: 16px;
   font-weight: 600;
   color: #1e40af;
+  flex: 1;
 }
 
 .preview-fields {
@@ -141,6 +160,10 @@ const handleCancel = () => {
 
 .field-row:last-child {
   border-bottom: none;
+}
+
+.field-row--more .field-label {
+  width: 120px;
 }
 
 .field-label {

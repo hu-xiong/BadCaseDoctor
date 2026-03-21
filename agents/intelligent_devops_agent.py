@@ -166,10 +166,8 @@ class IntelligentDevOpsAgent:
         # 0. 初始状态推送：仅用于触发前端显示「...」思考中，无需具体文案
         yield {'type': 'status', 'message': '...'}
 
-        # 首屏体验：在任何 LLM 调用之前先推一个 reasoning 占位，让前端立刻出现「深度思考」块
-        # （前端 v-if=reasoningContent；\u200b 为零宽空格，用户不可见但可触发渲染）
-        yield {'type': 'step', 'data': {'event': 'reasoning', 'content': '\u200b'}}
-        
+        # 不推假的 reasoning 占位：深度思考区块仅在有实质思考内容时由前端展示（见 SimpleChatPanel substantiveReasoning）。
+
         # 1. 分类意图（不阻塞首屏；前端也不会展示 intent）
         intent_task = asyncio.create_task(self._classify_intent(user_input))
         

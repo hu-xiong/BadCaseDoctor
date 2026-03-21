@@ -330,6 +330,42 @@ class QwenLLM:
             yield {"type": "content_delta", "delta": f"Error: {e}"}
             yield {"type": "done"}
 
+    def chat_stream_fallback_chunks(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
+        """
+        无可用流式 API 或上层显式降级时：直连用户 prompt 做一次非流式 completion，
+        再按块 yield reasoning_delta/content_delta（与 parse_intent 路由 JSON 完全解耦）。
+        """
+        messages: List[Dict[str, str]] = []
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+        extra_params: Dict[str, Any] = {}
+        if self._thinking_enabled_for(prompt):
+            extra_params["enable_thinking"] = True
+        try:
+            response = Generation.call(
+                model=self.model,
+                messages=messages,
+                result_format="message",
+                **extra_params,
+            )
+            if response.status_code != 200:
+                err = f"Error: {getattr(response, 'message', response)}"
+                yield {"type": "content_delta", "delta": err}
+                yield {"type": "done"}
+                return
+            msg = response.output.choices[0].message
+            rc = getattr(msg, "reasoning_content", None)
+            if rc and isinstance(rc, str) and rc.strip():
+                for i in range(0, len(rc), 64):
+                    yield {"type": "reasoning_delta", "delta": rc[i : i + 64]}
+            ct = (getattr(msg, "content", None) or "").strip()
+            for i in range(0, len(ct), 64):
+                yield {"type": "content_delta", "delta": ct[i : i + 64]}
+        except Exception as e:
+            yield {"type": "content_delta", "delta": f"Error: {e}"}
+        yield {"type": "done"}
+
     async def chat(self, prompt: str, history: list = None) -> str:
         """通用聊天方法，直接返回文本"""
         def _sync_chat():
@@ -359,87 +395,35 @@ class QwenLLM:
 
     async def chat_with_reasoning(self, prompt: str, history: list = None) -> Dict[str, Any]:
         """
-        对话接口并返回思考过程（用于 qwen-max-thinking 等带 reasoning 的模型）。
-        返回 {"content": str, "reasoning_content": str|None}，无思考时 reasoning_content 为 None。
-        说明：阿里文档写明「多数深度思考模型仅支持流式输出」时才会返回 reasoning_content，
-        因此开启 enable_thinking 时改为流式调用并汇总 reasoning_content / content。
+        返回整段 {"content", "reasoning_content"}，供仅需一次性结果的场景（如 ReAct 回退）。
+        实现上只复用 chat_stream_with_reasoning 的同一条流式链路，在这里把 delta 拼成整段，
+        避免与 chat_stream_with_reasoning 各写一套 Generation.call（行为不一致、难维护）。
         """
         def _sync_chat_with_reasoning():
-            messages = [{"role": "user", "content": prompt}]
-            extra_params = {}
-            if self.enable_thinking:
-                extra_params['enable_thinking'] = True
-                extra_params['stream'] = True
-                extra_params['incremental_output'] = True
-                print(f"[QWEN-LLM-REASONING] enable_thinking=True model={self.model}")
-            else:
-                print(f"[QWEN-LLM-REASONING] 未开启思考模式：model={self.model}")
+            reasoning_parts: List[str] = []
+            content_parts: List[str] = []
+            try:
+                for item in self.chat_stream_with_reasoning(prompt, history):
+                    if not isinstance(item, dict):
+                        continue
+                    typ = item.get("type")
+                    if typ == "reasoning_delta":
+                        d = item.get("delta")
+                        if isinstance(d, str) and d:
+                            reasoning_parts.append(d)
+                    elif typ == "content_delta":
+                        d = item.get("delta") or ""
+                        if d:
+                            content_parts.append(d)
+            except Exception as e:
+                print(f"[QWEN-LLM-REASONING] 汇总流式结果异常: {e}")
+                return {"content": f"Error: {e}", "reasoning_content": None}
+            rc_joined = "".join(reasoning_parts).strip() or None
+            ct = "".join(content_parts).strip()
+            if rc_joined:
+                print(f"[QWEN-LLM-REASONING] reasoning_len={len(rc_joined)}")
+            return {"content": ct, "reasoning_content": rc_joined}
 
-            out = {"content": "", "reasoning_content": None}
-            reasoning_parts = []
-            content_parts = []
-
-            if self.enable_thinking:
-                # 流式调用：按文档，思考内容通过 delta.reasoning_content 返回
-                try:
-                    responses = Generation.call(
-                        model=self.model,
-                        messages=messages,
-                        result_format='message',
-                        **extra_params
-                    )
-                    def _get_safe(obj, key, default=None):
-                        if obj is None:
-                            return default
-                        if isinstance(obj, dict):
-                            return obj.get(key, default)
-                        try:
-                            return getattr(obj, key, default)
-                        except (KeyError, AttributeError):
-                            return default
-
-                    for response in responses:
-                        if response.status_code != 200:
-                            out["content"] = f"Error: {response.message}"
-                            return out
-                        if not getattr(response, 'output', None) or not getattr(response.output, 'choices', None):
-                            continue
-                        choice = response.output.choices[0]
-                        # DashScope 流式：choice 上可能是 message，无 delta 时不要访问避免 KeyError
-                        msg = _get_safe(choice, 'message')
-                        if msg is None:
-                            msg = _get_safe(choice, 'delta')
-                        if msg is None:
-                            continue
-                        rc = _get_safe(msg, 'reasoning_content')
-                        if rc and isinstance(rc, str):
-                            reasoning_parts.append(rc)
-                        ct = _get_safe(msg, 'content')
-                        if ct and isinstance(ct, str):
-                            content_parts.append(ct)
-                    if reasoning_parts:
-                        out["reasoning_content"] = "".join(reasoning_parts).strip() or None
-                        print(f"[QWEN-LLM-REASONING] reasoning_len={len(out['reasoning_content'])}")
-                    out["content"] = "".join(content_parts).strip()
-                except Exception as e:
-                    out["content"] = f"Error: {e}"
-                    print(f"[QWEN-LLM-REASONING] 流式调用异常: {e}")
-                return out
-
-            # 非思考模式：非流式调用
-            response = Generation.call(
-                model=self.model,
-                messages=messages,
-                result_format='message',
-                **extra_params
-            )
-            if response.status_code != 200:
-                out["content"] = f"Error: {response.message}"
-                return out
-            message_obj = response.output.choices[0].message
-            out["content"] = (getattr(message_obj, 'content', None) or (message_obj.get('content') if isinstance(message_obj, dict) else None) or "")
-            return out
-        
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self.executor, _sync_chat_with_reasoning)
 

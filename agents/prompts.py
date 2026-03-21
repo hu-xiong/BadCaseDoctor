@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # agents/prompts.py
 """
 ReAct Prompt 工程 - 公用强约束模板
@@ -13,6 +14,7 @@ ReAct Prompt 工程 - 公用强约束模板
 """
 
 import json
+import os
 import re
 from typing import Any, List, Dict, Union, Optional
 try:
@@ -93,6 +95,7 @@ class ReactPromptTemplates:
    **创建操作（单步流程）**：
    - 使用 create 工具创建新的 Bug/BadCase/测试用例
    - 创建意图关键词：创建、新建、添加、增加
+   - **复制/沿用某条测试用例新建**：在 fields 中传入 `copy_from_testcase_id`（或 `source_testcase_id`）为源用例 id，可与新 `title` 等同用；后端会将新用例的 `plan_id` 与源用例对齐（同一迭代计划）。
 
 【grep 工具参数规范】：
 - keywords: 搜索关键词（必填，如果要查询所有，设置为空字符串 "" 或 "*"）
@@ -256,6 +259,7 @@ class ReactPromptTemplates:
         - 包含 execute / tool / params 三个关键字段
         - 提供详细的决策理由
         - 智能选择搜索引擎
+        - modify：params 可不全；引擎会按服务端补参逻辑在执行前合并（见 prompt 内「服务端补参」）
         """
         tools_info = "\n".join([
             f"  <tool id=\"{t['name']}\" description=\"{t['description']}\"/>"
@@ -285,13 +289,18 @@ class ReactPromptTemplates:
 6. 优先执行而非跳过 - 当有疑问时，必须 execute: true
 7. 提供清晰的决策理由
 8. 工具参数应该具体且可执行
+9. create 工具：**params 中 confirm 必须为 false**（仅生成预览与 diff）；禁止在对话首轮直接落库，采纳由用户在左侧列表完成。
 
 ⭐ 人类式先检索再阅读（modify 前必读）：
 - 流程：先 grep 检索出候选列表（badcase_list/bug_list/testcase_location），对候选做 rerank，**分高的**作为 target_id；支持 BadCase、Bug、测试用例( testcase )。
 - 若 context 中尚无列表，必须先 grep：grep(keywords="用户话里的标题或关键词", target="badcase"或"bug"或"testcase"或"all", project_id=当前项目)。可选 plan_id 限定当前迭代。grep 支持关键词拆分模糊匹配。
 - 选 target_id 时：系统会对候选按与关键词的匹配度 rerank，分高的即可；修改目标类型由 target 指定（bug/badcase/testcase）。
 - 字段命名统一（避免混淆）：**答案用 answer**，**正确答案用 correct_answer**（由 modify 工具映射到数据库字段）。
-- 绝不能猜测 target_id，必须从检索到的列表中选。
+- 不要在 params 里编造数字 id；若 context 中已有上一步 grep 结果，你可写出 target_id；**若不确定，params 可只含 target / 或留空，真实执行以服务端补参为准**（见下条）。
+
+⭐ 服务端补参（真实可靠性口径，优先遵守）：
+- 你只要 **execute=true 且 tool=modify** 即可完成任务绑定；**target_id、modifications 若写不全，不必硬编**，引擎会在调用 modify 工具前自动补全：合并上一步 grep 的候选 id、必要时自动再 grep、结合用户原话与探索记录生成 modifications。
+- 你能写出完整 params（含 target、target_id、modifications）时，日志更清晰，但最终仍以 **服务端合并、校验后的参数** 为准。
 
 ⭐ modify 工具状态值规则（重要）：
 修改 status 字段时，必须使用以下合法的状态值（英文），不能使用中文：
@@ -556,10 +565,10 @@ class ReactPromptTemplates:
     "description": "用户登录时出现失败"
   }},
   "project_id": "1",
-  "confirm": true
+  "confirm": false
 }}
 </params>
-<reason>创建Bug，直接执行创建</reason>
+<reason>创建 Bug：先沙箱预览（confirm=false），用户在列表中采纳后再落库</reason>
 </decision>
 </good_example>
 
@@ -745,14 +754,18 @@ class ReactPromptTemplates:
 """
 
 def format_tools_for_prompt(tool_registry) -> list:
-    """格式化工具信息"""
-    return [
-        {
-            'name': tool.name,
-            'description': tool.description
-        }
-        for tool in tool_registry.tools.values()
-    ]
+    """格式化工具信息。REACT_TOOL_DESC_MAX_CHARS>0 时截断描述，缩短首轮 THINK prompt（不改模型，仅减 token）。"""
+    try:
+        max_chars = int(os.getenv("REACT_TOOL_DESC_MAX_CHARS", "0") or "0")
+    except Exception:
+        max_chars = 0
+    out = []
+    for tool in tool_registry.tools.values():
+        desc = tool.description or ""
+        if max_chars > 0 and len(desc) > max_chars:
+            desc = desc[:max_chars].rstrip() + "…"
+        out.append({"name": tool.name, "description": desc})
+    return out
 
 
 def extract_xml_field(text: Any, tag: str) -> str:
@@ -839,10 +852,9 @@ def parse_xml_decision(text: Any) -> dict:
             result['execute'] = True
             result['tool'] = 'create'
             result['params'] = text
-            # 确保 confirm 默认为 True
-            if 'confirm' not in result['params']:
-                result['params']['confirm'] = True
-            result['reason'] = '检测到创建参数，自动执行create工具'
+            # 与 modify 一致：对话中 create 一律沙箱预览，禁止直接落库
+            result['params']['confirm'] = False
+            result['reason'] = '检测到创建参数，自动执行 create 工具（沙箱预览模式）'
             return result
         
         # 兼容 Qwen 默认格式 (agent/action/script)

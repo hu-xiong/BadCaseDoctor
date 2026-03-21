@@ -1,0 +1,38 @@
+name: query_testcase
+description: 查询测试用例（按标题、关键词、状态、负责人等）
+trigger:
+  intents: [查询, 搜索, 查找, 查看, 列出, 显示]
+  entities: [测试用例, testcase, test case, 用例]
+  patterns:
+    - 查询测试用例
+    - 搜索测试用例
+    - 查看测试用例
+    - 列出测试用例
+
+tools:
+  - name: grep
+    purpose: 查询并定位测试用例
+    params:
+      mode: locate
+      target: testcase
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具查询测试用例
+    depends_on: null
+
+examples:
+  - 查询标题包含登录的测试用例
+  - 搜索负责人是33的测试用例
+  - 查看当前计划下的测试用例
+  - 列出所有状态为draft的测试用例
+
+metadata:
+  category: testcase_management
+  priority: medium
+  version: 1.0.0
+  created_at: 2026-03-19
+  author: BadCase Doctor Team

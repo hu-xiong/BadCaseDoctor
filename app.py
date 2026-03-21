@@ -842,7 +842,8 @@ class Bug(db.Model):
     environment = db.Column(db.String(100))  # 测试环境
     browser = db.Column(db.String(50))  # 浏览器
     os = db.Column(db.String(50))  # 操作系统
-    plan_id = db.Column(db.Integer, db.ForeignKey('plan.id'), nullable=False)
+    # 可为空：与「未计划的 Bug」列表（plan_id IS NULL）一致
+    plan_id = db.Column(db.Integer, db.ForeignKey('plan.id'), nullable=True)
     project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     assignee_id = db.Column(db.Integer, db.ForeignKey('user.id'))  # 负责人
@@ -3536,8 +3537,18 @@ def api_create_badcase():
         import json
         attachments_json = json.dumps(data.get('attachments', [])) if data.get('attachments') else None
         
+        _pid = data.get('plan_id')
+        if _pid in (None, '', 0, '0'):
+            _pid = None
+        else:
+            try:
+                _pid = int(_pid)
+            except (TypeError, ValueError):
+                _pid = None
+
         badcase = BadCase(
             project_id=project_id,
+            plan_id=_pid,
             creator_id=current_user.id,
             title=title,
             case_category=case_category,
@@ -3733,10 +3744,31 @@ def api_add_badcase_comment(badcase_id):
         }
     })
 
-@app.route('/api/badcases/<int:badcase_id>', methods=['PUT'])
+@app.route('/api/badcases/<int:badcase_id>', methods=['PUT', 'DELETE'])
 @login_required
 def api_update_badcase(badcase_id):
     """更新BadCase信息"""
+    print(f"=== 更新/删除 BadCase {badcase_id} ===")
+    
+    # 删除
+    if request.method == 'DELETE':
+        try:
+            badcase = BadCase.query.get_or_404(badcase_id)
+            
+            if not has_project_permission(current_user.id, badcase.project_id):
+                return jsonify({'success': False, 'error': '无权删除此BadCase'}), 403
+            
+            db.session.delete(badcase)
+            db.session.commit()
+            _cache_invalidate_plans(badcase.project_id)
+            
+            return jsonify({'success': True, 'message': 'BadCase删除成功'})
+        except Exception as e:
+            db.session.rollback()
+            print(f"删除BadCase失败: {e}")
+            return jsonify({'success': False, 'error': '删除BadCase失败'}), 500
+    
+    # 更新
     print(f"=== 更新BadCase {badcase_id} ===")
     
     try:
@@ -4010,7 +4042,7 @@ def sync_database_schema():
                     'environment VARCHAR(100)',
                     'browser VARCHAR(50)',
                     'os VARCHAR(50)',
-                    'plan_id INT NOT NULL',
+                    'plan_id INT',
                     'project_id INT NOT NULL',
                     'creator_id INT NOT NULL',
                     'assignee_id INT',
@@ -5087,22 +5119,29 @@ def api_create_bug():
     try:
         data = request.get_json()
         
-        # 验证必填字段
-        required_fields = ['title', 'plan_id', 'project_id']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
+        # 验证必填字段（plan_id 可选：未指定则归入「未计划的 Bug」）
+        if not data.get('title') or not data.get('project_id'):
+            return jsonify({'success': False, 'error': '缺少必填字段: title 或 project_id'}), 400
         
         # 检查项目权限
         if not has_project_permission(current_user.id, data['project_id']):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
-        # 检查计划是否存在且为bug类型
-        plan = Plan.query.get(data['plan_id'])
-        if not plan:
-            return jsonify({'success': False, 'error': '计划不存在'}), 404
-        if plan.plan_type != 'bug':
-            return jsonify({'success': False, 'error': '只能在bug类型计划中创建bug'}), 400
+        raw_plan = data.get('plan_id')
+        plan_id_val = None
+        if raw_plan is not None and str(raw_plan).strip() != '':
+            try:
+                pi = int(raw_plan)
+                if pi != 0:
+                    plan_id_val = pi
+            except (TypeError, ValueError):
+                plan_id_val = None
+        if plan_id_val is not None:
+            plan = Plan.query.get(plan_id_val)
+            if not plan:
+                return jsonify({'success': False, 'error': '计划不存在'}), 404
+            if plan.plan_type != 'bug':
+                return jsonify({'success': False, 'error': '只能在bug类型计划中创建bug'}), 400
         
         # 创建Bug
         bug = Bug(
@@ -5118,7 +5157,7 @@ def api_create_bug():
             environment=data.get('environment', ''),
             browser=data.get('browser', ''),
             os=data.get('os', ''),
-            plan_id=data['plan_id'],
+            plan_id=plan_id_val,
             project_id=data['project_id'],
             creator_id=current_user.id,
             assignee_id=data.get('assignee_id'),
@@ -5224,7 +5263,7 @@ def api_get_project_bugs(project_id):
         print(f"获取项目Bug列表失败: {e}")
         return jsonify({'success': False, 'error': '获取Bug列表失败'}), 500
 
-@app.route('/api/bugs/<int:bug_id>', methods=['GET', 'PUT'])
+@app.route('/api/bugs/<int:bug_id>', methods=['GET', 'PUT', 'DELETE'])
 @login_required
 def api_bug_detail(bug_id):
     """Bug详情接口：GET查询，PUT更新"""
@@ -5342,6 +5381,22 @@ def api_bug_detail(bug_id):
             db.session.rollback()
             print(f"更新Bug失败: {e}")
             return jsonify({'success': False, 'error': '更新Bug失败'}), 500
+    elif request.method == 'DELETE':
+        try:
+            bug = Bug.query.get_or_404(bug_id)
+
+            if not has_project_permission(current_user.id, bug.project_id):
+                return jsonify({'success': False, 'error': '无权删除此Bug'}), 403
+
+            db.session.delete(bug)
+            db.session.commit()
+            _cache_invalidate_plans(bug.project_id)
+
+            return jsonify({'success': True, 'message': 'Bug删除成功'})
+        except Exception as e:
+            db.session.rollback()
+            print(f"删除Bug失败: {e}")
+            return jsonify({'success': False, 'error': '删除Bug失败'}), 500
 
 @app.route('/api/bugs/<int:bug_id>/comment', methods=['POST'])
 @login_required

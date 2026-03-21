@@ -156,7 +156,15 @@ class ModifyTool(BaseTool):
             target_id = await self._find_target_by_query(target, natural_query, project_id)
             if target_id:
                 print(f"[MODIFY] 通过自然语言查询找到目标ID: {target_id}")
-        
+
+        # Text2SQL 未启用或失败：在项目内按标题 ORM 模糊匹配一条（与 ReAct 注入的 natural_query 配合）
+        if not target_id and natural_query and project_id:
+            _progress("Text2SQL 未定位到记录，尝试 ORM 标题模糊匹配…")
+            tid_fb = self._find_target_by_orm_fallback(target, natural_query, project_id)
+            if tid_fb:
+                target_id = tid_fb
+                print(f"[MODIFY] 通过 ORM 模糊匹配找到目标ID: {target_id}")
+
         # 确保 target_id 是整数
         if target_id:
             try:
@@ -299,14 +307,68 @@ class ModifyTool(BaseTool):
                 'error': f'修改失败: {str(e)}'
             }
     
-    async def _find_target_by_query(self, target: str, natural_query: str, project_id: int) -> int:
+    def _find_target_by_orm_fallback(self, target: str, natural_query: str, project_id: int) -> Optional[int]:
+        """Text2SQL 不可用时：按标题/名称在项目内 LIKE 匹配最近更新的一条记录。"""
+        import re
+
+        q = (natural_query or "").strip()
+        if not project_id or len(q) < 2:
+            return None
+        tokens = re.findall(r"[\w\u4e00-\u9fff]+", q)
+        needle = None
+        for t in tokens:
+            if len(t) >= 2:
+                needle = t
+                break
+        if not needle:
+            needle = q[:40]
+        pat = f"%{needle}%"
+        try:
+            with self._get_app_context():
+                from app import db as flask_db
+
+                if target == "bug":
+                    from app import Bug
+
+                    r = (
+                        flask_db.session.query(Bug)
+                        .filter(Bug.project_id == project_id, Bug.title.like(pat))
+                        .order_by(Bug.updated_at.desc())
+                        .first()
+                    )
+                    return r.id if r else None
+                if target == "testcase":
+                    from app import TestCase
+
+                    r = (
+                        flask_db.session.query(TestCase)
+                        .filter(TestCase.project_id == project_id, TestCase.title.like(pat))
+                        .order_by(TestCase.updated_at.desc())
+                        .first()
+                    )
+                    return r.id if r else None
+                from app import BadCase
+
+                r = (
+                    flask_db.session.query(BadCase)
+                    .filter(BadCase.project_id == project_id, BadCase.title.like(pat))
+                    .order_by(BadCase.updated_at.desc())
+                    .first()
+                )
+                return r.id if r else None
+        except Exception as e:
+            print(f"[MODIFY] ORM fallback 失败: {e}")
+            return None
+
+    async def _find_target_by_query(self, target: str, natural_query: str, project_id: int) -> Optional[int]:
         """使用自然语言查询查找目标记录ID"""
         if not self.text2sql:
             return None
-        
+
         try:
-            table_name = 'bug' if target == 'bug' else 'bad_case'
-            
+            table_map = {"bug": "bug", "badcase": "bad_case", "testcase": "test_case"}
+            table_name = table_map.get(target, "bad_case")
+
             sql_result = self.text2sql.generate_sql(
                 f"查找{table_name}表中{natural_query}的记录ID",
                 f"项目ID: {project_id}"

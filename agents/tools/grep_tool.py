@@ -2,8 +2,10 @@
 Grep Tool - 缺陷定位工具
 模拟人类测试工程师的思维模式，精准定位 BadCase/Bug/测试用例的归属关系
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Callable, Optional, Tuple
 import json
+import os
+import time
 from agents.tool_registry import BaseTool
 
 
@@ -19,6 +21,8 @@ class GrepTool(BaseTool):
     """
     
     def __init__(self):
+        # project_id -> (plan_tree_dict, unix_ts)；GREP_PLAN_TREE_CACHE_TTL 秒，0 关闭
+        self._plan_tree_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
         super().__init__(
             name="grep",
             description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位BadCase/Bug/测试用例的归属关系和业务场景。"
@@ -62,6 +66,17 @@ class GrepTool(BaseTool):
         """
         print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target}, status={status}, plan_id={plan_id})")
         
+        progress_callback = kwargs.get("progress_callback")
+        def _progress(msg: str):
+            try:
+                s = str(msg)
+                if callable(progress_callback):
+                    progress_callback(s)
+            except Exception:
+                pass
+        
+        _progress("初始化 grep 参数…")
+        
         try:
             from app import app, db, BadCase, Bug, Plan
             
@@ -75,24 +90,39 @@ class GrepTool(BaseTool):
             with app.app_context():
                 if mode == "locate":
                     # 【阶段1】数据库查询（支持 plan_id 限定当前迭代，关键词拆分模糊匹配）
+                    _progress("阶段1：获取计划树…")
                     plan_tree = await self._get_plan_tree(project_id)
+                    _progress("阶段1：计划树已就绪")
 
                     # 人类阅读模式：如果指定了 plan_id，则返回该计划及其子计划的树形结构，并挂载各计划下的记录（从上到下、从外到里）
                     plan_records_tree = None
                     if plan_id:
-                        plan_records_tree = await self._build_plan_records_tree(project_id=project_id, root_plan_id=plan_id)
+                        _progress("读取当前迭代计划下的记录材料…")
+                        plan_records_tree = await self._build_plan_records_tree(
+                            project_id=project_id,
+                            root_plan_id=plan_id,
+                            progress_callback=progress_callback,
+                        )
+                        _progress("迭代计划材料已就绪")
                     
                     badcase_list = []
                     bug_list = []
                     testcase_list = []
                     if target in ['all', 'badcase']:
+                        _progress("阶段1：检索 BadCase 候选…")
                         badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
+                        _progress(f"BadCase 候选获取完成：{len(badcase_list)} 条")
                     if target in ['all', 'bug']:
+                        _progress("阶段1：检索 Bug 候选…")
                         bug_list = await self._get_bug_list(project_id, keywords, status, plan_id=plan_id)
+                        _progress(f"Bug 候选获取完成：{len(bug_list)} 条")
                     if target in ['all', 'testcase']:
+                        _progress("阶段1：检索 TestCase 候选…")
                         testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
+                        _progress(f"TestCase 候选获取完成：{len(testcase_list)} 条")
                     
                     # 【阶段2】分析关联
+                    _progress("阶段2：分析关联归属…")
                     analysis_result = await self._analyze_associations(
                         keywords=keywords,
                         plan_tree=plan_tree,
@@ -101,13 +131,17 @@ class GrepTool(BaseTool):
                         testcase_list=testcase_list,
                         evidence=evidence
                     )
+                    _progress("阶段2：关联分析完成")
                     
                     # 【阶段3】生成对比报告
+                    _progress("阶段3：生成对比报告…")
                     comparison = await self._generate_comparison(project_id, keywords)
+                    _progress("阶段3：对比报告生成完成")
                     
                     # 生成导航指令
                     navigation = None
                     if bug_list:
+                        _progress("生成导航指令…")
                         navigation_list = []
                         for bug in bug_list:
                             if bug.get('plan_id'):
@@ -134,6 +168,7 @@ class GrepTool(BaseTool):
                                 'items': navigation_list
                             }
                             print(f"[GREP] ✅ 定位完成: {len(bug_list)}条Bug, {len(badcase_list)}条BadCase")
+                            _progress("定位完成，导航已生成")
                     
                     result['data'] = {
                         'plan_tree': plan_tree,
@@ -149,7 +184,9 @@ class GrepTool(BaseTool):
                     
                 elif mode == "associate":
                     # 三向关联模式
+                    _progress("associate：开始三向关联分析…")
                     associations = await self._three_way_association(project_id, keywords)
+                    _progress("associate：关联分析完成")
                     result['data'] = {
                         'associations': associations,
                         'total_associations': len(associations),
@@ -158,7 +195,9 @@ class GrepTool(BaseTool):
                     
                 elif mode == "compare":
                     # 对比模式
+                    _progress("compare：开始生成对比报告…")
                     comparison = await self._generate_comparison(project_id, keywords)
+                    _progress("compare：对比报告生成完成")
                     result['data'] = {
                         'comparison': comparison,
                         'markdown': comparison['markdown'],
@@ -170,6 +209,7 @@ class GrepTool(BaseTool):
                 
         except Exception as e:
             print(f"[GREP] ❌ 定位分析失败: {e}")
+            _progress(f"定位失败：{e}")
             import traceback
             traceback.print_exc()
             return {
@@ -177,12 +217,24 @@ class GrepTool(BaseTool):
                 'error': str(e)
             }
 
-    async def _build_plan_records_tree(self, project_id: str, root_plan_id: str) -> Dict[str, Any]:
+    async def _build_plan_records_tree(
+        self,
+        project_id: str,
+        root_plan_id: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
         """
         构建“计划树 + 计划下记录”的阅读结构：
         - 从 root_plan_id 出发，递归包含所有子计划
         - 每个计划节点挂载 badcases/bugs/testcases（包含尽可能完整字段，便于大模型逐条阅读判断）
         """
+        def _p(msg: str):
+            try:
+                if callable(progress_callback):
+                    progress_callback(str(msg))
+            except Exception:
+                pass
+
         from app import db, Plan, BadCase, Bug, TestCase
         try:
             root_id = int(root_plan_id)
@@ -190,6 +242,7 @@ class GrepTool(BaseTool):
             return None
 
         # 取该项目下所有计划，构建 parent->children
+        _p("计划材料：加载项目下全部计划…")
         plans = db.session.query(Plan).filter_by(project_id=project_id).all()
         plan_map = {}
         children_map = {}
@@ -212,9 +265,11 @@ class GrepTool(BaseTool):
                     stack.append(cid)
 
         # 查询三类记录（不做 rerank/不做筛选，仅按 plan_id 归类，模拟人类先把材料拿全）
+        _p(f"计划材料：在 {len(plan_ids)} 个相关计划下查询 BadCase/Bug/TestCase（数据量大时可能需数秒）…")
         badcases = db.session.query(BadCase).filter(BadCase.project_id == int(project_id), BadCase.plan_id.in_(plan_ids)).all() if plan_ids else []
         bugs = db.session.query(Bug).filter(Bug.project_id == int(project_id), Bug.plan_id.in_(plan_ids)).all() if plan_ids else []
         testcases = db.session.query(TestCase).filter(TestCase.project_id == int(project_id), TestCase.plan_id.in_(plan_ids)).all() if plan_ids else []
+        _p(f"计划材料：已取库 BadCase={len(badcases)} Bug={len(bugs)} TestCase={len(testcases)}，正在组装树…")
 
         badcase_by_plan = {}
         for bc in badcases:
@@ -272,12 +327,25 @@ class GrepTool(BaseTool):
                     node['children'].append(child_node)
             return node
 
-        return build_node(root_id)
+        _p("计划材料：递归组装计划树节点…")
+        tree = build_node(root_id)
+        _p("计划材料：树结构组装完成")
+        return tree
     
     async def _get_plan_tree(self, project_id: str) -> Dict[str, Any]:
         """
         计划阅读器：解析迭代计划结构（优化版）
         """
+        try:
+            ttl = float(os.getenv("GREP_PLAN_TREE_CACHE_TTL", "60") or "60")
+        except Exception:
+            ttl = 60.0
+        key = str(project_id)
+        if ttl > 0 and key in self._plan_tree_cache:
+            cached, ts = self._plan_tree_cache[key]
+            if time.time() - ts < ttl:
+                return cached
+
         from app import db, Plan
         
         # 查询项目下所有计划（单次查询）
@@ -309,13 +377,16 @@ class GrepTool(BaseTool):
             if plan_data['parent_id'] and plan_data['parent_id'] in plan_map:
                 plan_map[plan_data['parent_id']]['children'].append(plan_data)
         
-        return {
+        result = {
             'total_plans': len(plans),
             'root_plans': root_plans,
             'plans': list(plan_map.values()),  # 扁平列表便于查找
             'plan_map': plan_map,
             'business_domains': list(set(p['business_domain'] for p in plan_map.values()))
         }
+        if ttl > 0:
+            self._plan_tree_cache[key] = (result, time.time())
+        return result
     
     def _extract_keywords(self, text: str) -> List[str]:
         """从计划名称中提取关键词"""

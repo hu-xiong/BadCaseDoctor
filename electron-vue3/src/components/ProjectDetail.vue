@@ -506,7 +506,7 @@
           :toggleTaskSelection="toggleTaskSelection"
           :editItem="editBadcase"
           :pendingModifications="pendingModifications"
-          :pendingCreates="pendingCreates"
+          :pendingCreates="pendingCreatesForCurrentView"
           :expandedDetailRows="expandedDetailRows"
           :hasDetailFieldModifications="hasDetailFieldModifications"
           :toggleDetailExpand="toggleDetailExpand"
@@ -969,6 +969,7 @@ import NewBadcase from './NewBadcase.vue'
 import NewBug from './NewBug.vue'
 import NewTestCase from './NewTestCase.vue'
 import userStore from '../store/user.js'
+import { persistStableCreatedId, getStableCreatedId } from '../utils/createPreviewKeys.js'
 
 // 在浏览器环境中，这些Node.js模块可能不可用，需要处理
 let os, path
@@ -1185,7 +1186,113 @@ export default {
     const totalBadcases = ref(0)
     const pendingModifications = ref({}) // 存储待确认的修改
     const pendingCreates = ref([]) // 存储待确认的新建（无 before diff）
+    const processedCreateKeyMap = reactive({})
+    const createdIdByCreateKey = reactive({})
     const expandedDetailRows = ref([]) // 展开的详情行
+
+    /** 与列表 currentPlanType / create target 对齐（bug、badcase、test_case） */
+    const normalizeCreateTarget = (t) => {
+      const s = (t || '').toString().toLowerCase()
+      if (s === 'testcase' || s === 'test_case') return 'test_case'
+      if (s === 'bug') return 'bug'
+      if (s === 'badcase') return 'badcase'
+      return s
+    }
+    const normalizeViewType = (ct) => {
+      const s = (ct || '').toString().toLowerCase()
+      if (s === 'testcase' || s === 'test_case') return 'test_case'
+      if (s === 'bug') return 'bug'
+      if (s === 'badcase') return 'badcase'
+      return s
+    }
+    /**
+     * 仅在「当前视图」展示待确认新建行：内容类型一致，且 plan_id 与当前选中的迭代计划一致（未计划视图只显示无 plan 的预览）。
+     */
+    const pendingCreatesForCurrentView = computed(() => {
+      const list = pendingCreates.value || []
+      const ct = normalizeViewType(currentPlanType.value)
+      const sp = selectedPlan.value
+      return list.filter((pc) => {
+        const t = normalizeCreateTarget(pc.target)
+        if (t !== ct) return false
+        const pp = pc.preview?.plan_id ?? pc.preview?.planId
+        const ppNum = pp != null && pp !== '' ? Number(pp) : null
+        const isUnplannedPreview =
+          ppNum == null || !Number.isFinite(ppNum) || ppNum === 0
+        const isUnplannedTab =
+          sp === null || sp === undefined || sp === 'unplanned'
+        if (isUnplannedTab) {
+          return isUnplannedPreview
+        }
+        const sid = Number(sp)
+        if (!Number.isFinite(sid)) return false
+        if (isUnplannedPreview) return false
+        return Number(ppNum) === sid
+      })
+    })
+
+    const PROCESSED_CREATE_KEY_LS_PREFIX = 'badcase_doctor:processed_create_key:'
+    const getProcessedCreateKeyStorageKey = (pid) =>
+      `${PROCESSED_CREATE_KEY_LS_PREFIX}${String(pid)}`
+
+    const loadProcessedCreateFromStorage = (pid) => {
+      if (!pid && pid !== 0) return
+      const raw = localStorage.getItem(getProcessedCreateKeyStorageKey(pid))
+      try {
+        const obj = raw ? (JSON.parse(raw) || {}) : {}
+        Object.keys(obj).forEach((createKey) => {
+          if (!createKey) return
+          processedCreateKeyMap[createKey] = true
+          const meta = obj[createKey]
+          if (meta && typeof meta === 'object' && meta.createdId) {
+            createdIdByCreateKey[createKey] = meta.createdId
+          }
+        })
+      } catch (e) {
+        console.warn('[CREATE] 载入 processed create key 失败:', e)
+      }
+    }
+
+    const persistProcessedCreateKey = (pid, createKey, meta = {}) => {
+      if (!pid && pid !== 0) return
+      if (!createKey) return
+      const storageKey = getProcessedCreateKeyStorageKey(pid)
+      let obj = {}
+      try {
+        const raw = localStorage.getItem(storageKey)
+        obj = raw ? (JSON.parse(raw) || {}) : {}
+      } catch {
+        obj = {}
+      }
+      obj[createKey] = {
+        processed: true,
+        ...(obj[createKey] && typeof obj[createKey] === 'object' ? obj[createKey] : {}),
+        ...(meta && typeof meta === 'object' ? meta : {})
+      }
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(obj))
+      } catch (e) {
+        console.warn('[CREATE] persist processed create key 失败:', e)
+      }
+    }
+
+    const createSessionId = `${Date.now()}_${Math.random().toString(16).slice(2)}`
+    const makeCreateKey = (target, preview, messageId = null) => {
+      const t = target || 'testcase'
+      const p = preview || {}
+      const title = (
+        p.title ||
+        p.name ||
+        p.bug_title ||
+        p.bugTitle ||
+        p.testcase_title ||
+        p.badcase_title ||
+        ''
+      ).toString().trim()
+      const planId = p.plan_id ?? p.planId ?? null
+      const scope = (messageId ?? p._messageId ?? p.messageId) ?? `session:${createSessionId}`
+      return `${scope}|${t}|${title}|${planId ?? 'null'}`
+    }
     
     // 详情字段列表（不在列表中显示的字段）
     // 详情字段列表（不在列表中显示的字段）
@@ -3810,7 +3917,8 @@ export default {
 
     onMounted(async () => {
       console.log('=== ProjectDetail onMounted ===')
-                      
+      loadProcessedCreateFromStorage(projectId.value)
+                       
       // 监听 grep 导航事件
       window.addEventListener('grep-navigate', handleGrepNavigate)
           
@@ -3826,6 +3934,7 @@ export default {
       // 监听 modify-cancelled 事件（来自对话区）
       window.addEventListener('modify-cancelled', handleModifyCancelled)
       window.addEventListener('create-pending', handleCreatePending)
+      window.addEventListener('show-create-in-list', handleShowCreateInList)
                   
       // 检查URL参数，如果有expand_plan参数，先设置选中的计划ID
       // 这样后续的manualRefreshPlans中的fetchBadcases就能带上正确的plan_id
@@ -3942,20 +4051,43 @@ export default {
       window.removeEventListener('modify-confirmed', handleModifyConfirmed)
       window.removeEventListener('modify-cancelled', handleModifyCancelled)
       window.removeEventListener('create-pending', handleCreatePending)
+      window.removeEventListener('show-create-in-list', handleShowCreateInList)
     })
 
     const handleCreatePending = (event) => {
       const detail = event?.detail || {}
       const target = detail.target
-      const preview = detail.preview
-      if (!target || !preview) return
-      // 只保留当前 projectId 的待新增
-      if (preview.project_id && Number(preview.project_id) !== Number(projectId.value)) return
+      const rawPreview = detail.preview
+      const messageId = detail.messageId ?? null
+      const hasStableMessageScope = messageId !== null && messageId !== undefined
+      if (!target || !rawPreview) return
+      const preview = { ...rawPreview }
+      // 预览带错 project_id 时，不丢弃，统一归一到当前项目
+      if (
+        preview.project_id &&
+        Number(projectId.value) &&
+        Number(preview.project_id) !== Number(projectId.value)
+      ) {
+        preview.project_id = Number(projectId.value)
+      }
+      // 已采纳过（稳定键命中）：不再插入待确认行，直接定位到已创建记录
+      const adoptedRowId = getStableCreatedId(projectId.value, target, preview)
+      if (adoptedRowId != null) {
+        const pid = preview.plan_id ?? preview.planId
+        window.dispatchEvent(new CustomEvent('grep-navigate', {
+          detail: { planId: pid, bugId: adoptedRowId, target: target || 'bug' },
+          bubbles: true
+        }))
+        return
+      }
+      const createKey = makeCreateKey(target, preview, messageId)
+      // 仅在带 messageId 时才应用“已处理”拦截；无 messageId 场景避免误吞新预览
+      if (hasStableMessageScope && processedCreateKeyMap[createKey]) return
       // 生成临时 id
       const tempId = `create_${Date.now()}_${Math.random().toString(16).slice(2)}`
       pendingCreates.value = [
-        ...pendingCreates.value,
-        { tempId, target, preview, messageId: detail.messageId || null, createdAt: Date.now() }
+        ...pendingCreates.value.filter(x => x.createKey !== createKey),
+        { tempId, target, preview, messageId, createdAt: Date.now(), createKey }
       ]
       // 刷新列表，让虚拟行能显示在顶部
       refreshBadcases()
@@ -3969,44 +4101,117 @@ export default {
       }, 50)
     }
 
+    const handleShowCreateInList = (event) => {
+      handleCreatePending(event)
+    }
+
+    /** 采纳新建后滚动到列表中对应行（与 grep / modify 定位一致） */
+    const scrollToCreatedListRow = async (createdId) => {
+      if (createdId == null || createdId === '') return
+      const id = Number(createdId)
+      if (!Number.isFinite(id)) return
+      const sel = `[data-bug-id="${id}"]`
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await nextTick()
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 60 : 100))
+        const el = document.querySelector(sel)
+        if (el && el.scrollIntoView) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          el.classList.add('highlight-row')
+          setTimeout(() => el.classList.remove('highlight-row'), 3000)
+          return
+        }
+      }
+      console.warn('[CREATE] 未找到列表行，无法滚动:', sel)
+    }
+
     const confirmCreate = async (tempId) => {
       const item = pendingCreates.value.find(x => x.tempId === tempId)
       if (!item) return
       const target = item.target
       const preview = item.preview || {}
+      const createKey = item.createKey || makeCreateKey(target, preview, item.messageId || null)
       // 先乐观移除
       pendingCreates.value = pendingCreates.value.filter(x => x.tempId !== tempId)
       try {
+        let createdId = null
         if (target === 'testcase' || target === 'test_case') {
-          await fetch(`${BACKEND_BASE_URL}/api/testcases`, {
+          const res = await fetch(`${BACKEND_BASE_URL}/api/testcases`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify(preview)
           }).then(r => r.json())
+          if (!res?.success) throw new Error(res?.error || '创建TestCase失败')
+          createdId = res?.testcase?.id ?? res?.id ?? null
         } else if (target === 'bug') {
-          await fetch(`${BACKEND_BASE_URL}/api/bugs`, {
+          const res = await fetch(`${BACKEND_BASE_URL}/api/bugs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify(preview)
           }).then(r => r.json())
+          if (!res?.success) throw new Error(res?.error || '创建Bug失败')
+          createdId = res?.bug?.id ?? res?.id ?? null
         } else if (target === 'badcase') {
-          await fetch(`${BACKEND_BASE_URL}/api/badcases`, {
+          const res = await fetch(`${BACKEND_BASE_URL}/api/badcases`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify(preview)
           }).then(r => r.json())
+          if (!res?.success) throw new Error(res?.error || '创建BadCase失败')
+          createdId = res?.badcase?.id ?? res?.id ?? null
         }
-        await refreshBadcases()
+        processedCreateKeyMap[createKey] = true
+        createdIdByCreateKey[createKey] = createdId
+        persistProcessedCreateKey(projectId.value, createKey, { createdId, target, messageId: item.messageId || null })
+        persistStableCreatedId(projectId.value, target, preview, createdId)
+
+        const targetPlanId = preview.plan_id ?? preview.planId
+        if (targetPlanId && Number(selectedPlan.value) !== Number(targetPlanId)) {
+          const expandPlanAndParents = (tid) => {
+            const findAndExpand = (plans, targetId, parents = []) => {
+              for (const plan of plans) {
+                if (plan.id === targetId) {
+                  parents.forEach((parentId) => {
+                    if (!expandedPlans.value.includes(parentId)) {
+                      expandedPlans.value.push(parentId)
+                    }
+                  })
+                  return true
+                }
+                if (plan.children && plan.children.length > 0) {
+                  if (findAndExpand(plan.children, targetId, [...parents, plan.id])) {
+                    return true
+                  }
+                }
+              }
+              return false
+            }
+            findAndExpand(projectPlans.value, tid)
+          }
+          expandPlanAndParents(Number(targetPlanId))
+          await selectPlan(Number(targetPlanId))
+        } else {
+          await refreshBadcases()
+        }
         await fetchProjectPlans()
+        if (createdId != null) {
+          await scrollToCreatedListRow(createdId)
+        }
       } catch (e) {
         console.error('[CREATE] 创建失败:', e)
       }
     }
 
     const cancelCreate = (tempId) => {
+      const item = pendingCreates.value.find(x => x.tempId === tempId)
+      if (item) {
+        const createKey = item.createKey || makeCreateKey(item.target, item.preview, item.messageId || null)
+        processedCreateKeyMap[createKey] = true
+        persistProcessedCreateKey(projectId.value, createKey, { rejected: true, target: item.target, messageId: item.messageId || null })
+      }
       pendingCreates.value = pendingCreates.value.filter(x => x.tempId !== tempId)
     }
     
@@ -4561,6 +4766,10 @@ export default {
       hasBaselines,
       showBaselineManagementModal,
       // AI助手相关
+      pendingCreates,
+      pendingCreatesForCurrentView,
+      confirmCreate,
+      cancelCreate,
       showDropdown,
       toggleDropdown,
       closeSession,

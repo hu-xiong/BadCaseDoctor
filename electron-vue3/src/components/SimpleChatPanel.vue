@@ -28,6 +28,7 @@
               <textarea
                 ref="inlineTextareaRef"
                 v-model="inlineInputMessage"
+                @input="autoResizeInline"
                 @keydown.enter.exact="handleInlineSend"
                 @keydown.enter.shift.exact="addNewLineInline"
                 @keydown.esc.exact="cancelEditUserMessage"
@@ -107,46 +108,85 @@
             <span class="message-time">{{ message.time }}</span>
           </div>
                     
-          <!-- AI等待占位（...） - 深度思考 / Todo / 结果出来前的短暂状态 -->
-          <div v-if="message.understanding" class="ai-understanding">
+          <!-- AI等待占位（...）：Todo / 结果出来前的短暂状态；深度思考仅在有实质 reasoning 正文时展示 -->
+          <div v-if="message.understanding && !message.finalResponse" class="ai-understanding">
             <div class="ai-understanding-text">
-              {{ message.understanding }}
+              <template v-if="message.understanding === '...'">
+                处理中
+                <span class="loading-dots" aria-hidden="true">
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                </span>
+              </template>
+              <template v-else>
+                {{ message.understanding }}
+              </template>
             </div>
           </div>
                     
 
                     
-          <!-- 思考过程（文心 X1 等带推理模型）- 极简深色风格，打字机效果 -->
-          <div v-if="message.reasoningContent" class="reasoning-section">
-            <details class="reasoning-details">
-              <summary class="reasoning-summary">
-                <img class="reasoning-icon" :src="deepThinkingIcon" alt="深度思考" />
-                <span class="reasoning-title">深度思考</span>
-                <img
-                  class="reasoning-toggle reasoning-toggle--right"
-                  :src="chevronRightIcon"
-                  alt="toggle-right"
-                />
-                <img
-                  class="reasoning-toggle reasoning-toggle--down"
-                  :src="chevronDownIcon"
-                  alt="toggle"
-                />
-              </summary>
-              <div class="reasoning-content">
+          <!-- Cursor 式：窄条思考流（限高滚动）；规划完成后默认折叠为一行，可点击展开 -->
+          <div
+            v-if="substantiveReasoning(message.reasoningContent)"
+            class="cursor-reasoning-wrap"
+          >
+            <div class="cursor-reasoning-block">
+              <button
+                type="button"
+                class="cursor-reason-summary"
+                @click="message.thoughtCollapsed = !message.thoughtCollapsed"
+              >
+                <span class="cursor-reason-pill">{{ thoughtSummaryLabel(message) }}</span>
+                <span
+                  v-if="message.thoughtCollapsed && message.agentResult?.thinking_time != null"
+                  class="cursor-reason-meta"
+                >
+                  {{ Number(message.agentResult.thinking_time).toFixed(1) }}s
+                </span>
+                <span class="cursor-reason-chevron">{{ message.thoughtCollapsed ? '▸' : '▾' }}</span>
+              </button>
+              <div v-show="!message.thoughtCollapsed" class="cursor-reason-feed">
                 <div
-                  class="reasoning-text reasoning-markdown"
+                  class="reasoning-text reasoning-markdown cursor-reason-inner"
                   v-html="formatReasoningMarkdown(message.reasoningContent)"
                 ></div>
               </div>
+            </div>
+          </div>
+
+          <!-- Cursor：Exploring — Explored X files, Y searches（默认折叠，点击 summary 展开明细） -->
+          <div
+            v-if="message.activityExplorer && message.activityExplorer.headline"
+            class="cursor-explorer-wrap"
+          >
+            <div class="cursor-explorer-label-row">Exploring</div>
+            <details class="cursor-explorer-details">
+              <summary class="cursor-explorer-summary">
+                <span class="cursor-explorer-headline">{{ message.activityExplorer.headline }}</span>
+                <span class="cursor-explorer-chevron" aria-hidden="true"></span>
+              </summary>
+              <ul class="cursor-explorer-list">
+                <li v-for="(ln, li) in message.activityExplorer.lines" :key="li">{{ ln }}</li>
+              </ul>
             </details>
           </div>
           
-          <!-- 待办列表 - Qoder 风格（步骤+evidence整合） -->
-          <TodoTimeline 
-            v-if="message.steps && message.steps.length > 0" 
-            :todos="formatTodosForTimeline(message.steps, message)"
+          <!-- 首轮 LLM 生成 Todo：流式正文（在结构化步骤出现前逐字显示） -->
+          <div
+            v-if="(message.todosStreamDraft || message.todosStreamVisible) && (!message.steps || message.steps.length === 0)"
+            class="todos-stream-block"
+          >
+            <div class="todos-stream-label">任务规划（生成中）</div>
+            <pre class="todos-stream-pre">{{ message.todosStreamVisible }}</pre>
+          </div>
+          <!-- Cursor 式：顶部计划 + 分步流式执行日志（沙箱预览在下方独立区域） -->
+          <AgentTaskRun
+            v-if="message.steps && message.steps.length > 0"
+            :steps="message.steps"
             :statusText="getTimelineStatus(message)"
+            :instantPlan="!!message.isHistorical"
           />
           
           <!-- 工具执行卡片 - 隐藏，已整合到TodoTimeline中 -->
@@ -200,18 +240,21 @@
                 />
               </div>
               <div v-show="isSandboxExpanded(message.id, groupIdx)" class="collapsible-content modify-navigation-content">
-                <template v-if="group.items[0]?.diff">
-                  <div v-for="(fieldDiff, idx) in group.items[0].diff" :key="idx" class="modify-field-preview">
-                    <span class="field-label">{{ fieldDiff.field_label }}:</span>
-                    <span :class="['old-value', { 'empty-value': !getFieldOldValue(fieldDiff) }]">
-                      {{ getFieldOldValue(fieldDiff) || '未设置' }}
-                    </span>
-                    <span class="arrow">→</span>
-                    <span class="new-value">{{ getFieldNewValue(fieldDiff) || '-' }}</span>
-                  </div>
+                <template v-for="(git, gix) in group.items" :key="gix">
+                  <div v-if="group.items.length > 1" class="group-item-target">记录 #{{ git.target_id }}</div>
+                  <template v-if="git.diff && git.diff.length">
+                    <div v-for="(fieldDiff, idx) in git.diff" :key="`${gix}-${idx}`" class="modify-field-preview">
+                      <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                      <span :class="['old-value', { 'empty-value': !getFieldOldValue(fieldDiff) }]">
+                        {{ getFieldOldValue(fieldDiff) || '未设置' }}
+                      </span>
+                      <span class="arrow">→</span>
+                      <span class="new-value">{{ getFieldNewValue(fieldDiff) || '-' }}</span>
+                    </div>
+                  </template>
                 </template>
                 <div v-if="group.items.length > 1" class="group-items-hint">
-                  共 {{ group.items.length }} 条连续记录待确认
+                  共 {{ group.items.length }} 条记录合并为一组，请在左侧列表对每组共用一次 ✓ / ✗
                 </div>
               </div>
             </div>
@@ -221,8 +264,8 @@
           <div v-else-if="message.modifyNavigation && !message.modifyNavigation.batch_modify" class="modify-navigation-section">
             <div class="collapsible-card findings-card sandbox-card">
               <div class="collapsible-header sandbox-header" @click="handleShowModifyInList(message.modifyNavigation, message.id)">
-                <span class="card-icon">📝</span>
-                <span class="card-title">沙箱预览</span>
+                <span class="card-icon">{{ message.modifyNavigation.navigate_to_existing ? '✓' : (message.modifyNavigation.is_create ? '➕' : '📝') }}</span>
+                <span class="card-title">{{ message.modifyNavigation.navigate_to_existing ? '已创建 · 点击定位到列表' : (message.modifyNavigation.is_create ? '新建预览' : '沙箱预览') }}</span>
                 <span class="card-count">{{ message.modifyNavigation.diff?.length || 1 }} 项</span>
                 <img
                   class="sandbox-toggle"
@@ -235,14 +278,34 @@
               <div v-show="isSandboxExpanded(message.id, null)" class="collapsible-content modify-navigation-content">
                 <div v-for="(fieldDiff, idx) in (message.modifyNavigation.diff || [])" :key="idx" class="modify-field-preview">
                   <span class="field-label">{{ fieldDiff.field_label }}:</span>
-                  <span :class="['old-value', { 'empty-value': !fieldDiff.lines?.find(l => l.type === 'delete')?.content }]">
-                    {{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || '未设置' }}
-                  </span>
-                  <span class="arrow">→</span>
-                  <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
+                  <!-- 新建操作：只有add，没有delete -->
+                  <template v-if="message.modifyNavigation.is_create">
+                    <span class="new-value create-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
+                  </template>
+                  <!-- 修改操作：有delete和add -->
+                  <template v-else>
+                    <span :class="['old-value', { 'empty-value': !fieldDiff.lines?.find(l => l.type === 'delete')?.content }]">
+                      {{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || '未设置' }}
+                    </span>
+                    <span class="arrow">→</span>
+                    <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
+                  </template>
                 </div>
               </div>
             </div>
+          </div>
+          
+          <div
+            v-if="((message.modifyGroups && message.modifyGroups.length) || (message.modifyNavigation && !message.modifyNavigation.batch_modify)) && !(message.modifyNavigation && message.modifyNavigation.navigate_to_existing)"
+            class="sandbox-confirm-hint"
+          >
+            在沙箱中查看变更后，点击卡片跳转到左侧列表，使用行内 <strong>✓</strong> 采纳或 <strong>✗</strong> 拒绝后才会正式落库。
+          </div>
+          <div
+            v-if="message.modifyNavigation && message.modifyNavigation.navigate_to_existing"
+            class="sandbox-confirm-hint sandbox-confirm-hint--muted"
+          >
+            本条与已采纳的新建一致，已为你定位到左侧列表中的记录（无需再次采纳）。
           </div>
           
           <!-- Bug 导航区域 - 独立于 findings 之外（可折叠深色背景） -->
@@ -390,7 +453,7 @@ import { BACKEND_BASE_URL, getChatSession, addChatMessage, saveAgentBugs, genera
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
 import StreamingMessage from './StreamingMessage.vue'
-import TodoTimeline from './TodoTimeline.vue'
+import AgentTaskRun from './AgentTaskRun.vue'
 import ExecutionResult from './ExecutionResult.vue'
 import CreatePreview from './CreatePreview.vue'
 import deepThinkingIcon from '../assets/deep-thinking-icon.svg'
@@ -400,6 +463,7 @@ import qwenIcon from '../assets/qwen-icon.png'
 import ernieIcon from '../assets/ernie-icon.png'
 import glmIcon from '../assets/glm-icon.png'
 import sendCursorIcon from '../assets/send-cursor.png'
+import { getStableCreatedId } from '../utils/createPreviewKeys.js'
 
 // Props
 const props = defineProps({
@@ -438,6 +502,60 @@ const emit = defineEmits(['title-updated'])
     'baseline',
     'reproduce_steps'
   ]
+
+  /** 从批量预览项中取记录标题，用于「同一条 / 同标题」合并沙箱分组 */
+  const getModifyItemRecordTitle = (item) => {
+    if (!item) return ''
+    const b = item.before
+    if (b && (b.title || b.name)) {
+      return String(b.title || b.name).trim()
+    }
+    if (item.record_title) {
+      return String(item.record_title).trim()
+    }
+    const rows = item.diff || []
+    for (const fd of rows) {
+      const fname = fd.field || fd.field_label || ''
+      if (fname === 'title' || String(fname).includes('标题')) {
+        const line = fd.lines?.find(l => l.type === 'delete') || fd.lines?.find(l => l.type === 'unchanged')
+        if (line?.content) return String(line.content).trim()
+      }
+    }
+    return ''
+  }
+
+  const stableModifyModsKey = (m) => {
+    if (!m || typeof m !== 'object') return ''
+    const o = {}
+    Object.keys(m)
+      .sort()
+      .forEach((k) => {
+        o[k] = m[k]
+      })
+    return JSON.stringify(o)
+  }
+
+  /**
+   * 与上一条是否应合并为一组（共用一个沙箱卡片、一次跳转派发）：
+   * - 同 target_id（列表+详情拆分）
+   * - 相邻数字 ID（差 1）
+   * - 同计划内同标题（含 record_title / before.title）
+   * - 同计划、同 target、同 modifications，且在批量结果中相邻（保留 grep 顺序，避免按 ID 排序拆散同标题相邻项）
+   */
+  const shouldMergeModifyPreviewItems = (prevItem, item) => {
+    if (!prevItem || !item) return false
+    if (prevItem.target_id === item.target_id) return true
+    const idDiff = item.target_id - prevItem.target_id
+    if (idDiff === 1 || idDiff === -1) return true
+    const samePlan = prevItem.plan_id === item.plan_id
+    const sameTarget = (prevItem.target || 'badcase') === (item.target || 'badcase')
+    const sameMods = stableModifyModsKey(prevItem.modifications) === stableModifyModsKey(item.modifications)
+    const t1 = getModifyItemRecordTitle(prevItem)
+    const t2 = getModifyItemRecordTitle(item)
+    // 同标题 + 同计划 + 同类型 + 同修改：覆盖「ID 不相邻但在 grep 结果里紧挨着」的重复标题行
+    if (t1 && t2 && t1 === t2 && samePlan && sameTarget && sameMods) return true
+    return false
+  }
 
 const inputMessage = ref('')
 const editingUserMessageId = ref(null)
@@ -504,6 +622,9 @@ const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
   if (!aiMessage.finalResponse) {
     aiMessage.finalResponse = reason === 'stopped' ? '已停止生成' : '已中断'
   }
+
+  cancelTodosStreamTypewriter(aiMessage)
+  aiMessage.todosStreamVisible = ''
 }
 
 // 格式化消息内容（支持简单的markdown）
@@ -514,12 +635,20 @@ const formatMessage = (content) => {
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
 }
 
+// 零宽字符（历史后端占位等）：不计入「是否有深度思考」
+const INVISIBLE_REASONING_CHARS = /[\u200B-\u200D\uFEFF\u2060]/g
+/** 是否展示「深度思考」折叠块：只看本条消息是否含有实质思考文本，与模型选项无关 */
+const substantiveReasoning = (text) => {
+  if (text == null || typeof text !== 'string') return false
+  return text.replace(INVISIBLE_REASONING_CHARS, '').trim().length > 0
+}
+
 // 思考过程：使用 marked 做完整 Markdown 渲染（换行、加粗、列表、代码块等）
 marked.setOptions({ gfm: true, breaks: true })
 const formatReasoningMarkdown = (content) => {
   if (!content || typeof content !== 'string') return ''
   try {
-    let text = content.trim()
+    let text = content.replace(INVISIBLE_REASONING_CHARS, '').trim()
     // 若模型未输出换行，在中文句号/分号后插入换行，便于展示段落
     if (!/\n/.test(text) && /[。；]/.test(text)) {
       text = text.replace(/([。；])/g, '$1\n')
@@ -630,6 +759,80 @@ const formatObjectToSummary = (obj) => {
   return ''
 }
 
+/** 将后端 Todo 字符串列表转为 ReAct 步骤（与流式 todos / todos_partial 共用） */
+const buildReactStepsFromTodoStrings = (todoData) => {
+  return (todoData || []).map((todo, idx) => {
+    const todoText = typeof todo === 'string' ? todo : (todo.title || todo.text || todo.content || `任务${idx + 1}`)
+    let friendlyTitle = todoText
+    const toolMatch = todoText.match(/使用\s*(\w+)\s*工具/)
+    if (toolMatch) {
+      friendlyTitle = toolMatch[1]
+    } else if (todoText.includes('database_query') || todoText.includes('查询')) {
+      friendlyTitle = 'database_query'
+    } else if (todoText.includes('grep') || todoText.includes('定位')) {
+      friendlyTitle = 'grep'
+    } else if (todoText.includes('modify') || todoText.includes('修改')) {
+      friendlyTitle = 'modify'
+    } else if (todoText.includes('create') || todoText.includes('创建')) {
+      friendlyTitle = 'create'
+    } else if (todoText.includes('browser_test') || todoText.includes('测试')) {
+      friendlyTitle = 'browser_test'
+    } else if (todoText.includes('search') || todoText.includes('搜索')) {
+      friendlyTitle = 'search'
+    }
+    return {
+      title: friendlyTitle,
+      originalTodo: todoText,
+      status: 'pending',
+      description: '',
+      progressLog: [],
+      detailLog: [],
+      inputParams: null,
+      stepStartedAt: null,
+      stepDurationMs: null,
+      resultSummary: '',
+      llmDraft: '', // 决策/观察等 LLM 流式正文（llm_text_stream）
+      reasoningStepDraft: '', // decide/observe 的 reasoning_step 流
+      thoughtTiming: null // { durationMs, kind, segment, briefThresholdMs } — Cursor 式耗时
+    }
+  })
+}
+
+/** 取消首轮 Todo 正文的逐字追赶动画 */
+const cancelTodosStreamTypewriter = (msg) => {
+  if (!msg) return
+  const id = msg._todosTypewriterRaf
+  if (id != null) {
+    cancelAnimationFrame(id)
+    msg._todosTypewriterRaf = null
+  }
+}
+
+/**
+ * 将 todosStreamDraft 以逐字方式写入 todosStreamVisible（rAF 追赶，chunk 再大也像打字机）
+ */
+const scheduleTodosStreamTypewriter = (msg) => {
+  if (!msg) return
+  const loop = () => {
+    msg._todosTypewriterRaf = null
+    const draft = msg.todosStreamDraft || ''
+    const vis = msg.todosStreamVisible || ''
+    if (!draft) {
+      msg.todosStreamVisible = ''
+      return
+    }
+    if (vis.length >= draft.length) return
+    const backlog = draft.length - vis.length
+    const n = Math.min(backlog, Math.max(1, Math.ceil(backlog / 6)))
+    msg.todosStreamVisible = draft.slice(0, vis.length + n)
+    if ((msg.todosStreamVisible || '').length < draft.length) {
+      msg._todosTypewriterRaf = requestAnimationFrame(loop)
+    }
+  }
+  if (msg._todosTypewriterRaf != null) return
+  msg._todosTypewriterRaf = requestAnimationFrame(loop)
+}
+
 // 格式化 steps 为 TodoTimeline 所需的 todos 数据结构
 const formatTodosForTimeline = (steps, message) => {
   if (!steps || !Array.isArray(steps)) return []
@@ -698,6 +901,9 @@ const formatTodosForTimeline = (steps, message) => {
               resultSummary = badcaseCount > 0 
                 ? `分析完成，解析 ${planCount} 个计划，定位 ${badcaseCount} 条BadCase`
                 : `分析完成，解析 ${planCount} 个计划，未找到BadCase`
+            } else if (data.data?.testcase_location?.length) {
+              const n = data.data.testcase_location.length
+              resultSummary = `分析完成，定位 ${n} 条测试用例`
             } else {
               resultSummary = '分析完成，未找到匹配项'
             }
@@ -748,16 +954,56 @@ const formatTodosForTimeline = (steps, message) => {
         // 实时显示后端下发的进度文案（流式）
         resultSummary = step.description || '修改中...'
       }
+    } else if (toolName === 'create') {
+      friendlyText = '➕ 使用 create 工具新建记录'
+      if (isSkipped) {
+        resultSummary = '已跳过'
+      } else if (isCompleted) {
+        const output = step.toolCall?.output
+        if (output) {
+          try {
+            const data = typeof output === 'string' ? JSON.parse(output) : output
+            const inner = data.data || data
+            const hasCreatePreview = inner.preview?.title || (inner.diff && inner.diff.length)
+            if (inner.success !== false && !inner.created_id && hasCreatePreview) {
+              const t = inner.preview?.title || inner.target || '待确认'
+              resultSummary = inner.message ? String(inner.message).slice(0, 120) : `新建预览就绪：${t}`
+            } else if (inner.created_id) {
+              resultSummary = `已创建，ID=${inner.created_id}`
+            } else if (inner.error) {
+              resultSummary = `创建失败: ${inner.error}`
+            } else {
+              resultSummary = '执行完成'
+            }
+          } catch {
+            resultSummary = '执行完成'
+          }
+        } else {
+          resultSummary = '执行完成'
+        }
+      } else if (isRunning) {
+        const last = (step.progressLog && step.progressLog.length) ? step.progressLog[step.progressLog.length - 1] : ''
+        resultSummary = last || step.description || '正在生成新建预览…'
+      }
     } else {
       // 其他工具，使用原始title
       friendlyText = step.title || step.description || '未知任务'
-      resultSummary = isSkipped ? '已跳过' : (isCompleted ? '执行完成' : (isRunning ? '执行中...' : ''))
+      const lastLog = (step.progressLog && step.progressLog.length) ? step.progressLog[step.progressLog.length - 1] : ''
+      resultSummary = isSkipped
+        ? '已跳过'
+        : (isCompleted ? '执行完成' : (isRunning ? (lastLog || step.description || '执行中…') : ''))
     }
     
     // 关联对应的evidence卡片
     const relatedEvidence = message?.evidences?.find(ev => 
       ev.data?.tool === toolName || ev.data?.title?.includes(toolName)
     )
+
+    // LLM 决策/观察等流式正文：进行中时优先在子标题展示（打字机效果）
+    if (isRunning && step.llmDraft && String(step.llmDraft).trim()) {
+      const raw = String(step.llmDraft)
+      resultSummary = raw.length > 320 ? raw.slice(0, 320) + '…' : raw
+    }
     
     return {
       text: friendlyText,
@@ -771,17 +1017,81 @@ const formatTodosForTimeline = (steps, message) => {
   })
 }
 
-// 从标题中提取工具名称
+// 从标题中提取工具名称（不区分大小写，避免步骤标题仅为 Create 时识别失败）
 const extractToolName = (title) => {
   if (!title) return ''
-  if (title.includes('database_query')) return 'database_query'
-  if (title.includes('grep')) return 'grep'
-  if (title.includes('modify')) return 'modify'
-  if (title.includes('create')) return 'create'
-  if (title.includes('browser_test')) return 'browser_test'
-  if (title.includes('log_analyzer')) return 'log_analyzer'
-  if (title.includes('search')) return 'search'
+  const t = String(title).toLowerCase()
+  if (t.includes('database_query')) return 'database_query'
+  if (t.includes('grep')) return 'grep'
+  if (t.includes('modify')) return 'modify'
+  if (t.includes('create')) return 'create'
+  if (t.includes('browser_test')) return 'browser_test'
+  if (t.includes('log_analyzer')) return 'log_analyzer'
+  if (t.includes('search')) return 'search'
   return ''
+}
+
+/**
+ * 解析 SSE 里的步骤下标：避免 Number(null)===0 把未带 index 的事件错绑到第 1 步，
+ * 导致 grep 步骤上出现 create 心跳 / observation。
+ */
+const resolveStreamStepIndex = (raw, steps) => {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw === 'string' && raw.trim() === '') return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0) return null
+  if (!Array.isArray(steps) || !steps[n]) return null
+  return n
+}
+
+/** 步骤执行日志：流式追加，去重连续相同行（心跳「已等待 x.xs」不去重，避免界面像卡住） */
+const appendStepDetailLine = (step, line) => {
+  if (!step || line == null || line === '') return
+  const t = String(line).trimEnd()
+  if (!t) return
+  if (!step.detailLog) step.detailLog = []
+  const last = step.detailLog[step.detailLog.length - 1]
+  const isHeartbeat = /已等待\s*[\d.]+s/.test(t)
+  if (last === t && !isHeartbeat) return
+  step.detailLog.push(t)
+  if (step.detailLog.length > 100) step.detailLog.shift()
+  // 新数组引用，确保子组件（AgentTaskRun）对流式追加即时刷新
+  step.detailLog = [...step.detailLog]
+}
+
+/** 从 observation 生成人类可读的一行结果摘要 */
+const buildStepResultSummary = (outputData, toolName, toolData) => {
+  const d = toolData && typeof toolData === 'object' ? toolData : {}
+  const tool = toolName || outputData?.tool || ''
+  if (d.error) return `错误：${d.error}`
+  if (tool === 'grep' || d.testcase_location || d.bug_location || d.badcase_analysis || d.plan_tree) {
+    const tc = d.testcase_location?.length ?? 0
+    const bugs = d.bug_location?.length ?? 0
+    const bc = d.badcase_analysis?.length ?? 0
+    if (d.summary && typeof d.summary === 'string') return d.summary.slice(0, 400)
+    const parts = []
+    if (tc) parts.push(`测试用例 ${tc} 条`)
+    if (bugs) parts.push(`Bug ${bugs} 条`)
+    if (bc) parts.push(`BadCase ${bc} 条`)
+    if (d.plan_tree?.total_plans) parts.push(`计划 ${d.plan_tree.total_plans} 个`)
+    return parts.length ? `定位：${parts.join('，')}` : '定位完成'
+  }
+  if (tool === 'modify' || d.batch_modify || (d.diff && (d.target_id != null || d.batch_results))) {
+    if (d.batch_modify && d.batch_results?.length) {
+      return `批量修改预览 ${d.batch_results.length} 条，请在下方沙箱确认`
+    }
+    if (d.diff?.length) return `已生成修改预览（${d.diff.length} 个字段）`
+    if (d.success === false) return `修改失败：${d.error || '未知错误'}`
+    return d.message || '修改步骤完成'
+  }
+  if (tool === 'create' || (d.preview && typeof d.preview === 'object' && d.target)) {
+    const title = d.preview?.title
+    if (title) return `新建预览：「${title}」`
+    return d.message || '新建预览就绪'
+  }
+  if (d.message) return String(d.message).slice(0, 400)
+  if (outputData?.success === false) return '执行失败'
+  return '步骤完成'
 }
 
 // 获取 diff 字段的旧值（兼容 delete 和 unchanged 类型）
@@ -810,16 +1120,19 @@ const getFieldNewValue = (fieldDiff) => {
 
 // 获取时间轴状态描述
 const getTimelineStatus = (message) => {
-  const hasRunning = message.steps?.some(s => s.status === 'running')
-  const allCompleted = message.steps?.every(s => s.status === 'completed')
+  const steps = message.steps
+  if (!steps?.length) return '正在规划任务步骤...'
+  const hasRunning = steps.some(s => s.status === 'running')
+  const allCompleted = steps.every(s => s.status === 'completed')
+  const runningIdx = steps.findIndex(s => s.status === 'running')
   
-  if (hasRunning) {
-    return '正在规划任务步骤...'
-  } else if (allCompleted) {
-    return ''
-  } else {
-    return '正在规划任务步骤...'
+  if (hasRunning && runningIdx >= 0) {
+    return `正在执行第 ${runningIdx + 1}/${steps.length} 步…`
   }
+  if (allCompleted) {
+    return ''
+  }
+  return '正在规划任务步骤...'
 }
 
 // 判断是否有运行中的步骤
@@ -827,8 +1140,73 @@ const hasRunningSteps = (message) => {
   return message.steps?.some(s => s.status === 'running') || false
 }
 
+/** Cursor 式：思考行标题（与后端 reasoning_timing 一致；回退用 thinking_time） */
+const thoughtSummaryLabel = (message) => {
+  const ms = message.reasoningUiDurationMs
+  const kind = message.reasoningUiKind
+  const thr = message.reasoningBriefThresholdMs ?? 800
+  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return 'Thought briefly'
+  if (ms != null && ms >= 0) return `Thought for ${(ms / 1000).toFixed(1)}s`
+  const tt = message.agentResult?.thinking_time
+  if (tt != null && tt >= 0 && Number(tt) < 0.8) return 'Thought briefly'
+  if (tt != null && tt >= 0) return `Thought for ${Number(tt).toFixed(1)}s`
+  return 'Thought'
+}
+
+/** 供 buildActivityExplorer 内行文案 */
+function explorerToolTag(s) {
+  const t = String(s.title || '').toLowerCase()
+  if (t.includes('grep')) return 'grep'
+  if (t.includes('modify')) return 'modify'
+  if (t.includes('create')) return 'create'
+  if (t.includes('search')) return 'search'
+  if (t.includes('database')) return 'database_query'
+  return t || 'tool'
+}
+
+/**
+ * Cursor 同款：Explored {files} files, {searches} searches + 展开明细行（Grepped / …）
+ */
+const buildActivityExplorer = (msg) => {
+  const steps = msg.steps || []
+  if (!steps.length) return null
+  const tool = (s) => String(s.title || '').trim().toLowerCase()
+  const n = steps.length
+  let grepN = 0
+  let searchN = 0
+  const lines = []
+  steps.forEach((s, i) => {
+    const t = tool(s)
+    const todo = String(s.originalTodo || '').replace(/\s+/g, ' ').trim()
+    const short = todo.length > 96 ? `${todo.slice(0, 94)}…` : todo
+    if (t.includes('grep')) grepN++
+    if (t.includes('search')) searchN++
+    if (t.includes('grep')) {
+      lines.push(`Grepped ${short || 'keywords'} in workspace`)
+    } else if (t.includes('search')) {
+      lines.push(`Searched ${short || 'web'}`)
+    } else if (t.includes('database')) {
+      lines.push(`Queried database — ${short || 'SQL'}`)
+    } else if (t.includes('modify')) {
+      lines.push(`Modified — ${short || 'records'}`)
+    } else if (t.includes('create')) {
+      lines.push(`Created — ${short || 'record'}`)
+    } else {
+      lines.push(`Ran ${explorerToolTag(s)} — ${short || 'step'}`)
+    }
+  })
+  // 与 Cursor 对齐：files ≈ 有产出的步骤数；searches ≈ grep+search，否则与 files 对齐避免 0
+  const files = n
+  let searches = grepN + searchN
+  if (searches < 1) searches = files
+  const headline = `Explored ${files} files, ${searches} searches`
+  return { headline, lines, files, searches }
+}
+
 // 是否显示「统一总结」块（关键发现 + 执行统计合并，Cursor 式耗时 Xs）
 const hasUnifiedSummary = (message) => {
+  // 总结流式阶段 done 未到，先展示底部总结块
+  if (message.summaryStreamDraft && String(message.summaryStreamDraft).trim()) return true
   const r = message.agentResult
   if (!r || r.status !== 'success') return false
   return (r.findings && r.findings.length > 0) || r.execution_time != null || (r.steps_count != null && r.steps_count > 0)
@@ -839,6 +1217,9 @@ const getUnifiedSummaryBody = (message) => {
   const r = message.agentResult
   if (r?.summaryText && typeof r.summaryText === 'string' && r.summaryText.trim()) {
     return r.summaryText.trim()
+  }
+  if (message.summaryStreamDraft && String(message.summaryStreamDraft).trim()) {
+    return String(message.summaryStreamDraft).trim()
   }
   const lines = []
   if (r?.findings && r.findings.length > 0) {
@@ -855,7 +1236,7 @@ const getUnifiedSummaryBody = (message) => {
   const body = lines.join('\n')
   // 有思考耗时但无思考内容时提示（qwen-max 等模型可能不返回 reasoning_content）
   const thinkingTime = (r?.thinking_time ?? r?.execution_time ?? 0)
-  if (thinkingTime > 0 && !(message.reasoningContent && message.reasoningContent.trim())) {
+  if (thinkingTime > 0 && !substantiveReasoning(message.reasoningContent)) {
     const hint = '思考过程未返回（当前模型或接口可能不返回思考内容）。'
     return body ? `${hint}\n\n${body}` : hint
   }
@@ -994,7 +1375,22 @@ const handleShowModifyInList = (modifyData, messageId) => {
   if (!modifyData) {
     console.error('[MODIFY] modifyData 为空')
     return
-  }  
+  }
+
+  // 新建已采纳：只跳转列表，不再派发待确认新建
+  if (modifyData.navigate_to_existing && modifyData.created_id != null) {
+    const pv = modifyData.preview || {}
+    const planId = modifyData.plan_id ?? pv.plan_id ?? pv.planId
+    window.dispatchEvent(new CustomEvent('grep-navigate', {
+      detail: {
+        planId,
+        bugId: modifyData.created_id,
+        target: modifyData.target || 'bug'
+      },
+      bubbles: true
+    }))
+    return
+  }
   
   // 批量修改：为每个记录发送单独的事件
   if (modifyData.batch_modify && modifyData.batch_results && Array.isArray(modifyData.batch_results) && modifyData.batch_results.length > 0) {
@@ -1038,6 +1434,26 @@ const handleShowModifyInList = (modifyData, messageId) => {
     return
   }
   
+  // 新建预览（create 工具）：无真实 target_id，单独派发事件由 ProjectDetail 处理计划跳转与待创建行
+  if (modifyData.is_create) {
+    const preview =
+      modifyData.preview ||
+      modifyData.modifications ||
+      {}
+    const event = new CustomEvent('show-create-in-list', {
+      detail: {
+        target: modifyData.target || 'testcase',
+        preview: { ...preview },
+        diff: modifyData.diff || [],
+        messageId
+      },
+      bubbles: true
+    })
+    window.dispatchEvent(event)
+    console.log('[CREATE] 派发 show-create-in-list:', event.detail)
+    return
+  }
+
   // 单个修改
   const rawId = modifyData.target_id ?? modifyData.targetId ?? modifyData.id
   const intTargetId = parseInt(rawId)
@@ -1231,12 +1647,15 @@ const loadSessionMessages = async () => {
           // 如果 confirmation_required=true 但数据库中的记录已被修改，标记为已执行
           // 这里先保留原始状态，后续通过API检查
           
+          const _histSteps = msg.steps ? JSON.parse(msg.steps) : []
           return {
             id: msg.id,
             isUser: false,
             understanding: msg.understanding,
             reasoningContent: msg.reasoning,  // 历史消息的思考过程
-            steps: msg.steps ? JSON.parse(msg.steps) : [],
+            steps: _histSteps,
+            activityExplorer: buildActivityExplorer({ steps: _histSteps }),
+            thoughtCollapsed: true,
             executionResults: msg.execution_results ? JSON.parse(msg.execution_results) : [],
             agentResult: msg.agent_result ? JSON.parse(msg.agent_result) : { findings: [], recommendations: [], status: 'success' },
             evidences: msg.evidences ? JSON.parse(msg.evidences) : [],
@@ -1523,6 +1942,16 @@ const handleReactAgentMode = async (userMessage) => {
     steps: [],
     finalResponse: '',
     reasoningContent: '',  // 思考过程内容
+    todosStreamDraft: '',  // 首轮 Todo 列表正文流式片段（与 todos_partial / todos 互斥展示）
+    todosStreamVisible: '', // 首轮正文逐字显示缓冲（追赶 todosStreamDraft）
+    summaryStreamDraft: '', // 结束阶段大模型总结流式片段（与 done.summary 对齐）
+    thoughtCollapsed: false, // true 时仅显示一行「Thought…」摘要（Cursor 式）
+    activityExplorer: null, // { headline, lines, files, searches } — Cursor Exploring 块
+    reasoningPhaseStartTs: null,
+    /** 后端 reasoning_timing（Cursor 式 brief / 秒数） */
+    reasoningUiDurationMs: null,
+    reasoningUiKind: null,
+    reasoningBriefThresholdMs: null,
     showReasoning: true,   // 默认展开思考过程
     agentResult: { findings: [], recommendations: [], status: 'running' },
     allObservations: [],
@@ -1600,9 +2029,9 @@ const handleReactAgentMode = async (userMessage) => {
               break
             
             case 'step':
-              // 一旦进入具体步骤，清理顶部省略号状态
-              if (aiMessage.understanding === '...') {
-                aiMessage.understanding = ''
+              // 在最终结果出现前，保持顶部等待动画持续显示
+              if (!aiMessage.understanding) {
+                aiMessage.understanding = '...'
               }
               const stepEvent = chunk.data
               if (!stepEvent) break
@@ -1611,11 +2040,37 @@ const handleReactAgentMode = async (userMessage) => {
               if (stepEvent.event === 'thought') {
                 // thought 事件只用于内部状态更新，不展示
                 // 不创建思考过程卡片
+              } else if (stepEvent.event === 'reasoning_timing') {
+                // Cursor 式：think / decide / observe 各段耗时
+                const seg = stepEvent.segment
+                if (seg === 'think') {
+                  if (stepEvent.duration_ms != null) aiMessage.reasoningUiDurationMs = Number(stepEvent.duration_ms)
+                  if (stepEvent.kind) aiMessage.reasoningUiKind = stepEvent.kind
+                  if (stepEvent.brief_threshold_ms != null) aiMessage.reasoningBriefThresholdMs = Number(stepEvent.brief_threshold_ms)
+                } else if ((seg === 'decide' || seg === 'observe') && stepEvent.index != null) {
+                  const j = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+                  if (j != null && aiMessage.steps[j]) {
+                    aiMessage.steps[j].thoughtTiming = {
+                      durationMs: stepEvent.duration_ms != null ? Number(stepEvent.duration_ms) : null,
+                      kind: stepEvent.kind || null,
+                      segment: seg,
+                      briefThresholdMs: stepEvent.brief_threshold_ms != null ? Number(stepEvent.brief_threshold_ms) : 800
+                    }
+                  }
+                }
+              } else if (stepEvent.event === 'reasoning_step') {
+                const j = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+                if (j != null && aiMessage.steps[j] && typeof stepEvent.content === 'string') {
+                  aiMessage.steps[j].reasoningStepDraft = (aiMessage.steps[j].reasoningStepDraft || '') + stepEvent.content
+                }
               } else if (stepEvent.event === 'reasoning') {
-                // 文心 X1 / Qwen3 Max Thinking 等：流式追加思考过程，不截取
-                const content = stepEvent.content ?? stepEvent.data ?? ''
-                if (content !== '') {
-                  aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + content
+                // 文心 X1 / Qwen 思考模式等：流式追加思考过程（仅接受字符串，避免非预期结构）
+                let piece = stepEvent.content
+                if (piece == null || piece === undefined) piece = stepEvent.data
+                if (typeof piece !== 'string') piece = ''
+                if (piece !== '') {
+                  if (aiMessage.reasoningPhaseStartTs == null) aiMessage.reasoningPhaseStartTs = Date.now()
+                  aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + piece
                 }
               } else if (stepEvent.event === 'immutable_field_rejection') {
                 // 用户请求修改不可修改字段（如类型），后端已提前拦截，直接展示提示
@@ -1627,54 +2082,102 @@ const handleReactAgentMode = async (userMessage) => {
                   s.status = 'skipped'
                   s.description = '已跳过（该字段不可修改）'
                 })
+              } else if (stepEvent.event === 'todos_stream') {
+                const piece = stepEvent.delta
+                if (typeof piece === 'string' && piece) {
+                  aiMessage.todosStreamDraft = (aiMessage.todosStreamDraft || '') + piece
+                  scheduleTodosStreamTypewriter(aiMessage)
+                }
+              } else if (stepEvent.event === 'summary_stream') {
+                const piece = stepEvent.delta
+                if (typeof piece === 'string' && piece) {
+                  aiMessage.summaryStreamDraft = (aiMessage.summaryStreamDraft || '') + piece
+                }
+              } else if (stepEvent.event === 'summary_stream_reset') {
+                aiMessage.summaryStreamDraft = ''
+              } else if (stepEvent.event === 'llm_text_stream') {
+                const piece = stepEvent.delta
+                const _li = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+                if (typeof piece === 'string' && piece && _li != null) {
+                  const st = aiMessage.steps[_li]
+                  if (st) {
+                    st.llmDraft = (st.llmDraft || '') + piece
+                  }
+                }
+              } else if (stepEvent.event === 'todos_partial') {
+                // 流式阶段已能解析出部分 Todo：提前展示时间线，并收起原始正文流
+                console.log('[CHAT-STREAM] 收到 todos_partial:', stepEvent.data)
+                cancelTodosStreamTypewriter(aiMessage)
+                aiMessage.todosStreamDraft = ''
+                aiMessage.todosStreamVisible = ''
+                aiMessage.steps = buildReactStepsFromTodoStrings(stepEvent.data || [])
               } else if (stepEvent.event === 'todos') {
-                // 初始化 Todo 列表
+                // 初始化 Todo 列表（最终版）
                 console.log('[CHAT-STREAM] 收到 todos 数据:', stepEvent.data)
-                aiMessage.steps = (stepEvent.data || []).map((todo, idx) => {
-                  const todoText = typeof todo === 'string' ? todo : (todo.title || todo.text || todo.content || `任务${idx+1}`)
-                  console.log('[CHAT-STREAM] Todo项', idx, ':', todoText)
-                  
-                  // 提取工具名称，生成友好的标题
-                  let friendlyTitle = todoText
-                  const toolMatch = todoText.match(/使用\s*(\w+)\s*工具/)
-                  if (toolMatch) {
-                    friendlyTitle = toolMatch[1] // 提取工具名称
-                  } else if (todoText.includes('database_query') || todoText.includes('查询')) {
-                    friendlyTitle = 'database_query'
-                  } else if (todoText.includes('grep') || todoText.includes('定位')) {
-                    friendlyTitle = 'grep'
-                  } else if (todoText.includes('modify') || todoText.includes('修改')) {
-                    friendlyTitle = 'modify'
-                  } else if (todoText.includes('create') || todoText.includes('创建')) {
-                    friendlyTitle = 'create'
-                  } else if (todoText.includes('browser_test') || todoText.includes('测试')) {
-                    friendlyTitle = 'browser_test'
-                  } else if (todoText.includes('search') || todoText.includes('搜索')) {
-                    friendlyTitle = 'search'
-                  }
-                  
-                  return {
-                    title: friendlyTitle,
-                    originalTodo: todoText, // 保存原始 todo 文本
-                    status: 'pending',
-                    description: '',
-                    progressLog: []  // modify 等工具实时进度日志，用于流式展示
-                  }
-                })
+                cancelTodosStreamTypewriter(aiMessage)
+                aiMessage.todosStreamDraft = ''
+                aiMessage.todosStreamVisible = ''
+                aiMessage.steps = buildReactStepsFromTodoStrings(stepEvent.data || [])
                 console.log('[CHAT-STREAM] 处理后的 steps:', aiMessage.steps)
+                // 规划阶段结束：折叠思考块为一行摘要（Cursor 式）
+                aiMessage.thoughtCollapsed = true
               } else if (stepEvent.event === 'todo_start') {
-                if (aiMessage.steps[stepEvent.index]) {
-                  aiMessage.steps[stepEvent.index].status = 'running'
+                const _tsi = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+                const st = _tsi != null ? aiMessage.steps[_tsi] : null
+                if (st) {
+                  st.status = 'running'
+                  st.stepStartedAt = Date.now()
+                  appendStepDetailLine(st, `── 开始 ──`)
+                }
+              } else if (stepEvent.event === 'step_log') {
+                // 可选：与后端约定 { stepIndex, type: start|output|end, title, params, content, duration }
+                const _sli = resolveStreamStepIndex(stepEvent.stepIndex ?? stepEvent.index, aiMessage.steps)
+                let st = _sli != null ? aiMessage.steps[_sli] : null
+                if (!st) {
+                  st = aiMessage.steps.find(s => s.status === 'running') || aiMessage.steps[aiMessage.steps.length - 1]
+                }
+                if (!st) break
+                if (stepEvent.type === 'start') {
+                  st.status = 'running'
+                  st.stepStartedAt = Date.now()
+                  if (stepEvent.params) st.inputParams = stepEvent.params
+                  appendStepDetailLine(st, `── 开始：${stepEvent.title || ''} ──`.trim())
+                } else if (stepEvent.type === 'output' && stepEvent.content) {
+                  appendStepDetailLine(st, stepEvent.content)
+                } else if (stepEvent.type === 'end') {
+                  if (stepEvent.duration != null) st.stepDurationMs = Math.round(Number(stepEvent.duration) * 1000)
+                  if (stepEvent.result) {
+                    try {
+                      st.resultSummary = typeof stepEvent.result === 'string'
+                        ? stepEvent.result
+                        : JSON.stringify(stepEvent.result)
+                    } catch {
+                      st.resultSummary = '步骤结束'
+                    }
+                  }
+                  st.status = 'completed'
                 }
               } else if (stepEvent.event === 'executing') {
-                const runningStep = aiMessage.steps.find(s => s.status === 'running')
+                const _exi = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+                let runningStep = _exi != null
+                  ? aiMessage.steps[_exi]
+                  : aiMessage.steps.find(s => s.status === 'running')
                 if (runningStep) {
                   if (!runningStep.progressLog) runningStep.progressLog = []
-                  // 后端 message 优先，用于流式进度/心跳
+                  if (!runningStep.inputParams && (stepEvent.params || stepEvent.tool || stepEvent.reason)) {
+                    runningStep.inputParams = {
+                      tool: stepEvent.tool,
+                      reason: stepEvent.reason,
+                      ...(stepEvent.params && typeof stepEvent.params === 'object' ? stepEvent.params : {})
+                    }
+                  }
+                  // 后端 message 优先，用于流式进度/心跳（grep / create / modify 均会下发）
                   if (stepEvent.message) {
                     runningStep.description = stepEvent.message
                     runningStep.progressLog.push(stepEvent.message)
-                    if (runningStep.progressLog.length > 20) runningStep.progressLog.shift()
+                    if (runningStep.progressLog.length > 25) runningStep.progressLog.shift()
+                    runningStep.progressLog = [...runningStep.progressLog]
+                    appendStepDetailLine(runningStep, stepEvent.message)
                   }
                   // 无 message 时用工具名或字段列表做描述，避免一直只显示“修改中...”
                   if (stepEvent.tool === 'modify' && Array.isArray(stepEvent.fields) && stepEvent.fields.length > 0) {
@@ -1682,8 +2185,9 @@ const handleReactAgentMode = async (userMessage) => {
                     if (!stepEvent.message) runningStep.description = `正在执行: modify（字段：${fieldText}）`
                     runningStep.toolCall = { name: `modify: ${fieldText}`, output: '执行中...' }
                   } else {
-                    if (!stepEvent.message) runningStep.description = `正在执行: ${stepEvent.tool}`
-                    runningStep.toolCall = { name: stepEvent.tool, output: '执行中...' }
+                    const t = stepEvent.tool || '工具'
+                    if (!stepEvent.message) runningStep.description = `正在执行: ${t}`
+                    runningStep.toolCall = { name: t, output: '执行中...' }
                   }
                 }
               } else if (stepEvent.event === 'observation') {
@@ -1696,14 +2200,35 @@ const handleReactAgentMode = async (userMessage) => {
                 // 存储所有 observation 数据
                 aiMessage.allObservations.push(outputData)
                 
-                // 查找正在运行的步骤，如果找不到就用最后一个步骤
-                let runningStep = aiMessage.steps.find(s => s.status === 'running')
+                const _obsIdx = resolveStreamStepIndex(stepEvent.stepIndex ?? stepEvent.index, aiMessage.steps)
+                let runningStep = null
+                if (_obsIdx != null) {
+                  runningStep = aiMessage.steps[_obsIdx]
+                  console.log('[CHAT-STREAM] observation 绑定步骤 stepIndex=', _obsIdx)
+                } else {
+                  runningStep = aiMessage.steps.find(s => s.status === 'running')
+                }
                 if (!runningStep) {
-                  // 如果没有 running 的步骤，找最后一个 modify 相关的步骤
-                  runningStep = aiMessage.steps.slice().reverse().find(s => 
-                    s.title && (s.title.includes('modify') || s.title === 'grep')
+                  // 若没有 running（事件顺序异常时），优先匹配 create / modify / grep
+                  const ot = outputData && typeof outputData === 'object' ? outputData.tool : ''
+                  if (ot && ['grep', 'create', 'modify'].includes(String(ot))) {
+                    runningStep = [...aiMessage.steps].reverse().find(s => s.title === ot || (s.title && s.title.includes(ot)))
+                  }
+                  runningStep = runningStep || aiMessage.steps.slice().reverse().find(s =>
+                    s.title && (
+                      s.title.includes('create') ||
+                      s.title.includes('modify') ||
+                      s.title === 'grep' ||
+                      s.title.includes('grep')
+                    )
                   ) || aiMessage.steps[aiMessage.steps.length - 1]
                   console.log('[CHAT-STREAM] 没有找到 running 步骤，使用:', runningStep?.title)
+                }
+                if (_obsIdx != null && runningStep && outputData && typeof outputData === 'object' && outputData.tool) {
+                  const tn = String(outputData.tool)
+                  if (['grep', 'create', 'modify', 'search', 'database_query'].includes(tn)) {
+                    runningStep.title = tn
+                  }
                 }
                 
                 if (runningStep) {
@@ -1714,7 +2239,9 @@ const handleReactAgentMode = async (userMessage) => {
                   
                   // 收到结果后立即更新步骤状态为 completed
                   runningStep.status = 'completed'
-                  runningStep.description = '已完成'
+                  const od = typeof outputData === 'object' && outputData !== null ? outputData : {}
+                  const humanMsg = od.message || od.summary || (od.data && (od.data.message || od.data.summary))
+                  runningStep.description = humanMsg && String(humanMsg).trim() ? String(humanMsg).trim().slice(0, 200) : '已完成'
                   
                   // 提取搜索结果 - 执行辅揥器可能会调用搜索工具
                   let isSearchResult = false
@@ -1734,10 +2261,48 @@ const handleReactAgentMode = async (userMessage) => {
                     }
                   }
                   
+                  // Cursor 式步骤：耗时 + 结果摘要 + 写入 detailLog（非搜索工具）
+                  if (!isSearchResult) {
+                    if (runningStep.stepStartedAt != null) {
+                      runningStep.stepDurationMs = Date.now() - runningStep.stepStartedAt
+                    }
+                    let resolvedTool = (outputData && outputData.tool) || extractToolName(runningStep.title)
+                    if (!resolvedTool && outputData && typeof outputData === 'object') {
+                      const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
+                      if (
+                        flat &&
+                        !flat.created_id &&
+                        flat.preview &&
+                        typeof flat.preview === 'object' &&
+                        ['testcase', 'bug', 'badcase', 'plan'].includes(flat.target)
+                      ) {
+                        resolvedTool = 'create'
+                      }
+                    }
+                    const td0 = outputData?.data || outputData
+                    if (typeof td0 === 'object' && td0 !== null) {
+                      runningStep.resultSummary = buildStepResultSummary(outputData, resolvedTool, td0)
+                      appendStepDetailLine(runningStep, `── 结果 ──\n${runningStep.resultSummary}`)
+                    }
+                  }
+                  
                   // 只有非搜索结果才添加到 executionResults（避免显示原始 JSON）
                   if (!isSearchResult && runningStep.title) {
                     // 从title中提取工具名（title格式如："使用 grep 工具进行精准定位分析"）
-                    const toolName = extractToolName(runningStep.title)
+                    let toolName = (outputData && outputData.tool) || extractToolName(runningStep.title)
+                    // 兜底：部分响应可能未带 tool 字段，但结构为 create 预览
+                    if (!toolName && outputData && typeof outputData === 'object') {
+                      const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
+                      if (
+                        flat &&
+                        !flat.created_id &&
+                        flat.preview &&
+                        typeof flat.preview === 'object' &&
+                        ['testcase', 'bug', 'badcase', 'plan'].includes(flat.target)
+                      ) {
+                        toolName = 'create'
+                      }
+                    }
                     console.log('[TOOL-DEBUG] runningStep.title:', runningStep.title)
                     console.log('[TOOL-DEBUG] toolName:', toolName)
                     console.log('[TOOL-DEBUG] outputData:', outputData)
@@ -1762,6 +2327,7 @@ const handleReactAgentMode = async (userMessage) => {
                         try {
                           // ===== 收集所有修改项（包含 plan_id）=====
                           const allItems = []
+                          let batchOrderSeq = 0
                           resultsArray.forEach(r => {
                             // 防御性检查 - batch_results 格式是 {target_id, plan_id, diff, ...}
                             // 不是 {id, result: {...}} 格式
@@ -1783,9 +2349,10 @@ const handleReactAgentMode = async (userMessage) => {
                             const listFieldDiff = []
                             const detailFieldDiff = []
                             rawDiff.forEach(fieldDiff => {
-                              if (!fieldDiff || !fieldDiff.field) return
-                              console.log('[MODIFY-DEBUG] fieldDiff.field:', fieldDiff.field, 'isDetail:', DETAIL_FIELDS.includes(fieldDiff.field))
-                              if (DETAIL_FIELDS.includes(fieldDiff.field)) {
+                              const fname = fieldDiff && (fieldDiff.field || fieldDiff.field_label)
+                              if (!fieldDiff || !fname) return
+                              console.log('[MODIFY-DEBUG] fieldDiff.field:', fname, 'isDetail:', DETAIL_FIELDS.includes(fname))
+                              if (DETAIL_FIELDS.includes(fname)) {
                                 detailFieldDiff.push(fieldDiff)
                               } else {
                                 listFieldDiff.push(fieldDiff)
@@ -1799,21 +2366,32 @@ const handleReactAgentMode = async (userMessage) => {
                               target: r.target || toolData.target || 'badcase',
                               modifications: r.modifications || (r.result && r.result.modifications) || {},
                               confirmation_required: r.confirmation_required !== false,
-                              success: r.success === true
+                              success: r.success === true,
+                              before: r.before || (r.result && r.result.before) || null,
+                              after: r.after || (r.result && r.result.after) || null,
+                              record_title: r.record_title || (r.before && r.before.title) || (r.result && r.result.before && r.result.before.title) || null,
+                              batchOrder: batchOrderSeq++
                             }
 
-                            // 如果同一条记录同时修改了列表和详情字段，则拆成两个 item
-                            if (listFieldDiff.length > 0) {
+                            // 如果同一条记录同时修改了列表和详情字段，则拆成两个 item；否则整段 diff 入列
+                            if (listFieldDiff.length === 0 && detailFieldDiff.length === 0 && rawDiff.length > 0) {
                               allItems.push({
                                 ...baseItemInfo,
-                                diff: listFieldDiff
+                                diff: rawDiff
                               })
-                            }
-                            if (detailFieldDiff.length > 0) {
-                              allItems.push({
-                                ...baseItemInfo,
-                                diff: detailFieldDiff
-                              })
+                            } else {
+                              if (listFieldDiff.length > 0) {
+                                allItems.push({
+                                  ...baseItemInfo,
+                                  diff: listFieldDiff
+                                })
+                              }
+                              if (detailFieldDiff.length > 0) {
+                                allItems.push({
+                                  ...baseItemInfo,
+                                  diff: detailFieldDiff
+                                })
+                              }
                             }
                           })
                           
@@ -1833,29 +2411,24 @@ const handleReactAgentMode = async (userMessage) => {
                             // ===== 在每个 plan_id 组内按连续性分组 =====
                             const modifyGroups = []
                             Object.entries(planGroups).forEach(([planId, items]) => {
-                              // 按 target_id 数值排序
-                              items.sort((a, b) => a.target_id - b.target_id)
+                              // 保持批量 / grep 返回顺序，避免按 ID 排序把「同标题相邻」拆散
+                              items.sort((a, b) => (a.batchOrder ?? 0) - (b.batchOrder ?? 0))
                               
-                              // 分组连续的项（ID 差值为 1）
+                              // 合并：同 target_id（列表+详情拆分）| 相邻 ID | 同计划内同标题
                               let currentGroup = []
                               
                               items.forEach((item, idx) => {
                                 if (idx === 0) {
-                                  // 第一项直接加入
                                   currentGroup.push(item)
                                 } else {
                                   const prevItem = items[idx - 1]
-                                  const idDiff = item.target_id - prevItem.target_id
-                                  
-                                  if (idDiff === 1) {
-                                    // 连续：加入当前组
+                                  if (shouldMergeModifyPreviewItems(prevItem, item)) {
                                     currentGroup.push(item)
                                   } else {
-                                    // 不连续：保存当前组，开始新组
                                     if (currentGroup.length > 0) {
                                       modifyGroups.push({
                                         plan_id: planId === 'unplanned' ? null : parseInt(planId),
-                                        items: [...currentGroup]  // 复制数组
+                                        items: [...currentGroup]
                                       })
                                     }
                                     currentGroup = [item]
@@ -1913,15 +2486,63 @@ const handleReactAgentMode = async (userMessage) => {
                       }
                     }
                     
-                    // 处理create工具输出
+                    // 处理 create 工具输出（沙箱「新建预览」：优先 diff，否则仅有 preview 也展示可点击卡片）
+                    // 只要有 preview/diff 且未返回 created_id，即视为待确认预览（避免 confirmation_required 类型不一致导致不展示）
                     if (toolName === 'create' && toolData && typeof toolData === 'object') {
-                      if (toolData.confirmation_required && toolData.preview) {
-                        // 存储create预览数据
-                        aiMessage.createPreview = {
-                          target: toolData.target,
-                          preview: toolData.preview
+                      const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
+                      const hasPreview = toolData.preview && typeof toolData.preview === 'object' && Object.keys(toolData.preview).length > 0
+                      const looksLikePreview =
+                        toolData.success !== false &&
+                        !toolData.created_id &&
+                        (hasDiff || hasPreview)
+                      if (looksLikePreview) {
+                        const pv = toolData.preview && typeof toolData.preview === 'object' ? toolData.preview : {}
+                        const adoptedId =
+                          props.projectId != null
+                            ? getStableCreatedId(props.projectId, toolData.target || 'testcase', pv)
+                            : null
+                        if (adoptedId != null) {
+                          const planIdNav = pv.plan_id ?? pv.planId
+                          aiMessage.modifyNavigation = {
+                            target: toolData.target || 'bug',
+                            target_id: adoptedId,
+                            preview: toolData.preview,
+                            plan_id: planIdNav,
+                            confirmation_required: false,
+                            navigate_to_existing: true,
+                            created_id: adoptedId,
+                            is_create: false,
+                            diff: hasDiff ? toolData.diff : []
+                          }
+                          window.dispatchEvent(new CustomEvent('grep-navigate', {
+                            detail: {
+                              planId: planIdNav,
+                              bugId: adoptedId,
+                              target: toolData.target || 'bug'
+                            },
+                            bubbles: true
+                          }))
+                          console.log('[CREATE] 稳定键已采纳，改为定位已存在行:', adoptedId)
+                        } else {
+                          aiMessage.modifyNavigation = {
+                            target: toolData.target || 'testcase',
+                            target_id: 'new',
+                            diff: hasDiff ? toolData.diff : [],
+                            preview: toolData.preview,
+                            modifications: toolData.preview || {},
+                            confirmation_required: true,
+                            is_create: true
+                          }
                         }
-                        console.log('[CREATE] 存储create预览:', aiMessage.createPreview)
+                        console.log('[CREATE] 存储新建预览（modifyNavigation）:', aiMessage.modifyNavigation)
+                      } else if (toolData.success === false || toolData.error) {
+                        const errText = toolData.error || toolData.message || '新建预览失败'
+                        aiMessage.executionResults.push({
+                          step: runningStep.title,
+                          text: `create：${errText}`,
+                          success: false
+                        })
+                        console.warn('[CREATE] 工具返回失败，未生成预览:', toolData)
                       }
                     }
                                       
@@ -2030,9 +2651,14 @@ const handleReactAgentMode = async (userMessage) => {
                   aiMessage.agentResult.findings.push(stepEvent.data)
                 }
               } else if (stepEvent.event === 'todo_end') {
-                if (aiMessage.steps[stepEvent.index]) {
-                  aiMessage.steps[stepEvent.index].status = 'completed'
-                  aiMessage.steps[stepEvent.index].description = '已完成'
+                const _tei = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+                if (_tei != null) {
+                  const st = aiMessage.steps[_tei]
+                  st.status = 'completed'
+                  st.description = '已完成'
+                  if (st.stepDurationMs == null && st.stepStartedAt != null) {
+                    st.stepDurationMs = Date.now() - st.stepStartedAt
+                  }
                 }
               } else if (stepEvent.event === 'skip') {
                 // 跳过的步骤标记为 skipped 状态
@@ -2051,6 +2677,9 @@ const handleReactAgentMode = async (userMessage) => {
                 if (stepEvent.summary && typeof stepEvent.summary === 'string') {
                   aiMessage.agentResult.summaryText = stepEvent.summary.trim()
                 }
+                aiMessage.summaryStreamDraft = ''
+                aiMessage.thoughtCollapsed = true
+                aiMessage.activityExplorer = buildActivityExplorer(aiMessage)
                 
                 // 确保所有步骤状态都更新为 completed
                 aiMessage.steps.forEach((step, idx) => {
@@ -2294,7 +2923,7 @@ const handleChatMode = async (userMessage) => {
     isUser: false,
     content: '',
     time: new Date().toLocaleTimeString(),
-    understanding: '',
+    understanding: '...',
     steps: [],
     finalResponse: ''
   }
@@ -2441,13 +3070,31 @@ const addNewLine = (e) => {
   autoResize()
 }
 
-// 自动调整textarea高度
+// 自动调整 textarea 高度
 const autoResize = () => {
   const textarea = textareaRef.value
   if (textarea) {
     textarea.style.height = 'auto'
-    const newHeight = Math.min(Math.max(textarea.scrollHeight, 44), 200)
+    const scrollHeight = textarea.scrollHeight
+    // 最小高度 60px（约 3 行），最大高度 300px（约 15 行）
+    const newHeight = Math.min(Math.max(scrollHeight, 60), 300)
     textarea.style.height = newHeight + 'px'
+    // 当内容超过最大高度时，启用滚动条
+    textarea.style.overflowY = scrollHeight > 300 ? 'auto' : 'hidden'
+  }
+}
+
+// 自动调整 inline textarea 高度
+const autoResizeInline = () => {
+  const textarea = inlineTextareaRef.value
+  if (textarea) {
+    textarea.style.height = 'auto'
+    const scrollHeight = textarea.scrollHeight
+    // 最小高度 60px（约 3 行），最大高度 300px（约 15 行）
+    const newHeight = Math.min(Math.max(scrollHeight, 60), 300)
+    textarea.style.height = newHeight + 'px'
+    // 当内容超过最大高度时，启用滚动条
+    textarea.style.overflowY = scrollHeight > 300 ? 'auto' : 'hidden'
   }
 }
 
@@ -2770,8 +3417,8 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .inline-composer .input-box-wrapper:focus-within {
-  border-color: #007acc;
-  box-shadow: 0 0 0 1px #007acc;
+  border-color: #3e3e3e;
+  box-shadow: none;
 }
 
 /* AI消息样式 */
@@ -2779,6 +3426,119 @@ watch(() => props.sessionId, (newSessionId) => {
   display: flex;
   flex-direction: column;
   width: 100%;
+}
+
+/* Cursor 式思考区：限高 + 内部滚动，避免整页被「思考框」撑满 */
+.cursor-reasoning-wrap {
+  margin: 8px 0 10px;
+  max-width: 100%;
+}
+.cursor-reasoning-block {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.45);
+  overflow: hidden;
+}
+.cursor-reason-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.92);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.cursor-reason-summary:hover {
+  background: rgba(59, 130, 246, 0.08);
+}
+.cursor-reason-pill {
+  color: rgba(148, 163, 184, 0.95);
+  font-weight: 500;
+}
+.cursor-reason-meta {
+  color: rgba(148, 163, 184, 0.75);
+  font-size: 11px;
+}
+.cursor-reason-chevron {
+  margin-left: auto;
+  opacity: 0.7;
+  font-size: 10px;
+}
+.cursor-reason-feed {
+  max-height: min(36vh, 240px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 10px 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  /* 新内容在底部追加时，保持贴底滚动观感（接近 Cursor 流式） */
+  scroll-behavior: smooth;
+}
+.cursor-reason-inner {
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(203, 213, 225, 0.88);
+}
+/* Cursor：Exploring + Explored N files, M searches */
+.cursor-explorer-wrap {
+  margin: 6px 0 12px;
+  padding: 0 2px;
+}
+.cursor-explorer-label-row {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(148, 163, 184, 0.75);
+  margin-bottom: 4px;
+  letter-spacing: 0.02em;
+}
+.cursor-explorer-details {
+  font-size: 12px;
+  color: rgba(203, 213, 225, 0.88);
+}
+.cursor-explorer-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  user-select: none;
+}
+.cursor-explorer-summary::-webkit-details-marker {
+  display: none;
+}
+.cursor-explorer-headline {
+  color: rgba(148, 163, 184, 0.95);
+  flex: 1;
+  min-width: 0;
+}
+.cursor-explorer-chevron {
+  flex-shrink: 0;
+  width: 1em;
+  text-align: center;
+  color: rgba(148, 163, 184, 0.65);
+  font-size: 10px;
+}
+.cursor-explorer-chevron::after {
+  content: '▸';
+}
+.cursor-explorer-details[open] .cursor-explorer-chevron::after {
+  content: '▾';
+}
+.cursor-explorer-list {
+  margin: 6px 0 0;
+  padding: 0 0 4px 18px;
+  list-style: disc;
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(148, 163, 184, 0.88);
+}
+.cursor-explorer-list li {
+  margin: 3px 0;
 }
 
 /* 步骤列表 */
@@ -2989,8 +3749,8 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .input-box-wrapper:focus-within {
-  border-color: #007acc;
-  box-shadow: 0 0 0 1px #007acc;
+  border-color: #3e3e3e;
+  box-shadow: none;
 }
 
 .message-input {
@@ -3004,9 +3764,9 @@ watch(() => props.sessionId, (newSessionId) => {
   resize: none;
   outline: none;
   line-height: 1.5;
-  min-height: 44px;
-  max-height: 200px;
-  overflow-y: auto;
+  min-height: 60px;  /* 最小高度 60px（约 3 行） */
+  max-height: 300px;  /* 最大高度 300px（约 15 行） */
+  overflow-y: hidden;  /* 默认隐藏滚动条，由 JS 动态控制 */
   box-sizing: border-box;
 }
 
@@ -3371,6 +4131,26 @@ watch(() => props.sessionId, (newSessionId) => {
   margin: 12px 0;
 }
 
+.sandbox-confirm-hint {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #94a3b8;
+  border-left: 3px solid rgba(59, 130, 246, 0.45);
+  background: rgba(15, 23, 42, 0.35);
+  border-radius: 0 6px 6px 0;
+}
+
+.sandbox-confirm-hint strong {
+  color: #cbd5e1;
+}
+
+.sandbox-confirm-hint--muted {
+  border-left-color: rgba(34, 197, 94, 0.45);
+  color: #86efac;
+}
+
 .plan-badge {
   background: transparent;
   color: #ffffff;
@@ -3402,12 +4182,47 @@ watch(() => props.sessionId, (newSessionId) => {
   opacity: 0.95;
 }
 
+.group-item-target {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin: 8px 0 4px;
+}
+.group-item-target:first-of-type {
+  margin-top: 0;
+}
+
 .group-items-hint {
   font-size: 12px;
   color: #888;
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px dashed #eee;
+}
+
+/* 首轮 Todo 流式正文（LLM content_delta） */
+.todos-stream-block {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.todos-stream-label {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.todos-stream-pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #334155;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .modify-navigation-content {
@@ -3452,6 +4267,13 @@ watch(() => props.sessionId, (newSessionId) => {
   padding: 2px 6px;
   border-radius: 4px;
   font-weight: 500;
+}
+
+/* 新建操作的值样式：更深的暗绿色 */
+.modify-field-preview .new-value.create-value {
+  color: #047857;
+  background: #d1fae5;
+  font-weight: 600;
 }
 
 .modify-actions {
@@ -3967,6 +4789,13 @@ watch(() => props.sessionId, (newSessionId) => {
 .collapsible-content .modify-field-preview .new-value {
   color: #4ade80;
   background: rgba(74, 222, 128, 0.15);
+}
+
+/* 新建操作的值样式：更深的暗绿色（暗色主题） */
+.collapsible-content .modify-field-preview .new-value.create-value {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.2);
+  font-weight: 600;
 }
 .collapsible-content .modify-actions {
   border-top-color: rgba(148, 163, 184, 0.22);

@@ -2,8 +2,21 @@
 """
 极简 ReAct 引擎 - 结合 Claude Code 强约束 Prompt + 自我修正 + Skill动态加载 + Text2SQL
 核心：单主循环 + Agent 自管理 Todo +强约束提示词 + 自动修正 +技能匹配 + 自然语言SQL
+
+性能 / 体验（环境变量，可选）：
+- REACT_THOUGHT_BRIEF_MS：低于该毫秒数则前端显示「Thought briefly」（默认 800）
+- REACT_SKIP_THINK_HINT=1：跳过首轮用户向说明注入，略减首包延迟
+- REACT_TOOL_DESC_MAX_CHARS：>0 时截断各工具 description，缩短首轮 THINK prompt（见 prompts.format_tools_for_prompt）
+- GREP_PLAN_TREE_CACHE_TTL：grep 内计划树缓存秒数（默认 60，0 关闭），见 GrepTool._get_plan_tree
+- PERF_LOG=1：打印各阶段耗时，便于对比模型与链路瓶颈
+
+进一步提速方向（需产品/架构取舍，不单靠开关）：
+- 合并多步 LLM（decide+observe 合一）、缩短 prompt、工具结果缓存
+- 模型侧：更低延迟 endpoint、适当减小 max_tokens（本仓库不强制改模型）
+- 工具侧：DB 索引、grep 范围缩小、异步 I/O
 """
 
+import contextlib
 import asyncio
 import concurrent.futures
 import json
@@ -13,7 +26,7 @@ import threading
 import queue
 import re
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, AsyncIterator, Tuple
 
 #原依赖
 from .prompts import ReactPromptTemplates, format_tools_for_prompt
@@ -184,7 +197,193 @@ class SimplifiedReActEngine:
             print("[REACT] ⚠️  Text2SQL 不可用")
         # 线程池：modify 等工具内部有同步 DB（Flask/SQLAlchemy），在事件循环中会阻塞，导致流式“修改中...”卡住
         self._tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="react_tool")
-    
+
+    @contextlib.contextmanager
+    def _llm_no_thinking(self):
+        """与 run_stream 内 _NoThinking 一致：modify 决策/提取 modifications 时临时关闭思考模式。"""
+        try:
+            if hasattr(self.llm, "force_disable_thinking"):
+                setattr(self.llm, "force_disable_thinking", True)
+            yield
+        finally:
+            if hasattr(self.llm, "force_disable_thinking"):
+                setattr(self.llm, "force_disable_thinking", False)
+
+    def _resolve_chat_stream_iter(self, prompt: str, history: Optional[list] = None):
+        """
+        统一流式迭代：优先 chat_stream_with_reasoning，否则 chat_stream_fallback_chunks（直连 prompt，禁止 parse_intent 聚合）。
+        """
+        fn = getattr(self.llm, "chat_stream_with_reasoning", None)
+        if callable(fn):
+            return fn(prompt, history)
+        fb = getattr(self.llm, "chat_stream_fallback_chunks", None)
+        if callable(fb):
+            return fb(prompt, history)
+        raise RuntimeError(
+            f"LLM {type(self.llm).__name__} 须实现 chat_stream_with_reasoning 或 chat_stream_fallback_chunks"
+        )
+
+    async def _collect_llm_text(self, prompt: str) -> str:
+        """
+        仅聚合正文（不向前端 yield），用于内部 JSON/参数提取等。
+        与界面同源：只走 _resolve_chat_stream_iter（禁止 parse_intent）。
+        """
+        def _sync_collect():
+            parts: List[str] = []
+            try:
+                for item in self._resolve_chat_stream_iter(prompt):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get('type') == 'content_delta':
+                        d = item.get('delta') or ''
+                        if d:
+                            parts.append(d)
+            except Exception as e:
+                return f'Error: {e}'
+            return ''.join(parts).strip()
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._tool_executor, _sync_collect)
+
+    async def _stream_llm_prompt_collect(
+        self,
+        prompt: str,
+        *,
+        step_index: Optional[int] = None,
+        stream_kind: str = 'think',
+        full_text_sink: Optional[List[str]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        统一流式：复用 chat_stream_with_reasoning，边收边 yield。
+        - think：reasoning + todos_stream（+ 可选 todos_partial）
+        - decide/observe/summary 等：reasoning + llm_text_stream（带 index/kind）
+        最终拼接正文：传入 full_text_sink（单元素 list），消费结束后 sink[0] 为全文（async generator 不能 return 值）。
+        """
+        try:
+            _brief_ms_fb = max(0, int(os.getenv("REACT_THOUGHT_BRIEF_MS", "800")))
+        except Exception:
+            _brief_ms_fb = 800
+        content_parts: List[str] = []
+        q: 'queue.Queue[object]' = queue.Queue()
+        DONE = object()
+        _t_stream_start = time.time()
+        _t_first_reasoning_fb = None
+        _reasoning_buf_fb = ""
+        _reasoning_timing_sent_fb = False
+        _timing_kinds = frozenset({"think", "decide", "observe"})
+
+        def _worker():
+            try:
+                for it in self._resolve_chat_stream_iter(prompt):
+                    q.put(it)
+            except Exception as e:
+                q.put({'type': 'content_delta', 'delta': f'Error: {e}'})
+            finally:
+                q.put(DONE)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        _todo_buf = ''
+        _partial_parse_tick = 0
+        _last_partial_n = 0
+
+        while True:
+            item = q.get()
+            if item is DONE:
+                break
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') == 'reasoning_delta':
+                delta = item.get('delta')
+                if delta is not None and isinstance(delta, str):
+                    if stream_kind in _timing_kinds:
+                        _reasoning_buf_fb += delta
+                        if _t_first_reasoning_fb is None and _reasoning_buf_fb.strip():
+                            _t_first_reasoning_fb = time.time()
+                    if stream_kind in ('decide', 'observe') and step_index is not None:
+                        yield {
+                            'event': 'reasoning_step',
+                            'content': delta,
+                            'segment': stream_kind,
+                            'index': step_index,
+                        }
+                    else:
+                        yield {'event': 'reasoning', 'content': delta}
+            elif item.get('type') == 'content_delta':
+                delta = item.get('delta') or ''
+                if not delta:
+                    continue
+                if stream_kind in _timing_kinds and not _reasoning_timing_sent_fb:
+                    now = time.time()
+                    if _t_first_reasoning_fb is not None:
+                        duration_ms = int((now - _t_first_reasoning_fb) * 1000)
+                        had_r = True
+                    else:
+                        duration_ms = int((now - _t_stream_start) * 1000)
+                        had_r = False
+                    _seg = stream_kind
+                    _ev_rt: Dict[str, Any] = {
+                        'event': 'reasoning_timing',
+                        'segment': _seg,
+                        'duration_ms': duration_ms,
+                        'kind': 'brief' if duration_ms < _brief_ms_fb else 'normal',
+                        'had_reasoning': had_r,
+                        'brief_threshold_ms': _brief_ms_fb,
+                    }
+                    if step_index is not None:
+                        _ev_rt['index'] = step_index
+                    yield _ev_rt
+                    _reasoning_timing_sent_fb = True
+                content_parts.append(delta)
+                if stream_kind == 'think':
+                    yield {'event': 'todos_stream', 'delta': delta}
+                    _todo_buf += delta
+                    _partial_parse_tick += len(delta)
+                    _should_try = (
+                        _partial_parse_tick >= 96
+                        or '</todo' in _todo_buf.lower()
+                        or '</item>' in _todo_buf.lower()
+                    )
+                    if _should_try:
+                        _partial_parse_tick = 0
+                        try:
+                            _pt = robust_parse_todos(_todo_buf)
+                            if _pt and len(_pt) > _last_partial_n:
+                                _last_partial_n = len(_pt)
+                                yield {'event': 'todos_partial', 'data': _pt}
+                        except Exception:
+                            pass
+                elif stream_kind == 'summary':
+                    yield {'event': 'summary_stream', 'delta': delta}
+                else:
+                    ev: Dict[str, Any] = {
+                        'event': 'llm_text_stream',
+                        'delta': delta,
+                        'kind': stream_kind,
+                    }
+                    if step_index is not None:
+                        ev['index'] = step_index
+                    yield ev
+        if stream_kind in _timing_kinds and not _reasoning_timing_sent_fb and _reasoning_buf_fb.strip():
+            if _t_first_reasoning_fb is not None:
+                duration_ms = int((time.time() - _t_first_reasoning_fb) * 1000)
+            else:
+                duration_ms = int((time.time() - _t_stream_start) * 1000)
+            _ev_edge: Dict[str, Any] = {
+                'event': 'reasoning_timing',
+                'segment': stream_kind,
+                'duration_ms': duration_ms,
+                'kind': 'brief' if duration_ms < _brief_ms_fb else 'normal',
+                'had_reasoning': True,
+                'brief_threshold_ms': _brief_ms_fb,
+            }
+            if step_index is not None:
+                _ev_edge['index'] = step_index
+            yield _ev_edge
+        text = ''.join(content_parts).strip()
+        if full_text_sink is not None:
+            full_text_sink.clear()
+            full_text_sink.append(text)
+
     async def run_stream(self, user_input: str, project_id: int = None, plan_id: int = None):
         """流式执行 ReAct 循环（使用 Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下的记录（人类式先看本迭代）。"""
         print(f"\n[REACT] ReAct Stream Loop Start")
@@ -218,7 +417,13 @@ class SimplifiedReActEngine:
             return project_name, plan_name
 
         result_context = {}
-        project_name, plan_name = await _load_names()
+        # 并行：项目/计划名查询 与 工具说明格式化（省 THINK 前串行等待）
+        (project_name, plan_name), tools_info = await asyncio.gather(
+            _load_names(),
+            asyncio.to_thread(format_tools_for_prompt, self.tools),
+        )
+        if perf:
+            print(f"[PERF][react] gather_names_and_tools_parallel=1")
         if plan_id is not None:
             result_context['plan_id'] = plan_id  # 供 LLM 传给 grep，先检索本计划再阅读
             if plan_name:
@@ -254,10 +459,14 @@ class SimplifiedReActEngine:
             # 关键体验优化：在 LLM 首 token 前先推一个不可见字符，让前端立刻出现「深度思考」块
             # （前端 v-if=reasoningContent；\u200b 为零宽空格，用户不可见但可触发渲染）
             yield {"event": "reasoning", "content": "\u200b"}
-            t_tools0 = time.perf_counter()
-            tools_info = await asyncio.to_thread(format_tools_for_prompt, self.tools)
-            if perf:
-                print(f"[PERF][react] format_tools_for_prompt_ms={(time.perf_counter()-t_tools0)*1000:.1f}")
+            # 可选：跳过首轮「说明」注入，略减首包延迟（REACT_SKIP_THINK_HINT=1）
+            if (os.getenv("REACT_SKIP_THINK_HINT", "") or "").strip() not in ("1", "true", "yes"):
+                try:
+                    _hint = self._reasoning_summary_from_user_input(user_input)
+                    if _hint and str(_hint).strip():
+                        yield {'event': 'reasoning', 'content': str(_hint).strip() + '\n\n'}
+                except Exception:
+                    pass
             prompt = ReactPromptTemplates.think_prompt(
                 user_input,
                 tools_info,
@@ -267,75 +476,182 @@ class SimplifiedReActEngine:
             if perf:
                 print(f"[PERF][react] think_prompt_build_ms={(time.perf_counter()-t0)*1000:.1f}")
             
-            # 若 LLM 支持返回思考过程（如文心 X1），优先使用"流式思考"接口实时下发 reasoning 事件
+            # 首轮思考：本处一律用 chat_stream_with_reasoning 边收边 yield（真流式）。
+            # LLM 的 chat_with_reasoning 已改为「复用同一条流式迭代再汇总」，仅作无 stream 方法或上面流式失败时的回退，不再单独维护一套 DashScope 调用。
             response = None
-            print(f"[REACT-STREAM] 检查 LLM 方法：chat_stream_with_reasoning={hasattr(self.llm, 'chat_stream_with_reasoning')}, chat_with_reasoning={hasattr(self.llm, 'chat_with_reasoning')}")
-            if hasattr(self.llm, 'chat_stream_with_reasoning'):
+            stream_attempted = False
+            stream_ok = False
+            print(
+                f"[REACT-STREAM] LLM 流式：chat_stream_with_reasoning={hasattr(self.llm, 'chat_stream_with_reasoning')}, "
+                f"chat_stream_fallback_chunks={hasattr(self.llm, 'chat_stream_fallback_chunks')}, "
+                f"chat_with_reasoning={hasattr(self.llm, 'chat_with_reasoning')}"
+            )
+            stream_attempted = True
+            try:
+                content_parts = []
+                # Cursor 式「Thought briefly / Thought for X.Xs」：从首段 reasoning 到首段正文（或首 token）
                 try:
-                    content_parts = []
-                    # 真正实时：在后台线程读取流式结果，通过队列逐段推送到 SSE
-                    q: "queue.Queue[object]" = queue.Queue()
-                    DONE = object()
+                    brief_ms = max(0, int(os.getenv("REACT_THOUGHT_BRIEF_MS", "800")))
+                except Exception:
+                    brief_ms = 800
+                _t_stream_start = time.time()
+                _t_first_reasoning = None
+                _reasoning_timing_sent = False
+                # 真正实时：在后台线程读取流式结果，通过队列逐段推送到 SSE（统一 _resolve_chat_stream_iter）
+                q: "queue.Queue[object]" = queue.Queue()
+                DONE = object()
 
-                    def _worker():
-                        try:
-                            for it in self.llm.chat_stream_with_reasoning(prompt):
-                                q.put(it)
-                        except Exception as e:
-                            q.put({"type": "content_delta", "delta": f"Error: {e}"})
-                        finally:
-                            q.put(DONE)
+                def _worker():
+                    try:
+                        for it in self._resolve_chat_stream_iter(prompt):
+                            q.put(it)
+                    except Exception as e:
+                        q.put({"type": "content_delta", "delta": f"Error: {e}"})
+                    finally:
+                        q.put(DONE)
 
-                    t = threading.Thread(target=_worker, daemon=True)
-                    t.start()
-                    
-                    # 实时流式下发思考过程，不缓冲
-                    # 每收到一段 reasoning_delta 就立即通过 yield 发送到前端
-                    reasoning_buffer = ""
-                    first_reasoning_sent = False
-                    
-                    while True:
-                        item = q.get()
-                        if item is DONE:
-                            break
-                        if not isinstance(item, dict):
-                            continue
-                        if item.get("type") == "reasoning_delta":
-                            delta = item.get("delta")
-                            if delta is not None and isinstance(delta, str):
-                                reasoning_buffer += delta
-                                # 实时下发思考过程（保留换行等，不 strip 以便前端正确展示）
-                                if perf and not first_reasoning_sent:
-                                    first_reasoning_sent = True
-                                    print(f"[PERF][react] first_reasoning_delta_ms={(time.perf_counter()-t0)*1000:.1f}")
-                                yield {"event": "reasoning", "content": delta}
-                        elif item.get("type") == "content_delta":
-                            delta = item.get("delta") or ""
-                            if delta:
-                                content_parts.append(delta)
+                t = threading.Thread(target=_worker, daemon=True)
+                t.start()
 
-                    # 用流式汇总的 content 作为 response，避免再调 parse_intent
-                    response = "".join(content_parts).strip() if content_parts else None
-                except Exception as e:
-                    print(f"[REACT-STREAM] chat_stream_with_reasoning 失败，回退 parse_intent: {e}")
-                    import traceback
-                    traceback.print_exc()
-            elif hasattr(self.llm, 'chat_with_reasoning'):
+                # 实时流式下发思考过程，不缓冲
+                reasoning_buffer = ""
+                first_reasoning_sent = False
+
+                # 首轮「任务列表」正文流式：边收边推给前端，并择机解析出部分 Todo（无需等整段结束）
+                _todo_buf = ""
+                _partial_parse_tick = 0
+                _last_partial_n = 0
+
+                while True:
+                    item = q.get()
+                    if item is DONE:
+                        break
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "reasoning_delta":
+                        delta = item.get("delta")
+                        if delta is not None and isinstance(delta, str):
+                            reasoning_buffer += delta
+                            if _t_first_reasoning is None and reasoning_buffer.strip():
+                                _t_first_reasoning = time.time()
+                            if perf and not first_reasoning_sent:
+                                first_reasoning_sent = True
+                                print(f"[PERF][react] first_reasoning_delta_ms={(time.perf_counter()-t0)*1000:.1f}")
+                            yield {"event": "reasoning", "content": delta}
+                    elif item.get("type") == "content_delta":
+                        delta = item.get("delta") or ""
+                        if delta:
+                            if not _reasoning_timing_sent:
+                                now = time.time()
+                                if _t_first_reasoning is not None:
+                                    duration_ms = int((now - _t_first_reasoning) * 1000)
+                                    had_r = True
+                                else:
+                                    duration_ms = int((now - _t_stream_start) * 1000)
+                                    had_r = False
+                                kind = "brief" if duration_ms < brief_ms else "normal"
+                                yield {
+                                    "event": "reasoning_timing",
+                                    "segment": "think",
+                                    "duration_ms": duration_ms,
+                                    "kind": kind,
+                                    "had_reasoning": had_r,
+                                    "brief_threshold_ms": brief_ms,
+                                }
+                                _reasoning_timing_sent = True
+                            content_parts.append(delta)
+                            _todo_buf += delta
+                            yield {"event": "todos_stream", "delta": delta}
+                            _partial_parse_tick += len(delta)
+                            _should_try = (
+                                _partial_parse_tick >= 96
+                                or "</todo" in _todo_buf.lower()
+                                or "</item>" in _todo_buf.lower()
+                            )
+                            if _should_try:
+                                _partial_parse_tick = 0
+                                try:
+                                    _pt = robust_parse_todos(_todo_buf)
+                                    if _pt and len(_pt) > _last_partial_n:
+                                        _last_partial_n = len(_pt)
+                                        yield {"event": "todos_partial", "data": _pt}
+                                except Exception:
+                                    pass
+
+                # 仅产出 reasoning、无正文时补一条 timing（少见）
+                if not _reasoning_timing_sent and reasoning_buffer.strip():
+                    try:
+                        bms = brief_ms
+                    except Exception:
+                        bms = 800
+                    if _t_first_reasoning is not None:
+                        duration_ms = int((time.time() - _t_first_reasoning) * 1000)
+                    else:
+                        duration_ms = int((time.time() - _t_stream_start) * 1000)
+                    yield {
+                        "event": "reasoning_timing",
+                        "segment": "think",
+                        "duration_ms": duration_ms,
+                        "kind": "brief" if duration_ms < bms else "normal",
+                        "had_reasoning": True,
+                        "brief_threshold_ms": bms,
+                    }
+
+                # 用流式汇总的 content 作为 response
+                response = "".join(content_parts).strip() if content_parts else None
+                stream_ok = True
+            except Exception as e:
+                print(f"[REACT-STREAM] 统一流式迭代失败，将尝试 chat_with_reasoning / _stream_llm_prompt_collect 回退: {e}")
+                import traceback
+                traceback.print_exc()
+            # 无流式方法、或流式抛错、或（极少数）未实现 stream 时：整段接口回退，仍走与前端一致的 reasoning / todos_stream 事件
+            if (
+                response is None
+                and hasattr(self.llm, 'chat_with_reasoning')
+                and (not stream_attempted or not stream_ok)
+            ):
                 try:
+                    try:
+                        _fb_brief_ms = max(0, int(os.getenv("REACT_THOUGHT_BRIEF_MS", "800")))
+                    except Exception:
+                        _fb_brief_ms = 800
+                    _t_fb = time.time()
                     raw = await self.llm.chat_with_reasoning(prompt)
+                    _dur_fb = int((time.time() - _t_fb) * 1000)
+                    _had_r_fb = bool((raw.get('reasoning_content') or '').strip())
+                    yield {
+                        'event': 'reasoning_timing',
+                        'segment': 'think',
+                        'duration_ms': _dur_fb,
+                        'kind': 'brief' if _dur_fb < _fb_brief_ms else 'normal',
+                        'had_reasoning': _had_r_fb,
+                        'brief_threshold_ms': _fb_brief_ms,
+                    }
                     response = raw.get('content') or raw.get('result') or ''
                     reasoning = raw.get('reasoning_content')
-                    # 如果有思考过程，实时下发（虽然是非流式，但可以模拟逐字效果）
                     if reasoning and isinstance(reasoning, str) and reasoning.strip():
-                        # 将思考过程按字符逐字下发，模拟打字机效果
-                        for char in reasoning.strip():
-                            yield {'event': 'reasoning', 'content': char}
-                            # 短暂延迟，模拟打字速度
-                            await asyncio.sleep(0.02)
+                        yield {'event': 'reasoning', 'content': reasoning.strip()}
+                    if response:
+                        yield {'event': 'todos_stream', 'delta': response}
+                        try:
+                            _pt_fb = robust_parse_todos(response)
+                            if _pt_fb:
+                                yield {'event': 'todos_partial', 'data': _pt_fb}
+                        except Exception:
+                            pass
                 except Exception as e:
-                    print(f"[REACT-STREAM] chat_with_reasoning 失败，回退 parse_intent: {e}")
+                    print(f"[REACT-STREAM] chat_with_reasoning 失败，回退流式拉取: {e}")
             if response is None:
-                response = await self.llm.parse_intent(prompt)
+                _sink = []
+                _ag = self._stream_llm_prompt_collect(prompt, stream_kind="think", full_text_sink=_sink)
+                _ait = _ag.__aiter__()
+                while True:
+                    try:
+                        _ev = await _ait.__anext__()
+                        yield _ev
+                    except StopAsyncIteration:
+                        break
+                response = _sink[0] if _sink else ""
             # 使用健壮版解析，优先 XML，其次 JSON/文本兜底
             todos = robust_parse_todos(response)
             thinking_time = time.time() - thinking_start_time  # 思考阶段耗时（不是总过程）
@@ -396,7 +712,7 @@ class SimplifiedReActEngine:
                     # 兜底：如果 todo 解析不出工具，用技能 workflow 的对应步骤工具补齐（不改 todo 文本，只改执行工具）
                     if tool_name == 'unknown' and fallback_workflow_tools:
                         mapped = fallback_workflow_tools[i] if i < len(fallback_workflow_tools) else fallback_workflow_tools[-1]
-                        if mapped in ('grep', 'modify'):
+                        if mapped in ('grep', 'modify', 'create'):
                             tool_name = mapped
                             todo_params['tool'] = mapped
                             # 尽量补齐 grep/modify 的必要参数
@@ -422,9 +738,38 @@ class SimplifiedReActEngine:
                                 params.setdefault('confirm', False)
                                 if 'modifications' not in params or not params.get('modifications'):
                                     params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+                            elif mapped == 'create':
+                                params.setdefault('target', 'bug')
+                                params.setdefault('fields', {})
+                                params['confirm'] = False
                             todo_params['params'] = params
                             print(f"[REACT-STREAM] 🔧 todo 工具兜底映射: index={i}, unknown -> {mapped}")
                     
+                    # secondary fallback: if parser still returns unknown, infer by todo text
+                    if tool_name == 'unknown':
+                        t = (todo or '').lower()
+                        if 'create' in t:
+                            tool_name = 'create'
+                            todo_params['tool'] = 'create'
+                            p = todo_params.get('params') or {}
+                            p.setdefault('target', 'bug')
+                            p.setdefault('fields', {})
+                            p['confirm'] = False
+                            todo_params['params'] = p
+                        elif 'grep' in t or 'search' in t:
+                            tool_name = 'grep'
+                            todo_params['tool'] = 'grep'
+                            p = todo_params.get('params') or {}
+                            p.setdefault('mode', 'locate')
+                            todo_params['params'] = p
+                        elif 'modify' in t or 'update' in t:
+                            tool_name = 'modify'
+                            todo_params['tool'] = 'modify'
+                            p = todo_params.get('params') or {}
+                            p.setdefault('confirm', False)
+                            p.setdefault('modifications', {})
+                            todo_params['params'] = p
+
                     print(f"[REACT-STREAM] Todo[{i}] 提取参数: tool={tool_name}, params={todo_params}")
                     
                     # 确保必要参数
@@ -449,11 +794,60 @@ class SimplifiedReActEngine:
                             target_id = grep_result.get('first_testcase_id')
                         else:
                             target_id = grep_result.get('first_badcase_id')
+                        if not target_id:
+                            tid_m = self._try_target_id_from_merged_lists(
+                                result_context, target_type, user_input, todo
+                            )
+                            if tid_m is not None:
+                                target_id = tid_m
+                                print(
+                                    f"[REACT-STREAM] 从合并列表注入 target_id={target_id}, target={target_type}"
+                                )
                         if target_id:
                             params['target_id'] = target_id
                             print(f"[REACT-STREAM] 从 grep 结果获取 target_id={target_id}, target={target_type}")
                         else:
-                            print(f"[REACT-STREAM] ⚠️ 无法从 grep 结果获取 target_id (target={target_type})")
+                            print(f"[REACT-STREAM] ⚠️ 无法从 grep 结果获取 target_id (target={target_type})，尝试补救 grep…")
+                            kw = self._extract_title_keywords_for_grep(user_input, todo) or ''
+                            gparams: Dict[str, Any] = {
+                                'project_id': project_id,
+                                'keywords': kw,
+                                'mode': 'locate',
+                                'target': target_type if target_type in ('bug', 'badcase', 'testcase') else 'all',
+                                'userId': 'system_agent',
+                            }
+                            if self.plan_id is not None and gparams.get('target') != 'all':
+                                gparams['plan_id'] = self.plan_id
+                            if gparams.get('target') == 'all':
+                                gparams.pop('plan_id', None)
+                            yield {
+                                'event': 'executing',
+                                'tool': 'grep',
+                                'reason': f'Todo步骤 {i+1}',
+                                'index': i,
+                                'message': '正在补充定位记录（用于修改）…',
+                            }
+                            grep_obs = await self._execute_tool({'execute': True, 'tool': 'grep', 'params': gparams})
+                            if grep_obs.get('success'):
+                                self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
+                                grep_result = result_context.get('grep_result', {})
+                                if target_type == 'bug':
+                                    target_id = grep_result.get('first_bug_id')
+                                elif target_type == 'testcase':
+                                    target_id = grep_result.get('first_testcase_id')
+                                else:
+                                    target_id = grep_result.get('first_badcase_id')
+                                if target_id:
+                                    params['target_id'] = target_id
+                                    print(f"[REACT-STREAM] 补救 grep 后 target_id={target_id}")
+                                if not params.get('target_id'):
+                                    tid_s = self._try_target_id_from_merged_lists(
+                                        result_context, target_type, user_input, todo
+                                    )
+                                    if tid_s is not None:
+                                        params['target_id'] = tid_s
+                                        target_id = tid_s
+                                        print(f"[REACT-STREAM] 技能分支补救 grep 后从列表注入 target_id={tid_s}")
                         
                         # 思考意图 + 探索记录（类似 Cursor 探索文件）：有 target_id 时先探索当前记录与用户列表，再让大模型基于探索结果确认 modifications
                         if target_id and (not params.get('modifications') or len(params.get('modifications', {})) == 0):
@@ -488,67 +882,117 @@ class SimplifiedReActEngine:
                                     params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
                                 if not params.get('modifications'):
                                     params['modifications'] = self._extract_modifications_with_regex(user_input)
-                    
-                    # 执行工具
-                    decision = {'execute': True, 'tool': tool_name, 'params': params}
-                    exec_payload = {'event': 'executing', 'tool': tool_name, 'reason': f'Todo步骤 {i+1}'}
-                    if tool_name == 'modify':
-                        exec_payload['message'] = '正在应用修改到数据库…'
-                        print(f"[REACT-STREAM] modify 即将执行（探索/参数已就绪），进入线程池…")
-                    yield exec_payload
 
-                    # modify 可能执行较久：持续下发分步进度/心跳事件，避免前端“卡住没输出”
+                    if tool_name == 'create':
+                        grep_result = result_context.get('grep_result', {})
+                        target_type = params.get('target') or self._infer_create_target(user_input, todo)
+                        params['target'] = target_type
+                        fields = params.get('fields') or {}
+                        title_key = 'name' if target_type == 'plan' else 'title'
+                        extracted_title = self._extract_create_title(user_input, todo)
+                        if extracted_title and not fields.get(title_key):
+                            fields[title_key] = extracted_title
+
+                        wants_copy = any(token in (user_input or '') for token in ('复制', '一样', '相同')) or any(token in (todo or '') for token in ('复制', '一样', '相同'))
+                        if wants_copy:
+                            if target_type == 'bug':
+                                source_id = grep_result.get('first_bug_id') or result_context.get('first_bug_id')
+                                if source_id and not fields.get('copy_from_bug_id'):
+                                    fields['copy_from_bug_id'] = source_id
+                            elif target_type == 'badcase':
+                                source_id = grep_result.get('first_badcase_id') or result_context.get('first_badcase_id')
+                                if source_id and not fields.get('copy_from_badcase_id'):
+                                    fields['copy_from_badcase_id'] = source_id
+                            elif target_type == 'testcase':
+                                source_id = grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
+                                if source_id and not fields.get('copy_from_testcase_id'):
+                                    fields['copy_from_testcase_id'] = source_id
+
+                        params['fields'] = fields
+                        params.setdefault('confirm', False)
+                        params.setdefault('natural_query', user_input)
+                        print(f"[REACT-STREAM] create 参数补齐: target={target_type}, fields={fields}")
+
+                    # 技能分支：与主循环一致，执行 modify 前再 enrich + last_resort，避免仅有 modifications 却无 target_id 直接调工具报错
+                    skill_skip_modify = False
                     if tool_name == 'modify':
-                        started = time.time()
-                        task = asyncio.create_task(self._execute_tool(decision))
-                        # 尽快轮询 progress_queue，缩短首条进度/心跳的延迟
-                        await asyncio.sleep(0.1)
-                        while not task.done():
-                            waited = time.time() - started
-                            got_any = False
-                            try:
-                                pq = (decision.get('params') or {}).get('progress_queue')
-                                if pq:
-                                    while True:
-                                        msg = pq.get_nowait()
-                                        got_any = True
-                                        yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'message': str(msg)}
-                                        print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
-                            except Exception:
-                                pass
-                            if not got_any:
-                                yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'message': f'修改中…已等待 {waited:.0f}s'}
-                            # 有进度 0.2s 轮询，无进度 0.4s 心跳，让前端尽快看到变化
-                            await asyncio.sleep(0.2 if got_any else 0.4)
-                        observation = await task
+                        decision_skill = {'execute': True, 'tool': 'modify', 'params': params}
+                        decision_skill, _pre_ev = await self._enrich_modify_decision_for_main_loop(
+                            decision_skill, todo, user_input, result_context, project_id, step_index=i
+                        )
+                        for _ev in _pre_ev:
+                            yield _ev
+                        if not self._modify_params_ready(decision_skill.get('params')):
+                            decision_skill, _lr_ev = await self._last_resort_modify_fill(
+                                decision_skill, todo, user_input, result_context, project_id, step_index=i
+                            )
+                            for _ev in _lr_ev:
+                                yield _ev
+                        params = decision_skill['params']
+                        if not self._modify_params_ready(params):
+                            nq = (user_input or todo or '').strip()
+                            if nq:
+                                params['natural_query'] = nq[:2000]
+                        if not self._modify_params_ready(params):
+                            skill_skip_modify = True
+                            print(
+                                "[REACT-STREAM] 技能分支 stability_gate: modify 仍缺 target_id/natural_query 或 modifications"
+                            )
+
+                    # 执行工具（skill_skip_modify 时跳过真实调用，避免 decision 未定义或重复调用）
+                    if skill_skip_modify:
+                        observation = {
+                            'success': False,
+                            'skipped': True,
+                            'stability_gate': 'modify_params_incomplete',
+                            'error': '缺少必要参数：modify 需要 target_id（或 natural_query）与非空 modifications，已尝试补全仍不足。',
+                            'message': 'modify 未执行（参数未就绪）',
+                        }
+                        print(f"[REACT-STREAM] 技能分支跳过 modify 执行")
+                        yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'index': i, 'message': '参数未就绪，已跳过修改'}
                     else:
-                        observation = await self._execute_tool(decision)
+                        decision = {'execute': True, 'tool': tool_name, 'params': params}
+                        exec_payload = {'event': 'executing', 'tool': tool_name, 'reason': f'Todo步骤 {i+1}', 'index': i}
+                        _pub = {}
+                        for _k in ('keywords', 'target', 'mode', 'fields', 'modifications', 'target_id'):
+                            if _k in params and params[_k] not in (None, '', {}):
+                                _pub[_k] = params[_k]
+                        if _pub:
+                            exec_payload['params'] = _pub
+                        if tool_name == 'modify':
+                            exec_payload['message'] = '正在应用修改到数据库…'
+                            print(f"[REACT-STREAM] modify 即将执行（探索/参数已就绪），进入线程池…")
+                        yield exec_payload
+
+                        # modify 可能执行较久：持续下发分步进度/心跳事件，避免前端“卡住没输出”
+                        if tool_name == 'modify':
+                            started = time.time()
+                            task = asyncio.create_task(self._execute_tool(decision))
+                            await asyncio.sleep(0.1)
+                            while not task.done():
+                                waited = time.time() - started
+                                got_any = False
+                                try:
+                                    pq = (decision.get('params') or {}).get('progress_queue')
+                                    if pq:
+                                        while True:
+                                            msg = pq.get_nowait()
+                                            got_any = True
+                                            yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'index': i, 'message': str(msg)}
+                                            print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
+                                except Exception:
+                                    pass
+                                if not got_any:
+                                    yield {'event': 'executing', 'tool': 'modify', 'reason': f'Todo步骤 {i+1}', 'index': i, 'message': f'修改中…已等待 {waited:.0f}s'}
+                                await asyncio.sleep(0.2 if got_any else 0.4)
+                            observation = await task
+                        else:
+                            observation = await self._execute_tool(decision)
                     print(f"[REACT-STREAM] Todo[{i}] 工具 {tool_name} 结果: success={observation.get('success')}")
                     
                     # 更新上下文（供后续步骤使用，含 testcase；id 用 rerank 取分高的）
                     if tool_name == 'grep' and observation.get('success'):
-                        grep_data = observation.get('data', {})
-                        badcase_list = grep_data.get('badcase_analysis', [])
-                        bug_list = grep_data.get('bug_location', [])
-                        testcase_list = grep_data.get('testcase_location', [])
-                        kw = (params.get('keywords') or result_context.get('_last_grep_keywords') or '')
-                        result_context['_last_grep_keywords'] = kw or params.get('keywords') or ''
-                        def first_id(lst, kws):
-                            if not lst: return None
-                            picked = self._rerank_and_pick(lst, kws, 'title', 1)
-                            return picked[0].get('id') if picked else lst[0].get('id')
-                        result_context['grep_result'] = {
-                            'first_badcase_id': first_id(badcase_list, kw),
-                            'first_bug_id': first_id(bug_list, kw),
-                            'first_testcase_id': first_id(testcase_list, kw),
-                            'badcase_list': badcase_list,
-                            'bug_list': bug_list,
-                            'testcase_list': testcase_list
-                        }
-                        result_context['badcase_list'] = badcase_list
-                        result_context['bug_list'] = bug_list
-                        result_context['testcase_list'] = testcase_list
-                        print(f"[REACT-STREAM] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, {len(testcase_list)} testcase")
+                        self._merge_grep_observation_into_context(observation, params, result_context)
                     
                     # 如果是 modify，收集结果（含 testcase）；类型与 params.target 一致，避免误标为 badcase
                     if tool_name == 'modify':
@@ -566,10 +1010,12 @@ class SimplifiedReActEngine:
                         if observation.get('success'):
                             # 优先用 modify 工具返回的 target，避免 params 被推断成 badcase 时误标
                             actual_target = observation.get('target') or target_type
+                            _bef = observation.get('before') or {}
                             batch_results.append({
                                 'target_id': params.get('target_id'),
                                 'target': actual_target,
-                                'plan_id': (observation.get('before') or {}).get('plan_id'),
+                                'plan_id': _bef.get('plan_id'),
+                                'record_title': _bef.get('title') or _bef.get('name'),
                                 'diff': observation.get('diff', []),
                                 'modifications': params.get('modifications', {}),
                                 'before': observation.get('before', {}),
@@ -634,6 +1080,7 @@ class SimplifiedReActEngine:
                 return
             
             # ===== MAIN LOOP: ACT（正常流程，当没有匹配技能时）=====
+            # modify 的 target_id / modifications 以服务端 _enrich_modify_decision_for_main_loop 补全为准，不依赖模型 XML 完整性。
             for i, todo in enumerate(todos):
                 yield {'event': 'todo_start', 'index': i, 'todo': todo}
                 
@@ -644,9 +1091,31 @@ class SimplifiedReActEngine:
                 # 进入 modify 步骤：传递参数给所有的模型传递不开启思考
                 if 'modify' in (todo or '').lower() or '修改' in (todo or ''):
                     with _NoThinking():
-                        decision_response = await self.llm.parse_intent(decision_prompt)
+                        _sink_d = []
+                        _dg = self._stream_llm_prompt_collect(
+                            decision_prompt, step_index=i, stream_kind="decide", full_text_sink=_sink_d
+                        )
+                        _dit = _dg.__aiter__()
+                        while True:
+                            try:
+                                _de = await _dit.__anext__()
+                                yield _de
+                            except StopAsyncIteration:
+                                break
+                        decision_response = _sink_d[0] if _sink_d else ""
                 else:
-                    decision_response = await self.llm.parse_intent(decision_prompt)
+                    _sink_d = []
+                    _dg = self._stream_llm_prompt_collect(
+                        decision_prompt, step_index=i, stream_kind="decide", full_text_sink=_sink_d
+                    )
+                    _dit = _dg.__aiter__()
+                    while True:
+                        try:
+                            _de = await _dit.__anext__()
+                            yield _de
+                        except StopAsyncIteration:
+                            break
+                    decision_response = _sink_d[0] if _sink_d else ""
                 print(f"[REACT-STREAM] LLM决策原始响应: {decision_response}")
                 decision = parse_xml_decision(decision_response)
                 
@@ -677,74 +1146,184 @@ class SimplifiedReActEngine:
                         print(f"[REACT-STREAM] 优先使用 Text2SQL执行: {natural_query}")
                         decision['params']['natural_query'] = natural_query
                 
-                print(f"[REACT-STREAM] 执行工具: {decision['tool']}")
+                # Todo 文案与 LLM 决策对齐：避免「步骤标题是 create、executing 里却是 grep」导致前端展示矛盾
+                if decision.get('execute') and decision.get('tool'):
+                    todo_params_aligned = await self._extract_todo_params(todo, user_input)
+                    t_from_todo = todo_params_aligned.get('tool')
+                    if (
+                        t_from_todo
+                        and t_from_todo != 'unknown'
+                        and t_from_todo != decision.get('tool')
+                        and t_from_todo in ('create', 'grep', 'modify')
+                        and decision.get('tool') in ('create', 'grep', 'modify')
+                    ):
+                        print(
+                            f"[REACT-STREAM] Todo 与 LLM 工具不一致，按 Todo 纠正: "
+                            f"{decision.get('tool')} -> {t_from_todo} | todo={todo!r}"
+                        )
+                        decision['tool'] = t_from_todo
+                        new_params = dict(todo_params_aligned.get('params') or {})
+                        old_p = decision.get('params') or {}
+                        if isinstance(old_p, dict):
+                            for k, v in old_p.items():
+                                if v is None or v == '' or v == {}:
+                                    continue
+                                if k not in new_params or new_params.get(k) in (None, '', {}):
+                                    new_params[k] = v
+                        decision['params'] = new_params
+                    if decision.get('tool') == 'create':
+                        dp = decision.setdefault('params', {})
+                        dp.setdefault('natural_query', user_input)
 
-                # 如果是 modify，尝试从参数里提取要修改的字段，并带上首条进度文案，避免前端一直只显示“修改中...”
-                executing_payload = {
-                    'event': 'executing',
-                    'tool': decision['tool'],
-                    'reason': decision.get('reason', ''),
-                }
-                if decision['tool'] == 'modify':
-                    mods = (decision.get('params') or {}).get('modifications') or {}
-                    if isinstance(mods, dict) and mods:
-                        executing_payload['fields'] = list(mods.keys())
-                    executing_payload['message'] = '正在启动修改（进入线程池）…'
+                skip_modify_exec = False
+                # 主循环 modify：补全 target_id / modifications（与技能分支一致），并可选下发补救 grep 事件
+                if decision.get('execute') and decision.get('tool') == 'modify':
+                    decision, _pre_yield_modify = await self._enrich_modify_decision_for_main_loop(
+                        decision, todo, user_input, result_context, project_id, step_index=i
+                    )
+                    for _ev in _pre_yield_modify:
+                        yield _ev
+                    if not self._modify_params_ready(decision.get('params')):
+                        decision, _lr_ev = await self._last_resort_modify_fill(
+                            decision, todo, user_input, result_context, project_id, step_index=i
+                        )
+                        for _ev in _lr_ev:
+                            yield _ev
+                    if not self._modify_params_ready(decision.get('params')):
+                        nq = (user_input or todo or '').strip()
+                        if nq:
+                            decision.setdefault('params', {})['natural_query'] = nq[:2000]
+                    if not self._modify_params_ready(decision.get('params')):
+                        skip_modify_exec = True
+                        print(
+                            "[REACT-STREAM] stability_gate: modify 仍缺 target_id/natural_query 或 modifications，"
+                            "跳过执行以避免无效调用"
+                        )
 
-                yield executing_payload
-                
-                # 批量修改逻辑：如果是 modify 工具，检查是否有候选列表（badcase/bug/testcase）
-                # 按用户意图选择类型：说「修改bug」用 bug_list，避免误用 badcase_list
-                if decision['tool'] == 'modify':
-                    badcase_list = result_context.get('badcase_list', [])
-                    bug_list = result_context.get('bug_list', [])
-                    testcase_list = result_context.get('testcase_list', [])
-                    mod_target = (decision.get('params') or {}).get('target') or self._infer_modify_target(user_input, (decision.get('reason') or ''))
-                    if mod_target == 'bug' and bug_list:
-                        target_list, target_type = bug_list, 'bug'
-                    elif mod_target == 'testcase' and testcase_list:
-                        target_list, target_type = testcase_list, 'testcase'
-                    elif badcase_list:
-                        target_list, target_type = badcase_list, 'badcase'
-                    elif bug_list:
-                        target_list, target_type = bug_list, 'bug'
-                    elif testcase_list:
-                        target_list, target_type = testcase_list, 'testcase'
-                    else:
-                        target_list, target_type = [], 'badcase'
-                    
-                    if target_list and len(target_list) > 1:
-                        # 批量修改所有记录
-                        all_results = []
-                        for item in target_list:
-                            item_id = item.get('id')
-                            item_plan_id = item.get('plan_id')  # 获取 plan_id
-                            if item_id:
-                                modify_decision = decision.copy()
-                                modify_decision['params']['target_id'] = item_id
-                                modify_decision['params']['target'] = target_type
-                                print(f"[REACT-STREAM] 批量修改 {target_type} ID={item_id}, plan_id={item_plan_id}")
-                                observation = await self._execute_tool(modify_decision)
-                                all_results.append({
-                                    'id': item_id,
-                                    'plan_id': item_plan_id,  # 添加 plan_id
-                                    'result': observation
-                                })
+                if skip_modify_exec:
+                    observation = {
+                        'success': False,
+                        'skipped': True,
+                        'stability_gate': 'modify_params_incomplete',
+                        'error': '缺少必要参数：modify 需要 target_id（或 natural_query）与非空 modifications，已尝试 enrich/最后手段补全仍不足，请明确要改的记录与字段。',
+                        'message': 'modify 未执行（参数未就绪）',
+                    }
+                    print(f"[REACT-STREAM] 执行工具: {decision['tool']} (stability_gate 跳过)")
+                else:
+                    print(f"[REACT-STREAM] 执行工具: {decision['tool']}")
+
+                    # 如果是 modify，尝试从参数里提取要修改的字段，并带上首条进度文案，避免前端一直只显示“修改中...”
+                    executing_payload = {
+                        'event': 'executing',
+                        'tool': decision['tool'],
+                        'reason': decision.get('reason', '') or f'Todo步骤 {i + 1}',
+                        'index': i,
+                    }
+                    if decision['tool'] == 'modify':
+                        mods = (decision.get('params') or {}).get('modifications') or {}
+                        if isinstance(mods, dict) and mods:
+                            executing_payload['fields'] = list(mods.keys())
+                        executing_payload['message'] = '正在启动修改（进入线程池）…'
+                        _pp = decision.get('params') or {}
+                        _pub = {}
+                        for _k in ('keywords', 'target', 'mode', 'fields', 'modifications', 'target_id'):
+                            if _k in _pp and _pp[_k] not in (None, '', {}):
+                                _pub[_k] = _pp[_k]
+                        if _pub:
+                            executing_payload['params'] = _pub
+
+                    yield executing_payload
+
+                    # 批量修改逻辑：如果是 modify 工具，检查是否有候选列表（badcase/bug/testcase）
+                    # 按用户意图选择类型：说「修改bug」用 bug_list，避免误用 badcase_list
+                    if decision['tool'] == 'modify':
+                        badcase_list = result_context.get('badcase_list', [])
+                        bug_list = result_context.get('bug_list', [])
+                        testcase_list = result_context.get('testcase_list', [])
+                        mod_target = (decision.get('params') or {}).get('target') or self._infer_modify_target(user_input, (decision.get('reason') or ''))
+                        if mod_target == 'bug' and bug_list:
+                            target_list, target_type = bug_list, 'bug'
+                        elif mod_target == 'testcase' and testcase_list:
+                            target_list, target_type = testcase_list, 'testcase'
+                        elif badcase_list:
+                            target_list, target_type = badcase_list, 'badcase'
+                        elif bug_list:
+                            target_list, target_type = bug_list, 'bug'
+                        elif testcase_list:
+                            target_list, target_type = testcase_list, 'testcase'
+                        else:
+                            target_list, target_type = [], 'badcase'
+    
+                        # 仅一条候选时与 enrich 对齐：直接从列表写 target_id（grep_result.first_* 可能为空）
+                        if (
+                            decision.get('tool') == 'modify'
+                            and target_list
+                            and len(target_list) == 1
+                            and not (decision.get('params') or {}).get('target_id')
+                        ):
+                            only = target_list[0]
+                            oid = only.get('id') if isinstance(only, dict) else None
+                            if oid is not None:
+                                decision.setdefault('params', {})['target_id'] = oid
+                                decision['params']['target'] = target_type
+                                print(f"[REACT-STREAM] 主循环从单条候选注入 target_id={oid} ({target_type})")
                         
-                        # 合并结果
-                        target_name = 'Bug' if target_type == 'bug' else ('测试用例' if target_type == 'testcase' else 'BadCase')
-                        modifications = decision.get('params', {}).get('modifications', {})
-                        mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
-                        observation = {
-                            'success': all(r['result'].get('success') for r in all_results),
-                            'message': f'已批量修改 {len(all_results)} 个 {target_type}',
-                            'summary': f'批量修改{len(all_results)}条{target_name}：{mod_summary}',
-                            'results': all_results,
-                            'batch_modify': True,
-                            'target': target_type
-                        }
+                        if target_list and len(target_list) > 1:
+                            # 批量修改所有记录
+                            all_results = []
+                            for item in target_list:
+                                item_id = item.get('id')
+                                item_plan_id = item.get('plan_id')  # 获取 plan_id
+                                if item_id:
+                                    modify_decision = decision.copy()
+                                    modify_decision['params']['target_id'] = item_id
+                                    modify_decision['params']['target'] = target_type
+                                    print(f"[REACT-STREAM] 批量修改 {target_type} ID={item_id}, plan_id={item_plan_id}")
+                                    observation = await self._execute_tool(modify_decision)
+                                    all_results.append({
+                                        'id': item_id,
+                                        'plan_id': item_plan_id,  # 添加 plan_id
+                                        'result': observation
+                                    })
+                            
+                            # 合并结果
+                            target_name = 'Bug' if target_type == 'bug' else ('测试用例' if target_type == 'testcase' else 'BadCase')
+                            modifications = decision.get('params', {}).get('modifications', {})
+                            mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
+                            observation = {
+                                'success': all(r['result'].get('success') for r in all_results),
+                                'message': f'已批量修改 {len(all_results)} 个 {target_type}',
+                                'summary': f'批量修改{len(all_results)}条{target_name}：{mod_summary}',
+                                'results': all_results,
+                                'batch_modify': True,
+                                'target': target_type
+                            }
+                        else:
+                            # 单个修改：modify 可能执行较久，持续下发分步进度/心跳
+                            if decision.get('tool') == 'modify':
+                                started = time.time()
+                                task = asyncio.create_task(self._execute_tool(decision))
+                                await asyncio.sleep(0.1)
+                                while not task.done():
+                                    waited = time.time() - started
+                                    got_any = False
+                                    try:
+                                        pq = (decision.get('params') or {}).get('progress_queue')
+                                        if pq:
+                                            while True:
+                                                msg = pq.get_nowait()
+                                                got_any = True
+                                                yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'index': i, 'message': str(msg)}
+                                                print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
+                                    except Exception:
+                                        pass
+                                    if not got_any:
+                                        yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'index': i, 'message': f'修改中…已等待 {waited:.0f}s'}
+                                    await asyncio.sleep(0.2 if got_any else 0.4)
+                                observation = await task
+                            else:
+                                observation = await self._execute_tool(decision)
                     else:
-                        # 单个修改：modify 可能执行较久，持续下发分步进度/心跳
                         if decision.get('tool') == 'modify':
                             started = time.time()
                             task = asyncio.create_task(self._execute_tool(decision))
@@ -758,40 +1337,16 @@ class SimplifiedReActEngine:
                                         while True:
                                             msg = pq.get_nowait()
                                             got_any = True
-                                            yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'message': str(msg)}
+                                            yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'index': i, 'message': str(msg)}
                                             print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
                                 except Exception:
                                     pass
                                 if not got_any:
-                                    yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'message': f'修改中…已等待 {waited:.0f}s'}
+                                    yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'index': i, 'message': f'修改中…已等待 {waited:.0f}s'}
                                 await asyncio.sleep(0.2 if got_any else 0.4)
                             observation = await task
                         else:
                             observation = await self._execute_tool(decision)
-                else:
-                    if decision.get('tool') == 'modify':
-                        started = time.time()
-                        task = asyncio.create_task(self._execute_tool(decision))
-                        await asyncio.sleep(0.1)
-                        while not task.done():
-                            waited = time.time() - started
-                            got_any = False
-                            try:
-                                pq = (decision.get('params') or {}).get('progress_queue')
-                                if pq:
-                                    while True:
-                                        msg = pq.get_nowait()
-                                        got_any = True
-                                        yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'message': str(msg)}
-                                        print(f"[REACT-STREAM] modify 进度: {msg}", flush=True)
-                            except Exception:
-                                pass
-                            if not got_any:
-                                yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'message': f'修改中…已等待 {waited:.0f}s'}
-                            await asyncio.sleep(0.2 if got_any else 0.4)
-                        observation = await task
-                    else:
-                        observation = await self._execute_tool(decision)
                 
                 print(f"[REACT-STREAM] 工具执行结果:")
                 print(f"[REACT-STREAM]   成功: {observation.get('success', False)}")
@@ -817,7 +1372,11 @@ class SimplifiedReActEngine:
                 print(f"[REACT-STREAM]   完整结果: {observation}")
                 
                 # 智能重试：如果 modify 缺少 target_id，自动执行 grep 查询
-                if decision['tool'] == 'modify' and observation.get('need_grep_first'):
+                if (
+                    not skip_modify_exec
+                    and decision['tool'] == 'modify'
+                    and observation.get('need_grep_first')
+                ):
                     print(f"[REACT-STREAM] modify 缺少 target_id，自动执行 grep 查询...")
                     yield {'event': 'retry', 'message': '正在执行 grep 工具定位目标记录...'}
                     
@@ -898,6 +1457,11 @@ class SimplifiedReActEngine:
                                         retry_decision = decision.copy()
                                         retry_decision['params']['target_id'] = item_id
                                         retry_decision['params']['target'] = target_type
+                                        if not retry_decision['params'].get('modifications'):
+                                            retry_decision['params']['modifications'] = self._extract_modifications_with_regex(user_input)
+                                        if not retry_decision['params'].get('modifications'):
+                                            with self._llm_no_thinking():
+                                                retry_decision['params']['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
                                         retry_obs = await self._execute_tool(retry_decision)
                                         all_results.append({'id': item_id, 'plan_id': item.get('plan_id'), 'result': retry_obs})
                                 
@@ -914,11 +1478,37 @@ class SimplifiedReActEngine:
                                 retry_decision = decision.copy()
                                 retry_decision['params']['target_id'] = target_list[0].get('id')
                                 retry_decision['params']['target'] = target_type
+                                if not retry_decision['params'].get('modifications'):
+                                    retry_decision['params']['modifications'] = self._extract_modifications_with_regex(user_input)
+                                if not retry_decision['params'].get('modifications'):
+                                    with self._llm_no_thinking():
+                                        retry_decision['params']['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
                                 print(f"[REACT-STREAM] 重试单个修改: target_id={retry_decision['params']['target_id']}")
                                 observation = await self._execute_tool(retry_decision)
-                
+
+                # 结构化纠错：modify 失败后 grep+补参并重试（早于 LLM correct_and_retry）
+                if (
+                    decision.get('tool') == 'modify'
+                    and not observation.get('success')
+                    and not observation.get('skipped')
+                ):
+                    observation, _rec_ev = await self._recover_modify_after_failure(
+                        decision,
+                        observation,
+                        todo,
+                        user_input,
+                        result_context,
+                        project_id,
+                    )
+                    for _ev in _rec_ev:
+                        yield _ev
+
                 # 自动修正（最多1次）
-                if not observation.get('success') and not observation.get('corrected'):
+                if (
+                    not observation.get('success')
+                    and not observation.get('corrected')
+                    and not observation.get('skipped')
+                ):
                     yield {'event': 'retry', 'message': '执行失败，正在尝试自动修正...'}
                     observation = await self.correction_engine.correct_and_retry(
                         todo=todo,
@@ -949,7 +1539,18 @@ class SimplifiedReActEngine:
                 analyze_prompt = ReactPromptTemplates.observe_prompt(
                     todo, decision, observation, result_context
                 )
-                analyze_response = await self.llm.parse_intent(analyze_prompt)
+                _sink_o = []
+                _og = self._stream_llm_prompt_collect(
+                    analyze_prompt, step_index=i, stream_kind="observe", full_text_sink=_sink_o
+                )
+                _oit = _og.__aiter__()
+                while True:
+                    try:
+                        _oe = await _oit.__anext__()
+                        yield _oe
+                    except StopAsyncIteration:
+                        break
+                analyze_response = _sink_o[0] if _sink_o else ""
                 analysis = parse_xml_findings(analyze_response)
                 
                 # 更新状态
@@ -1074,10 +1675,21 @@ class SimplifiedReActEngine:
 🐛 定位 2 条高优先级缺陷
 🎯 建议将 3 个Bug调整到登录计划"""
                     
-                    summary_response = await self.llm.chat(summary_prompt)
+                    _sink_s = []
+                    _sg = self._stream_llm_prompt_collect(summary_prompt, stream_kind="summary", full_text_sink=_sink_s)
+                    _sit = _sg.__aiter__()
+                    while True:
+                        try:
+                            _se = await _sit.__anext__()
+                            yield _se
+                        except StopAsyncIteration:
+                            break
+                    summary_response = _sink_s[0] if _sink_s else ""
                     # 按行分割，过滤空行
                     summarized_findings = [line.strip() for line in summary_response.strip().split('\n') if line.strip()]
                     print(f"[REACT] LLM总结完成: {len(summarized_findings)} 条")
+                    # 与下一段「统一总结」流式区分，避免前端同一段草稿串联两段模型输出
+                    yield {'event': 'summary_stream_reset'}
                 except Exception as e:
                     print(f"[REACT] LLM总结失败: {e}，使用原始数据")
                     summarized_findings = findings[:5]  # 降级：只显示前5条
@@ -1110,7 +1722,16 @@ class SimplifiedReActEngine:
 执行统计：完成 {len(steps)} 步，耗时 {duration:.2f}s。
 
 要求：纯中文、无 emoji、无列表符号，直接一段话。"""
-                summary_text = (await self.llm.chat(summary_prompt) or "").strip()
+                _sink_u = []
+                _ug = self._stream_llm_prompt_collect(summary_prompt, stream_kind="summary", full_text_sink=_sink_u)
+                _uit = _ug.__aiter__()
+                while True:
+                    try:
+                        _ue = await _uit.__anext__()
+                        yield _ue
+                    except StopAsyncIteration:
+                        break
+                summary_text = (_sink_u[0] if _sink_u else "").strip()
                 if summary_text:
                     print(f"[REACT] 统一总结: {summary_text[:80]}...")
             except Exception as e:
@@ -1158,7 +1779,7 @@ class SimplifiedReActEngine:
                 []
             )
             
-            response = await self.llm.parse_intent(prompt)
+            response = await self._collect_llm_text(prompt)
             # 统一使用健壮版解析
             todos = robust_parse_todos(response)
             
@@ -1183,19 +1804,59 @@ class SimplifiedReActEngine:
                     result['context']
                 )
                 
-                decision_response = await self.llm.parse_intent(decision_prompt)
+                decision_response = await self._collect_llm_text(decision_prompt)
                 decision = parse_xml_decision(decision_response)
                 
                 if not decision['execute']:
                     print(f"[REACT]   Skip")
                     continue
                 
+                skip_modify_exec = False
+                if decision.get('tool') == 'modify':
+                    decision, _ = await self._enrich_modify_decision_for_main_loop(
+                        decision, todo, user_input, result['context'], project_id, step_index=i
+                    )
+                    if not self._modify_params_ready(decision.get('params')):
+                        decision, _ = await self._last_resort_modify_fill(
+                            decision, todo, user_input, result['context'], project_id, step_index=i
+                        )
+                    if not self._modify_params_ready(decision.get('params')):
+                        nq = (user_input or todo or '').strip()
+                        if nq:
+                            decision.setdefault('params', {})['natural_query'] = nq[:2000]
+                    if not self._modify_params_ready(decision.get('params')):
+                        skip_modify_exec = True
+                        print("[REACT] stability_gate: modify 参数未就绪，跳过执行")
+
                 # 执行工具
                 print(f"[REACT]   Tool: {decision['tool']}")
-                observation = await self._execute_tool(decision)
-                
+                if skip_modify_exec:
+                    observation = {
+                        'success': False,
+                        'skipped': True,
+                        'stability_gate': 'modify_params_incomplete',
+                        'error': '缺少必要参数：modify 需要 target_id（或 natural_query）与非空 modifications。',
+                        'message': 'modify 未执行（参数未就绪）',
+                    }
+                else:
+                    observation = await self._execute_tool(decision)
+
+                if (
+                    decision.get('tool') == 'modify'
+                    and not observation.get('success')
+                    and not observation.get('skipped')
+                ):
+                    observation, _ = await self._recover_modify_after_failure(
+                        decision,
+                        observation,
+                        todo,
+                        user_input,
+                        result['context'],
+                        project_id,
+                    )
+
                 # 自我修正：如果执行失败，尝试自动修正
-                if not observation.get('success'):
+                if not observation.get('success') and not observation.get('skipped'):
                     print(f"[REACT]   Execution failed, retrying with correction")
                     
                     tools_info = format_tools_for_prompt(self.tools)
@@ -1216,7 +1877,7 @@ class SimplifiedReActEngine:
                     result['context']
                 )
                 
-                analyze_response = await self.llm.parse_intent(analyze_prompt)
+                analyze_response = await self._collect_llm_text(analyze_prompt)
                 analysis = parse_xml_findings(analyze_response)
                 
                 # 记录
@@ -1288,19 +1949,6 @@ class SimplifiedReActEngine:
                 decision['params']['natural_query'] = natural_query
         
         return decision
-        """传统 THINK - 生成 Todo列表"""
-        tools_info = format_tools_for_prompt(self.tools)
-        prompt = ReactPromptTemplates.think_prompt(
-            user_input,
-            tools_info,
-            context,
-            []
-        )
-        
-        response = await self.llm.parse_intent(prompt)
-        todos = parse_xml_todos(response)
-        print(f"[REACT-STREAM] 传统模式生成的Todos: {todos}")
-        return todos
     
     def _generate_todos_from_skill_workflow(self, skill: Skill, user_input: str) -> List[str]:
         """根据技能工作流生成 Todo列表（按 step 排序，与 fallback_workflow_tools 一致）"""
@@ -1386,6 +2034,377 @@ class SimplifiedReActEngine:
         top = [item for item, s in scored if s == best_score][:top_k]
         return top if top else [scored[0][0]]
 
+    def _merge_grep_observation_into_context(
+        self,
+        observation: Dict[str, Any],
+        params: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> None:
+        """将 grep 成功的 observation 合并进 result_context，供后续 modify 使用。"""
+        if not observation or not observation.get('success'):
+            return
+        grep_data = observation.get('data', {}) or {}
+        badcase_list = grep_data.get('badcase_analysis', [])
+        bug_list = grep_data.get('bug_location', [])
+        testcase_list = grep_data.get('testcase_location', [])
+        kw = (params.get('keywords') or result_context.get('_last_grep_keywords') or '')
+        result_context['_last_grep_keywords'] = kw or params.get('keywords') or ''
+
+        def first_id(lst, kws):
+            if not lst:
+                return None
+            picked = self._rerank_and_pick(lst, kws, 'title', 1)
+            return picked[0].get('id') if picked else lst[0].get('id')
+
+        result_context['grep_result'] = {
+            'first_badcase_id': first_id(badcase_list, kw),
+            'first_bug_id': first_id(bug_list, kw),
+            'first_testcase_id': first_id(testcase_list, kw),
+            'badcase_list': badcase_list,
+            'bug_list': bug_list,
+            'testcase_list': testcase_list,
+        }
+        result_context['badcase_list'] = badcase_list
+        result_context['bug_list'] = bug_list
+        result_context['testcase_list'] = testcase_list
+        print(
+            f"[REACT-STREAM] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, {len(testcase_list)} testcase"
+        )
+
+    async def _enrich_modify_decision_for_main_loop(
+        self,
+        decision: Dict[str, Any],
+        todo: str,
+        user_input: str,
+        result_context: Dict[str, Any],
+        project_id: Optional[int],
+        step_index: int,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """
+        主循环（未走技能匹配分支）在解析 LLM 的 decide 结果后，补齐 modify 的 target_id / modifications。
+
+        **可靠性口径**：真正执行 modify_tool 以前，以本函数补全/合并后的 params 为准；
+        parse_xml_decision 仅提供 tool 选择与「有则更好」的初值，模型常省略参数，属预期行为。
+
+        与技能分支内逻辑对齐：grep 上下文 → 必要时补救 grep → explore_record + LLM 提取 modifications
+        → 正则兜底 → _infer_modify_params 合并。
+        """
+        events: List[Dict[str, Any]] = []
+        params = decision.setdefault('params', {})
+        if not isinstance(params, dict):
+            params = {}
+            decision['params'] = params
+        if project_id is not None and 'project_id' not in params:
+            params['project_id'] = project_id
+        if 'userId' not in params:
+            params['userId'] = 'system_agent'
+        params.setdefault('confirm', False)
+
+        grep_result = result_context.get('grep_result', {})
+        target_type = params.get('target') or self._infer_modify_target(user_input, todo)
+        params['target'] = target_type
+
+        target_id = params.get('target_id')
+        if target_id is not None:
+            try:
+                target_id = int(target_id)
+                params['target_id'] = target_id
+            except (TypeError, ValueError):
+                params.pop('target_id', None)
+                target_id = None
+
+        if not target_id:
+            if target_type == 'bug':
+                target_id = grep_result.get('first_bug_id') or result_context.get('first_bug_id')
+            elif target_type == 'testcase':
+                target_id = grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
+            else:
+                target_id = grep_result.get('first_badcase_id') or result_context.get('first_badcase_id')
+            if target_id is not None:
+                try:
+                    params['target_id'] = int(target_id)
+                    target_id = params['target_id']
+                except (TypeError, ValueError):
+                    target_id = None
+
+        if not params.get('target_id'):
+            tid_m = self._try_target_id_from_merged_lists(
+                result_context, target_type, user_input, todo
+            )
+            if tid_m is not None:
+                params['target_id'] = tid_m
+                print(f"[REACT-STREAM] enrich 从合并列表注入 target_id={tid_m} ({target_type})")
+
+        if not params.get('target_id'):
+            print(
+                f"[REACT-STREAM] ⚠️ 主循环 modify：无法从上下文获取 target_id (target={target_type})，尝试补救 grep…"
+            )
+            kw = self._extract_title_keywords_for_grep(user_input, todo) or ''
+            gparams: Dict[str, Any] = {
+                'project_id': project_id,
+                'keywords': kw,
+                'mode': 'locate',
+                'target': target_type if target_type in ('bug', 'badcase', 'testcase') else 'all',
+                'userId': 'system_agent',
+            }
+            if self.plan_id is not None and gparams.get('target') != 'all':
+                gparams['plan_id'] = self.plan_id
+            if gparams.get('target') == 'all':
+                gparams.pop('plan_id', None)
+            events.append(
+                {
+                    'event': 'executing',
+                    'tool': 'grep',
+                    'reason': f'Todo步骤 {step_index + 1}',
+                    'index': step_index,
+                    'message': '正在补充定位记录（用于修改）…',
+                }
+            )
+            grep_obs = await self._execute_tool({'execute': True, 'tool': 'grep', 'params': gparams})
+            if grep_obs.get('success'):
+                self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
+                grep_result = result_context.get('grep_result', {})
+                if target_type == 'bug':
+                    target_id = grep_result.get('first_bug_id')
+                elif target_type == 'testcase':
+                    target_id = grep_result.get('first_testcase_id')
+                else:
+                    target_id = grep_result.get('first_badcase_id')
+                if target_id is not None:
+                    try:
+                        params['target_id'] = int(target_id)
+                        print(f"[REACT-STREAM] 主循环补救 grep 后 target_id={params['target_id']}")
+                    except (TypeError, ValueError):
+                        pass
+            if not params.get('target_id'):
+                tid2 = self._try_target_id_from_merged_lists(
+                    result_context, target_type, user_input, todo
+                )
+                if tid2 is not None:
+                    params['target_id'] = tid2
+                    print(f"[REACT-STREAM] enrich 补救 grep 后从列表注入 target_id={tid2}")
+
+        tid = params.get('target_id')
+        mods = params.get('modifications')
+        _proj_for_explore = params.get('project_id') or self.project_id
+        if tid and (not mods or (isinstance(mods, dict) and len(mods) == 0)):
+            modify_tool = self.tools.get('modify')
+            if modify_tool and getattr(modify_tool, 'explore_record', None) and _proj_for_explore is not None:
+                try:
+                    loop = asyncio.get_event_loop()
+                    _eid = int(tid)
+                    _epid = int(_proj_for_explore)
+                    exploration = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            self._tool_executor,
+                            lambda: modify_tool.explore_record(target_type, _eid, _epid),
+                        ),
+                        timeout=15,
+                    )
+                    if exploration and exploration.get('current_record'):
+                        with self._llm_no_thinking():
+                            params['modifications'] = await self._extract_modifications_with_llm(
+                                todo, user_input, exploration=exploration
+                            )
+                        if not params.get('modifications') and user_input:
+                            params['modifications'] = self._extract_modifications_with_regex(user_input)
+                except Exception as e:
+                    print(f"[REACT-STREAM] 主循环 explore_record 失败: {e}")
+                    if not params.get('modifications'):
+                        with self._llm_no_thinking():
+                            params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+                        if not params.get('modifications'):
+                            params['modifications'] = self._extract_modifications_with_regex(user_input)
+            elif not params.get('modifications'):
+                with self._llm_no_thinking():
+                    params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+                if not params.get('modifications'):
+                    params['modifications'] = self._extract_modifications_with_regex(user_input)
+
+        if (not params.get('target_id')) or (not params.get('modifications')):
+            infer = self._infer_modify_params(todo, result_context)
+            if infer.get('execute') and isinstance(infer.get('params'), dict):
+                ip = infer['params']
+                for k in ('target_id', 'target', 'modifications', 'project_id', 'confirm'):
+                    if k not in params or params.get(k) in (None, '', {}):
+                        v = ip.get(k)
+                        if v is not None and v != '' and v != {}:
+                            params[k] = v
+                print(f"[REACT-STREAM] 主循环 modify 已合并 _infer_modify_params 兜底: keys={list(params.keys())}")
+
+        return decision, events
+
+    @staticmethod
+    def _modify_params_ready(params: Optional[Dict[str, Any]]) -> bool:
+        """
+        modify 执行前需：非空 modifications，且满足其一：
+        - 已有 target_id；或
+        - 提供 natural_query（交给 modify_tool 用 Text2SQL/ORM 解析 id）
+        """
+        if not params or not isinstance(params, dict):
+            return False
+        m = params.get('modifications')
+        if not m or not isinstance(m, dict) or len(m) == 0:
+            return False
+        if params.get('target_id') not in (None, ''):
+            return True
+        nq = (params.get('natural_query') or '').strip()
+        return bool(nq)
+
+    async def _last_resort_modify_fill(
+        self,
+        decision: Dict[str, Any],
+        todo: str,
+        user_input: str,
+        result_context: Dict[str, Any],
+        project_id: Optional[int],
+        step_index: int,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """
+        最后手段：全库/宽关键词 grep → 合并列表 → 按 bug/testcase/badcase 顺序取 id → 正则+LLM 补 modifications。
+        用于主循环 enrich 与单条注入后仍缺参的情况。
+        """
+        events: List[Dict[str, Any]] = []
+        params = decision.setdefault('params', {})
+        if not isinstance(params, dict):
+            params = {}
+            decision['params'] = params
+        kw = (self._extract_title_keywords_for_grep(user_input, todo) or '').strip()
+        if not kw and user_input:
+            kw = (user_input[:200] or '').strip()
+        if not kw and todo:
+            kw = (todo[:200] or '').strip()
+        if not kw:
+            kw = ' '
+
+        gparams: Dict[str, Any] = {
+            'project_id': project_id,
+            'keywords': kw,
+            'mode': 'locate',
+            'target': 'all',
+            'userId': 'system_agent',
+        }
+        events.append(
+            {
+                'event': 'executing',
+                'tool': 'grep',
+                'reason': f'Todo步骤 {step_index + 1}',
+                'index': step_index,
+                'message': '最后手段：全库检索以定位修改目标…',
+            }
+        )
+        grep_obs = await self._execute_tool({'execute': True, 'tool': 'grep', 'params': gparams})
+        if grep_obs.get('success'):
+            self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
+            for tt in ('bug', 'testcase', 'badcase'):
+                tid = self._try_target_id_from_merged_lists(
+                    result_context, tt, user_input, todo
+                )
+                if tid is not None:
+                    params['target_id'] = tid
+                    params['target'] = tt
+                    print(f"[REACT-STREAM] last_resort 从列表选定 target_id={tid}, target={tt}")
+                    break
+        if not params.get('modifications') or (
+            isinstance(params.get('modifications'), dict) and len(params.get('modifications')) == 0
+        ):
+            params['modifications'] = self._extract_modifications_with_regex(user_input or '')
+            if not params.get('modifications'):
+                with self._llm_no_thinking():
+                    params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
+            if not params.get('modifications'):
+                params['modifications'] = self._extract_modifications_with_regex(todo or '')
+        return decision, events
+
+    async def _recover_modify_after_failure(
+        self,
+        decision: Dict[str, Any],
+        observation: Dict[str, Any],
+        todo: str,
+        user_input: str,
+        result_context: Dict[str, Any],
+        project_id: Optional[int],
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """
+        modify 失败后的结构化纠错（在 LLM correct_and_retry 之前）：
+        缺参 / need_grep_first 时：全库 grep + 列表 + 补 modifications → 再执行一次 modify。
+        返回 (observation, 需在主循环中 yield 的事件列表)。
+        """
+        empty_ev: List[Dict[str, Any]] = []
+        if observation.get('success'):
+            return observation, empty_ev
+        if decision.get('tool') != 'modify':
+            return observation, empty_ev
+        if observation.get('corrected'):
+            return observation, empty_ev
+        err = str(observation.get('error') or '')
+        need = observation.get('need_grep_first') or '缺少必要参数' in err or 'target_id' in err.lower()
+        if not need:
+            return observation, empty_ev
+        if self._modify_params_ready(decision.get('params')):
+            # 参数已齐仍失败，交给上层修正
+            return observation, empty_ev
+        print(f"[REACT-STREAM] 🛠 结构化纠错：modify 失败后尝试 grep+补参并重试")
+        try:
+            decision2 = {
+                'execute': True,
+                'tool': 'modify',
+                'params': dict(decision.get('params') or {}),
+            }
+            decision2, ev = await self._last_resort_modify_fill(
+                decision2,
+                todo,
+                user_input,
+                result_context,
+                project_id,
+                step_index=-1,
+            )
+            if not self._modify_params_ready(decision2.get('params')):
+                nq = (user_input or todo or '').strip()
+                if nq:
+                    decision2.setdefault('params', {})['natural_query'] = nq[:2000]
+            if not self._modify_params_ready(decision2.get('params')):
+                return observation, ev
+            retry_obs = await self._execute_tool(decision2)
+            if retry_obs.get('success'):
+                retry_obs['recovered'] = True
+                retry_obs['recovery'] = 'structured_grep_after_failure'
+            return retry_obs, ev
+        except Exception as e:
+            print(f"[REACT-STREAM] 结构化纠错异常: {e}")
+            return observation, empty_ev
+
+    def _try_target_id_from_merged_lists(
+        self,
+        result_context: Dict[str, Any],
+        target_type: str,
+        user_input: str,
+        todo: str,
+    ) -> Optional[int]:
+        """
+        grep_result.first_bug_id 等可能为空，但 _merge_grep_observation_into_context 已写入
+        bug_list/badcase_list/testcase_list 时，从列表 rerank 取一条 id。
+        """
+        kw = self._extract_title_keywords_for_grep(user_input, todo) or ''
+        if target_type == 'bug':
+            lst = result_context.get('bug_list') or []
+        elif target_type == 'testcase':
+            lst = result_context.get('testcase_list') or []
+        else:
+            lst = result_context.get('badcase_list') or []
+        if not lst:
+            return None
+        pick = self._pick_best_match_from_list(lst, kw, 'title') if kw else lst[0]
+        if not isinstance(pick, dict):
+            return None
+        tid = pick.get('id')
+        if tid is None:
+            return None
+        try:
+            return int(tid)
+        except (TypeError, ValueError):
+            return None
+
     def _pick_best_match_from_list(self, items: List[Dict], keywords: str, key_title: str = 'title') -> Dict:
         """Rerank 后取分最高的那一条（兼容旧调用）。"""
         picked = self._rerank_and_pick(items, keywords, key_title, top_k=1)
@@ -1427,6 +2446,39 @@ class SimplifiedReActEngine:
                 kw = m.group(1).strip()
                 if kw and len(kw) <= 50:  # 避免整句当关键词
                     return kw
+        return ''
+
+    def _infer_create_target(self, user_input: str, todo: str) -> str:
+        text = f"{todo or ''} {user_input or ''}"
+        text_lower = text.lower()
+        if 'testcase' in text_lower or 'test_case' in text_lower or '测试用例' in text:
+            return 'testcase'
+        if 'plan' in text_lower or '计划' in text or '迭代' in text:
+            return 'plan'
+        if 'bug' in text_lower or '缺陷' in text:
+            return 'bug'
+        if 'badcase' in text_lower or 'bad case' in text_lower or 'BadCase' in text:
+            return 'badcase'
+        return 'bug'
+
+    def _extract_create_title(self, user_input: str, todo: str) -> str:
+        import re
+
+        for text in (todo or '', user_input or ''):
+            if not text:
+                continue
+            patterns = [
+                r'标题\s*[=:：]\s*[\"“”‘’「]?([^，。,；;」\"“”‘’]+)',
+                r'标题(?:叫|是|为)\s*[\"“”‘’「]?([^，。,；;」\"“”‘’]+)',
+                r'叫做\s*[\"“”‘’「]?([^，。,；;」\"“”‘’]+)',
+                r'叫\s*[\"“”‘’「]?([^，。,；;」\"“”‘’]+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
+                    title = (match.group(1) or '').strip()
+                    if title:
+                        return title
         return ''
 
     def _infer_modify_params(self, todo: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1830,10 +2882,10 @@ class SimplifiedReActEngine:
 请直接返回 JSON，不要包含其他内容。"""
         
         try:
-            response = await self.llm.parse_intent(prompt)
+            response = await self._collect_llm_text(prompt)
             print(f"[REACT-LLM] 提取修改参数响应: {response}")
             
-            # 如果 parse_intent 已经返回字典，直接使用（并做期望结果兜底）
+            # _collect_llm_text 一般为字符串；若以后改为结构化再处理 dict
             if isinstance(response, dict):
                 print(f"[REACT-LLM] 提取的修改参数: {response}")
                 return self._normalize_modifications_for_bug_expected_result(response, user_input)
@@ -2012,6 +3064,14 @@ class SimplifiedReActEngine:
             key = 'assignee' if field_name == '负责人' else ('title' if field_name == '标题' else 'status')
             modifications[key] = value
             print(f"[REACT-REGEX] 兜底（极简）：{field_name} -> {key} = {value}")
+        if not modifications and '负责人' in user_input:
+            m2 = re.search(
+                r'负责人\s*(?:修改|改|改为|设为|调整为|为)?\s*[：:\s]*([^\s，,。]+)',
+                user_input,
+            )
+            if m2:
+                modifications['assignee'] = m2.group(1).strip().rstrip('。，')
+                print(f"[REACT-REGEX] 兜底（负责人句式）：assignee = {modifications['assignee']}")
         return modifications
     
     async def _extract_todo_params(self, todo: str, user_input: str) -> Dict[str, Any]:
@@ -2059,7 +3119,7 @@ class SimplifiedReActEngine:
             }
             print(f"[REACT] 从 todo 提取 modify 参数：modifications={modifications}, target={target}")
         
-        # 再检查 grep 工具
+        # 必须先于 create：todo 文案里常含标题「一个新增的 bug」，子串「新增」会误匹配 create
         elif 'grep' in todo.lower() or '搜索' in todo or '查找' in todo or '定位' in todo:
             result['tool'] = 'grep'
             
@@ -2100,6 +3160,20 @@ class SimplifiedReActEngine:
             if target == 'all':
                 result['params'].pop('plan_id', None)
             print(f"[REACT] 从 todo 提取 grep 参数: keywords='{keywords}', target={target}")
+
+        elif 'create' in todo.lower() or '创建' in todo or '新增' in todo or '新建' in todo:
+            result['tool'] = 'create'
+            target = self._infer_create_target(user_input, todo)
+            title = self._extract_create_title(user_input, todo)
+            fields = {}
+            if title:
+                fields['name' if target == 'plan' else 'title'] = title
+            result['params'] = {
+                'target': target,
+                'fields': fields,
+                'confirm': False,
+            }
+            print(f"[REACT] 从 todo 提取 create 参数: target={target}, fields={fields}")
         
         else:
             # 未知工具，返回空

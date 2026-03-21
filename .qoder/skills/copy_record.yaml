@@ -1,0 +1,51 @@
+name: copy_record
+description: 复制已有记录并创建新记录（固定流程：grep + create），支持 bug、badcase、testcase
+trigger:
+  intents: [复制, 克隆, 仿照, 参照, 一样, 同样, 拷贝]
+  entities: [bug, 缺陷, badcase, 测试用例, testcase]
+  patterns:
+    - 复制.*测试用例
+    - 新增.*测试用例.*和.*一样
+    - 按照.*bug.*创建
+    - 参照.*badcase.*新增
+
+tools:
+  - name: grep
+    purpose: 定位被复制的源记录
+    params:
+      mode: locate
+      keywords: ${user_keywords}
+      target: ${target}
+      project_id: ${project_id}
+
+  - name: create
+    purpose: 创建新记录（标题覆盖，其他属性按自然语言复制）
+    params:
+      target: ${target}
+      fields: ${user_fields}
+      project_id: ${project_id}
+      confirm: false
+      natural_query: ${user_input}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 使用 grep 工具进行精准定位分析
+    depends_on: null
+
+  - step: 2
+    tool: create
+    description: 使用 create 工具复制并创建新记录
+    depends_on: step_1
+
+examples:
+  - 帮我新增一个测试用例，其他属性和“创建测试用例7”一样，标题叫“一个新增的测试用例”
+  - 复制这个 bug 生成一条新 bug，标题改成“登录问题-回归”
+  - 按照 badcase 123 新建一个 badcase，标题改为“新增badcase”
+
+metadata:
+  category: record_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-03-19
+  author: BadCase Doctor Team

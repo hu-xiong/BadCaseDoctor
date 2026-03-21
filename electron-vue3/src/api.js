@@ -176,6 +176,11 @@ export function addBadcaseComment(id, data) {
 export function closeBadcase(id) {
   return api.post(`/api/badcases/${id}/close`)
 }
+
+// 删除 BadCase
+export function deleteBadcase(id) {
+  return api.delete(`/api/badcases/${id}`)
+}
 // 导入Excel
 export function importExcel(formData) {
   return api.post('/api/import_excel', formData, { headers: { 'Content-Type': 'multipart/form-data' } })

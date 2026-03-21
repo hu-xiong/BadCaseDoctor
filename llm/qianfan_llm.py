@@ -119,52 +119,33 @@ class QianfanLLM:
 
     async def chat_with_reasoning(self, prompt: str, history: list = None) -> Dict[str, Any]:
         """
-        对话接口并返回思考过程（用于 ERNIE-X1 等带 reasoning 的模型）。
-        返回 {"content": str, "reasoning_content": str|None}，无思考时 reasoning_content 为 None。
+        返回整段结果；实现上只复用 chat_stream_with_reasoning 的流式 SSE，再汇总，
+        与非流式 JSON 请求保持一致的一条链路，避免两套解析逻辑漂移。
         """
-        url = "https://qianfan.baidubce.com/v2/chat/completions"
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": prompt})
-        payload = json.dumps({
-            "model": self.model,
-            "messages": messages,
-            "temperature": Config.QIANFAN_TEMPERATURE,
-            "top_p": Config.QIANFAN_TOP_P
-        })
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-
-        def _do_request():
-            timeout = (
-                float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
-                float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
-            )
-            return get_session().request("POST", url, headers=headers, data=payload, timeout=timeout)
+        def _aggregate_from_stream():
+            reasoning_parts: List[str] = []
+            content_parts: List[str] = []
+            try:
+                for item in self.chat_stream_with_reasoning(prompt, history):
+                    if not isinstance(item, dict):
+                        continue
+                    typ = item.get("type")
+                    if typ == "reasoning_delta":
+                        d = item.get("delta")
+                        if isinstance(d, str) and d:
+                            reasoning_parts.append(d)
+                    elif typ == "content_delta":
+                        d = item.get("delta") or ""
+                        if d:
+                            content_parts.append(d)
+            except Exception as e:
+                return {"content": f"Error: {e}", "reasoning_content": None}
+            rc = "".join(reasoning_parts).strip() or None
+            ct = "".join(content_parts).strip()
+            return {"content": ct, "reasoning_content": rc}
 
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, _do_request)
-        out = {"content": "", "reasoning_content": None}
-
-        if response.status_code != 200:
-            out["content"] = f"Error: {response.text}"
-            return out
-
-        res_json = response.json()
-        if "choices" not in res_json or len(res_json["choices"]) == 0:
-            out["content"] = res_json.get("result", "")
-            return out
-
-        msg = res_json["choices"][0].get("message", {})
-        out["content"] = msg.get("content") or ""
-        # 千帆 V2 思考模型（如 ERNIE-X1）返回推理过程
-        if "reasoning_content" in msg and msg["reasoning_content"]:
-            out["reasoning_content"] = msg["reasoning_content"]
-        return out
+        return await loop.run_in_executor(None, _aggregate_from_stream)
 
     def chat_stream_with_reasoning(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
         """
@@ -243,6 +224,55 @@ class QianfanLLM:
         except Exception as e:
             yield {"type": "content_delta", "delta": f"Error: {e}"}
             yield {"type": "done"}
+
+    def chat_stream_fallback_chunks(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
+        """
+        流式不可用时：同步 HTTP 非流式 completion，按块 yield（与 parse_intent 解耦）。
+        """
+        url = "https://qianfan.baidubce.com/v2/chat/completions"
+        model_to_use = self.model
+        if getattr(self, "force_disable_thinking", False) and isinstance(model_to_use, str) and model_to_use.lower().startswith("ernie-x1"):
+            model_to_use = "ernie-4.5-turbo-128k"
+        messages: List[Dict[str, str]] = []
+        if history:
+            for msg in history:
+                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        messages.append({"role": "user", "content": prompt})
+        payload = json.dumps({
+            "model": model_to_use,
+            "messages": messages,
+            "temperature": Config.QIANFAN_TEMPERATURE,
+            "top_p": Config.QIANFAN_TOP_P,
+        })
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        def _do_request():
+            timeout = (
+                float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+                float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+            )
+            return get_session().request("POST", url, headers=headers, data=payload, timeout=timeout)
+
+        text = ""
+        try:
+            resp = _do_request()
+            if resp.status_code == 200:
+                res_json = resp.json()
+                if "choices" in res_json and len(res_json["choices"]) > 0:
+                    text = (res_json["choices"][0].get("message") or {}).get("content") or ""
+                else:
+                    text = res_json.get("result", "") or ""
+            else:
+                text = f"Error: {resp.text}"
+        except Exception as e:
+            text = f"Error: {e}"
+        chunk = 56
+        for i in range(0, len(text), chunk):
+            yield {"type": "content_delta", "delta": text[i : i + chunk]}
+        yield {"type": "done"}
 
     def chat_stream(self, prompt: str, history: list = None):
         """流式对话"""

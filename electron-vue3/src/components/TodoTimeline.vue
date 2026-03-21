@@ -36,6 +36,14 @@
           >
             <div class="qoder-todo-text">{{ todo.text }}</div>
           </div>
+          <div v-if="todo.resultSummary" class="qoder-todo-sub">{{ todo.resultSummary }}</div>
+          <div v-if="todo.status === 'running' && todo.progressLog && todo.progressLog.length" class="qoder-todo-progress">
+            <div
+              v-for="(line, li) in todo.progressLog.slice(-6)"
+              :key="li"
+              class="qoder-todo-progress-line"
+            >{{ line }}</div>
+          </div>
         </div>
       </div>
     </div>
@@ -168,6 +176,30 @@ const toggleAll = () => {
 
 .qoder-todo-row.error .qoder-todo-text {
   color: #fecaca;
+}
+
+.qoder-todo-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(203, 213, 225, 0.92);
+}
+
+.qoder-todo-progress {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.qoder-todo-progress-line {
+  font-size: 11px;
+  line-height: 1.35;
+  color: rgba(226, 232, 240, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 原始输出样式 */

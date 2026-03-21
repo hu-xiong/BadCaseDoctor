@@ -51,8 +51,14 @@
         </div>
 
         <button class="refresh-btn" :disabled="badcaseLoading" @click="refreshBadcases">🔄</button>
-        <button class="view-btn">📋</button>
-        <span class="total-count">共{{ filteredBadcases.length }}条</span>
+        <button
+          v-if="selectedTasks && selectedTasks.length > 0"
+          class="batch-delete-btn"
+          @click.stop="batchDeleteSelected"
+          :title="`将删除 ${selectedTasks.length} 条记录`"
+        >
+          批量删除（{{ selectedTasks.length }}）
+        </button>
       </div>
     </div>
 
@@ -73,11 +79,49 @@
         <div v-if="badcaseLoading" class="loading-row">
           <div class="loading-text">加载中...</div>
         </div>
-        <div v-else-if="filteredBadcases.length === 0" class="empty-row">
-          <div class="empty-text">暂无{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}数据</div>
-        </div>
+        <template v-else>
+          <!-- 待确认新建（create 沙箱）：暗绿显示新值，✓ 采纳 ✗ 拒绝 -->
+          <div
+            v-for="pc in (pendingCreates || [])"
+            :key="pc.tempId"
+            :data-create-id="pc.tempId"
+            class="table-row pending-create-row"
+            @click.stop
+          >
+            <div class="row-checkbox"></div>
+            <div class="row-title">
+              <div v-if="pc.displayDiff?.title" class="field-diff-inline create-pending-diff">
+                <span class="new-value-inline create-new-only">{{ pc.displayDiff.title.new }}</span>
+              </div>
+              <span v-else class="badcase-title create-new-only">{{ pc.preview?.title || '（新建）' }}</span>
+            </div>
+            <div class="row-type">
+              <span class="type-badge" :class="currentPlanType">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</span>
+            </div>
+            <div class="row-status">
+              <div v-if="pc.displayDiff?.status" class="field-diff-inline create-pending-diff">
+                <span class="new-value-inline create-new-only">{{ pc.displayDiff.status.new }}</span>
+              </div>
+              <span v-else class="status-badge">—</span>
+            </div>
+            <div class="row-assignee">
+              <div v-if="pc.displayDiff?.assignee" class="field-diff-inline create-pending-diff">
+                <span class="new-value-inline create-new-only">{{ getAssigneeDisplayText(pc.displayDiff.assignee.new) }}</span>
+              </div>
+              <span v-else class="assignee-text">{{ getAssigneeDisplayText(pc.preview?.assignee_id) }}</span>
+            </div>
+            <div class="row-date"><span class="date-text">待确认</span></div>
+            <div v-if="!pc.executed && confirmCreate && cancelCreate" class="row-actions" @click.stop>
+              <button class="btn-icon-approve" title="采纳并创建" @click="confirmCreate(pc.tempId)">✓</button>
+              <button class="btn-icon-reject" title="拒绝" @click="cancelCreate(pc.tempId)">✗</button>
+            </div>
+          </div>
+          <div v-if="filteredBadcases.length === 0 && !(pendingCreates || []).length" class="empty-row">
+            <div class="empty-text">暂无{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}数据</div>
+          </div>
+        </template>
+        <template v-if="!badcaseLoading">
         <div
-          v-else
           v-for="badcase in filteredBadcases"
           :key="badcase.id"
           :data-bug-id="badcase.id"
@@ -141,12 +185,14 @@
             </template>
           </div>
         </div>
+        </template>
       </div>
     </div>
   </div>
 </template>
 
 <script>
+import { deleteBug, deleteBadcase, deleteTestCase } from '../../api.js'
 export default {
   name: 'BadcaseListPanel',
   props: {
@@ -185,10 +231,53 @@ export default {
     getAssigneeDisplayText: { type: Function, required: true },
 
     // actions
-    createNewBadcase: { type: Function, required: true }
+    createNewBadcase: { type: Function, required: true },
+    /** 待确认新建（来自对话 create 沙箱） */
+    pendingCreates: { type: Array, default: () => [] },
+    confirmCreate: { type: Function, default: null },
+    cancelCreate: { type: Function, default: null }
   },
   emits: ['update:searchText', 'update:selectedAssignee', 'update:selectedStatus'],
   methods: {
+    async batchDeleteSelected() {
+      const ids = Array.isArray(this.selectedTasks) ? this.selectedTasks.slice() : []
+      if (!ids.length) return
+
+      const label = this.currentPlanType === 'bug'
+        ? 'Bug'
+        : (this.currentPlanType === 'test_case' ? '测试用例' : 'BadCase')
+
+      if (!confirm(`确定删除选中的 ${ids.length} 条${label}吗？此操作无法撤销。`)) return
+
+      try {
+        const requests = ids.map((id) => {
+          if (this.currentPlanType === 'bug') return deleteBug(id)
+          if (this.currentPlanType === 'test_case') return deleteTestCase(id)
+          return deleteBadcase(id)
+        })
+
+        const results = await Promise.allSettled(requests)
+        const failed = results.filter(r => {
+          if (r.status !== 'fulfilled') return true
+          const ok = r.value?.data?.success === true
+          return !ok
+        }).length
+
+        if (failed > 0) {
+          alert(`批量删除完成，但有 ${failed} 条失败。请刷新后重试。`)
+        } else {
+          alert('批量删除成功！')
+        }
+      } catch (e) {
+        console.error('批量删除异常:', e)
+        alert('批量删除失败：' + (e?.message || '未知错误'))
+      } finally {
+        // refreshBadcases 会触发父组件重新拉取列表并清空 selectedTasks
+        if (typeof this.refreshBadcases === 'function') {
+          this.refreshBadcases()
+        }
+      }
+    },
     handleEdit(id) {
       const fn = this.editItem || this.editBadcase
       if (typeof fn === 'function') fn(id)
@@ -355,8 +444,7 @@ export default {
 }
 
 .total-count {
-  font-size: 13px;
-  color: #666;
+  display: none;
 }
 
 /* 任务表格 */
@@ -612,6 +700,22 @@ export default {
   align-items: center;
   justify-content: center;
   text-align: center;
+}
+
+.batch-delete-btn {
+  padding: 6px 12px;
+  background: #ef4444;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.batch-delete-btn:hover {
+  background: #dc2626;
+  transform: translateY(-1px);
 }
 </style>
 

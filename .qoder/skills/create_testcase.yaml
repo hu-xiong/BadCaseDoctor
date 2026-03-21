@@ -1,0 +1,39 @@
+name: create_testcase
+description: 创建新的测试用例记录
+trigger:
+  intents: [创建, 新建, 添加, 增加, 新增]
+  entities: [测试用例, testcase, test case, 用例]
+  patterns:
+    - 创建测试用例
+    - 新增测试用例
+    - 新建一个测试用例
+    - 添加一个测试用例
+
+tools:
+  - name: create
+    purpose: 创建新的测试用例
+    params:
+      target: testcase
+      fields: ${user_fields}
+      project_id: ${project_id}
+      confirm: false
+      natural_query: ${user_input}
+
+workflow:
+  - step: 1
+    tool: create
+    description: 使用 create 工具创建测试用例
+    depends_on: null
+
+examples:
+  - 创建一个测试用例，标题是登录功能验证
+  - 新增测试用例：验证用户能正常退出登录
+  - 添加一个测试用例，优先级高，负责人是33
+  - 新建测试用例，标题叫支付成功回调校验
+
+metadata:
+  category: testcase_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-03-19
+  author: BadCase Doctor Team

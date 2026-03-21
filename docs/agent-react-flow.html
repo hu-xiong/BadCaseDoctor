@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReAct Agent 流程图</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: system-ui, "Segoe UI", sans-serif;
+    }
+    h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #94a3b8;
+      margin: 28px 0 12px;
+      letter-spacing: 0.04em;
+    }
+    h2:first-of-type { margin-top: 0; }
+    .mermaid { display: flex; justify-content: center; }
+  </style>
+</head>
+<body>
+
+<h2>① SSE 与双层结构</h2>
+<pre class="mermaid">
+flowchart TB
+  B[浏览器 fetch POST /api/agent/react] --> R[ReadableStream 按块读]
+  R --> L[按行解析 data: JSON]
+  L --> T{chunk.type}
+  T -->|status| S[处理中…]
+  T -->|step| E[chunk.data = stepEvent]
+  T -->|heartbeat| X[忽略]
+  T -->|intent| I[可选]
+  E --> V{stepEvent.event}
+  V --> TH[THINK: reasoning / todos_*]
+  V --> AC[ACT: todo_start / executing / observation / todo_end]
+  V --> DN[done / summary]
+</pre>
+
+<h2>② 后端调用链</h2>
+<pre class="mermaid">
+flowchart LR
+  subgraph HTTP["Flask routers/agent.py"]
+    R["POST /api/agent/react"]
+    G["generate: SSE 写队列"]
+  end
+  subgraph Agent["intelligent_devops_agent"]
+    H["handle_user_request_stream"]
+  end
+  subgraph Engine["SimplifiedReActEngine"]
+    RS["run_stream"]
+  end
+  R --> G
+  G --> H
+  H --> RS
+  RS -->|"event + payload"| H
+  H -->|"{type: step, data: ...}"| G
+</pre>
+
+<h2>③ ReAct 阶段顺序</h2>
+<pre class="mermaid">
+flowchart TD
+  A[THINK: think_prompt + LLM 流式] --> B[reasoning / todos_stream]
+  B --> C[todos_partial / todos]
+  C --> D{技能匹配?}
+  D -->|是| E[技能 workflow 顺序执行]
+  D -->|否| F[主循环 decide + parse_xml_decision]
+  E --> G[工具 execute + observation]
+  F --> G
+  G --> H[modify 服务端补参]
+  H --> I[done + summary]
+</pre>
+
+<h2>④ 前端渲染时机 SimpleChatPanel</h2>
+<pre class="mermaid">
+flowchart TD
+  S[status] --> U[understanding …]
+  R[reasoning] --> RC[reasoningContent]
+  TS[todos_stream] --> TV[todosStreamDraft / Visible]
+  TP[todos_partial / todos] --> ST[steps → AgentTaskRun]
+  EX[executing / observation] --> LG[detailLog / llmDraft / 状态]
+  DN[done] --> AE[activityExplorer]
+  DN --> FIN[finalResponse]
+</pre>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    themeVariables: {
+      primaryColor: "#1e3a5f",
+      primaryTextColor: "#e2e8f0",
+      primaryBorderColor: "#3b82f6",
+      lineColor: "#64748b",
+      secondaryColor: "#1e293b",
+      tertiaryColor: "#0f172a"
+    },
+    flowchart: { htmlLabels: true, curve: "basis", padding: 12 }
+  });
+</script>
+</body>
+</html>
