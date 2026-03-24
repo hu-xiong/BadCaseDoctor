@@ -15,27 +15,6 @@ try:
 except ImportError:
     TEXT2SQL_AVAILABLE = False
 
-# 从 Bug 复制新建时，仅允许用 LLM/用户入参覆盖这些键；其余保留源记录，
-# 避免 status=new、priority=中 等「模板默认值」冲掉源 Bug 的 closed、负责人等。
-_BUG_COPY_ALLOWED_FROM_FIELDS = frozenset({
-    'title', 'plan_id', 'description', 'steps_to_reproduce', 'reproduce_steps',
-    'expected_result', 'actual_result', 'environment', 'browser', 'os',
-    'bug_type', 'attachments',
-})
-
-# BadCase / 测试用例复制时同理（状态、负责人、优先级等保留源记录）
-_BADCASE_COPY_ALLOWED_FROM_FIELDS = frozenset({
-    'title', 'plan_id', 'description', 'base_problem', 'reproduction_steps',
-    'reproduce_steps', 'badcase_result', 'answer', 'correct_answer',
-    'case_category', 'problem_reason', 'solution', 'attachments', 'document_type',
-    'assigned_users', 'needs_processing', 'is_verified', 'plan',
-})
-_TC_COPY_ALLOWED_FROM_FIELDS = frozenset({
-    'title', 'plan_id', 'preconditions', 'steps', 'remark', 'case_type',
-    'test_type', 'related_defects', 'baseline', 'estimated_time', 'actual_time',
-    'remaining_time', 'version', 'requirement_id',
-})
-
 
 class CreateTool(BaseTool):
     """对话新增Bug/BadCase/计划工具"""
@@ -132,17 +111,11 @@ class CreateTool(BaseTool):
         
         _progress(f"初始化 create 参数… target={target}, confirm={confirm}")
         
-        # 若指定了复制来源（用例 / Bug / BadCase），跳过 Text2SQL「智能填充」：否则会只填少数字段，覆盖不全源记录属性
+        # 若指定了复制来源用例，跳过 Text2SQL「智能填充」：否则会只填少数字段，覆盖不全源用例属性
         copy_src_id = (fields or {}).get('copy_from_testcase_id') or (fields or {}).get('source_testcase_id')
-        copy_src_bug = (fields or {}).get('copy_from_bug_id') or (fields or {}).get('source_bug_id')
-        copy_src_badcase = (fields or {}).get('copy_from_badcase_id') or (fields or {}).get('source_badcase_id')
-        skip_smart = bool(
-            (copy_src_id and str(copy_src_id).strip())
-            or (copy_src_bug and str(copy_src_bug).strip())
-            or (copy_src_badcase and str(copy_src_badcase).strip())
-        )
+        skip_smart = bool(copy_src_id and str(copy_src_id).strip())
         if skip_smart and natural_query:
-            _progress("检测到复制来源：跳过智能填充，改为从源记录全量合并字段")
+            _progress("检测到 copy_from_testcase_id：跳过智能填充，改为从源用例全量合并字段")
         
         # 如果提供了自然语言描述，尝试智能填充字段（非「复制用例」场景）
         if natural_query and not skip_smart:
@@ -292,34 +265,6 @@ class CreateTool(BaseTool):
             'testcase': '测试用例'
         }
         return labels.get(target, target)
-
-    def _finalize_iteration_plan(self, target: str, validated: Dict[str, Any], fields: Dict) -> None:
-        """
-        迭代计划归属（与产品「未计划的卡片」一致）：
-        1）显式 plan_id（LLM/用户/预览）优先；
-        2）否则保留 validated 中已有值（含复制来源合并结果）；
-        3）否则 plan_id=None，表示归入「未计划」的 Bug / BadCase / 测试用例列表。
-        """
-        if target not in ('bug', 'badcase', 'testcase'):
-            return
-        f = fields or {}
-        raw = f.get('plan_id')
-        if raw is not None and str(raw).strip() != '':
-            try:
-                pi = int(raw)
-                validated['plan_id'] = None if pi == 0 else pi
-            except (TypeError, ValueError):
-                pass
-            return
-        pid = validated.get('plan_id')
-        if pid not in (None, ''):
-            try:
-                pi = int(pid)
-                validated['plan_id'] = None if pi == 0 else pi
-            except (TypeError, ValueError):
-                validated['plan_id'] = None
-            return
-        validated['plan_id'] = None
     
     def _validate_and_complete_fields(self, target: str, fields: Dict, project_id: int) -> Dict:
         """验证和补全字段"""
@@ -335,163 +280,78 @@ class CreateTool(BaseTool):
             raise ValueError(f"不支持的target类型: {target}")
     
     def _validate_bug_fields(self, fields: Dict, project_id: int) -> Dict:
-        """
-        验证 Bug 字段。
-        若带 copy_from_bug_id：以源 Bug 为基底复制业务字段（除 id/时间戳），
-        再用本次 fields 覆盖（通常为新标题）；与 copy_from_testcase 行为一致。
-        """
-        from sqlalchemy.inspection import inspect as sa_inspect
-        from app import Bug as _Bug
-
-        copy_from = fields.get('copy_from_bug_id') or fields.get('source_bug_id')
-        use_copy = copy_from is not None and str(copy_from).strip() != ''
-        meta_keys = {'copy_from_bug_id', 'source_bug_id', 'natural_query'}
+        """验证 Bug 字段"""
+        # 检查是否是复制场景
+        copy_from_bug_id = fields.get('copy_from_bug_id') or fields.get('source_bug_id')
         plan_from_copy = None
-        merged: Dict[str, Any] = {}
-
-        if use_copy:
-            try:
-                src = None
-                try:
-                    src_id = int(copy_from)
-                    src = self.db.query(_Bug).get(src_id)
-                except Exception:
-                    src = None
-                if src:
-                    plan_from_copy = src.plan_id
-                    skip_from_src = {'id', 'created_at', 'updated_at'}
-                    for c in sa_inspect(_Bug).mapper.column_attrs:
-                        k = c.key
-                        if k in skip_from_src:
-                            continue
-                        merged[k] = getattr(src, k)
-                    print(
-                        f"[CREATE] copy_from_bug_id 命中: copy_from={copy_from}, "
-                        f"src_plan_id={plan_from_copy}, assignee_id={merged.get('assignee_id')}, "
-                        f"priority={merged.get('priority')}, severity={merged.get('severity')}"
-                    )
-                else:
-                    print(f"[CREATE] copy_from_bug_id 未命中源记录: copy_from={copy_from}")
-            except Exception as ex:
-                print(f"[CREATE] 从源 Bug 加载失败: {ex}")
-
-        for k, v in (fields or {}).items():
-            if k in meta_keys:
-                continue
-            if v is None:
-                continue
-            # 与前端/LLM 常用别名对齐到 ORM 列名
-            fk = 'steps_to_reproduce' if k == 'reproduce_steps' else k
-            if use_copy:
-                if fk not in _BUG_COPY_ALLOWED_FROM_FIELDS and k not in _BUG_COPY_ALLOWED_FROM_FIELDS:
-                    continue
-                if v == '' or v == [] or v == {}:
-                    continue
-                if isinstance(v, str):
-                    sv = v.strip()
-                    if sv.startswith('[') and sv.endswith(']'):
-                        continue
-            merged[fk] = v
-
-        merged['project_id'] = int(project_id)
-        if merged.get('plan_id') in (None, '') and plan_from_copy is not None:
-            merged['plan_id'] = plan_from_copy
-
-        if not merged.get('title'):
+            
+        # 如果是复制 Bug，获取源 Bug 的 plan_id
+        if copy_from_bug_id:
+            from app import Bug
+            src_bug = self.db.query(Bug).get(int(copy_from_bug_id)) if copy_from_bug_id else None
+            if src_bug:
+                plan_from_copy = src_bug.plan_id
+                print(f"[CREATE] copy_from_bug_id 命中：copy_from={copy_from_bug_id}, src_plan_id={plan_from_copy}")
+            
+        # plan_id 优先级：1. 明确指定的 > 2. 复制源的 > 3. 未计划的同类型计划
+        plan_id = fields.get('plan_id')
+        if not plan_id and plan_from_copy:
+            plan_id = plan_from_copy
+            
+        validated = {
+            'title': fields.get('title', ''),
+            'description': fields.get('description', ''),
+            'priority': fields.get('priority', '中'),
+            'severity': fields.get('severity', 'medium'),
+            'status': fields.get('status', 'new'),
+            'project_id': project_id,
+            'plan_id': plan_id,
+            'assignee_id': fields.get('assignee_id'),
+            'reproduce_steps': fields.get('reproduce_steps', ''),
+            'expected_result': fields.get('expected_result', ''),
+            'actual_result': fields.get('actual_result', '')
+        }
+            
+        if not validated['title']:
             raise ValueError('Bug 标题不能为空')
-
-        allowed = {c.key for c in sa_inspect(_Bug).mapper.column_attrs}
-        validated = {k: merged[k] for k in allowed if k in merged}
-        validated.pop('id', None)
-        self._finalize_iteration_plan('bug', validated, fields)
+            
         return validated
     
     def _validate_badcase_fields(self, fields: Dict, project_id: int) -> Dict:
-        """
-        验证 BadCase 字段。
-        若带 copy_from_badcase_id：以源 BadCase 为基底复制业务字段（除 id/时间戳），
-        再用本次 fields 覆盖（通常为新标题）；与 Bug / 测试用例复制行为一致。
-        """
-        from sqlalchemy.inspection import inspect as sa_inspect
-        from app import BadCase as _BC
-        from app import BadCaseStatus
-
-        copy_from = fields.get('copy_from_badcase_id') or fields.get('source_badcase_id')
-        use_copy = copy_from is not None and str(copy_from).strip() != ''
-        meta_keys = {'copy_from_badcase_id', 'source_badcase_id', 'natural_query'}
+        """验证 BadCase 字段"""
+        # 检查是否是复制场景
+        copy_from_badcase_id = fields.get('copy_from_badcase_id') or fields.get('source_badcase_id')
         plan_from_copy = None
-        merged: Dict[str, Any] = {}
-
-        if use_copy:
-            try:
-                src = None
-                try:
-                    src_id = int(copy_from)
-                    src = self.db.query(_BC).get(src_id)
-                except Exception:
-                    src = None
-                if src:
-                    plan_from_copy = src.plan_id
-                    skip_from_src = {'id', 'created_at', 'updated_at'}
-                    for c in sa_inspect(_BC).mapper.column_attrs:
-                        k = c.key
-                        if k in skip_from_src:
-                            continue
-                        merged[k] = getattr(src, k)
-                    print(
-                        f"[CREATE] copy_from_badcase_id 命中: copy_from={copy_from}, "
-                        f"src_plan_id={plan_from_copy}, assignee={merged.get('assignee')}, "
-                        f"priority={merged.get('priority')}, case_category={merged.get('case_category')}"
-                    )
-                else:
-                    print(f"[CREATE] copy_from_badcase_id 未命中源记录: copy_from={copy_from}")
-            except Exception as ex:
-                print(f"[CREATE] 从源 BadCase 加载失败: {ex}")
-
-        for k, v in (fields or {}).items():
-            if k in meta_keys:
-                continue
-            if v is None:
-                continue
-            # 与前端/LLM 常用别名对齐到 ORM 列名（BadCase 为 reproduction_steps，非 Bug 的 steps_to_reproduce）
-            if k == 'reproduce_steps':
-                fk = 'reproduction_steps'
-            elif k == 'description':
-                fk = 'base_problem'
-            else:
-                fk = k
-            if use_copy:
-                if fk not in _BADCASE_COPY_ALLOWED_FROM_FIELDS and k not in _BADCASE_COPY_ALLOWED_FROM_FIELDS:
-                    continue
-                if v == '' or v == [] or v == {}:
-                    continue
-                if isinstance(v, str):
-                    sv = v.strip()
-                    if sv.startswith('[') and sv.endswith(']'):
-                        continue
-            merged[fk] = v
-
-        merged['project_id'] = int(project_id)
-        if merged.get('plan_id') in (None, '') and plan_from_copy is not None:
-            merged['plan_id'] = plan_from_copy
-
-        # 非复制：补 NOT NULL 与常见默认值（仅当尚未由 fields 写入）
-        if not use_copy:
-            merged.setdefault('case_category', '其他')
-            merged.setdefault('base_problem', '')
-            merged.setdefault('badcase_result', '')
-            merged.setdefault('answer', '')
-            merged.setdefault('priority', 'p3')
-            if 'status' not in merged:
-                merged['status'] = BadCaseStatus.NEW
-
-        if not merged.get('title'):
+            
+        # 如果是复制 BadCase，获取源 BadCase 的 plan_id
+        if copy_from_badcase_id:
+            from app import BadCase
+            src_badcase = self.db.query(BadCase).get(int(copy_from_badcase_id)) if copy_from_badcase_id else None
+            if src_badcase:
+                plan_from_copy = src_badcase.plan_id
+                print(f"[CREATE] copy_from_badcase_id 命中：copy_from={copy_from_badcase_id}, src_plan_id={plan_from_copy}")
+            
+        # plan_id 优先级：1. 明确指定的 > 2. 复制源的 > 3. 未计划的同类型计划
+        plan_id = fields.get('plan_id')
+        if not plan_id and plan_from_copy:
+            plan_id = plan_from_copy
+            
+        validated = {
+            'title': fields.get('title', ''),
+            'description': fields.get('description', ''),
+            'priority': fields.get('priority', '中'),
+            'status': fields.get('status', '待处理'),
+            'project_id': project_id,
+            'plan_id': plan_id,
+            'assignee_id': fields.get('assignee_id'),
+            'reproduce_steps': fields.get('reproduce_steps', ''),
+            'expected_result': fields.get('expected_result', ''),
+            'actual_result': fields.get('actual_result', '')
+        }
+            
+        if not validated['title']:
             raise ValueError('BadCase 标题不能为空')
-
-        allowed = {c.key for c in sa_inspect(_BC).mapper.column_attrs}
-        validated = {k: merged[k] for k in allowed if k in merged}
-        validated.pop('id', None)
-        self._finalize_iteration_plan('badcase', validated, fields)
+            
         return validated
     
     def _validate_plan_fields(self, fields: Dict, project_id: int) -> Dict:
@@ -584,10 +444,8 @@ class CreateTool(BaseTool):
             if v is None:
                 continue
             # 复制模式下：LLM/前端可能会带来大量“空值字段”，这些会覆盖源用例的非空字段。
-            # 这里忽略空值，且仅允许白名单键覆盖，避免 status/priority/assignee 等默认值冲掉源用例。
+            # 这里忽略空值，确保“除标题外其他属性都与源用例一致”。
             if use_copy:
-                if k not in _TC_COPY_ALLOWED_FROM_FIELDS:
-                    continue
                 if v == '' or v == [] or v == {}:
                     continue
                 if isinstance(v, str):
@@ -621,7 +479,6 @@ class CreateTool(BaseTool):
         allowed = {c.key for c in sa_inspect(_TC).mapper.column_attrs}
         validated = {k: merged[k] for k in allowed if k in merged}
         validated.pop('id', None)
-        self._finalize_iteration_plan('testcase', validated, fields)
         return validated
     
     async def _create_record(self, target: str, fields: Dict, project_id: int) -> int:

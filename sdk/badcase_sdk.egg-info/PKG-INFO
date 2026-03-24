@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: badcase-sdk
+Version: 0.1.0
+Summary: BadCase 指标采集 SDK - 采集 LLM 对话五大因素，输出 Prometheus 指标
+License: MIT
+Keywords: badcase,prometheus,metrics,llm,observability
+Requires-Python: >=3.8
+Requires-Dist: prometheus-client>=0.19.0
+Provides-Extra: fastapi
+Requires-Dist: fastapi>=0.100.0; extra == "fastapi"
+Provides-Extra: flask
+Requires-Dist: flask>=2.0.0; extra == "flask"

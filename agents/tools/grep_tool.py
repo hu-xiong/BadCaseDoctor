@@ -138,37 +138,27 @@ class GrepTool(BaseTool):
                     comparison = await self._generate_comparison(project_id, keywords)
                     _progress("阶段3：对比报告生成完成")
                     
-                    # 生成导航指令
+                    # 生成导航指令（Bug / BadCase / TestCase，随 grep target 过滤；all 时合并多类）
                     navigation = None
-                    if bug_list:
+                    navigation_list = self._build_grep_navigation_items(
+                        plan_tree, target, badcase_list, bug_list, testcase_list
+                    )
+                    if navigation_list:
                         _progress("生成导航指令…")
-                        navigation_list = []
-                        for bug in bug_list:
-                            if bug.get('plan_id'):
-                                # 查找计划名称
-                                plan_name = ''
-                                if plan_tree and 'plans' in plan_tree:
-                                    for plan in plan_tree['plans']:
-                                        if plan['id'] == bug.get('plan_id'):
-                                            plan_name = plan['name']
-                                            break
-                                
-                                navigation_list.append({
-                                    'type': 'expand_and_locate',
-                                    'target': 'bug',
-                                    'bug_id': bug['id'],
-                                    'plan_id': bug['plan_id'],
-                                    'bug_title': bug['title'],
-                                    'plan_name': plan_name
-                                })
-                        
-                        if navigation_list:
-                            navigation = navigation_list[0] if len(navigation_list) == 1 else {
-                                'type': 'multiple',
-                                'items': navigation_list
-                            }
-                            print(f"[GREP] ✅ 定位完成: {len(bug_list)}条Bug, {len(badcase_list)}条BadCase")
-                            _progress("定位完成，导航已生成")
+                        navigation = (
+                            navigation_list[0]
+                            if len(navigation_list) == 1
+                            else {'type': 'multiple', 'items': navigation_list}
+                        )
+                        print(
+                            f"[GREP] ✅ 定位完成: Bug={len(bug_list)} BadCase={len(badcase_list)} "
+                            f"TestCase={len(testcase_list)}，导航条目={len(navigation_list)}"
+                        )
+                        print(
+                            f"[MODIFY-TRACE] grep_tool: grep_target={target!r}, nav_len={len(navigation_list)} "
+                            f"(无 plan_id 的记录不会进导航卡片)"
+                        )
+                        _progress("定位完成，导航已生成")
                     
                     result['data'] = {
                         'plan_tree': plan_tree,
@@ -387,6 +377,89 @@ class GrepTool(BaseTool):
         if ttl > 0:
             self._plan_tree_cache[key] = (result, time.time())
         return result
+
+    def _plan_display_name(self, plan_tree: Optional[Dict[str, Any]], plan_id: Any) -> str:
+        """从 plan_tree 扁平 plans 列表解析计划名称（用于导航卡片）。"""
+        if plan_id is None or not plan_tree:
+            return ''
+        for p in plan_tree.get('plans') or []:
+            if p.get('id') == plan_id:
+                return (p.get('name') or '').strip()
+        return ''
+
+    def _build_grep_navigation_items(
+        self,
+        plan_tree: Optional[Dict[str, Any]],
+        grep_target: str,
+        badcase_list: List[Dict[str, Any]],
+        bug_list: List[Dict[str, Any]],
+        testcase_list: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        生成前端「点击跳转」列表项；与 bug 一致带 type=expand_and_locate，并统一 record_id/title，
+        同时保留 bug_id/bug_title 兼容旧前端。
+        """
+        gt = (grep_target or 'all').strip().lower()
+        items: List[Dict[str, Any]] = []
+
+        def append_bug(bug: Dict[str, Any]) -> None:
+            pid = bug.get('plan_id')
+            if not pid:
+                return
+            title = (bug.get('title') or '').strip()
+            bid = bug.get('id')
+            items.append({
+                'type': 'expand_and_locate',
+                'target': 'bug',
+                'record_id': bid,
+                'title': title,
+                'plan_id': pid,
+                'plan_name': self._plan_display_name(plan_tree, pid),
+                'bug_id': bid,
+                'bug_title': title,
+            })
+
+        def append_badcase(bc: Dict[str, Any]) -> None:
+            pid = bc.get('plan_id')
+            if not pid:
+                return
+            title = (bc.get('title') or '').strip()
+            rid = bc.get('id')
+            items.append({
+                'type': 'expand_and_locate',
+                'target': 'badcase',
+                'record_id': rid,
+                'title': title,
+                'plan_id': pid,
+                'plan_name': self._plan_display_name(plan_tree, pid),
+            })
+
+        def append_tc(tc: Dict[str, Any]) -> None:
+            pid = tc.get('plan_id')
+            if not pid:
+                return
+            title = (tc.get('title') or '').strip()
+            rid = tc.get('id')
+            items.append({
+                'type': 'expand_and_locate',
+                'target': 'testcase',
+                'record_id': rid,
+                'title': title,
+                'plan_id': pid,
+                'plan_name': self._plan_display_name(plan_tree, pid),
+            })
+
+        if gt in ('bug', 'all'):
+            for b in bug_list or []:
+                append_bug(b)
+        if gt in ('badcase', 'all'):
+            for bc in badcase_list or []:
+                append_badcase(bc)
+        if gt in ('testcase', 'all'):
+            for tc in testcase_list or []:
+                append_tc(tc)
+
+        return items
     
     def _extract_keywords(self, text: str) -> List[str]:
         """从计划名称中提取关键词"""

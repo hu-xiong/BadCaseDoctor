@@ -99,6 +99,7 @@ def execute_agent():
         agent_mode = data.get('agent_mode', 'auto')
         model_name = data.get('model')
         project_id = data.get('project_id')  # 获取项目ID
+        ui_locale = data.get('locale') or data.get('ui_locale')
         
         print(f"[AGENT] 用户ID: {current_user.id}")
         print(f"[AGENT] 用户输入: {user_input}")
@@ -126,7 +127,7 @@ def execute_agent():
             intent_start = time.time()
             
             with MetricsRecorder('intent_detection'):
-                intent_result = _detect_intent(user_input, conversation_history, llm)
+                intent_result = _detect_intent(user_input, conversation_history, llm, locale=ui_locale)
             
             detected_agent = intent_result.get('agent', 'unknown')
             detected_intent = intent_result.get('intent', 'unknown')
@@ -186,7 +187,7 @@ def execute_agent():
         }), 500
 
 
-def _detect_intent(user_input: str, conversation_history: list, llm) -> dict:
+def _detect_intent(user_input: str, conversation_history: list, llm, locale=None) -> dict:
     """
     使用千帆模型识别用户意图
     
@@ -225,8 +226,7 @@ def _detect_intent(user_input: str, conversation_history: list, llm) -> dict:
 - bug_modify: 用户要求修改 Bug 的字段 (期望结果、复现步骤、描述、状态、优先级等)
 - general: 其他通用对话
 """
-        
-        response = llm.parse_intent(prompt, conversation_history)
+        response = llm.parse_intent(prompt, conversation_history, locale=locale)
         
         if isinstance(response, list) and len(response) > 0:
             intent_data = response[0]
@@ -499,19 +499,56 @@ def react_agent():
         if perf:
             print(f"[PERF][react_api][{req_id}] parse_json_ms={(time.perf_counter()-t_req0)*1000:.1f}")
         user_input = data.get('user_input', '')
-        stream_mode = data.get('stream', True)  # 默认开启流式
-        model_name = data.get('model')  # 获取模型名称
-        project_id = data.get('project_id')  # 获取项目 ID
-        plan_id = data.get('plan_id')  # 当前迭代计划 ID，传入则 grep 只查该计划下的记录（人类式先看本迭代）
-        
+        images = data.get('images') or []
+        stream_mode = data.get('stream', True)
+        model_name = data.get('model')
+        project_id = data.get('project_id')
+        plan_id = data.get('plan_id')
+        ui_locale = data.get('locale') or data.get('ui_locale')
+        pending_diff_context = data.get('pending_diff_context') or []
+
+        if images:
+            try:
+                from agents.locale_prompts import vision_image_block_labels
+                from agents.vision_describe import VisionDescribeService
+
+                vision_svc = VisionDescribeService()
+                descriptions = []
+                for img in images[:5]:
+                    data_field = img.get('data') or img.get('url', '')
+                    if not data_field:
+                        continue
+                    desc = vision_svc.describe_prototype_for_testcase(
+                        data_field, user_input or '', locale=ui_locale
+                    )
+                    if desc:
+                        descriptions.append(desc)
+                if descriptions:
+                    _ip, _ul, _def = vision_image_block_labels(ui_locale)
+                    user_input = (
+                        _ip
+                        + "\n"
+                        + "\n\n".join(descriptions)
+                        + f"\n\n{_ul} "
+                        + (user_input or _def)
+                    )
+                    print(f"[REACT] 已注入 {len(descriptions)} 条图片描述，丰富后的 user_input 长度: {len(user_input)}")
+            except Exception as ve:
+                print(f"[REACT] 视觉描述失败，将使用原始输入: {ve}")
+                import traceback
+                traceback.print_exc()
+
         print(f"[REACT] 请求参数:")
-        print(f"  - user_input: {user_input}")
+        print(f"  - user_input 长度: {len(user_input)}")
         print(f"  - model: {model_name}")
         print(f"  - stream: {stream_mode}")
         print(f"  - project_id: {project_id}")
         print(f"  - plan_id: {plan_id}")
-        print(f"[REACT] JSON 数据：{data}")
-        
+        try:
+            print(f"  - pending_diff_context: {len(pending_diff_context) if isinstance(pending_diff_context, list) else 0}")
+        except Exception:
+            pass
+
         if not user_input.strip():
             return jsonify({'code': 400, 'message': '输入不能为空'}), 400
         
@@ -527,7 +564,9 @@ def react_agent():
         
         if not stream_mode:
             # 非流式模式
-            result = asyncio.run(agent.handle_user_request(user_input, project_id=project_id))
+            result = asyncio.run(
+                agent.handle_user_request(user_input, project_id=project_id, locale=ui_locale)
+            )
             return jsonify({'code': 200, 'data': result})
 
         # 流式模式 - 使用 Queue 桥接异步生成器到同步生成器
@@ -549,22 +588,28 @@ def react_agent():
                 asyncio.set_event_loop(loop)
                 async def task():
                     try:
-                        print(f"[REACT-STREAM] 开始异步任务循环")
-                        async for chunk in agent.handle_user_request_stream(user_input, project_id=project_id, plan_id=plan_id):
-                            print(f"[REACT-STREAM] 产出 chunk: {chunk.get('type')}")
+                        print(f"[REACT-planing] 开始异步任务循环")
+                        async for chunk in agent.handle_user_request_stream(
+                            user_input,
+                            project_id=project_id,
+                            plan_id=plan_id,
+                            locale=ui_locale,
+                            pending_diff_context=pending_diff_context,
+                        ):
+                            print(f"[REACT-thought] 产出 chunk: {chunk.get('type')}")
                             q.put(chunk)
                     except Exception as e:
-                        print(f"[REACT-STREAM] 异常: {str(e)}")
+                        print(f"[REACT-execution] 异常: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         q.put({'type': 'error', 'message': str(e)})
                     finally:
-                        print(f"[REACT-STREAM] 任务结束")
+                        print(f"[REACT-planing] 任务结束")
                         q.put(done)
                 try:
                     loop.run_until_complete(task())
                 except Exception as e:
-                    print(f"[REACT-STREAM] 事件循环异常: {str(e)}")
+                    print(f"[REACT-execution] 事件循环异常: {str(e)}")
                     import traceback
                     traceback.print_exc()
                 finally:

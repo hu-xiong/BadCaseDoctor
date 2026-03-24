@@ -1,14 +1,14 @@
-# Windows 下强制 stdout/stderr 使用 UTF-8，避免 print 中文/emoji 时 GBK 报错
+# Windows 下让控制台用 UTF-8 输出中文/emoji。
+# 禁止再用 TextIOWrapper 包一层替换 sys.stdout：Flask debug 重载子进程里原 buffer 可能已关闭，
+# 会导致 ValueError: I/O operation on closed file，进而所有 print() 让接口 500。
 import sys
-import io
 if sys.platform == "win32":
-    try:
-        if hasattr(sys.stdout, "buffer"):
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        if hasattr(sys.stderr, "buffer"):
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -43,6 +43,7 @@ import time
 import signal
 import os
 import enum
+import hashlib
 
 from routers.chat import chat_bp
 from routers.agent import agent_bp
@@ -1056,6 +1057,30 @@ class ChatMessage(db.Model):
     session = db.relationship('ChatSession', backref='messages')
     user = db.relationship('User', backref='chat_messages')
 
+
+class DiffReviewState(db.Model):
+    """每条记录仅保留一份当前 Diff 状态（pending/adopted/rejected/superseded）"""
+    __tablename__ = 'diff_review_state'
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False, index=True)
+    target = db.Column(db.String(32), nullable=False, index=True)  # badcase/bug/testcase
+    target_id = db.Column(db.Integer, nullable=False, index=True)
+    plan_id = db.Column(db.Integer, nullable=True, index=True)
+    lifecycle_id = db.Column(db.Integer, default=1, nullable=False)
+    diff_fingerprint = db.Column(db.String(64), nullable=False, default='')
+    status = db.Column(db.String(20), nullable=False, default='pending', index=True)
+    diff_payload = db.Column(db.Text, nullable=True)  # JSON string
+    modifications_payload = db.Column(db.Text, nullable=True)  # JSON string
+    source_message_id = db.Column(db.Integer, nullable=True)
+    source_session_id = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    adopted_at = db.Column(db.DateTime, nullable=True)
+    rejected_at = db.Column(db.DateTime, nullable=True)
+
+    project = db.relationship('Project', backref='diff_review_states')
+
 class BugComment(db.Model):
     __tablename__ = 'bug_comment'
     id = db.Column(db.Integer, primary_key=True)
@@ -1994,6 +2019,260 @@ def api_agent_change_bug_status():
         print(f"修改 Bug 状态失败: {e}")
         return jsonify({"error": f"修改 Bug 状态失败: {str(e)}"}), 500
 
+
+def _normalize_diff_target(target):
+    t = (target or '').strip().lower().replace('-', '_')
+    if t == 'test_case':
+        return 'testcase'
+    if t in ('bug', 'badcase', 'testcase'):
+        return t
+    return t or 'badcase'
+
+
+def _canonical_modifications(modifications):
+    if not isinstance(modifications, dict):
+        return {}
+    out = {}
+    for k in sorted(modifications.keys()):
+        v = modifications.get(k)
+        if isinstance(v, dict):
+            out[k] = {'old': v.get('old', ''), 'new': v.get('new', '')}
+        else:
+            out[k] = {'old': '', 'new': v}
+    return out
+
+
+def _fingerprint_for_diff(target, target_id, modifications):
+    payload = {
+        'target': _normalize_diff_target(target),
+        'target_id': int(target_id),
+        'modifications': _canonical_modifications(modifications),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _upsert_diff_review_state(
+    project_id,
+    target,
+    target_id,
+    plan_id,
+    diff,
+    modifications,
+    source_message_id=None,
+    source_session_id=None,
+):
+    """同一记录只维护一份当前 Diff 状态；已采纳/已拒绝且 fingerprint 相同不再回到 pending。"""
+    nt = _normalize_diff_target(target)
+    tid = int(target_id)
+    canonical_mods = _canonical_modifications(modifications)
+    fp = _fingerprint_for_diff(nt, tid, canonical_mods)
+    now = datetime.utcnow()
+    all_rows = (
+        DiffReviewState.query
+        .filter_by(project_id=project_id, target=nt, target_id=tid)
+        .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
+        .all()
+    )
+    row = all_rows[0] if all_rows else None
+
+    if row is None:
+        row = DiffReviewState(
+            project_id=project_id,
+            target=nt,
+            target_id=tid,
+            plan_id=plan_id,
+            lifecycle_id=1,
+            diff_fingerprint=fp,
+            status='pending',
+            diff_payload=json.dumps(diff or [], ensure_ascii=False),
+            modifications_payload=json.dumps(canonical_mods, ensure_ascii=False),
+            source_message_id=source_message_id,
+            source_session_id=source_session_id,
+            updated_at=now,
+        )
+        db.session.add(row)
+        db.session.flush()
+        return row, False
+
+    if row.status in ('adopted', 'rejected', 'superseded') and row.diff_fingerprint == fp:
+        row.updated_at = now
+        if source_message_id is not None:
+            row.source_message_id = source_message_id
+        if source_session_id is not None:
+            row.source_session_id = source_session_id
+        # 其余同键历史行统一标记 superseded，避免旧 pending 被误读
+        for old in all_rows[1:]:
+            if old.status != 'superseded':
+                old.status = 'superseded'
+                old.updated_at = now
+        db.session.flush()
+        return row, True
+
+    if row.status != 'pending':
+        row.lifecycle_id = int(row.lifecycle_id or 0) + 1
+        row.adopted_at = None
+        row.rejected_at = None
+    row.status = 'pending'
+    row.plan_id = plan_id
+    row.diff_fingerprint = fp
+    row.diff_payload = json.dumps(diff or [], ensure_ascii=False)
+    row.modifications_payload = json.dumps(canonical_mods, ensure_ascii=False)
+    row.updated_at = now
+    if source_message_id is not None:
+        row.source_message_id = source_message_id
+    if source_session_id is not None:
+        row.source_session_id = source_session_id
+    # 其余同键历史行统一标记 superseded，保证“同记录只有一份当前状态”
+    for old in all_rows[1:]:
+        if old.status != 'superseded':
+            old.status = 'superseded'
+            old.updated_at = now
+    db.session.flush()
+    return row, False
+
+
+@app.route('/api/projects/<int:project_id>/diff-reviews/upsert', methods=['POST'])
+@login_required
+def api_upsert_diff_review(project_id):
+    try:
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        data = request.get_json() or {}
+        target = data.get('target')
+        target_id = data.get('target_id')
+        if target is None or target_id is None:
+            return jsonify({'success': False, 'error': '缺少 target/target_id'}), 400
+        row, suppressed = _upsert_diff_review_state(
+            project_id=project_id,
+            target=target,
+            target_id=target_id,
+            plan_id=data.get('plan_id'),
+            diff=data.get('diff') or [],
+            modifications=data.get('modifications') or {},
+            source_message_id=data.get('message_id'),
+            source_session_id=data.get('session_id'),
+        )
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'suppressed': bool(suppressed),
+            'record': {
+                'id': row.id,
+                'project_id': row.project_id,
+                'target': row.target,
+                'target_id': row.target_id,
+                'plan_id': row.plan_id,
+                'status': row.status,
+                'lifecycle_id': row.lifecycle_id,
+                'diff_fingerprint': row.diff_fingerprint,
+            }
+        })
+    except Exception as e:
+        db.session.rollback()
+        print(f"[DIFF-UPSERT] 失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/projects/<int:project_id>/diff-reviews/resolve', methods=['POST'])
+@login_required
+def api_resolve_diff_review(project_id):
+    try:
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        data = request.get_json() or {}
+        target = _normalize_diff_target(data.get('target'))
+        target_id = data.get('target_id')
+        action = (data.get('action') or '').strip().lower()
+        if not target or target_id is None or action not in ('confirm', 'reject'):
+            return jsonify({'success': False, 'error': '参数错误'}), 400
+
+        rows = (
+            DiffReviewState.query
+            .filter_by(project_id=project_id, target=target, target_id=int(target_id))
+            .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
+            .all()
+        )
+        if not rows:
+            return jsonify({'success': True, 'message': '无可更新记录（幂等）'})
+        row = rows[0]
+
+        now = datetime.utcnow()
+        if action == 'confirm':
+            row.status = 'adopted'
+            row.adopted_at = now
+            row.rejected_at = None
+        else:
+            row.status = 'rejected'
+            row.rejected_at = now
+            row.adopted_at = None
+        if data.get('message_id') is not None:
+            row.source_message_id = data.get('message_id')
+        if data.get('session_id') is not None:
+            row.source_session_id = data.get('session_id')
+        row.updated_at = now
+        # 其余历史行全部 superseded，避免旧 pending 残留
+        for old in rows[1:]:
+            if old.status != 'superseded':
+                old.status = 'superseded'
+                old.updated_at = now
+        db.session.commit()
+        return jsonify({'success': True, 'status': row.status})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[DIFF-RESOLVE] 失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/projects/<int:project_id>/diff-reviews', methods=['GET'])
+@login_required
+def api_list_diff_reviews(project_id):
+    try:
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        status = (request.args.get('status') or 'pending').strip().lower()
+        rows = (
+            DiffReviewState.query
+            .filter_by(project_id=project_id)
+            .order_by(DiffReviewState.target.asc(), DiffReviewState.target_id.asc(), DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
+            .all()
+        )
+        # 同记录只取最新一条；仅当最新状态命中筛选状态才返回
+        latest_by_key = {}
+        for r in rows:
+            k = (r.target, r.target_id)
+            if k not in latest_by_key:
+                latest_by_key[k] = r
+        result = []
+        for r in latest_by_key.values():
+            if status and r.status != status:
+                continue
+            try:
+                diff = json.loads(r.diff_payload) if r.diff_payload else []
+            except Exception:
+                diff = []
+            try:
+                mods = json.loads(r.modifications_payload) if r.modifications_payload else {}
+            except Exception:
+                mods = {}
+            result.append({
+                'target': r.target,
+                'target_id': r.target_id,
+                'plan_id': r.plan_id,
+                'status': r.status,
+                'lifecycle_id': r.lifecycle_id,
+                'diff_fingerprint': r.diff_fingerprint,
+                'diff': diff,
+                'modifications': mods,
+                'message_id': r.source_message_id,
+                'session_id': r.source_session_id,
+            })
+        return jsonify({'success': True, 'items': result})
+    except Exception as e:
+        print(f"[DIFF-LIST] 失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 def _run_modify_in_background(project_id, target, target_id, modifications, message_id, db_uri):
     """后台线程执行采纳落库，使用独立 app_context 和 db.session，避免阻塞主请求"""
     import asyncio
@@ -2019,6 +2298,24 @@ def _run_modify_in_background(project_id, target, target_id, modifications, mess
                         db.session.commit()
                 except Exception:
                     pass
+            if result.get('success'):
+                try:
+                    nt = _normalize_diff_target(target)
+                    row = DiffReviewState.query.filter_by(
+                        project_id=project_id,
+                        target=nt,
+                        target_id=int(target_id),
+                    ).first()
+                    if row:
+                        row.status = 'adopted'
+                        row.adopted_at = datetime.utcnow()
+                        row.rejected_at = None
+                        row.updated_at = datetime.utcnow()
+                        if message_id:
+                            row.source_message_id = message_id
+                        db.session.commit()
+                except Exception as _e:
+                    print(f"[MODIFY-BG] 更新 diff_review_state 为 adopted 失败: {_e}")
         except Exception as e:
             print(f"[MODIFY-BG] 后台采纳失败: {e}")
 
@@ -4135,6 +4432,27 @@ def sync_database_schema():
                     'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
+            },
+            'diff_review_state': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'project_id INT NOT NULL',
+                    'target VARCHAR(32) NOT NULL',
+                    'target_id INT NOT NULL',
+                    'plan_id INT',
+                    'lifecycle_id INT DEFAULT 1',
+                    'diff_fingerprint VARCHAR(64) DEFAULT ""',
+                    'status VARCHAR(20) DEFAULT "pending"',
+                    'diff_payload TEXT',
+                    'modifications_payload TEXT',
+                    'source_message_id INT',
+                    'source_session_id INT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'adopted_at DATETIME',
+                    'rejected_at DATETIME',
+                    'FOREIGN KEY (project_id) REFERENCES project(id)'
+                ]
             }
         }
         
@@ -4171,6 +4489,9 @@ def sync_database_schema():
         db.session.commit()
         print("数据库表结构同步完成")
         
+        # 先清理 diff_review_state 历史脏数据（同记录多条状态），再建索引
+        cleanup_diff_review_duplicates()
+
         # 创建性能优化索引
         create_performance_indexes()
         
@@ -4210,6 +4531,41 @@ def sync_database_schema():
         print(f"数据库同步过程中出现错误: {e}")
         db.session.rollback()
         return False
+
+def cleanup_diff_review_duplicates():
+    """清理 diff_review_state 脏数据：同 (project_id,target,target_id) 仅保留最新一条。"""
+    try:
+        if not inspect(db.engine).has_table('diff_review_state'):
+            return
+        rows = (
+            DiffReviewState.query
+            .order_by(
+                DiffReviewState.project_id.asc(),
+                DiffReviewState.target.asc(),
+                DiffReviewState.target_id.asc(),
+                DiffReviewState.updated_at.desc(),
+                DiffReviewState.id.desc(),
+            )
+            .all()
+        )
+        keep_keys = set()
+        delete_ids = []
+        for r in rows:
+            k = (r.project_id, r.target, r.target_id)
+            if k in keep_keys:
+                delete_ids.append(r.id)
+            else:
+                keep_keys.add(k)
+        if delete_ids:
+            DiffReviewState.query.filter(DiffReviewState.id.in_(delete_ids)).delete(synchronize_session=False)
+            db.session.commit()
+            print(f"[DIFF-CLEANUP] 已删除重复状态行: {len(delete_ids)}")
+        else:
+            print("[DIFF-CLEANUP] 无重复状态行")
+    except Exception as e:
+        print(f"[DIFF-CLEANUP] 清理失败: {e}")
+        db.session.rollback()
+
 
 def create_performance_indexes():
     """创建性能优化索引"""
@@ -4274,7 +4630,13 @@ def create_performance_indexes():
             ("idx_bug_comment_user_id", "CREATE INDEX idx_bug_comment_user_id ON bug_comment(user_id)"),
             
             # BadCase表新增索引
-            ("idx_badcase_plan_id", "CREATE INDEX idx_badcase_plan_id ON bad_case(plan_id)")
+            ("idx_badcase_plan_id", "CREATE INDEX idx_badcase_plan_id ON bad_case(plan_id)"),
+
+            # DiffReview 持久化索引
+            ("idx_diff_review_project_target", "CREATE INDEX idx_diff_review_project_target ON diff_review_state(project_id, target, target_id)"),
+            ("idx_diff_review_project_status", "CREATE INDEX idx_diff_review_project_status ON diff_review_state(project_id, status)"),
+            ("idx_diff_review_plan", "CREATE INDEX idx_diff_review_plan ON diff_review_state(project_id, plan_id)"),
+            ("unique_diff_review_record", "CREATE UNIQUE INDEX unique_diff_review_record ON diff_review_state(project_id, target, target_id)")
         ]
         
         # 执行索引创建
@@ -4326,12 +4688,23 @@ def api_create_plan():
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         print("权限检查通过")
             
-        # 检查父计划是否存在
+        # 检查父计划是否存在；子计划必须与父计划同一内容类型（BadCase / Bug / 测试用例）
         if data.get('parent_id'):
             parent_plan = Plan.query.get(data['parent_id'])
             if not parent_plan:
                 return jsonify({'success': False, 'error': '父计划不存在'}), 404
-            
+            requested_type = (data.get('plan_type') or 'badcase')
+            if isinstance(requested_type, str):
+                requested_type = requested_type.strip().lower()
+            parent_type = (parent_plan.plan_type or 'badcase')
+            if isinstance(parent_type, str):
+                parent_type = parent_type.strip().lower()
+            if requested_type != parent_type:
+                return jsonify({
+                    'success': False,
+                    'error': '子计划内容类型必须与父计划一致，不可混用 BadCase / Bug / 测试用例'
+                }), 400
+
         # 验证日期格式
         try:
             start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date() if data.get('start_date') else None
@@ -5949,18 +6322,35 @@ def api_generate_session_title(session_id):
         if not user_message:
             return jsonify({'success': False, 'error': '消息内容为空'}), 400
         
-        # 调用 LLM 生成简短标题
-        from llm.factory import LLMFactory
-        llm = LLMFactory.create()
-        
+        # 调用 LLM 生成简短标题（使用 get_llm；chat 多为 async，须 await）
+        import asyncio
+        import inspect
+        from llm.factory import get_llm
+
+        llm = get_llm("qwen")
+
         prompt = f"""请根据以下用户消息生成一个简短的会话标题（不超过15个字），直接输出标题，不要加引号或其他符号：
 
 用户消息：{user_message[:200]}
 
 标题："""
-        
-        title = llm.chat(prompt)
-        title = title.strip().strip('"').strip("'")
+
+        chat_fn = getattr(llm, "chat", None)
+        if not callable(chat_fn):
+            return jsonify({'success': False, 'error': 'LLM 未实现 chat'}), 500
+
+        if inspect.iscoroutinefunction(chat_fn):
+            title = asyncio.run(chat_fn(prompt))
+        else:
+            title = chat_fn(prompt)
+            if inspect.isawaitable(title):
+                title = asyncio.run(title)
+
+        if title is None:
+            title = ""
+        title = str(title).strip().strip('"').strip("'")
+        if title.startswith("Error:") or not title:
+            return jsonify({'success': False, 'error': '模型未返回有效标题'}), 500
         
         # 限制标题长度
         if len(title) > 20:
@@ -6147,5 +6537,20 @@ if __name__ == '__main__':
         print("✅ Redis初始化成功")
     else:
         print("❌ Redis初始化失败，缓存功能将不可用")
-    
-    app.run(debug=False, port=5000)
+
+    # 开发热重载：默认开启（修改 .py 后自动重启子进程）。关闭：FLASK_DEBUG=0 或 FLASK_ENV=production
+    _fd = os.getenv("FLASK_DEBUG", "1").strip().lower()
+    _use_reload = _fd not in ("0", "false", "no", "off", "")
+    if os.getenv("FLASK_ENV", "").strip().lower() == "production":
+        _use_reload = False
+    try:
+        _port = int(os.getenv("PORT", "5000") or "5000")
+    except ValueError:
+        _port = 5000
+    _host = (os.getenv("FLASK_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
+    if _use_reload:
+        print("🔁 热重载已开启：保存 Python 源码后会自动重启（关闭请设置 FLASK_DEBUG=0）")
+    else:
+        print("ℹ️ 热重载已关闭（FLASK_DEBUG=0 或 FLASK_ENV=production）")
+
+    app.run(debug=_use_reload, use_reloader=_use_reload, host=_host, port=_port)

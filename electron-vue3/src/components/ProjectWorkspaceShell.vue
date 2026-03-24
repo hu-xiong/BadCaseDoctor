@@ -10,10 +10,10 @@
         <div class="breadcrumb">
           <span class="breadcrumb-item">{{ projectName }}</span>
           <span class="breadcrumb-separator">/</span>
-          <span class="breadcrumb-item">{{ breadcrumb }}</span>
+          <span class="breadcrumb-item">{{ breadcrumb || t('project.breadcrumbIteration') }}</span>
           <span class="dropdown-arrow">▼</span>
         </div>
-        <span class="edit-permission">编辑权限</span>
+        <span class="edit-permission">{{ t('project.editPermission') }}</span>
       </div>
 
       <div class="top-right">
@@ -21,7 +21,7 @@
           <button
             class="layout-btn"
             :class="{ active: !leftSidebarHidden }"
-            title="切换侧边栏"
+            :title="t('shell.toggleSidebar')"
             @click="$emit('setLayout', 'left')"
           >
             <div class="layout-icon left-aligned"></div>
@@ -29,7 +29,7 @@
           <button
             class="layout-btn"
             :class="{ active: showTerminal }"
-            title="切换终端"
+            :title="t('shell.toggleTerminal')"
             @click="$emit('setLayout', 'bottom')"
           >
             <div class="layout-icon bottom-aligned"></div>
@@ -37,7 +37,7 @@
           <button
             class="layout-btn"
             :class="{ active: showAIAssistant }"
-            title="切换AI助手"
+            :title="t('shell.toggleAI')"
             @click="$emit('setLayout', 'right')"
           >
             <div class="layout-icon right-aligned"></div>
@@ -49,30 +49,34 @@
 
           <div v-if="showUserDropdown" class="user-menu" @click.stop>
             <div class="user-info">
-              <div class="user-name">{{ currentUser?.name || '用户' }}</div>
-              <div class="user-email">{{ currentUser?.email || 'user@example.com' }}</div>
+              <div class="user-name">{{ currentUser?.name || t('shell.userFallback') }}</div>
+              <div class="user-email">{{ currentUser?.email || t('shell.emailFallback') }}</div>
             </div>
             <div class="menu-divider"></div>
             <div class="menu-item" @click="$emit('showNotifications')">
               <span class="menu-icon">🔔</span>
-              <span class="menu-text">通知</span>
+              <span class="menu-text">{{ t('shell.notifications') }}</span>
             </div>
             <div class="menu-item" @click="$emit('showHelp')">
               <span class="menu-icon">❓</span>
-              <span class="menu-text">帮助</span>
+              <span class="menu-text">{{ t('shell.help') }}</span>
             </div>
             <div class="menu-item" @click="$emit('showTeamManagement')">
               <span class="menu-icon">👥</span>
-              <span class="menu-text">团队管理</span>
+              <span class="menu-text">{{ t('shell.team') }}</span>
             </div>
             <div class="menu-item" @click="$emit('showUserProfile')">
               <span class="menu-icon">👤</span>
-              <span class="menu-text">个人资料</span>
+              <span class="menu-text">{{ t('shell.profile') }}</span>
+            </div>
+            <div class="menu-item" @click="$emit('showPreferences')">
+              <span class="menu-icon">⚙️</span>
+              <span class="menu-text">{{ t('shell.preferences') }}</span>
             </div>
             <div class="menu-divider"></div>
             <div class="menu-item logout-item" @click="$emit('logout')">
               <span class="menu-icon">🚪</span>
-              <span class="menu-text">退出登录</span>
+              <span class="menu-text">{{ t('shell.logout') }}</span>
             </div>
           </div>
         </div>
@@ -84,29 +88,32 @@
   </div>
 </template>
 
-<script>
-export default {
-  name: 'ProjectWorkspaceShell',
-  props: {
-    projectName: { type: String, default: '' },
-    breadcrumb: { type: String, default: '迭代管理' },
-    currentUser: { type: Object, default: null },
-    leftSidebarHidden: { type: Boolean, default: false },
-    showTerminal: { type: Boolean, default: false },
-    showAIAssistant: { type: Boolean, default: false },
-    showUserDropdown: { type: Boolean, default: false }
-  },
-  emits: [
-    'goToDashboard',
-    'setLayout',
-    'toggleUserDropdown',
-    'showNotifications',
-    'showHelp',
-    'showTeamManagement',
-    'showUserProfile',
-    'logout'
-  ]
-}
+<script setup>
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
+
+defineProps({
+  projectName: { type: String, default: '' },
+  breadcrumb: { type: String, default: '' },
+  currentUser: { type: Object, default: null },
+  leftSidebarHidden: { type: Boolean, default: false },
+  showTerminal: { type: Boolean, default: false },
+  showAIAssistant: { type: Boolean, default: false },
+  showUserDropdown: { type: Boolean, default: false }
+})
+
+defineEmits([
+  'goToDashboard',
+  'setLayout',
+  'toggleUserDropdown',
+  'showNotifications',
+  'showHelp',
+  'showTeamManagement',
+  'showUserProfile',
+  'showPreferences',
+  'logout'
+])
 </script>
 
 <style scoped>
@@ -117,7 +124,10 @@ export default {
   background: #f8f9fa;
 }
 
+/* 叠在右侧 fixed 对话层之上，避免全高侧栏挡住顶栏点击；对话层仍从视口顶铺满（类似 Cursor 覆盖） */
 .top-bar {
+  position: relative;
+  z-index: 2100;
   display: flex;
   justify-content: space-between;
   align-items: center;

@@ -51,7 +51,11 @@ class ReactPromptTemplates:
 <system>
 你的角色：分析用户请求，拆分成可执行的任务步骤。
 
-【输出格式说明】本任务只需返回 <todo_list>...</todo_list>，不要额外输出思考说明或其它文字。若系统在别处展示「给用户看的简短说明」时，应为一两句话（如「先查找再修改」），且不写参数名；但本次回复中你只输出 XML 格式的 Todo 列表即可。
+【输出格式说明（必须遵守）】
+你必须分两段输出（顺序固定）：
+1) 先写「规划说明」：用 2～8 句中文说明你准备如何拆解任务，为什么这样拆。
+   - 这一段禁止使用任何 XML 标签（包含 <todo_list>/<item>/<thinking>）。
+2) 再输出机器可读规划：仅输出一个 <todo_list>...</todo_list> 块。
 
 【项目名称转换规则】
 - 如果上下文中提供了 project_name（项目名称），使用「在 XXX 项目中」而不是「在 project_id=1 中」
@@ -235,8 +239,8 @@ class ReactPromptTemplates:
 </examples>
 
 <format>
-必须返回以下格式（仅返回 XML，无其他文本）：
-- 只输出 <todo_list>...</todo_list>，不要输出任何思考说明、解释或前缀/后缀文字。
+第二段必须是且仅包含：
+- <todo_list>...</todo_list>（不要在该块外再输出 XML）
 - 每一项任务用 <item>...</item> 包裹，多条即多个 <item>，格式稳定、易解析。
 示例：
 <todo_list>
@@ -245,6 +249,8 @@ class ReactPromptTemplates:
 <item>第三项任务（具体且可执行）</item>
 </todo_list>
 </format>
+
+请先写「规划说明」，再输出 <todo_list>：
 
 现在请生成 Todo 列表：
 """
@@ -274,6 +280,10 @@ class ReactPromptTemplates:
         return f"""你是一个任务执行决策专家。分析当前 Todo，决定是否执行以及使用哪个工具。
 
 <system>
+你必须分两段输出（顺序固定）：
+1) **行动前说明**：用 3～12 句中文说明你接下来要怎么做、为什么这样做。可在首行使用「💭」（可选）。这一段**禁止使用 XML 标签**（包含 <decision>/<thinking> 等）。
+2) **机器可读决策**：在说明之后，**单独**输出且仅输出一个 <decision>...</decision> 块。
+
 你的角色：根据 Todo 和当前上下文，做出执行决策
 决策原则（严格按以下规则）：
 1. 强制绑定规则（优先级最高，绝不能违反）：
@@ -616,7 +626,7 @@ class ReactPromptTemplates:
 </examples>
 
 <format>
-返回格式（仅 XML + JSON，无其他文本）：
+第二段必须是且仅包含：
 <decision>
 <execute>true/false</execute>
 <tool>工具名（execute=true 时必填，选择最符合 Todo 的工具）</tool>
@@ -635,9 +645,105 @@ class ReactPromptTemplates:
 - 使用 search 工具时，必须根据关键词特征智能选择合适的搜索引擎
 </format>
 
+请先写「行动前说明」，再输出 <decision>：
+
 现在请做出决策：
 """
-    
+
+    @staticmethod
+    def decide_prompt_react_dynamic(
+        user_input: str,
+        available_tools: list,
+        context: dict,
+        *,
+        round_idx: int,
+        last_observation: Optional[dict],
+        last_analysis: Optional[dict],
+        plan_hints: List[str],
+    ) -> str:
+        """
+        动态 ReAct：每一步根据「当前上下文 + 上一步观察」再决策。
+        输出：先自然语言说明（Agent 行动前推理，非模型深度思考），再输出 <decision>...</decision>。
+        """
+        tools_info = "\n".join([
+            f"  <tool id=\"{t['name']}\" description=\"{t['description']}\"/>"
+            for t in available_tools
+        ])
+        context_str = "\n".join([
+            f"  - {k}: {str(v)[:500]}"
+            for k, v in (context or {}).items()
+        ]) if context else "无"
+        obs_s = ""
+        if last_observation is not None:
+            try:
+                raw = json.dumps(last_observation, ensure_ascii=False, indent=2)
+                obs_s = raw[:12000] + ("…" if len(raw) > 12000 else "")
+            except Exception:
+                obs_s = str(last_observation)[:8000]
+        else:
+            obs_s = "（尚无：这是本轮第一次行动前决策。）"
+        ana_s = ""
+        if last_analysis is not None:
+            try:
+                ana_s = json.dumps(last_analysis, ensure_ascii=False, indent=2)[:6000]
+            except Exception:
+                ana_s = str(last_analysis)[:4000]
+        hints = ""
+        if plan_hints:
+            hints = "\n".join(f"  {i + 1}. {h}" for i, h in enumerate(plan_hints[:20]))
+
+        return f"""你是任务执行 Agent。当前是第 {round_idx + 1} 轮「思考 → 行动 → 观察」循环。
+
+<system>
+你必须分两段输出（顺序固定）：
+1) **行动前说明**：用 3～12 句中文，说明「下一步要做什么、为什么、如何执行」，像对同事说明计划一样。
+   - 可在首行使用「💭」作为提示（可选），便于界面展示「思考」。
+   - 这是 Agent 的推理与沟通，**不要**使用任何 XML 标签（含 <thinking>），也不要模仿「模型内部思维链」格式。
+2) **机器可读决策**：在说明之后，**单独**输出且仅输出一个 <decision>...</decision> 块，结构必须与下面 <format> 一致，以便系统解析工具调用。
+决策规则与原有 decide 一致：grep 先于 modify、params 可部分省略由服务端补全、create/modify 的 confirm=false 等。
+若用户目标已达成、无需再调工具，则 <execute>false</execute> 并在 <reason> 中说明「任务已完成」或原因。
+</system>
+
+<user_request>
+{user_input}
+</user_request>
+
+<round_index>{round_idx}</round_index>
+
+<initial_plan_hints>
+（仅作背景参考，**非强制步骤顺序**；实际每轮须结合最新观察自主决定。）
+{hints or "（无单独规划列表）"}
+</initial_plan_hints>
+
+<current_context>
+{context_str}
+</current_context>
+
+<last_observation>
+{obs_s}
+</last_observation>
+
+<last_analysis>
+{ana_s if ana_s else "（无）"}
+</last_analysis>
+
+<available_tools>
+{tools_info}
+</available_tools>
+
+<format>
+第二段必须是且仅包含：
+<decision>
+<execute>true 或 false</execute>
+<tool>工具名</tool>
+<params>{{ ... JSON ... }}</params>
+<reason>简短理由</reason>
+</decision>
+</format>
+
+请先写「行动前说明」，再写 <decision> 块：
+"""
+
     @staticmethod
     def observe_prompt(todo: str, action: dict, observation: dict, context: dict) -> str:
         """
@@ -653,6 +759,10 @@ class ReactPromptTemplates:
         return f"""你是一个结果分析专家。分析工具执行结果，提取关键信息并更新上下文。
 
 <system>
+你必须分两段输出（顺序固定）：
+1) **分析说明**：用若干句中文，说明你从工具结果里看到了什么、对后续步骤的含义；可在首行使用「💭」（可选）。**不要使用 XML 标签**，不要输出 <result> 或 <finding> 等标签。
+2) **机器可读结果**：在说明之后，**单独**输出且仅输出一个 <result>...</result> 块，结构必须与下方 <format> 一致，以便系统解析。
+
 你的角色：分析工具结果，提取关键发现
 分析原则：
 1. 识别关键的 Bug、错误或成功指标
@@ -735,7 +845,7 @@ class ReactPromptTemplates:
 </examples>
 
 <format>
-返回格式：
+第二段必须是且仅包含：
 <result>
 <key_findings>
   <finding type="bug/info/success">发现内容</finding>
@@ -750,8 +860,89 @@ class ReactPromptTemplates:
 </result>
 </format>
 
+请先写「分析说明」，再写 <result> 块：
+
 现在请分析结果：
 """
+
+    @staticmethod
+    def ui_params_summary_prompt(
+        todo: str,
+        tool: str,
+        params: Optional[dict],
+        reason: str = "",
+        todos_overview: str = "",
+    ) -> str:
+        """面向聊天面板：把结构化入参改写成用户可读说明（不展示原始 JSON）。"""
+        pj = json.dumps(params or {}, ensure_ascii=False, indent=2)
+        r = (reason or "").strip()
+        rline = f"\n模型简述：{r[:900]}" if r else ""
+        tv = (todos_overview or "").strip() or "（仅本步，未提供完整列表）"
+        return f"""你是 ReAct 助手。请先**对照下方完整待办列表**，确认本步在整体任务中的位置，再用 2～8 句中文说明本步**即将执行什么**（工具调用要点：工具名、检索词、目标类型、关键 id）。不要用 JSON/XML/代码块。
+
+【待办步骤全貌（必须先阅读）】
+{tv}
+
+【本步对应的 Todo 条目】
+{todo}
+
+工具：{tool}
+结构化参数（仅供理解，勿原文复述）：
+{pj}{rline}
+"""
+
+    @staticmethod
+    def ui_decision_summary_prompt(todo: str, decision: dict, todos_overview: str = "") -> str:
+        """面向聊天面板：总结决策结论（替代原始 XML）。"""
+        tool = str(decision.get("tool") or "")
+        ex = "是" if decision.get("execute") else "否"
+        pj = json.dumps(decision.get("params") or {}, ensure_ascii=False, indent=2)
+        r = (decision.get("reason") or "").strip()
+        rline = f"\n模型决策理由：{r[:1200]}" if r else ""
+        tv = (todos_overview or "").strip() or "（仅本步，未提供完整列表）"
+        return f"""请对照【待办步骤全貌】，用 2～8 句中文写清**本步要完成什么**（是否执行、用哪个工具、关键意图）。不要输出 XML/JSON/代码块。
+
+【待办步骤全貌】
+{tv}
+
+【本步 Todo】
+{todo}
+
+是否执行：{ex}
+工具：{tool}
+参数摘要（仅供理解）：
+{pj}{rline}
+"""
+
+    @staticmethod
+    def ui_observe_summary_prompt(
+        todo: str, tool: str, observation: Any, todos_overview: str = ""
+    ) -> str:
+        """面向聊天面板：总结工具执行结果（替代原始 observe XML）。"""
+        try:
+            if isinstance(observation, dict):
+                obs_s = json.dumps(observation, ensure_ascii=False)
+            else:
+                obs_s = str(observation)
+        except Exception:
+            obs_s = str(observation)
+        max_len = 8000
+        if len(obs_s) > max_len:
+            obs_s = obs_s[:max_len] + "\n…（已截断）"
+        tv = (todos_overview or "").strip() or "（仅本步，未提供完整列表）"
+        return f"""请对照【待办步骤全貌】，用 2～10 句中文总结**本步执行得怎么样**：成败、关键数据、是否达成该 Todo 的预期、对后续步骤的含义。不要输出 XML/JSON/代码块。
+
+【待办步骤全貌】
+{tv}
+
+【本步 Todo】
+{todo}
+工具：{tool}
+
+工具返回（节选）：
+{obs_s}
+"""
+
 
 def format_tools_for_prompt(tool_registry) -> list:
     """格式化工具信息。REACT_TOOL_DESC_MAX_CHARS>0 时截断描述，缩短首轮 THINK prompt（不改模型，仅减 token）。"""

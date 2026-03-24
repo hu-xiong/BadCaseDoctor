@@ -4,38 +4,38 @@
     <div class="login-card">
       <div class="text-center mb-4">
         <h2 class="text-primary">BadCase Doctor</h2>
-        <p class="text-muted">登录您的账户</p>
+        <p class="text-muted">{{ t('auth.subtitle') }}</p>
       </div>
       
       <form @submit.prevent="handleLogin">
         <div class="mb-3">
-          <label for="email" class="form-label">邮箱地址</label>
+          <label for="email" class="form-label">{{ t('auth.email') }}</label>
           <input
             type="email"
             class="form-control"
             id="email"
             v-model="form.email"
             required
-            placeholder="请输入邮箱地址"
+            :placeholder="t('auth.emailPlaceholder')"
           />
         </div>
         
         <div class="mb-3">
-          <label for="password" class="form-label">密码</label>
+          <label for="password" class="form-label">{{ t('auth.password') }}</label>
           <input
             type="password"
             class="form-control"
             id="password"
             v-model="form.password"
             required
-            placeholder="请输入密码"
+            :placeholder="t('auth.passwordPlaceholder')"
           />
         </div>
         
         <div class="d-grid gap-2">
           <button type="submit" class="btn btn-primary" :disabled="loading">
             <span v-if="loading" class="spinner-border spinner-border-sm me-2"></span>
-            {{ loading ? '登录中...' : '登录' }}
+            {{ loading ? t('auth.loggingIn') : t('auth.login') }}
           </button>
         </div>
         
@@ -44,13 +44,13 @@
       
       <div class="mt-3 text-center">
         <a href="#" @click.prevent="showRegister = true" class="text-decoration-none">
-          还没有账户？立即注册
+          {{ t('auth.registerLink') }}
         </a>
       </div>
       
       <div class="mt-2 text-center">
         <a href="#" @click.prevent="showForgotPassword = true" class="text-decoration-none">
-          忘记密码？
+          {{ t('auth.forgotPassword') }}
         </a>
       </div>
     </div>
@@ -60,13 +60,13 @@
       <div class="modal-dialog">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">用户注册</h5>
+            <h5 class="modal-title">{{ t('auth.registerTitle') }}</h5>
             <button type="button" class="btn-close" @click="showRegister = false"></button>
           </div>
           <div class="modal-body">
             <form @submit.prevent="handleRegister">
               <div class="mb-3">
-                <label for="reg-email" class="form-label">邮箱地址</label>
+                <label for="reg-email" class="form-label">{{ t('auth.email') }}</label>
                 <div class="input-group">
                   <input
                     type="email"
@@ -74,7 +74,7 @@
                     id="reg-email"
                     v-model="registerForm.email"
                     required
-                    placeholder="请输入邮箱地址"
+                    :placeholder="t('auth.emailPlaceholder')"
                   />
                   <button
                     type="button"
@@ -82,50 +82,50 @@
                     @click="sendVerificationCode"
                     :disabled="codeSending"
                   >
-                    {{ codeSending ? '发送中...' : '发送验证码' }}
+                    {{ codeSending ? t('auth.sendingCode') : t('auth.sendCode') }}
                   </button>
                 </div>
               </div>
               
               <div class="mb-3">
-                <label for="verification-code" class="form-label">验证码</label>
+                <label for="verification-code" class="form-label">{{ t('auth.verificationCode') }}</label>
                 <input
                   type="text"
                   class="form-control"
                   id="verification-code"
                   v-model="registerForm.verification_code"
                   required
-                  placeholder="请输入验证码"
+                  :placeholder="t('auth.codePlaceholder')"
                 />
               </div>
               
               <div class="mb-3">
-                <label for="reg-name" class="form-label">姓名</label>
+                <label for="reg-name" class="form-label">{{ t('auth.name') }}</label>
                 <input
                   type="text"
                   class="form-control"
                   id="reg-name"
                   v-model="registerForm.name"
                   required
-                  placeholder="请输入姓名"
+                  :placeholder="t('auth.namePlaceholder')"
                 />
               </div>
               
               <div class="mb-3">
-                <label for="reg-password" class="form-label">密码</label>
+                <label for="reg-password" class="form-label">{{ t('auth.password') }}</label>
                 <input
                   type="password"
                   class="form-control"
                   id="reg-password"
                   v-model="registerForm.password"
                   required
-                  placeholder="请输入密码"
+                  :placeholder="t('auth.passwordPlaceholder')"
                 />
               </div>
               
               <div class="d-grid gap-2">
                 <button type="submit" class="btn btn-primary" :disabled="registerLoading">
-                  {{ registerLoading ? '注册中...' : '注册' }}
+                  {{ registerLoading ? t('auth.registering') : t('auth.register') }}
                 </button>
               </div>
             </form>
@@ -139,26 +139,26 @@
       <div class="modal-dialog">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">忘记密码</h5>
+            <h5 class="modal-title">{{ t('auth.forgotTitle') }}</h5>
             <button type="button" class="btn-close" @click="showForgotPassword = false"></button>
           </div>
           <div class="modal-body">
             <form @submit.prevent="handleForgotPassword">
               <div class="mb-3">
-                <label for="forgot-email" class="form-label">邮箱地址</label>
+                <label for="forgot-email" class="form-label">{{ t('auth.email') }}</label>
                 <input
                   type="email"
                   class="form-control"
                   id="forgot-email"
                   v-model="forgotPasswordForm.email"
                   required
-                  placeholder="请输入邮箱地址"
+                  :placeholder="t('auth.emailPlaceholder')"
                 />
               </div>
               
               <div class="d-grid gap-2">
                 <button type="submit" class="btn btn-primary" :disabled="forgotPasswordLoading">
-                  {{ forgotPasswordLoading ? '发送中...' : '发送重置链接' }}
+                  {{ forgotPasswordLoading ? t('auth.sendingReset') : t('auth.sendReset') }}
                 </button>
               </div>
             </form>
@@ -172,6 +172,7 @@
 <script>
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { login, register, sendVerificationCode } from '../api.js'
 import { setUser } from '../store/user.js'
 
@@ -179,6 +180,7 @@ export default {
   name: 'Login',
   setup() {
     const router = useRouter()
+    const { t } = useI18n()
     
     const form = reactive({
       email: '',
@@ -217,14 +219,14 @@ export default {
           // 跳转到dashboard
           router.push('/dashboard')
         } else {
-          alert(response.data.error || '登录失败')
+          alert(response.data.error || t('auth.loginFailed'))
         }
       } catch (error) {
         console.error('登录失败:', error)
         if (error.response) {
-          alert(`登录失败: ${error.response.data?.error || error.response.statusText}`)
+          alert(t('auth.loginErrorDetail', { msg: error.response.data?.error || error.response.statusText }))
         } else {
-          alert(`登录失败: ${error.message}`)
+          alert(t('auth.loginErrorDetail', { msg: error.message }))
         }
       } finally {
         loading.value = false
@@ -243,7 +245,7 @@ export default {
         
         if (response.data.success) {
         showRegister.value = false
-        alert('注册成功！请登录')
+        alert(t('auth.registerSuccess'))
           // 清空注册表单
           Object.assign(registerForm, {
             email: '',
@@ -252,14 +254,14 @@ export default {
             verification_code: ''
           })
         } else {
-          alert(response.data.error || '注册失败')
+          alert(response.data.error || t('auth.registerFailed'))
         }
       } catch (error) {
         console.error('注册失败:', error)
         if (error.response) {
-          alert(`注册失败: ${error.response.data?.error || error.response.statusText}`)
+          alert(t('auth.registerErrorDetail', { msg: error.response.data?.error || error.response.statusText }))
         } else {
-          alert(`注册失败: ${error.message}`)
+          alert(t('auth.registerErrorDetail', { msg: error.message }))
         }
       } finally {
         registerLoading.value = false
@@ -268,7 +270,7 @@ export default {
     
     const handleSendVerificationCode = async () => {
       if (!registerForm.email) {
-        alert('请先输入邮箱地址')
+        alert(t('auth.enterEmailFirst'))
         return
       }
       
@@ -279,16 +281,16 @@ export default {
         })
         
         if (response.data.success) {
-        alert('验证码已发送到您的邮箱')
+        alert(t('auth.codeSent'))
         } else {
-          alert(response.data.error || '发送验证码失败')
+          alert(response.data.error || t('auth.sendCodeFailed'))
         }
       } catch (error) {
         console.error('发送验证码失败:', error)
         if (error.response) {
-          alert(`发送验证码失败: ${error.response.data?.error || error.response.statusText}`)
+          alert(t('auth.sendCodeErrorDetail', { msg: error.response.data?.error || error.response.statusText }))
         } else {
-          alert(`发送验证码失败: ${error.message}`)
+          alert(t('auth.sendCodeErrorDetail', { msg: error.message }))
         }
       } finally {
         codeSending.value = false
@@ -301,16 +303,17 @@ export default {
         // 这里可以调用忘记密码的API
         await new Promise(resolve => setTimeout(resolve, 1000))
         showForgotPassword.value = false
-        alert('重置链接已发送到您的邮箱')
+        alert(t('auth.resetSent'))
       } catch (error) {
         console.error('发送重置链接失败:', error)
-        alert('发送重置链接失败')
+        alert(t('auth.sendResetFailed'))
       } finally {
         forgotPasswordLoading.value = false
       }
     }
 
     return {
+      t,
       form,
       registerForm,
       forgotPasswordForm,

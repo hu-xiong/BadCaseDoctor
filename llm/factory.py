@@ -1,5 +1,4 @@
 # llm/factory.py
-from .openai_llm import OpenAILLM
 from .qwen_llm import QwenLLM
 from .zhipu_llm import ZhipuLLM
 from config import Config
@@ -20,14 +19,15 @@ def get_llm(provider: str = None, model: str = None):
         print(f"[LLM-FACTORY] 根据模型名推断 provider: {provider}")
     
     provider = provider or Config.DEFAULT_LLM
+    if provider == "openai":
+        # 兼容旧配置：OpenAI 实现已移除，统一走 DashScope 千问
+        print(f"[LLM-FACTORY] provider=openai 已映射为 QwenLLM（DashScope）")
+        provider = "qwen"
     print(f"[LLM-FACTORY] 最终 provider: {provider}")
 
     if provider == "zhipu":
         print(f"[LLM-FACTORY] 创建 ZhipuLLM, model: {model}")
         return ZhipuLLM(model=model)
-    elif provider == "openai":
-        print(f"[LLM-FACTORY] 创建 OpenAILLM")
-        return OpenAILLM()
     elif provider == "qwen":
         # 步骤推理 / 对话 Agent：千问 3.5 Plus（DashScope）
         final_model = model or Config.DASHSCOPE_MODEL

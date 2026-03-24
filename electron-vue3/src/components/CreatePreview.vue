@@ -17,7 +17,7 @@
 
       <div v-if="restFieldCount > 0" class="field-row field-row--more">
         <span class="field-label">…</span>
-        <span class="field-value">其余 {{ restFieldCount }} 项将在列表中查看</span>
+        <span class="field-value">其余 {{ restFieldCount }} 项为详情字段，请在表单或列表中查看</span>
       </div>
     </div>
     
@@ -36,6 +36,46 @@
 <script setup>
 import { defineProps, defineEmits, computed } from 'vue'
 
+/** 与列表列一致（与 SimpleChatPanel / ProjectDetail 列表字段对齐） */
+const PREVIEW_LIST_KEYS = {
+  bug: new Set([
+    'title',
+    'status',
+    'priority',
+    'severity',
+    'assignee',
+    'assignee_id',
+    'owner',
+    'bug_type',
+    'plan_id',
+    'environment',
+    'browser',
+    'os'
+  ]),
+  badcase: new Set([
+    'title',
+    'status',
+    'priority',
+    'assignee',
+    'assignee_id',
+    'case_category',
+    'plan_id',
+    'document_type'
+  ]),
+  testcase: new Set([
+    'title',
+    'status',
+    'priority',
+    'assignee',
+    'assignee_id',
+    'case_type',
+    'test_type',
+    'plan_id',
+    'version'
+  ]),
+  plan: new Set(['name', 'title', 'plan_type', 'status', 'priority', 'parent_id', 'start_date', 'end_date', 'cycle'])
+}
+
 const props = defineProps({
   previewData: {
     type: Object,
@@ -51,22 +91,32 @@ const emit = defineEmits(['confirm', 'cancel'])
 
 const filteredFieldEntries = computed(() => {
   const fields = props.previewData.preview || {}
+  const target = (props.previewData.target || 'bug').toLowerCase()
+  const allow = PREVIEW_LIST_KEYS[target] || PREVIEW_LIST_KEYS.bug
   const filteredEntries = []
   for (const [key, value] of Object.entries(fields)) {
-    if (value && key !== 'project_id' && key !== 'created_at' && key !== 'updated_at') {
-      filteredEntries.push([key, value])
-    }
+    if (!allow.has(key)) continue
+    if (value === null || value === undefined || value === '') continue
+    if (key === 'project_id' || key === 'created_at' || key === 'updated_at') continue
+    filteredEntries.push([key, value])
   }
   return filteredEntries
 })
 
-const displayFieldEntries = computed(() => {
-  // 无论处于“展开/收起”，预览都只展示前三项
-  return filteredFieldEntries.value.slice(0, 3)
-})
+const displayFieldEntries = computed(() => filteredFieldEntries.value)
 
 const restFieldCount = computed(() => {
-  return Math.max(filteredFieldEntries.value.length - 3, 0)
+  const fields = props.previewData.preview || {}
+  const target = (props.previewData.target || 'bug').toLowerCase()
+  const allow = PREVIEW_LIST_KEYS[target] || PREVIEW_LIST_KEYS.bug
+  let hidden = 0
+  for (const key of Object.keys(fields)) {
+    if (allow.has(key)) continue
+    if (['project_id', 'created_at', 'updated_at'].includes(key)) continue
+    const v = fields[key]
+    if (v !== null && v !== undefined && v !== '') hidden++
+  }
+  return hidden
 })
 
 const getTargetLabel = (target) => {
@@ -94,7 +144,12 @@ const getFieldLabel = (key) => {
     'expected_result': '预期结果',
     'actual_result': '实际结果',
     'start_date': '开始日期',
-    'end_date': '结束日期'
+    'end_date': '结束日期',
+    'bug_type': '类型',
+    'case_category': '问题分类',
+    'case_type': '用例类型',
+    'test_type': '测试类型',
+    'document_type': '文档类型'
   }
   return labels[key] || key
 }

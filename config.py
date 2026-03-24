@@ -32,11 +32,14 @@ class Config:
     # 复用 QWEN_API_KEY，可指定不同模型
     DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', QWEN_API_KEY)
     DASHSCOPE_MODEL = os.getenv('DASHSCOPE_MODEL', 'qwen3.5-plus')
+    # 全项目 Qwen 文本对话统一走 OpenAI 兼容 HTTP：.../compatible-mode/v1/chat/completions
+    DASHSCOPE_COMPAT_BASE_URL = os.getenv(
+        'DASHSCOPE_COMPAT_BASE_URL',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    )
     
-    # Qwen 可选模型列表：
-    # - qwen-turbo: 快速响应
-    # - qwen-plus: 均衡性能
-    # - qwen3.5-plus: 增强版（默认）
+    # Qwen 可选模型列表（compatible-mode 下 model 字段，与控制台一致）：
+    # - qwen-turbo / qwen-plus / qwen-max / qwen3.5-plus 等
     # 千问 Max 思考：模型 id qwen3-max-2026-01-23，enable_thinking 开启思考
     QWEN3_MAX_THINKING_MODEL = os.getenv('QWEN3_MAX_THINKING_MODEL', 'qwen3-max-2026-01-23')
     

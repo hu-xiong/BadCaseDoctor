@@ -2,17 +2,17 @@
   <div class="project-manage">
     <!-- 顶部操作栏 -->
     <div class="projects-header">
-      <h2 class="projects-title">项目管理</h2>
+      <h2 class="projects-title">{{ t('projectList.title') }}</h2>
       <div class="projects-actions">
         <div class="search-box">
-          <input type="text" placeholder="搜索项目名称" v-model="searchKeyword" class="search-input">
+          <input type="text" :placeholder="t('projectList.searchPlaceholder')" v-model="searchKeyword" class="search-input">
           <span class="search-icon">🔍</span>
         </div>
         <button class="refresh-btn" @click="refreshProjects">
           <span class="refresh-icon">🔄</span>
         </button>
         <button class="debug-btn" @click="debugProjects" style="background: #ff6b6b; color: white; border: none; padding: 8px 12px; border-radius: 8px; margin-left: 8px;">
-          调试
+          {{ t('projectList.debug') }}
         </button>
       </div>
     </div>
@@ -21,7 +21,7 @@
     <div class="new-project-section">
       <button class="new-project-btn" @click="createNewProject">
         <span class="new-project-icon">+</span>
-        <span class="new-project-text">新建项目</span>
+        <span class="new-project-text">{{ t('projectList.newProject') }}</span>
       </button>
     </div>
 
@@ -32,7 +32,7 @@
           <div class="project-avatar">
             <img v-if="project.avatar && !project.imageError" 
                  :src="project.avatar" 
-                 alt="项目头像" 
+                 :alt="t('projectList.avatarAlt')" 
                  @error="handleImageError(project)" 
                  @load="handleImageLoad(project)"
                  loading="lazy"
@@ -48,20 +48,20 @@
                       </div>
                     </div>
         <div class="project-tags">
-          <span class="project-tag">{{ project.owner || '未设置负责人' }}</span>
-          <span class="project-tag">{{ project.status === 'published' ? '已发布' : '未发布' }}</span>
+          <span class="project-tag">{{ project.owner || t('projectList.noOwner') }}</span>
+          <span class="project-tag">{{ project.status === 'published' ? t('projectList.published') : t('projectList.unpublished') }}</span>
         </div>
-        <div class="project-description">{{ project.description || '暂无描述' }}</div>
+        <div class="project-description">{{ project.description || t('projectList.noDescription') }}</div>
         <div class="project-footer">
           <span class="project-date">{{ formatDate(project.created_at) }}</span>
           <div class="project-actions" @click.stop>
-            <button class="action-btn" @click="viewProject(project)" title="查看详情">
+            <button class="action-btn" @click="viewProject(project)" :title="t('projectList.viewDetail')">
               <span class="action-icon">👁️</span>
             </button>
-            <button class="action-btn" @click="editProject(project)" title="编辑项目">
+            <button class="action-btn" @click="editProject(project)" :title="t('projectList.editProject')">
               <span class="action-icon">✏️</span>
             </button>
-            <button v-if="project.status === 'unpublished'" class="action-btn delete-btn" @click="deleteProject(project.id)" title="删除项目">
+            <button v-if="project.status === 'unpublished'" class="action-btn delete-btn" @click="deleteProject(project.id)" :title="t('projectList.deleteProject')">
               <span class="action-icon">🗑️</span>
             </button>
                   </div>
@@ -72,7 +72,7 @@
     <!-- 分页控件 -->
     <div class="pagination">
       <div class="pagination-info">
-        第{{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, totalProjects) }}条 共{{ totalProjects }}条
+        {{ t('projectList.pageRange', { from: (currentPage - 1) * pageSize + 1, to: Math.min(currentPage * pageSize, totalProjects), total: totalProjects }) }}
       </div>
       <div class="pagination-controls">
         <button class="page-btn" :disabled="currentPage === 1" @click="currentPage--">
@@ -86,13 +86,13 @@
           </div>
       <div class="pagination-settings">
         <select v-model="pageSize" class="page-size-select">
-          <option value="12">12条/页</option>
-          <option value="24">24条/页</option>
-          <option value="48">48条/页</option>
+          <option value="12">{{ t('projectList.perPage', { n: 12 }) }}</option>
+          <option value="24">{{ t('projectList.perPage', { n: 24 }) }}</option>
+          <option value="48">{{ t('projectList.perPage', { n: 48 }) }}</option>
         </select>
         <div class="jump-to">
           <input type="number" v-model="jumpPage" class="jump-input" min="1" :max="totalPages">
-          <button class="jump-btn" @click="jumpToPage">页</button>
+          <button class="jump-btn" @click="jumpToPage">{{ t('projectList.pageJump') }}</button>
         </div>
       </div>
     </div>
@@ -102,6 +102,7 @@
 <script>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { getProjects } from '../api.js'
 import api from '../api.js'
 
@@ -109,6 +110,7 @@ export default {
   name: 'ProjectManage',
   setup() {
     const router = useRouter()
+    const { t, locale } = useI18n()
     const projects = ref([])
     // 搜索关键字
     const searchKeyword = ref('')
@@ -269,7 +271,7 @@ export default {
     }
 
     const deleteProject = (id) => {
-      if (confirm('确定要删除这个项目吗？')) {
+      if (confirm(t('projectList.deleteConfirm'))) {
         console.log('删除项目:', id)
         // 这里添加删除逻辑
       }
@@ -301,7 +303,7 @@ export default {
     }
 
     const formatDate = (dateString) => {
-      return new Date(dateString).toLocaleDateString('zh-CN', {
+      return new Date(dateString).toLocaleDateString(locale.value === 'en' ? 'en-US' : 'zh-CN', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
@@ -311,7 +313,7 @@ export default {
     }
 
     const getStatusText = (status) => {
-      return status === 'published' ? '已发布' : '未发布'
+      return status === 'published' ? t('projectList.published') : t('projectList.unpublished')
     }
 
     const refreshProjects = () => {
@@ -351,6 +353,7 @@ export default {
     })
 
     return {
+      t,
       projects,
       searchKeyword,
       currentPage,

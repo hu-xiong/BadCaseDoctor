@@ -23,9 +23,13 @@ class ZhipuLLM:
         # 运行时开关：进入 modify 流程时强制“不带思考”
         self.force_disable_thinking = False
 
-    async def parse_intent(self, user_input: str, history: list = None) -> Optional[dict]:
+    async def parse_intent(
+        self, user_input: str, history: list = None, locale: Optional[str] = None
+    ) -> Optional[dict]:
         """解析意图"""
-        prompt = user_input
+        from agents.locale_prompts import wrap_general_user_prompt
+
+        prompt = wrap_general_user_prompt(user_input, locale)
         if not ("JSON" in prompt or "json" in prompt):
             prompt += "\n请务必只返回 JSON 格式结果。"
 
@@ -88,8 +92,11 @@ class ZhipuLLM:
             print(error_msg)
             return error_msg
 
-    def chat_stream(self, prompt: str, history: list = None):
+    def chat_stream(self, prompt: str, history: list = None, locale: Optional[str] = None):
         """流式对话（逐 token 字符串）"""
+        from agents.locale_prompts import wrap_general_user_prompt
+
+        p = wrap_general_user_prompt(prompt, locale)
         messages = []
         if history:
             for msg in history:
@@ -97,7 +104,7 @@ class ZhipuLLM:
                     "role": msg.get("role", "user"),
                     "content": msg.get("content", "")
                 })
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": p})
 
         payload = {
             "model": self.model,

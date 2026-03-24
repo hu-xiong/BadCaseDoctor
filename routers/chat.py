@@ -17,11 +17,40 @@ chat_bp = Blueprint('chat', __name__)
 @chat_bp.route('/chat', methods=['POST'])
 def chat_stream():
     print("=========")
-    data = request.json
-    user_input = data.get("inputMessage")
-    project_id = data.get("projectId") # 获取项目ID
-    model_name = data.get("model") # 获取模型名称
-    print(user_input)
+    data = request.json or {}
+    user_input = data.get("inputMessage", "")
+    images = data.get("images") or []
+    project_id = data.get("projectId")
+    model_name = data.get("model")
+    ui_locale = data.get("locale") or data.get("ui_locale")
+
+    if images:
+        try:
+            from agents.locale_prompts import vision_image_block_labels
+            from agents.vision_describe import VisionDescribeService
+
+            vision_svc = VisionDescribeService()
+            descriptions = []
+            for img in images[:5]:
+                data_field = img.get("data") or img.get("url", "")
+                if not data_field:
+                    continue
+                desc = vision_svc.describe_prototype_for_testcase(
+                    data_field, user_input or "", locale=ui_locale
+                )
+                if desc:
+                    descriptions.append(desc)
+            if descriptions:
+                _ip, _ul, _def = vision_image_block_labels(ui_locale)
+                user_input = (
+                    _ip
+                    + "\n"
+                    + "\n\n".join(descriptions)
+                    + f"\n\n{_ul} "
+                    + (user_input or _def)
+                )
+        except Exception as ve:
+            print(f"[CHAT] 视觉描述失败: {ve}")
 
     if not user_input:
         return Response("data: {\"error\": \"Missing 'content'\"}\n\n", mimetype='text/event-stream')
@@ -31,7 +60,7 @@ def chat_stream():
     def generate():
         try:
             # Step 1: 解析意图 (同步运行异步方法)
-            intentList = asyncio.run(llm.parse_intent(user_input))
+            intentList = asyncio.run(llm.parse_intent(user_input, locale=ui_locale))
             
             # 如果解析出的意图是 "other" 或者没有明确的 Agent，执行普通流式聊天
             is_general_chat = True
@@ -44,7 +73,7 @@ def chat_stream():
             if is_general_chat:
                 yield f"data: {json.dumps({'type': 'start', 'message': '开始普通聊天'})}\n\n"
                 # llm.chat_stream 现在是同步生成器
-                for chunk in llm.chat_stream(user_input):
+                for chunk in llm.chat_stream(user_input, locale=ui_locale):
                     yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
                 yield f"data: {json.dumps({'type': 'end'})}\n\n"
                 return

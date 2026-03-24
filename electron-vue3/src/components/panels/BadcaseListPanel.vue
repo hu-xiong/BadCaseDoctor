@@ -1,6 +1,7 @@
 <template>
   <div class="badcase-list-panel">
-    <div class="content-header">
+    <!-- 多 Tab 工作区下顶栏已承载上下文，不再保留面包屑与 x/y 计数条，避免大块留白 -->
+    <div v-if="showLongBreadcrumb" class="content-header">
       <div class="content-title">
         <span>{{ generateBreadcrumb() }}</span>
         <span class="completion-rate">{{ filteredBadcases.length }}/{{ totalBadcases }}</span>
@@ -10,7 +11,7 @@
     <div class="content-toolbar">
       <div class="toolbar-left">
         <button class="quick-create-btn" @click="createNewBadcase">
-          +快速新建{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}
+          {{ t('list.quickCreate', { type: listTypeLabel }) }}
         </button>
       </div>
 
@@ -19,7 +20,7 @@
           <input
             type="text"
             :value="searchText"
-            placeholder="搜索标题或负责人..."
+            :placeholder="t('list.searchPlaceholder')"
             class="search-input"
             @input="(e) => updateSearchText(e.target.value)"
             @keyup.enter="applyFilters"
@@ -29,8 +30,8 @@
 
         <div class="filter-dropdown">
           <select :value="selectedAssignee" @change="(e) => updateSelectedAssignee(e.target.value)" class="filter-select">
-            <option value="">全部负责人</option>
-            <option value="mine">只看自己</option>
+            <option value="">{{ t('list.assigneeAll') }}</option>
+            <option value="mine">{{ t('list.assigneeMine') }}</option>
             <option v-for="member in projectMembers" :key="member.id" :value="member.id">
               {{ member.name }}
             </option>
@@ -39,14 +40,14 @@
 
         <div class="filter-dropdown">
           <select :value="selectedStatus" @change="(e) => updateSelectedStatus(e.target.value)" class="filter-select">
-            <option value="">全部状态</option>
-            <option value="new">新建</option>
-            <option value="pending">待处理</option>
-            <option value="resolved">已解决</option>
-            <option value="close">已关闭</option>
-            <option value="hold">暂停</option>
-            <option value="reopen">重新打开</option>
-            <option value="not_badcase">非{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</option>
+            <option value="">{{ t('list.statusAll') }}</option>
+            <option value="new">{{ t('list.statusNew') }}</option>
+            <option value="pending">{{ t('list.statusPending') }}</option>
+            <option value="resolved">{{ t('list.statusResolved') }}</option>
+            <option value="close">{{ t('list.statusClosed') }}</option>
+            <option value="hold">{{ t('list.statusHold') }}</option>
+            <option value="reopen">{{ t('list.statusReopen') }}</option>
+            <option value="not_badcase">{{ t('list.statusNotType', { type: listTypeLabel }) }}</option>
           </select>
         </div>
 
@@ -55,9 +56,9 @@
           v-if="selectedTasks && selectedTasks.length > 0"
           class="batch-delete-btn"
           @click.stop="batchDeleteSelected"
-          :title="`将删除 ${selectedTasks.length} 条记录`"
+          :title="t('list.batchDeleteTitle', { n: selectedTasks.length })"
         >
-          批量删除（{{ selectedTasks.length }}）
+          {{ t('list.batchDelete', { n: selectedTasks.length }) }}
         </button>
       </div>
     </div>
@@ -67,17 +68,17 @@
         <div class="header-checkbox">
           <input type="checkbox" :checked="selectAll" @change="toggleSelectAll" />
         </div>
-        <div class="header-title">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}标题</div>
-        <div class="header-type">类型</div>
-        <div class="header-status">状态</div>
-        <div class="header-assignee">负责人</div>
-        <div class="header-date">创建时间</div>
-        <div class="header-actions">操作</div>
+        <div class="header-title">{{ t('list.colTitle', { type: listTypeLabel }) }}</div>
+        <div class="header-type">{{ t('list.colType') }}</div>
+        <div class="header-status">{{ t('list.colStatus') }}</div>
+        <div class="header-assignee">{{ t('list.colAssignee') }}</div>
+        <div class="header-date">{{ t('list.colCreated') }}</div>
+        <div class="header-actions">{{ t('list.colActions') }}</div>
       </div>
 
       <div class="table-body">
         <div v-if="badcaseLoading" class="loading-row">
-          <div class="loading-text">加载中...</div>
+          <div class="loading-text">{{ t('list.loading') }}</div>
         </div>
         <template v-else>
           <!-- 待确认新建（create 沙箱）：暗绿显示新值，✓ 采纳 ✗ 拒绝 -->
@@ -93,10 +94,10 @@
               <div v-if="pc.displayDiff?.title" class="field-diff-inline create-pending-diff">
                 <span class="new-value-inline create-new-only">{{ pc.displayDiff.title.new }}</span>
               </div>
-              <span v-else class="badcase-title create-new-only">{{ pc.preview?.title || '（新建）' }}</span>
+              <span v-else class="badcase-title create-new-only">{{ pc.preview?.title || t('list.newPending') }}</span>
             </div>
             <div class="row-type">
-              <span class="type-badge" :class="currentPlanType">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</span>
+              <span class="type-badge" :class="currentPlanType">{{ listTypeLabel }}</span>
             </div>
             <div class="row-status">
               <div v-if="pc.displayDiff?.status" class="field-diff-inline create-pending-diff">
@@ -110,14 +111,14 @@
               </div>
               <span v-else class="assignee-text">{{ getAssigneeDisplayText(pc.preview?.assignee_id) }}</span>
             </div>
-            <div class="row-date"><span class="date-text">待确认</span></div>
+            <div class="row-date"><span class="date-text">{{ t('list.pendingConfirm') }}</span></div>
             <div v-if="!pc.executed && confirmCreate && cancelCreate" class="row-actions" @click.stop>
-              <button class="btn-icon-approve" title="采纳并创建" @click="confirmCreate(pc.tempId)">✓</button>
-              <button class="btn-icon-reject" title="拒绝" @click="cancelCreate(pc.tempId)">✗</button>
+              <button class="btn-icon-approve" :title="t('list.approveCreate')" @click="confirmCreate(pc.tempId)">✓</button>
+              <button class="btn-icon-reject" :title="t('list.reject')" @click="cancelCreate(pc.tempId)">✗</button>
             </div>
           </div>
           <div v-if="filteredBadcases.length === 0 && !(pendingCreates || []).length" class="empty-row">
-            <div class="empty-text">暂无{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}数据</div>
+            <div class="empty-text">{{ t('list.emptyData', { type: listTypeLabel }) }}</div>
           </div>
         </template>
         <template v-if="!badcaseLoading">
@@ -130,8 +131,9 @@
             selected: selectedTasks.includes(badcase.id),
             'pending-modify': pendingModifications[badcase.id]
           }"
-          style="cursor: pointer;"
-          @click="handleEdit(badcase.id)"
+          :title="t('common.copyRowHint')"
+          @mousedown="onRowMouseDown"
+          @click="handleRowClick(badcase, $event)"
         >
           <div class="row-checkbox">
             <input
@@ -149,7 +151,7 @@
             <span v-else class="badcase-title">{{ badcase.title }}</span>
           </div>
           <div class="row-type">
-            <span class="type-badge" :class="currentPlanType">{{ currentPlanType === 'bug' ? 'Bug' : (currentPlanType === 'test_case' ? '测试用例' : 'BadCase') }}</span>
+            <span class="type-badge" :class="currentPlanType">{{ listTypeLabel }}</span>
           </div>
           <div class="row-status">
             <div v-if="pendingModifications[badcase.id]?.status" class="field-diff-inline">
@@ -173,15 +175,15 @@
             <button
               v-if="hasDetailFieldModifications(badcase.id)"
               class="btn-expand-detail"
-              :title="expandedDetailRows.includes(badcase.id) ? '收起详情' : '展开详情'"
+              :title="expandedDetailRows.includes(badcase.id) ? t('list.collapseDetail') : t('list.expandDetail')"
               @click="toggleDetailExpand(badcase.id)"
             >
               {{ expandedDetailRows.includes(badcase.id) ? '▼' : '▶' }}
             </button>
             <template v-if="isLastInConsecutiveGroup(badcase.id)">
-              <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ getConsecutiveGroupSize(badcase.id) }}条</span>
-              <button class="btn-icon-approve" title="确认" @click="confirmConsecutiveGroup(badcase.id)">✓</button>
-              <button class="btn-icon-reject" title="取消" @click="cancelConsecutiveGroup(badcase.id)">✗</button>
+              <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(badcase.id) }) }}</span>
+              <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmConsecutiveGroup(badcase.id)">✓</button>
+              <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelConsecutiveGroup(badcase.id)">✗</button>
             </template>
           </div>
         </div>
@@ -192,12 +194,15 @@
 </template>
 
 <script>
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { deleteBug, deleteBadcase, deleteTestCase } from '../../api.js'
 export default {
   name: 'BadcaseListPanel',
   props: {
-    // header
+    // header（多标签工作区下由顶栏 Tab 展示计划名，可关闭长面包屑）
     generateBreadcrumb: { type: Function, required: true },
+    showLongBreadcrumb: { type: Boolean, default: true },
     currentPlanType: { type: String, default: 'badcase' },
     totalBadcases: { type: Number, default: 0 },
 
@@ -238,16 +243,27 @@ export default {
     cancelCreate: { type: Function, default: null }
   },
   emits: ['update:searchText', 'update:selectedAssignee', 'update:selectedStatus'],
+  setup(props) {
+    const { t } = useI18n()
+    const listTypeLabel = computed(() => {
+      if (props.currentPlanType === 'bug') return t('list.types.bug')
+      if (props.currentPlanType === 'test_case') return t('list.types.testCase')
+      return t('list.types.badcase')
+    })
+    return { t, listTypeLabel }
+  },
+  data() {
+    return {
+      /** 行上按下时记录，用于区分「划选复制」与「单击打开」 */
+      _rowPress: null
+    }
+  },
   methods: {
     async batchDeleteSelected() {
       const ids = Array.isArray(this.selectedTasks) ? this.selectedTasks.slice() : []
       if (!ids.length) return
 
-      const label = this.currentPlanType === 'bug'
-        ? 'Bug'
-        : (this.currentPlanType === 'test_case' ? '测试用例' : 'BadCase')
-
-      if (!confirm(`确定删除选中的 ${ids.length} 条${label}吗？此操作无法撤销。`)) return
+      if (!confirm(this.$t('list.batchDeleteConfirm', { n: ids.length, type: this.listTypeLabel }))) return
 
       try {
         const requests = ids.map((id) => {
@@ -264,13 +280,13 @@ export default {
         }).length
 
         if (failed > 0) {
-          alert(`批量删除完成，但有 ${failed} 条失败。请刷新后重试。`)
+          alert(this.$t('list.batchDeletePartial', { failed }))
         } else {
-          alert('批量删除成功！')
+          alert(this.$t('list.batchDeleteOk'))
         }
       } catch (e) {
         console.error('批量删除异常:', e)
-        alert('批量删除失败：' + (e?.message || '未知错误'))
+        alert(this.$t('list.batchDeleteFail', { msg: e?.message || this.$t('common.unknownError') }))
       } finally {
         // refreshBadcases 会触发父组件重新拉取列表并清空 selectedTasks
         if (typeof this.refreshBadcases === 'function') {
@@ -281,6 +297,46 @@ export default {
     handleEdit(id) {
       const fn = this.editItem || this.editBadcase
       if (typeof fn === 'function') fn(id)
+    },
+    onRowMouseDown(e) {
+      if (e.button !== 0) return
+      const t = e.target
+      if (typeof t.closest === 'function' && (t.closest('.row-checkbox') || t.closest('.row-actions'))) return
+      this._rowPress = { x0: e.clientX, y0: e.clientY, moved: false }
+      const move = (ev) => {
+        if (!this._rowPress) return
+        if (Math.hypot(ev.clientX - this._rowPress.x0, ev.clientY - this._rowPress.y0) > 6) {
+          this._rowPress.moved = true
+        }
+      }
+      const up = () => {
+        document.removeEventListener('mousemove', move)
+        document.removeEventListener('mouseup', up)
+      }
+      document.addEventListener('mousemove', move, { passive: true })
+      document.addEventListener('mouseup', up, { once: true })
+    },
+    _hasTextSelection() {
+      if (typeof window === 'undefined' || !window.getSelection) return false
+      return !!String(window.getSelection().toString()).trim()
+    },
+    /** 单击打开详情；划选/拖拽复制时不打开（详情 Tab 由父组件按 id 去重） */
+    handleRowClick(badcase, e) {
+      if (e.button !== 0) return
+      const el = e?.target
+      if (el && typeof el.closest === 'function') {
+        if (el.closest('.row-checkbox') || el.closest('.row-actions')) return
+      }
+      if (this._rowPress?.moved) {
+        this._rowPress = null
+        return
+      }
+      this._rowPress = null
+      if (this._hasTextSelection()) return
+      setTimeout(() => {
+        if (this._hasTextSelection()) return
+        this.handleEdit(badcase.id)
+      }, 0)
     },
     updateSearchText(v) {
       this.$emit('update:searchText', v)
@@ -340,7 +396,7 @@ export default {
 }
 
 .quick-create-btn {
-  padding: 6px 12px;
+  padding: 6px 10px;
   background: #4a90e2;
   color: white;
   border: none;
@@ -349,9 +405,10 @@ export default {
   font-weight: 500;
   cursor: pointer;
   transition: background-color 0.2s;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 
 .quick-create-btn:hover {
@@ -479,8 +536,35 @@ export default {
   padding: 12px 24px;
   border-bottom: 1px solid #f0f0f0;
   align-items: center;
-  cursor: pointer;
+  cursor: default;
   transition: background-color 0.2s;
+}
+
+/* 列内空白处为箭头；仅文字节点为 I 形光标，便于划选复制 */
+.table-row .row-title,
+.table-row .row-type,
+.table-row .row-status,
+.table-row .row-assignee,
+.table-row .row-date {
+  cursor: default;
+  min-width: 0;
+}
+
+.table-row .badcase-title,
+.table-row .date-text,
+.table-row .assignee-text,
+.table-row .type-badge,
+.table-row .status-badge,
+.table-row .field-diff-inline,
+.table-row .field-diff-inline span {
+  cursor: text;
+  user-select: text;
+}
+
+.table-row .row-checkbox,
+.table-row .row-actions {
+  user-select: none;
+  cursor: default;
 }
 
 .table-row:hover {

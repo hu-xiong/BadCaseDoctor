@@ -7,13 +7,79 @@
 import asyncio
 import time
 import os
-from typing import Dict, Any
+from typing import Any, Dict
+
 from .react_simplified import SimplifiedReActEngine
 from .tool_registry import ToolRegistry
 from .tools import BrowserTestTool, DatabaseTool, LogAnalyzerTool, AccuracyTesterTool
 from .tools.search_tool import SearchTool
 from .tools.login_state_tool import LoginStateTool
 from .tools.layered_tool_factory import LayeredToolFactory
+
+# ReAct 三阶段（与前端约定）：think=思考 | act=执行 | observe_decide=观察与决策
+# stream_channel：该步若开启模型 reasoning，则 reasoning 与 content 两轨分流展示
+REACT_PHASE_THINK = "think"
+REACT_PHASE_ACT = "act"
+REACT_PHASE_OBSERVE_DECIDE = "observe_decide"
+
+
+def _react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
+    """为每条 step 事件附加 react_phase / stream_channel，便于前端分类与分样式渲染。"""
+    ev = step_data.get("event")
+    if not ev:
+        return {}
+    if ev == "reasoning_timing":
+        seg = (step_data.get("segment") or "").lower()
+        if seg == "think":
+            return {"react_phase": REACT_PHASE_THINK}
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    if ev == "reasoning":
+        return {"react_phase": REACT_PHASE_THINK, "stream_channel": "reasoning"}
+    if ev == "todos_stream":
+        return {"react_phase": REACT_PHASE_THINK, "stream_channel": "content"}
+    if ev in ("todos_partial", "todos"):
+        return {"react_phase": REACT_PHASE_THINK}
+    if ev in ("plan", "plan_update", "plan_init"):
+        return {"react_phase": REACT_PHASE_THINK}
+    if ev == "skill_matched":
+        return {"react_phase": REACT_PHASE_THINK}
+    if ev in ("immutable_field_rejection", "intent_clarification"):
+        return {"react_phase": REACT_PHASE_THINK}
+    if ev == "agent_thought":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "content"}
+    if ev == "agent_thought_done":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    if ev == "reasoning_step":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "reasoning"}
+    if ev == "thought_content_step":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "content"}
+    if ev == "react_ui_stream":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "content"}
+    if ev == "llm_text_stream":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "content"}
+    if ev == "executing":
+        return {"react_phase": REACT_PHASE_ACT}
+    if ev == "observation":
+        return {"react_phase": REACT_PHASE_ACT}
+    if ev in ("exploring", "retry"):
+        return {"react_phase": REACT_PHASE_ACT}
+    if ev in ("todo_start", "todo_end"):
+        return {"react_phase": REACT_PHASE_ACT}
+    if ev == "step_status":
+        return {"react_phase": REACT_PHASE_ACT}
+    if ev == "skip":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    if ev in ("finding", "evidence"):
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    if ev == "summary_stream":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "content"}
+    if ev == "summary_stream_reset":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    if ev in ("done", "finished"):
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    if ev == "phase_wait":
+        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+    return {}
 
 
 class ConversationMemory:
@@ -155,8 +221,20 @@ class IntelligentDevOpsAgent:
         except Exception:
             pass
     
-    async def handle_user_request_stream(self, user_input: str, project_id: int = None, plan_id: int = None):
+    async def handle_user_request_stream(
+        self,
+        user_input: str,
+        project_id: int = None,
+        plan_id: int = None,
+        locale: str = None,
+        pending_diff_context: list = None,
+    ):
         """流式处理用户请求。plan_id 为当前迭代计划ID时，grep 会只检索该计划下的记录（人类式先看本迭代）。"""
+        _llm = self.llm
+        print(
+            f"[AGENT-LLM] 本请求绑定 LLM: class={type(_llm).__name__} "
+            f"model_attr={getattr(_llm, 'model', None)!r} instance_id={id(_llm)}"
+        )
         print(f"\n[AGENT] User Request (Stream): {user_input}")
         if project_id:
             print(f"[AGENT] Project ID: {project_id}")
@@ -172,7 +250,115 @@ class IntelligentDevOpsAgent:
         intent_task = asyncio.create_task(self._classify_intent(user_input))
         
         # 2. 启动 ReAct 循环 (流式) - 传入 project_id、plan_id
-        async for step_data in self.react_engine.run_stream(user_input, project_id=project_id, plan_id=plan_id):
+        async for _raw in self.react_engine.run_stream(
+            user_input,
+            project_id=project_id,
+            plan_id=plan_id,
+            locale=locale,
+            pending_diff_context=pending_diff_context,
+        ):
+            step_data = _raw
+            if isinstance(step_data, dict):
+                _meta = _react_sse_meta(step_data)
+                if _meta:
+                    step_data = {**step_data, **_meta}
+                ev = step_data.get('event')
+                # 顶层 SSE：与 step 内事件同源；附带 react_phase / stream_channel 供分类订阅
+                if ev == 'plan':
+                    _pl = {
+                        'type': 'plan',
+                        'steps': step_data.get('steps') or [],
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                    if step_data.get('overview_only') is not None:
+                        _pl['overview_only'] = bool(step_data.get('overview_only'))
+                    yield _pl
+                elif ev == 'plan_init':
+                    yield {
+                        'type': 'plan_init',
+                        'mode': step_data.get('mode'),
+                        'steps': step_data.get('steps') or [],
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                elif ev == 'plan_update':
+                    yield {
+                        'type': 'plan_update',
+                        'steps': step_data.get('steps') or [],
+                        'reason': step_data.get('reason') or '',
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                elif ev == 'reasoning':
+                    yield {
+                        'type': 'thinking',
+                        'content': step_data.get('content') or '',
+                        'step_id': None,
+                        'react_phase': step_data.get('react_phase'),
+                        'stream_channel': step_data.get('stream_channel'),
+                    }
+                elif ev == 'reasoning_step':
+                    _idx = step_data.get('index')
+                    yield {
+                        'type': 'thinking',
+                        'content': step_data.get('content') or '',
+                        'step_id': int(_idx) + 1 if _idx is not None else None,
+                        'segment': step_data.get('segment'),
+                        'react_phase': step_data.get('react_phase'),
+                        'stream_channel': step_data.get('stream_channel'),
+                    }
+                elif ev == 'executing':
+                    _idx = step_data.get('index')
+                    yield {
+                        'type': 'action_start',
+                        'action': step_data.get('tool') or step_data.get('action'),
+                        'params': step_data.get('params'),
+                        'step_id': int(_idx) + 1 if _idx is not None else None,
+                        'index': _idx,
+                        'message': step_data.get('message'),
+                        'reason': step_data.get('reason'),
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                elif ev == 'observation':
+                    _idx = step_data.get('index')
+                    _sid = step_data.get('step_id')
+                    yield {
+                        'type': 'action_result',
+                        'result': step_data.get('data'),
+                        'summary_nl': step_data.get('summary_nl'),
+                        'tool': step_data.get('tool'),
+                        'step_id': _sid if _sid is not None else (int(_idx) + 1 if _idx is not None else None),
+                        'index': _idx,
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                elif ev == 'step_status':
+                    _idx = step_data.get('index')
+                    yield {
+                        'type': 'step_status',
+                        'status': step_data.get('status'),
+                        'step_id': step_data.get('step_id'),
+                        'index': _idx,
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                elif ev == 'finished':
+                    yield {
+                        'type': 'finished',
+                        'mode': step_data.get('mode'),
+                        'finished': step_data.get('finished'),
+                        'steps_count': step_data.get('steps_count'),
+                        'duration': step_data.get('duration'),
+                        'thinking_time': step_data.get('thinking_time'),
+                        'observations': step_data.get('observations'),
+                        'plan_snapshot': step_data.get('plan_snapshot'),
+                        'react_phase': step_data.get('react_phase'),
+                    }
+                elif ev == 'phase_wait':
+                    yield {
+                        'type': 'phase_wait',
+                        'kind': step_data.get('kind'),
+                        'active': step_data.get('active'),
+                        'index': step_data.get('index'),
+                        'message': step_data.get('message') or '',
+                        'react_phase': step_data.get('react_phase'),
+                    }
             yield {'type': 'step', 'data': step_data}
 
         # 结束前再补发 intent（如已完成）；避免阻塞主流程
@@ -187,7 +373,9 @@ class IntelligentDevOpsAgent:
         # 这里从 react_engine 的状态中获取最终结果可能更好，但目前 SimplifiedReActEngine 是无状态的
         # 我们让 run_stream 最后 yield 一个 summary
         
-    async def handle_user_request(self, user_input: str, project_id: int = None) -> Dict[str, Any]:
+    async def handle_user_request(
+        self, user_input: str, project_id: int = None, locale: str = None
+    ) -> Dict[str, Any]:
         """
         处理用户请求
         
@@ -207,7 +395,7 @@ class IntelligentDevOpsAgent:
         print(f"[AGENT] Intent Classification: {intent}")
         
         # 2. 启动 ReAct 循环 - 传入 project_id
-        result = await self.react_engine.run(user_input, project_id=project_id)
+        result = await self.react_engine.run(user_input, project_id=project_id, locale=locale)
         
         # 3. 后处理结果
         final_output = await self._format_output(result, intent)

@@ -11,30 +11,30 @@
         <!-- 用户下拉菜单 -->
         <div v-if="showUserDropdown" class="user-menu" @click.stop>
           <div class="user-detail">
-            <div class="user-name">{{ currentUser?.name || '用户' }}</div>
-            <div class="user-email">{{ currentUser?.email || 'user@example.com' }}</div>
+            <div class="user-name">{{ currentUser?.name || t('shell.userFallback') }}</div>
+            <div class="user-email">{{ currentUser?.email || t('shell.emailFallback') }}</div>
           </div>
           <div class="menu-divider"></div>
           <div class="menu-item" @click="showUserProfile">
             <span class="menu-icon">👤</span>
-            <span class="menu-text">个人资料</span>
+            <span class="menu-text">{{ t('dashboard.profile') }}</span>
           </div>
           <div class="menu-item" @click="showNotifications">
             <span class="menu-icon">🔔</span>
-            <span class="menu-text">通知</span>
+            <span class="menu-text">{{ t('dashboard.notifications') }}</span>
           </div>
           <div class="menu-item" @click="showHelp">
             <span class="menu-icon">❓</span>
-            <span class="menu-text">帮助</span>
+            <span class="menu-text">{{ t('dashboard.help') }}</span>
           </div>
           <div class="menu-item" @click="showTeamManagement">
             <span class="menu-icon">👥</span>
-            <span class="menu-text">团队管理</span>
+            <span class="menu-text">{{ t('dashboard.team') }}</span>
           </div>
           <div class="menu-divider"></div>
           <div class="menu-item logout-item" @click="logout">
             <span class="menu-icon">🚪</span>
-            <span class="menu-text">退出登录</span>
+            <span class="menu-text">{{ t('dashboard.logout') }}</span>
           </div>
         </div>
       </div>
@@ -56,11 +56,11 @@
         <div class="sidebar-menu">
           <button class="sidebar-item" :class="{active: currentView === 'overview'}" @click="currentView = 'overview'">
             <span class="sidebar-icon">🏠</span>
-            <span class="sidebar-text">概览</span>
+            <span class="sidebar-text">{{ t('dashboard.overview') }}</span>
           </button>
           <button class="sidebar-item" :class="{active: currentView === 'projects'}" @click="currentView = 'projects'">
             <span class="sidebar-icon">📁</span>
-            <span class="sidebar-text">项目管理</span>
+            <span class="sidebar-text">{{ t('dashboard.projectManage') }}</span>
           </button>
 
         </div>
@@ -76,15 +76,15 @@
           <div class="stats-section" style="flex-direction: row; gap: 24px; justify-content: center; margin-bottom: 32px;">
           <div class="stat-card">
             <div class="stat-number">0</div>
-            <div class="stat-label">项目数待处理BadCase</div>
+            <div class="stat-label">{{ t('dashboard.statPending') }}</div>
           </div>
           <div class="stat-card">
             <div class="stat-number">0</div>
-            <div class="stat-label">已解决BadCase</div>
+            <div class="stat-label">{{ t('dashboard.statResolved') }}</div>
           </div>
           <div class="stat-card">
             <div class="stat-number">0</div>
-            <div class="stat-label">总BadCase数</div>
+            <div class="stat-label">{{ t('dashboard.statTotal') }}</div>
           </div>
           </div>
         </div>
@@ -126,6 +126,7 @@
 <script>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import ProjectManage from './ProjectManage.vue'
 import Chat from './Chat.vue'
 import UserProfile from './UserProfile.vue'
@@ -140,6 +141,7 @@ export default {
   },
   setup() {
     const router = useRouter()
+    const { t } = useI18n()
     const currentView = ref('overview')
     const sidebarWidth = ref(280)
     const isResizing = ref(false)
@@ -183,19 +185,19 @@ export default {
     const showTeamManagement = () => {
       showUserDropdown.value = false
       // TODO: 实现团队管理页面
-      alert('团队管理功能开发中...')
+      alert(t('dashboard.teamDev'))
     }
     
     const showNotifications = () => {
       showUserDropdown.value = false
       // TODO: 实现通知页面
-      alert('通知功能开发中...')
+      alert(t('project.notificationsDev'))
     }
     
     const showHelp = () => {
       showUserDropdown.value = false
       // TODO: 实现帮助页面
-      alert('帮助功能开发中...')
+      alert(t('project.helpDev'))
     }
     
     const logout = () => {
@@ -251,6 +253,7 @@ export default {
     }, { immediate: true })
 
     return {
+      t,
       currentView,
       sidebarWidth,
       isResizing,

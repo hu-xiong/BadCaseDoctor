@@ -28,14 +28,11 @@ class SkillLoader:
             self.skill_dir = skill_dir
         else:
             self.skill_dir = os.path.join(os.getcwd(), skill_dir)
-                
+        
         self.skills: Dict[str, Skill] = {}
         self.skill_files: Dict[str, str] = {}  # skill_name -> file_path
         self.last_reload_time: Optional[datetime] = None
-        try:
-            print(f"[SKILL_LOADER] 技能目录：{self.skill_dir}")
-        except:
-            pass  # 忽略日志输出错误
+        print(f"[SKILL_LOADER] 技能目录: {self.skill_dir}")
     
     def load_all(self, force_reload: bool = False) -> Dict[str, Skill]:
         """
@@ -169,31 +166,54 @@ class SkillLoader:
         extracted_intents = self._extract_intents(user_input_lower)
         extracted_entities = self._extract_entities(user_input_lower)
         
-        # 计算每个技能的匹配分数
+        try:
+            from .intent_guards import intent_bucket
+        except ImportError:
+            intent_bucket = lambda _u: "unclear"  # type: ignore
+
+        bucket = intent_bucket(user_input)
+
+        # 计算每个技能的匹配分数；create_* 按意图桶软降权（不再整表过滤到空）
         skill_scores = []
         for skill in self.skills.values():
             score = skill.trigger.match(user_input_lower, extracted_intents, extracted_entities)
             if score > 0:
+                sn = (skill.name or "").lower()
+                if sn.startswith("create_"):
+                    orig = score
+                    if bucket == "modify":
+                        score *= 0.38
+                        print(
+                            f"[SKILL_MATCHER] 软降权 create_*（明确修改意图）: {skill.name} "
+                            f"{orig:.2f} → {score:.2f}"
+                        )
+                    elif bucket == "unclear":
+                        score *= 0.84
+                        print(
+                            f"[SKILL_MATCHER] 软降权 create_*（意图模糊，可由 ReAct 仲裁）: {skill.name} "
+                            f"{orig:.2f} → {score:.2f}"
+                        )
                 skill_scores.append((skill, score))
-        
+
         if not skill_scores:
             return None, 0.0
-        
+
         # 按匹配分数排序
         skill_scores.sort(key=lambda x: x[1], reverse=True)
+
         best_skill, best_score = skill_scores[0]
         
         # 记录匹配详情
-        print(f"[SKILL_MATCHER] 用户输入: '{user_input}'")
-        print(f"[SKILL_MATCHER] 匹配结果:")
+        print(f"[SKILL_MATCHER] 🎯 用户输入: '{user_input}'")
+        print(f"[SKILL_MATCHER] 📊 匹配结果:")
         for skill, score in skill_scores[:3]:  # 显示前3名
             print(f"  - {skill.name}: {score:.2f}")
         
         if best_score >= 0.3:  # 阈值
-            print(f"[SKILL_MATCHER] 选择技能: {best_skill.name} (分数: {best_score:.2f})")
+            print(f"[SKILL_MATCHER] ✅ 选择技能: {best_skill.name} (分数: {best_score:.2f})")
             return best_skill, best_score
         else:
-            print(f"[SKILL_MATCHER] 无合适技能 (最高分: {best_score:.2f})")
+            print(f"[SKILL_MATCHER] ⚠️  无合适技能 (最高分: {best_score:.2f})")
             return None, best_score
     
     def _extract_intents(self, text: str) -> List[str]:

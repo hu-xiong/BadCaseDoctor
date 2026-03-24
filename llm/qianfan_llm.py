@@ -15,10 +15,14 @@ class QianfanLLM:
         # 千帆没有显式 enable_thinking 参数，只能通过“降级到非推理模型”实现。
         self.force_disable_thinking = False
 
-    async def parse_intent(self, user_input: str, history: list = None) -> Optional[dict]:
+    async def parse_intent(
+        self, user_input: str, history: list = None, locale: Optional[str] = None
+    ) -> Optional[dict]:
         """解析意图"""
+        from agents.locale_prompts import wrap_general_user_prompt
+
         # 这里简化处理，直接调用对话接口并尝试解析 JSON
-        prompt = user_input
+        prompt = wrap_general_user_prompt(user_input, locale)
         if not ("JSON" in prompt or "json" in prompt):
              prompt += "\n请务必只返回 JSON 格式结果。"
 
@@ -274,8 +278,11 @@ class QianfanLLM:
             yield {"type": "content_delta", "delta": text[i : i + chunk]}
         yield {"type": "done"}
 
-    def chat_stream(self, prompt: str, history: list = None):
+    def chat_stream(self, prompt: str, history: list = None, locale: Optional[str] = None):
         """流式对话"""
+        from agents.locale_prompts import wrap_general_user_prompt
+
+        prompt = wrap_general_user_prompt(prompt, locale)
         # 这里简化为非流式，因为 requests 处理流式比较麻烦，且后端桥接需要稳定
         result = asyncio.run(self.chat(prompt, history))
         yield result

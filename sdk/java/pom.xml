@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.badcase</groupId>
+    <artifactId>badcase-sdk-parent</artifactId>
+    <version>0.1.0</version>
+    <packaging>pom</packaging>
+    <name>BadCase SDK Parent</name>
+    <description>BadCase 指标采集 SDK - Java 版</description>
+
+    <modules>
+        <module>badcase-sdk-core</module>
+        <module>badcase-sdk-spring-boot-starter</module>
+    </modules>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.badcase</groupId>
+                <artifactId>badcase-sdk-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>
