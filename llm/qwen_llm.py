@@ -165,13 +165,76 @@ class QwenLLM:
         *,
         stream: bool,
         enable_thinking: bool,
+        max_tokens: Optional[int] = None,
     ):
         kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
+        if max_tokens is not None and max_tokens > 0:
+            kwargs["max_tokens"] = max_tokens
         if enable_thinking:
             kwargs["extra_body"] = {"enable_thinking": True}
         if stream:
             kwargs["stream"] = True
         return self._get_client().chat.completions.create(**kwargs)
+
+    def chat_completion_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: Union[str, Dict[str, Any]] = "auto",
+        parallel_tool_calls: bool = False,
+        max_tokens: Optional[int] = None,
+    ):
+        """
+        百炼 OpenAI 兼容 /chat/completions：透传 tools、tool_choice、parallel_tool_calls。
+        ReAct 决策步使用；不开启 enable_thinking，避免干扰结构化 tool 参数。
+        """
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": False,
+        }
+        if max_tokens is not None and max_tokens > 0:
+            kwargs["max_tokens"] = max_tokens
+        return self._get_client().chat.completions.create(**kwargs)
+
+    def chat_completion_with_tools_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: Union[str, Dict[str, Any]] = "auto",
+        parallel_tool_calls: bool = False,
+        max_tokens: Optional[int] = None,
+    ) -> Iterator[Any]:
+        """
+        流式 FC：与 chat_completion_with_tools 相同参数，stream=True。
+        迭代 yield 原生 chunk（OpenAI SDK ChatCompletionChunk），供 ReAct 边收边推 agent_thought、累积 tool_calls。
+        """
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": True,
+        }
+        if max_tokens is not None and max_tokens > 0:
+            kwargs["max_tokens"] = max_tokens
+        stream = self._get_client().chat.completions.create(**kwargs)
+        for chunk in stream:
+            yield chunk
+
+    def chat_completion_messages(self, messages: List[Dict[str, Any]]):
+        """
+        仅 messages、非流式；用于 FC 第二轮（user + assistant.tool_calls + tool + user）等，不传 tools。
+        """
+        return self._get_client().chat.completions.create(
+            model=self.model, messages=messages, stream=False
+        )
 
     async def parse_intent(
         self, user_input: str, history: list = None, locale: Optional[str] = None
@@ -257,8 +320,14 @@ class QwenLLM:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self.executor, _sync_parse)
 
-    def chat_stream(self, prompt: str, history: list = None, locale: Optional[str] = None):
-        """流式聊天方法 (同步生成器，方便 Flask 使用)"""
+    def chat_stream(
+        self,
+        prompt: str,
+        history: list = None,
+        locale: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """流式聊天方法 (同步生成器，方便 Flask 使用)。max_tokens 供 ReAct observe 等场景可选上限。"""
         from agents.locale_prompts import wrap_general_user_prompt
 
         p = wrap_general_user_prompt(prompt, locale)
@@ -273,7 +342,9 @@ class QwenLLM:
         else:
             print(f"[QWEN-LLM-STREAM] 未开启思考模式：model={self.model}")
         try:
-            stream = self._chat_create(messages, stream=True, enable_thinking=eth)
+            stream = self._chat_create(
+                messages, stream=True, enable_thinking=eth, max_tokens=max_tokens
+            )
             for chunk in stream:
                 if not chunk.choices:
                     continue
@@ -284,7 +355,12 @@ class QwenLLM:
         except Exception as e:
             yield f"Error: {e}"
 
-    def chat_stream_with_reasoning(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
+    def chat_stream_with_reasoning(
+        self,
+        prompt: str,
+        history: list = None,
+        max_tokens: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
         messages = []
         if history:
             messages.extend(history)
@@ -295,7 +371,9 @@ class QwenLLM:
         _pl = len(prompt) if isinstance(prompt, str) else 0
 
         try:
-            stream = self._chat_create(messages, stream=True, enable_thinking=eth)
+            stream = self._chat_create(
+                messages, stream=True, enable_thinking=eth, max_tokens=max_tokens
+            )
             _first = True
             for chunk in stream:
                 _log_compat_stream_first(
@@ -320,7 +398,12 @@ class QwenLLM:
             yield {"type": "content_delta", "delta": f"Error: {e}"}
             yield {"type": "done"}
 
-    def chat_stream_fallback_chunks(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
+    def chat_stream_fallback_chunks(
+        self,
+        prompt: str,
+        history: list = None,
+        max_tokens: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
         messages: List[Dict[str, str]] = []
         if history:
             messages.extend(history)
@@ -328,7 +411,9 @@ class QwenLLM:
         eth = self._thinking_enabled_for(prompt)
         _pl = len(prompt) if isinstance(prompt, str) else 0
         try:
-            resp = self._chat_create(messages, stream=False, enable_thinking=eth)
+            resp = self._chat_create(
+                messages, stream=False, enable_thinking=eth, max_tokens=max_tokens
+            )
             _log_compat_stream_first(
                 "chat_stream_fallback_chunks",
                 self.model,

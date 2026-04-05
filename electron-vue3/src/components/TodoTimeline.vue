@@ -3,15 +3,15 @@
     <!-- 顶部汇总栏：弱化卡片感，左侧图标 + 待办步骤标题 -->
     <div class="todo-panel-header" @click="toggleAll">
       <div class="todo-panel-title">
-        <img class="todo-panel-icon" :src="todoListIcon" alt="待办步骤" />
-        <span class="todo-title-text">待办步骤</span>
+        <img class="todo-panel-icon" :src="todoListIcon" :alt="t('todoPanel.altIcon')" />
+        <span class="todo-title-text">{{ t('todoPanel.title') }}</span>
         <span class="todo-title-count">
-          已完成 {{ completedCount }} / 共 {{ totalCount }}
+          {{ t('todoPanel.progress', { done: completedCount, total: totalCount }) }}
         </span>
       </div>
       <div class="todo-panel-meta">
         <span v-if="runningCount > 0" class="todo-running-text">
-          正在执行 {{ runningCount }} 个步骤…
+          {{ t('todoPanel.runningSteps', { n: runningCount }) }}
         </span>
         <img
           class="todo-panel-toggle"
@@ -52,9 +52,12 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import todoListIcon from '../assets/todo-list-icon.svg'
 import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
+
+const { t } = useI18n()
 
 const props = defineProps({
   todos: {

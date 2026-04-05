@@ -394,3 +394,29 @@ Diff Review 不允许仅存于前端内存。以下状态必须落库（或持�
 10. `grep` 导航跳转遵循与沙箱预览一致的 Tab 规则（激活已有或新建目标 Tab），且不产生错误 Tab 渲染。
 11. 已采纳历史沙箱预览保留只读回看能力，但点击跳转后的目标 Tab 不出现待确认 Diff。
 
+---
+
+## 12. 操作人隔离与持久化（新增）
+
+### 12.1 问题说明
+
+- 沙箱预览点击后应进入与 **Diff 闭环**（见上文 §4、§10）一致的「左侧列表行内 √ / ✗」审核体验。
+- 若 diff 仅含列表可展示字段，但字段标签为英文（如 `Owner`）或未映射到统一 key（`assignee`），前端会误判为「需进详情」而 `openMainEditor`，导致**左侧列表不出现行内 diff**。
+- 未采纳的 Diff Review 仅**发起该次沙箱预览的操作者**可见并可采纳/拒绝；其他协作者不应看到他人待确认项。
+
+### 12.2 数据与接口
+
+- 表 `diff_review_state` 增加 **`operator_id`**（外键 `user.id`，可空以兼容历史行）。
+- `POST .../diff-reviews/upsert`：服务端将 `operator_id` 置为**当前登录用户**，标识本条 pending 归属。
+- `GET .../diff-reviews`：对 `status` 为 **`pending` / `rejected`** 的条目，仅返回 `operator_id` 为空（历史兼容）或 **`operator_id === 当前用户`** 的记录。
+- `POST .../diff-reviews/resolve` 与 `POST .../modify`（确认采纳）：若目标 pending 行的 `operator_id` 已设且**不是当前用户**，返回 **403**，避免代他人采纳。
+
+### 12.3 前端
+
+- Diff 字段名归一化：`Owner` / `owner` / `Assignee` 等与 `assignee` / `assignee_id` 统一映射后再判断「仅列表字段」与构造 `pendingModifications`，与 **grep 导航 + 列表闭环** 使用同一套列表列（标题、状态、负责人等）。
+
+### 12.4 完成定义（补充）
+
+1. 仅修改负责人（英文标签）时，从沙箱跳转后**左侧列表**出现行内 old→new 与 √ / ✗，而不是只打开详情。
+2. 用户 A 产生的未采纳 pending，用户 B 在同一项目下**列表/API 均不可见**且不可代为采纳。
+

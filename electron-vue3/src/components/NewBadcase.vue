@@ -1,5 +1,5 @@
 <template>
-  <div class="badcase-detail-wrapper">
+  <div class="badcase-detail-wrapper" :class="{ 'is-embedded': embedded }">
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
       <div class="loading-spinner"></div>
@@ -83,7 +83,7 @@
       <!-- 第二栏：页面级标题与操作 -->
       <div class="top-bar-row top-bar-row--secondary">
         <div class="secondary-left">
-          <span class="back-arrow" @click="goBack">←</span>
+          <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
           <span class="page-title">{{ isEdit ? '编辑BadCase' : '新建BadCase' }}</span>
         </div>
         <div class="secondary-right">
@@ -173,9 +173,10 @@
                     </div>
                     <div class="assignee-avatar">👤</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ currentUser.name }}</div>
-                      <div class="assignee-id">({{ currentUser.email }})</div>
-                      <div class="assignee-dept">{{ currentUser.department || '未设置部门' }}</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(currentUser) }}</div>
+                      <div v-if="personSecondaryLabel(currentUser) || currentUser.department" class="assignee-id">
+                        {{ personSecondaryLabel(currentUser) || currentUser.department || '未设置部门' }}
+                      </div>
                     </div>
                   </div>
                   <div v-else class="no-user-tip">
@@ -200,9 +201,9 @@
                     </div>
                     <div class="assignee-avatar">{{ assignee.avatar }}</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ assignee.name }}</div>
-                      <div class="assignee-id">({{ assignee.id }})</div>
-                      <div class="assignee-dept">{{ assignee.department }}</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(assignee) }}</div>
+                      <div v-if="assignee.id != null" class="assignee-id">ID {{ assignee.id }}</div>
+                      <div v-if="assignee.department" class="assignee-dept">{{ assignee.department }}</div>
                     </div>
                   </div>
                   <div v-else class="no-recent-tip">
@@ -226,9 +227,8 @@
                     </div>
                     <div class="assignee-avatar">👤</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ member.name }}</div>
-                      <div class="assignee-id">({{ member.email }})</div>
-                      <div class="assignee-dept">{{ member.role }} - {{ member.source }}</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(member) }}</div>
+                      <div v-if="personSecondaryLabel(member)" class="assignee-id">{{ personSecondaryLabel(member) }}</div>
                     </div>
                   </div>
                 </div>
@@ -240,9 +240,6 @@
                     <span class="tip-icon">ℹ️</span>
                     <span class="tip-text">该项目暂无成员，请先添加项目成员</span>
                   </div>
-                  <div class="debug-info">
-                    <small>调试信息: 项目ID {{ badcase.project_id }}, projectMembers长度: {{ projectMembers.length }}</small>
-                  </div>
                 </div>
                 
                 <!-- 未选择项目时的提示 -->
@@ -252,14 +249,6 @@
                     <span class="tip-icon">⚠️</span>
                     <span class="tip-text">请先选择所属项目</span>
                   </div>
-                </div>
-                
-                <!-- 调试信息 -->
-                <div class="debug-section" style="padding: 8px; background: #f0f0f0; margin: 8px 0; border-radius: 4px; font-size: 12px; color: #666;">
-                  <div>调试信息:</div>
-                  <div>项目ID: {{ badcase.project_id || '未选择' }}</div>
-                  <div>项目成员数量: {{ projectMembers.length }}</div>
-                  <div>项目成员数据: {{ JSON.stringify(projectMembers) }}</div>
                 </div>
               </div>
             </div>
@@ -789,9 +778,10 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
+import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
 
@@ -805,6 +795,10 @@ export default {
       default: null
     },
     project_id: {
+      type: [String, Number],
+      default: null
+    },
+    plan_id: {
       type: [String, Number],
       default: null
     },
@@ -1400,31 +1394,37 @@ export default {
               loading.value = false
             }
           }
-        } else if (query.project_id) {
-          console.log('新建模式，项目ID:', query.project_id)
-          console.log('query.project_id类型:', typeof query.project_id)
+        } else if (query.project_id || props.project_id) {
+          const pidRaw = query.project_id || props.project_id
+          console.log('新建模式，项目ID:', pidRaw)
+          console.log('project_id类型:', typeof pidRaw)
           console.log('availableProjects:', availableProjects.value)
 
           // 新建模式，设置项目ID
-          badcase.project_id = query.project_id
+          badcase.project_id = String(pidRaw)
           console.log('设置badcase.project_id:', badcase.project_id)
           console.log('设置后badcase.project_id类型:', typeof badcase.project_id)
 
+          // 新建模式可预设计划：优先 route.query，其次 props.plan_id（嵌入 Tab 新建）
+          if (query.plan_id || props.plan_id) {
+            badcase.plan = String(query.plan_id || props.plan_id)
+          }
+
           // 获取项目信息
-          const project = availableProjects.value.find(p => p.id == query.project_id)
+          const project = availableProjects.value.find(p => p.id == badcase.project_id)
           if (project) {
             projectInfo.value = project
             console.log('找到项目信息:', project.name)
           } else {
             console.log('未找到项目信息，availableProjects:', availableProjects.value)
-            console.log('尝试查找项目，query.project_id:', query.project_id)
+            console.log('尝试查找项目，project_id:', badcase.project_id)
             console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
           }
 
           // 获取当前项目的计划列表和成员列表
-          console.log('开始获取项目计划，项目ID:', query.project_id)
-          await fetchProjectPlans(query.project_id)
-          await fetchProjectMembers(query.project_id)
+          console.log('开始获取项目计划，项目ID:', badcase.project_id)
+          await fetchProjectPlans(badcase.project_id)
+          await fetchProjectMembers(badcase.project_id)
 
           // 确保数据同步
           console.log('初始化完成后，当前状态:')
@@ -1622,6 +1622,34 @@ export default {
     const stepsEditor = ref(null)
     const fileInput = ref(null)
     const commentEditorActive = ref(false)
+
+    const badcaseDraftPreset = inject('badcaseDraftPreset', null)
+    const _escHtml = (s) =>
+      String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    watch(
+      () => badcaseDraftPreset?.value?.token ?? 0,
+      async (tok) => {
+        if (!tok || !badcaseDraftPreset?.value?.description) return
+        if (isEdit.value) return
+        const block = String(badcaseDraftPreset.value.description).trim()
+        if (!block) return
+        const fragment = `<p><strong>【终端关联】</strong></p><pre style="white-space:pre-wrap;word-break:break-all;">${_escHtml(block)}</pre>`
+        await nextTick()
+        if (stepsEditor.value) {
+          const cur = (stepsEditor.value.innerHTML || '').trim()
+          stepsEditor.value.innerHTML = cur ? `${cur}<br/>${fragment}` : fragment
+          badcase.reproduction_steps = stepsEditor.value.innerHTML
+        } else {
+          const plain = `【终端关联】\n${block}`
+          badcase.reproduction_steps = badcase.reproduction_steps
+            ? `${badcase.reproduction_steps}\n\n${plain}`
+            : plain
+        }
+      }
+    )
     
     // 计算步骤编辑器字符长度
     const stepsLength = computed(() => {
@@ -1880,47 +1908,38 @@ export default {
 
     // 获取负责人显示文本
     const getAssigneeDisplayText = () => {
-      // 优先使用 assignee_id 查找用户名
-      if (badcase.assignee_id) {
-        const member = projectMembers.value.find(m => m.id == badcase.assignee_id)
-        if (member) {
-          return member.name
+      const resolveId = (rawId) => {
+        const sid = String(rawId)
+        const member = projectMembers.value.find(m => String(m.id) === sid)
+        if (member) return personPrimaryLabel(member)
+        if (currentUser.value && String(currentUser.value.id) === sid) {
+          return personPrimaryLabel(currentUser.value)
         }
-        // 如果找不到成员，尝试使用 currentUser
-        if (currentUser.value && currentUser.value.id == badcase.assignee_id) {
-          return currentUser.value.name
-        }
-        return String(badcase.assignee_id)
+        if (/^\d+$/.test(sid)) return `用户#${sid}`
+        return personPrimaryLabel({ name: sid, email: sid })
       }
-      
-      if (!badcase.assignee || badcase.assignee.length === 0) {
+
+      if (badcase.assignee_id != null && badcase.assignee_id !== '') {
+        return resolveId(badcase.assignee_id)
+      }
+
+      if (!badcase.assignee || (Array.isArray(badcase.assignee) && badcase.assignee.length === 0)) {
         return '未指派'
       }
-      
-      // 如果assignee是字符串（单个值），直接返回
+
       if (typeof badcase.assignee === 'string') {
-        return badcase.assignee
+        const s = badcase.assignee.trim()
+        if (!s) return '未指派'
+        return resolveId(s)
       }
-      
-      // 如果是数组，尝试查找用户名
+
       if (Array.isArray(badcase.assignee)) {
-        if (badcase.assignee.length === 0) {
-          return '未指派'
-        }
-        if (badcase.assignee.length === 1) {
-          // 尝试查找用户名
-          const memberId = badcase.assignee[0]
-          const member = projectMembers.value.find(m => m.id == memberId)
-          if (member) {
-            return member.name
-          }
-          return memberId
-        } else {
-          return `${badcase.assignee.length}...`
-        }
+        if (badcase.assignee.length === 1) return resolveId(badcase.assignee[0])
+        const labels = badcase.assignee.slice(0, 2).map((x) => resolveId(x))
+        return badcase.assignee.length > 2 ? `${labels.join('、')} 等 ${badcase.assignee.length} 人` : labels.join('、')
       }
-      
-      return badcase.assignee
+
+      return personPrimaryLabel(badcase.assignee)
     }
 
     // 检查负责人是否被选中
@@ -2063,6 +2082,12 @@ export default {
 
     // 返回上一页
     const goBack = () => {
+      // 嵌入在 ProjectDetail 的工作区 Tab：不要走浏览器历史，直接关闭 Tab
+      if (props.embedded) {
+        console.log('[EMBEDDED] 触发 close 事件')
+        emit('close')
+        return
+      }
       // 如果是通过覆盖层打开的，触发 close 事件
       if (props.id) {
         console.log('[OVERLAY] 触发 close 事件')
@@ -2352,6 +2377,8 @@ export default {
       handleProjectChange,
       toggleAssigneeDropdown,
       getAssigneeDisplayText,
+      personPrimaryLabel,
+      personSecondaryLabel,
       isAssigneeSelected,
       toggleAssignee,
       togglePlanDropdown,
@@ -2402,6 +2429,13 @@ export default {
   flex-direction: column;
   height: 100vh;
   background: #f8f9fa;
+}
+
+/* 嵌入在 ProjectDetail：占满父容器，避免底部按钮被裁切 */
+.badcase-detail-wrapper.is-embedded {
+  flex: 1;
+  min-height: 0;
+  height: auto;
 }
 
 /* 加载指示器 */
@@ -3742,11 +3776,17 @@ export default {
 
 /* 底部区域 */
 .footer-section {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-top: 24px;
+  padding: 16px 24px;
+  margin: 0 -24px -24px;
   border-top: 1px solid #e9ecef;
+  background: #fff;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
 }
 
 .footer-tip {

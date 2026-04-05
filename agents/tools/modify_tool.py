@@ -2,11 +2,38 @@
 对话修改Bug/BadCase工具
 支持行级别对比显示修改内容，集成Text2SQL智能查询
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from agents.tool_registry import BaseTool
+from agents.locale_prompts import (
+    normalize_locale,
+    is_english_locale,
+    modify_tool_progress,
+    modify_text2sql_row_question,
+    modify_error_target_id_bad,
+    modify_error_missing_params,
+    modify_error_immutable_fields,
+    modify_error_row_not_found,
+    modify_message_sandbox_done,
+    modify_summary_preview,
+    modify_message_apply_ok,
+    modify_message_apply_fail,
+    modify_summary_applied,
+    modify_error_apply_exception,
+    modify_modifications_kv_summary,
+    modify_assignee_unassigned,
+    modify_modifiable_fields_rows,
+    modify_field_label,
+    react_batch_modify_preview_message,
+    react_batch_modify_summary,
+)
 from config import Config
 import difflib
 import json
+import os
+import sqlite3
+import tempfile
+import time
+import uuid
 
 # Text2SQL Agent
 try:
@@ -14,6 +41,9 @@ try:
     TEXT2SQL_AVAILABLE = True
 except ImportError:
     TEXT2SQL_AVAILABLE = False
+
+# 批量预览流式事件：经 progress_queue 透传到 SSE（前缀 + JSON）
+MODIFY_BATCH_ROW_PREFIX = "__MODIFY_BATCH_ROW__"
 
 
 class ModifyTool(BaseTool):
@@ -71,7 +101,58 @@ class ModifyTool(BaseTool):
             except Exception as e:
                 self.text2sql = None
                 print(f"[MODIFY] Text2SQL初始化失败: {e}")
-    
+
+    @staticmethod
+    def _env_flag_enabled(name: str, default: str = "1") -> bool:
+        v = (os.getenv(name, default) or default).strip().lower()
+        return v not in ("0", "false", "no", "off", "")
+
+    def _sqlite_path_for_sandbox(self) -> str:
+        uri = (self._database_uri or "").strip()
+        if uri.startswith("sqlite:///"):
+            p = uri.replace("sqlite:///", "", 1)
+            return p if os.path.isabs(p) else p
+        return "instance/badcase_doctor.db"
+
+    def _perf_modify_trace_context(self, tag: str) -> None:
+        """PERF_LOG=1 时打印 ORM 数据源与 subset 所 ATTACH 的 SQLite 路径，便于排查「MySQL 读行 + 本地 db 沙箱」耗时与一致性。"""
+        if os.getenv("PERF_LOG", "").strip() != "1":
+            return
+        uri = (self._database_uri or "").strip()
+        if uri.startswith("mysql"):
+            orm_kind = "mysql"
+        elif uri.startswith("sqlite"):
+            orm_kind = "sqlite"
+        elif not uri:
+            orm_kind = "unset"
+        else:
+            orm_kind = "other"
+        sp = self._sqlite_path_for_sandbox()
+        sz_txt = "?"
+        try:
+            if os.path.isfile(sp):
+                sz_txt = f"{os.path.getsize(sp) / (1024 * 1024):.2f}"
+        except OSError:
+            pass
+        note = ""
+        if orm_kind == "mysql":
+            note = (
+                " | NOTE: subset 仍 ATTACH 此 SQLite；文件过大或磁盘慢会拉高 subset_prepare_ms；"
+                "若与 MySQL 不同步则写验证语义偏离生产"
+            )
+        print(
+            f"[PERF][modify_trace] {tag} orm_db_kind={orm_kind} "
+            f"sandbox_attach_sqlite={sp} sqlite_size_mb={sz_txt}{note}",
+            flush=True,
+        )
+
+    def _ensure_text2sql_if_needed_for_preview(
+        self, prefer_orm_read: bool, use_direct_sandbox: bool
+    ) -> None:
+        """沙箱预览：ORM 直读 + 直拼 UPDATE 时无需加载 Text2SQL Agent。"""
+        if not prefer_orm_read or not use_direct_sandbox:
+            self._ensure_text2sql()
+
     def _get_app_context(self):
         """获取 Flask 应用上下文"""
         from app import app
@@ -110,7 +191,180 @@ class ModifyTool(BaseTool):
             if status_value in badcase_valid_status:
                 return status_value
             return badcase_status_map.get(status_value, status_value)
-    
+
+    def _enrich_modified_data_for_preview(
+        self,
+        target: str,
+        modified_data: Dict[str, Any],
+        modifications: Dict[str, Any],
+        project_id: int,
+    ) -> None:
+        """沙箱预览：负责人等字段的展示名与落库解析一致（原地修改）。"""
+        if "assignee" in modifications and target == "badcase":
+            from app import User, db as flask_db
+
+            try:
+                new_assignee = modifications["assignee"]
+                user_id = int(new_assignee)
+                user = flask_db.session.query(User).get(user_id)
+                modified_data["assignee_display"] = user.name if user else str(new_assignee)
+            except (ValueError, TypeError):
+                modified_data["assignee_display"] = str(modifications.get("assignee", ""))
+        if target in ("bug", "testcase") and (
+            "assignee_id" in modifications or "assignee" in modifications
+        ):
+            from app import User, db as flask_db
+
+            try:
+                raw = (
+                    modified_data.get("assignee_id")
+                    or modifications.get("assignee_id")
+                    or modifications.get("assignee")
+                )
+                if raw is not None:
+                    resolved_uid = self._resolve_user_value(raw, project_id)
+                    u = (
+                        flask_db.session.query(User).get(int(resolved_uid))
+                        if resolved_uid is not None
+                        else None
+                    )
+                    name = u.name if u else str(raw)
+                    modified_data["assignee_display"] = name
+                    modified_data["assignee"] = name
+                    modified_data["assignee_id"] = (
+                        int(resolved_uid) if resolved_uid is not None else modified_data.get("assignee_id")
+                    )
+            except Exception:
+                modified_data["assignee_display"] = str(
+                    modifications.get("assignee") or modifications.get("assignee_id", "")
+                )
+                modified_data["assignee"] = modified_data["assignee_display"]
+
+    def _modifications_eligible_for_fast_apply(self, target: str, modifications: Dict[str, Any]) -> bool:
+        """仅负责人/状态等低风险字段时允许 skip_preview 直落库（须配合 MODIFY_ALLOW_FAST_APPLY）。"""
+        if not modifications:
+            return False
+        keys = set(modifications.keys())
+        if target in ("bug", "testcase"):
+            return keys <= {"assignee_id", "status"}
+        if target == "badcase":
+            return keys <= {"assignee", "status"}
+        return False
+
+    def _fetch_original_rows_batch_orm(
+        self, target: str, ids: List[int], project_id: int
+    ) -> Dict[int, Dict[str, Any]]:
+        """一次 IN 查询加载多行（与逐条 _get_original_data ORM 分支字段一致）。"""
+        from app import db as flask_db
+
+        ids = [int(x) for x in ids if x is not None]
+        if not ids:
+            return {}
+        out: Dict[int, Dict[str, Any]] = {}
+        if target == "bug":
+            from app import Bug, User
+
+            rows = (
+                flask_db.session.query(Bug)
+                .filter(Bug.project_id == project_id, Bug.id.in_(ids))
+                .all()
+            )
+            uids = {r.assignee_id for r in rows if r.assignee_id}
+            unames = {}
+            if uids:
+                for u in flask_db.session.query(User).filter(User.id.in_(uids)).all():
+                    unames[u.id] = u.name or ""
+            for bug in rows:
+                assignee_name = unames.get(bug.assignee_id, "") if bug.assignee_id else ""
+                out[bug.id] = {
+                    "id": bug.id,
+                    "title": bug.title,
+                    "description": bug.description or "",
+                    "status": bug.status.value if hasattr(bug.status, "value") else str(bug.status),
+                    "priority": bug.priority,
+                    "severity": bug.severity or "",
+                    "assignee_id": bug.assignee_id,
+                    "assignee": assignee_name,
+                    "plan_id": bug.plan_id,
+                    "steps_to_reproduce": bug.steps_to_reproduce or "",
+                    "expected_result": bug.expected_result or "",
+                    "actual_result": bug.actual_result or "",
+                }
+            return out
+        if target == "badcase":
+            from app import BadCase
+
+            rows = (
+                flask_db.session.query(BadCase)
+                .filter(BadCase.project_id == project_id, BadCase.id.in_(ids))
+                .all()
+            )
+            for bc in rows:
+                out[bc.id] = {
+                    "id": bc.id,
+                    "title": bc.title,
+                    "status": bc.status.value if hasattr(bc.status, "value") else str(bc.status),
+                    "priority": bc.priority,
+                    "assignee": bc.assignee or "",
+                    "plan_id": bc.plan_id,
+                    "reproduction_steps": bc.reproduction_steps or "",
+                    "answer": bc.answer or "",
+                    "correct_answer": bc.correct_answer or "",
+                    "badcase_result": bc.badcase_result or "",
+                    "base_problem": bc.base_problem or "",
+                }
+            return out
+        if target == "testcase":
+            from app import TestCase, User
+
+            rows = (
+                flask_db.session.query(TestCase)
+                .filter(TestCase.project_id == project_id, TestCase.id.in_(ids))
+                .all()
+            )
+            uids = set()
+            for r in rows:
+                if r.assignee_id:
+                    uids.add(r.assignee_id)
+                if r.executed_by:
+                    uids.add(r.executed_by)
+            unames = {}
+            if uids:
+                for u in flask_db.session.query(User).filter(User.id.in_(uids)).all():
+                    unames[u.id] = u.name or ""
+            for testcase in rows:
+                assignee_name = (
+                    unames.get(testcase.assignee_id, "") if testcase.assignee_id else ""
+                )
+                executed_by_name = (
+                    unames.get(testcase.executed_by, "") if testcase.executed_by else ""
+                )
+                out[testcase.id] = {
+                    "id": testcase.id,
+                    "title": testcase.title,
+                    "plan_id": testcase.plan_id,
+                    "status": testcase.status.value if testcase.status else "",
+                    "case_type": testcase.case_type or "",
+                    "priority": testcase.priority or "",
+                    "test_type": testcase.test_type or "",
+                    "preconditions": testcase.preconditions or "",
+                    "steps": json.dumps(testcase.steps, ensure_ascii=False)
+                    if testcase.steps
+                    else "",
+                    "remark": testcase.remark or "",
+                    "execution_result": testcase.execution_result.value
+                    if testcase.execution_result
+                    else "",
+                    "assignee_id": testcase.assignee_id,
+                    "assignee": assignee_name,
+                    "executed_by": executed_by_name,
+                    "estimated_time": testcase.estimated_time or "",
+                    "actual_time": testcase.actual_time or "",
+                    "baseline": testcase.baseline or "",
+                }
+            return out
+        return {}
+
     async def execute(
         self,
         target: str = "bug",
@@ -137,33 +391,40 @@ class ModifyTool(BaseTool):
             natural_query: 自然语言查询（用于查找目标记录）
         """
         progress_callback = kwargs.get("progress_callback")
-        def _progress(msg: str):
-            s = str(msg)
-            print(f"[MODIFY] 进度: {s}", flush=True)
+        loc = normalize_locale(kwargs.get("ui_locale"))
+
+        def _progress(msg: Union[str, Dict[str, Any]]):
+            if isinstance(msg, dict):
+                s = MODIFY_BATCH_ROW_PREFIX + json.dumps(msg, ensure_ascii=False, default=str)
+            else:
+                s = str(msg)
+            print(f"[MODIFY] 进度: {s[:500]}{'…' if len(s) > 500 else ''}", flush=True)
             try:
                 if callable(progress_callback):
                     progress_callback(s)
             except Exception:
                 pass
 
-        _progress("初始化 modify 参数…")
+        _progress(modify_tool_progress("init", loc))
+        batch_target_ids = self._normalize_target_ids(kwargs.get("target_ids", None) or target_id)
+        if batch_target_ids:
+            target_id = batch_target_ids[0]
 
-        # 如果没有target_id但有natural_query，尝试查找（需要时再初始化 Text2SQL）
-        if not target_id and natural_query:
-            self._ensure_text2sql()
-        if not target_id and natural_query and self.text2sql:
-            _progress("根据自然语言查询定位目标记录…")
-            target_id = await self._find_target_by_query(target, natural_query, project_id)
-            if target_id:
-                print(f"[MODIFY] 通过自然语言查询找到目标ID: {target_id}")
-
-        # Text2SQL 未启用或失败：在项目内按标题 ORM 模糊匹配一条（与 ReAct 注入的 natural_query 配合）
+        # 目标定位：默认先 ORM 标题模糊匹配，未命中再 Text2SQL（可通过 MODIFY_LOOKUP_ORM_FIRST=0 关闭）
+        prefer_orm_lookup = self._env_flag_enabled("MODIFY_LOOKUP_ORM_FIRST", "1")
         if not target_id and natural_query and project_id:
-            _progress("Text2SQL 未定位到记录，尝试 ORM 标题模糊匹配…")
+            _progress(modify_tool_progress("orm_fallback", loc))
             tid_fb = self._find_target_by_orm_fallback(target, natural_query, project_id)
             if tid_fb:
                 target_id = tid_fb
                 print(f"[MODIFY] 通过 ORM 模糊匹配找到目标ID: {target_id}")
+        if not target_id and natural_query:
+            self._ensure_text2sql()
+        if not target_id and natural_query and self.text2sql:
+            _progress(modify_tool_progress("natural_query_lookup", loc))
+            target_id = await self._find_target_by_query(target, natural_query, project_id)
+            if target_id:
+                print(f"[MODIFY] 通过自然语言查询找到目标ID: {target_id}")
 
         # 确保 target_id 是整数
         if target_id:
@@ -173,20 +434,19 @@ class ModifyTool(BaseTool):
                 print(f"[MODIFY] target_id 转换失败: {target_id}")
                 return {
                     'success': False,
-                    'error': f'target_id 格式错误: {target_id}'
+                    'error': modify_error_target_id_bad(target_id, loc),
                 }
         
-        _progress(f"已定位目标: target_id={target_id}，开始校验修改内容…")
+        _progress(modify_tool_progress("located_validate", loc, target_id=target_id))
         
         print(
             f"[MODIFY] 开始执行: target={target}, target_id={target_id}, modifications keys={list((modifications or {}).keys())}",
             flush=True,
         )
         if not target_id or not modifications:
-            error_msg = f'缺少必要参数：target_id={target_id}或modifications={modifications}'
-            hint_msg = '请先使用 grep 工具查询并定位目标记录，然后再使用 modify 工具修改。'
-            if not target_id:
-                hint_msg += f'\n\n示例流程：\n1. 使用 grep 工具查询 {target}：grep(target="{target}", project_id={project_id})\n2. 从 grep 结果中获取 target_id\n3. 使用 modify 工具修改：modify(target="{target}", target_id=<从grep获取的ID>, modifications={modifications})'
+            error_msg, hint_msg = modify_error_missing_params(
+                target_id, modifications, target, project_id, loc
+            )
             print(f"[MODIFY] ❌ {error_msg}")
             print(f"[MODIFY] 💡 {hint_msg}")
             return {
@@ -204,7 +464,7 @@ class ModifyTool(BaseTool):
             mapped_field = self._map_field_name(field, target)
             normalized_modifications[mapped_field] = value
         modifications = normalized_modifications
-        _progress(f"字段映射完成：{list(modifications.keys())}")
+        _progress(modify_tool_progress("fields_mapped", loc, keys=list(modifications.keys())))
         
         # 不可修改字段检查：若用户请求修改 type/类型 等，直接返回明确错误，避免长时间执行
         IMMUTABLE_FIELDS = {'id', 'type', 'project_id', 'plan_id', 'created_at', 'updated_at', 'creator_id'}
@@ -213,8 +473,7 @@ class ModifyTool(BaseTool):
             for f in requested_immutable:
                 modifications.pop(f, None)
             if not modifications:
-                hint = '可修改的字段包括：状态、期望结果、标题、优先级、复现步骤、负责人等。'
-                msg = f'「类型」(type) 等字段为系统固定，不可修改。{hint}'
+                msg, hint = modify_error_immutable_fields(loc)
                 print(f"[MODIFY] ❌ {msg}")
                 return {
                     'success': False,
@@ -228,58 +487,68 @@ class ModifyTool(BaseTool):
             original_status = modifications['status']
             normalized_status = self._normalize_status(modifications['status'], target)
             modifications['status'] = normalized_status
-            _progress(f"状态值归一化：{original_status} -> {normalized_status}")
+            _progress(
+                modify_tool_progress(
+                    "status_norm", loc, orig=original_status, norm=normalized_status
+                )
+            )
+
+        force_fast_commit = (
+            self._env_flag_enabled("MODIFY_ALLOW_FAST_APPLY", "0")
+            and bool(kwargs.get("skip_preview"))
+            and self._modifications_eligible_for_fast_apply(target, modifications)
+        )
+        if force_fast_commit:
+            print(
+                "[MODIFY] skip_preview 直落库（无沙箱），需 MODIFY_ALLOW_FAST_APPLY=1 且仅状态/负责人字段",
+                flush=True,
+            )
+        effective_confirm = bool(confirm) or force_fast_commit
         
         try:
             with self._get_app_context():
-                if not confirm:
-                    # confirm=False: 沙箱副本预览（需要 Text2SQL + 原始数据）
+                if not effective_confirm:
+                    prefer_orm_read = self._env_flag_enabled("MODIFY_ORIGINAL_DATA_ORM_FIRST", "1")
+                    use_direct_sandbox = self._env_flag_enabled("MODIFY_SANDBOX_DIRECT_SQL", "1")
+                    if len(batch_target_ids) > 1:
+                        return await self._execute_batch_sandbox_preview(
+                            target=target,
+                            batch_target_ids=batch_target_ids,
+                            modifications=modifications,
+                            project_id=project_id,
+                            loc=loc,
+                            _progress=_progress,
+                            batch_items=kwargs.get("batch_items"),
+                            prefer_orm_read=prefer_orm_read,
+                            use_direct_sandbox=use_direct_sandbox,
+                        )
+                    # confirm=False: 沙箱副本预览（默认 ORM 读行 + 直拼 UPDATE，可按需 Text2SQL）
                     print(f"[MODIFY] 沙箱预览模式，获取原始数据…", flush=True)
-                    _progress("进入沙箱预览：读取原始数据…")
-                    self._ensure_text2sql()
-                    _progress("正在查询数据库获取当前记录…")
-                    original_data = await self._get_original_data(target, target_id, project_id, progress_callback=_progress)
+                    _progress(modify_tool_progress("sandbox_enter", loc))
+                    self._ensure_text2sql_if_needed_for_preview(prefer_orm_read, use_direct_sandbox)
+                    _progress(modify_tool_progress("db_fetch", loc))
+                    original_data = await self._get_original_data(
+                        target, target_id, project_id, progress_callback=_progress, ui_locale=loc
+                    )
                     if not original_data:
-                        return {'success': False, 'error': f'未找到{target} ID={target_id}'}
-                    _progress("已读取原始数据，正在生成 diff 与预览…")
+                        return {'success': False, 'error': modify_error_row_not_found(target, target_id, loc)}
+                    _progress(modify_tool_progress("sandbox_diff", loc))
                     modified_data = original_data.copy()
                     modified_data.update(modifications)
-                    # 负责人显示名：BadCase 用 assignee，Bug/TestCase 用 assignee_id 解析为 name
-                    if 'assignee' in modifications and target == 'badcase':
-                        from app import User, db as flask_db
-                        try:
-                            new_assignee = modifications['assignee']
-                            user_id = int(new_assignee)
-                            user = flask_db.session.query(User).get(user_id)
-                            modified_data['assignee_display'] = user.name if user else str(new_assignee)
-                        except (ValueError, TypeError):
-                            modified_data['assignee_display'] = str(modifications.get('assignee', ''))
-                    if target in ('bug', 'testcase') and ('assignee_id' in modifications or 'assignee' in modifications):
-                        from app import User, db as flask_db
-                        try:
-                            raw = modified_data.get('assignee_id') or modifications.get('assignee_id') or modifications.get('assignee')
-                            if raw is not None:
-                                # 与落库一致：先按用户名解析，再按有效 user.id 解析
-                                resolved_uid = self._resolve_user_value(raw, project_id)
-                                u = flask_db.session.query(User).get(int(resolved_uid)) if resolved_uid is not None else None
-                                name = (u.name if u else str(raw))
-                                modified_data['assignee_display'] = name
-                                modified_data['assignee'] = name
-                                modified_data['assignee_id'] = int(resolved_uid) if resolved_uid is not None else modified_data.get('assignee_id')
-                        except Exception:
-                            # 预览阶段解析失败：仍展示用户输入，避免预览崩溃
-                            modified_data['assignee_display'] = str(modifications.get('assignee') or modifications.get('assignee_id', ''))
-                            modified_data['assignee'] = modified_data['assignee_display']
-                    diff_result = self._generate_line_diff(original_data, modified_data, modifications.keys())
-                    _progress("正在生成沙箱 SQL 预览…")
+                    self._enrich_modified_data_for_preview(
+                        target, modified_data, modifications, project_id
+                    )
+                    diff_result = self._generate_line_diff(
+                        original_data, modified_data, modifications.keys(), ui_locale=loc
+                    )
+                    _progress(modify_tool_progress("sandbox_sql", loc))
                     sandbox_result = await self._preview_in_sandbox(target, target_id, modifications, project_id)
-                    _progress("沙箱预览完成，等待确认…")
-                    target_name = 'Bug' if target == 'bug' else ('测试用例' if target == 'testcase' else 'BadCase')
-                    mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
+                    _progress(modify_tool_progress("sandbox_wait_confirm", loc))
+                    mod_summary = modify_modifications_kv_summary(modifications, loc)
                     return {
                         'success': True, 'confirmation_required': True,
-                        'message': '沙箱预览完成，请确认是否应用修改：',
-                        'summary': f'预览修改{target_name}(ID={target_id})：{mod_summary}',
+                        'message': modify_message_sandbox_done(loc),
+                        'summary': modify_summary_preview(target, target_id, mod_summary, loc),
                         'target': target, 'target_id': target_id,
                         'before': original_data, 'after': modified_data, 'diff': diff_result,
                         'modifications': modifications, 'sandbox_preview': sandbox_result
@@ -287,24 +556,34 @@ class ModifyTool(BaseTool):
                 
                 # confirm=True: 采纳即落库，快速路径（跳过 Text2SQL 和原始数据获取）
                 print(f"[MODIFY] 正在应用修改到数据库（ORM）…", flush=True)
-                _progress("开始落库：解析用户/负责人字段并写入 ORM…")
-                success = await self._apply_modifications(target, target_id, modifications, project_id)
+                _progress(modify_tool_progress("commit_start", loc))
+                if len(batch_target_ids) > 1:
+                    success = await self._apply_modifications_batch(target, batch_target_ids, modifications, project_id)
+                else:
+                    success = await self._apply_modifications(target, target_id, modifications, project_id)
                 print(f"[MODIFY] 应用修改完成: success={success}", flush=True)
-                _progress("落库完成" if success else "落库失败")
-                target_name = 'Bug' if target == 'bug' else ('测试用例' if target == 'testcase' else 'BadCase')
-                mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
-                return {
+                _progress(modify_tool_progress("commit_ok" if success else "commit_fail", loc))
+                mod_summary = modify_modifications_kv_summary(modifications, loc)
+                target_repr = batch_target_ids if len(batch_target_ids) > 1 else target_id
+                out_apply = {
                     'success': success,
-                    'message': f'已成功修改{target} ID={target_id}' if success else '修改失败',
-                    'summary': f'已修改{target_name}(ID={target_id})：{mod_summary}',
+                    'message': modify_message_apply_ok(target, target_repr, loc)
+                    if success
+                    else modify_message_apply_fail(loc),
+                    'summary': modify_summary_applied(target, target_repr, mod_summary, loc),
+                    'target_count': len(batch_target_ids),
                     'before': None, 'after': None, 'diff': None
                 }
+                if force_fast_commit:
+                    out_apply['fast_apply'] = True
+                    out_apply['sandbox_skipped'] = True
+                return out_apply
             
         except Exception as e:
             print(f"[MODIFY] 错误: {e}")
             return {
                 'success': False,
-                'error': f'修改失败: {str(e)}'
+                'error': modify_error_apply_exception(str(e), loc),
             }
     
     def _find_target_by_orm_fallback(self, target: str, natural_query: str, project_id: int) -> Optional[int]:
@@ -369,9 +648,17 @@ class ModifyTool(BaseTool):
             table_map = {"bug": "bug", "badcase": "bad_case", "testcase": "test_case"}
             table_name = table_map.get(target, "bad_case")
 
+            perf_rules = (
+                "性能约束："
+                "1) 只返回 id 列，严禁 SELECT *；"
+                "2) 必须包含 project_id 过滤；"
+                "3) 必须包含 LIMIT 1；"
+                "4) 尽量使用 title/status/id 等可索引字段过滤；"
+                "5) 避免函数包裹列与全表扫描写法。"
+            )
             sql_result = self.text2sql.generate_sql(
-                f"查找{table_name}表中{natural_query}的记录ID",
-                f"项目ID: {project_id}"
+                f"查找{table_name}表中{natural_query}的记录ID。{perf_rules}",
+                f"项目ID: {project_id}; 仅需返回单条最相关 id"
             )
             
             if sql_result.get('success'):
@@ -387,17 +674,27 @@ class ModifyTool(BaseTool):
             print(f"[MODIFY] 自然语言查询失败: {e}")
             return None
     
-    async def _get_original_data(self, target: str, target_id: int, project_id: int, progress_callback=None) -> Dict[str, Any]:
+    async def _get_original_data(
+        self,
+        target: str,
+        target_id: int,
+        project_id: int,
+        progress_callback=None,
+        ui_locale: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """获取原始数据。progress_callback(msg) 用于流式上报进度。"""
+        loc = normalize_locale(ui_locale)
+
         def _prog(msg: str):
             if callable(progress_callback):
                 try:
                     progress_callback(str(msg))
                 except Exception:
                     pass
-        # 优先使用 Text2SQL 查询
-        if self.text2sql:
-            _prog("通过 Text2SQL 查询原始数据…")
+        # 默认先 ORM 读行（与生产一致）；需 Text2SQL 时再初始化（MODIFY_ORIGINAL_DATA_ORM_FIRST=0 可改回先 LLM SQL）
+        prefer_orm_read = self._env_flag_enabled("MODIFY_ORIGINAL_DATA_ORM_FIRST", "1")
+        if self.text2sql and not prefer_orm_read:
+            _prog(modify_tool_progress("text2sql_load", loc))
             try:
                 # 注意：不同 target 对应不同表，testcase 为 test_case
                 table_map = {
@@ -407,8 +704,8 @@ class ModifyTool(BaseTool):
                 }
                 table_name = table_map.get(target, 'bad_case')
                 sql_result = self.text2sql.generate_sql(
-                    f"查询{table_name}表中ID为{target_id}的记录",
-                    f"项目ID: {project_id}"
+                    modify_text2sql_row_question(table_name, target_id, loc),
+                    f"项目ID: {project_id}" if not is_english_locale(loc) else f"project_id: {project_id}",
                 )
                 
                 if sql_result.get('success'):
@@ -422,7 +719,7 @@ class ModifyTool(BaseTool):
                             user = flask_db.session.query(User).get(data['assignee_id'])
                             name = user.name if user else ''
                             data['assignee'] = name
-                            data['assignee_display'] = name or '未指派'
+                            data['assignee_display'] = name or modify_assignee_unassigned(loc)
                         elif 'assignee' in data and data.get('assignee'):
                             # BadCase: assignee 存储的是用户ID字符串，需要转换为用户名
                             from app import User
@@ -438,17 +735,17 @@ class ModifyTool(BaseTool):
                                 data['assignee_display'] = str(data['assignee'])
                         else:
                             data['assignee'] = data.get('assignee', '') or ''
-                            data['assignee_display'] = '未指派'
+                            data['assignee_display'] = modify_assignee_unassigned(loc)
                         return data
             except Exception as e:
                 print(f"[MODIFY] Text2SQL查询失败，回退到ORM: {e}")
         
-        # 回退到 ORM 查询（使用 Flask-SQLAlchemy 的 db.session）
+        # ORM 查询（使用 Flask-SQLAlchemy 的 db.session）
         from app import db as flask_db
-        _prog("通过 ORM 查询原始数据…")
+        _prog(modify_tool_progress("orm_load", loc))
 
         if target == 'bug':
-            _prog("正在查询 Bug 记录…")
+            _prog(modify_tool_progress("querying_bug", loc))
             from app import Bug, User
             bug = flask_db.session.query(Bug).filter(
                 Bug.id == target_id,
@@ -481,7 +778,7 @@ class ModifyTool(BaseTool):
             }
         
         elif target == 'badcase':
-            _prog("正在查询 BadCase 记录…")
+            _prog(modify_tool_progress("querying_badcase", loc))
             from app import BadCase
             badcase = flask_db.session.query(BadCase).filter(
                 BadCase.id == target_id,
@@ -506,7 +803,7 @@ class ModifyTool(BaseTool):
             }
         
         elif target == 'testcase':
-            _prog("正在查询测试用例记录…")
+            _prog(modify_tool_progress("querying_testcase", loc))
             from app import TestCase, User
             testcase = flask_db.session.query(TestCase).filter(
                 TestCase.id == target_id,
@@ -546,9 +843,30 @@ class ModifyTool(BaseTool):
                 'baseline': testcase.baseline or ''
             }
         
+        if self.text2sql and prefer_orm_read:
+            _prog(modify_tool_progress("text2sql_load", loc))
+            try:
+                table_map = {
+                    'bug': 'bug',
+                    'badcase': 'bad_case',
+                    'testcase': 'test_case',
+                }
+                table_name = table_map.get(target, 'bad_case')
+                sql_result = self.text2sql.generate_sql(
+                    modify_text2sql_row_question(table_name, target_id, loc),
+                    f"项目ID: {project_id}" if not is_english_locale(loc) else f"project_id: {project_id}",
+                )
+                if sql_result.get('success'):
+                    exec_result = self.text2sql.execute_sql(sql_result['sql'])
+                    if exec_result.get('success') and exec_result.get('data'):
+                        return exec_result['data'][0]
+            except Exception as e:
+                print(f"[MODIFY] Text2SQL兜底查询失败: {e}")
         return None
     
-    def explore_record(self, target: str, target_id: int, project_id: int) -> Dict[str, Any]:
+    def explore_record(
+        self, target: str, target_id: int, project_id: int, ui_locale: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         探索目标记录与可选用户列表，供「思考意图」时使用（类似 Cursor 探索文件）。
         返回当前记录快照 + 用户列表(id/name)，便于大模型结合上下文确认修改意图。
@@ -562,96 +880,28 @@ class ModifyTool(BaseTool):
                     users.append({'id': u.id, 'name': (u.name or '').strip() or str(u.id)})
             except Exception as e:
                 print(f"[MODIFY] explore_record 查询用户失败: {e}")
+            loc = normalize_locale(ui_locale)
             return {
                 'current_record': current,
                 'users': users,
-                'modifiable_fields': self._get_modifiable_fields(target),
+                'modifiable_fields': self._get_modifiable_fields(target, loc),
             }
     
-    def _get_modifiable_fields(self, target: str) -> List[Dict[str, str]]:
-        """返回目标类型可修改的字段列表（英文字段名 + 中文标签），供探索时明确有哪些列可改。"""
-        # 统一格式: [ {"field": "title", "label": "标题"}, ... ]
-        if target == 'bug':
-            return [
-                {'field': 'title', 'label': '标题'},
-                {'field': 'description', 'label': '描述'},
-                {'field': 'status', 'label': '状态'},
-                {'field': 'priority', 'label': '优先级'},
-                {'field': 'severity', 'label': '严重程度'},
-                {'field': 'assignee', 'label': '负责人'},
-                {'field': 'steps_to_reproduce', 'label': '复现步骤'},
-                {'field': 'expected_result', 'label': '期望结果'},
-                {'field': 'actual_result', 'label': '实际结果'},
-            ]
-        if target == 'badcase':
-            return [
-                {'field': 'title', 'label': '标题'},
-                {'field': 'status', 'label': '状态'},
-                {'field': 'priority', 'label': '优先级'},
-                {'field': 'assignee', 'label': '负责人'},
-                {'field': 'base_problem', 'label': '相似问题/具体问题'},
-                {'field': 'reproduction_steps', 'label': '复现步骤'},
-                {'field': 'answer', 'label': '答案'},
-                {'field': 'correct_answer', 'label': '正确答案'},
-                {'field': 'badcase_result', 'label': 'BadCase结果'},
-                {'field': 'solution', 'label': '解决方式'},
-                {'field': 'problem_reason', 'label': '问题原因'},
-            ]
-        if target == 'testcase':
-            return [
-                {'field': 'title', 'label': '标题'},
-                {'field': 'status', 'label': '状态'},
-                {'field': 'priority', 'label': '优先级'},
-                {'field': 'assignee', 'label': '负责人'},
-                {'field': 'preconditions', 'label': '前置条件'},
-                {'field': 'steps', 'label': '测试步骤'},
-                {'field': 'remark', 'label': '备注'},
-                {'field': 'baseline', 'label': '基线'},
-                {'field': 'case_type', 'label': '用例类型'},
-                {'field': 'test_type', 'label': '测试类型'},
-                {'field': 'execution_result', 'label': '执行结果'},
-                {'field': 'estimated_time', 'label': '预估工时'},
-                {'field': 'actual_time', 'label': '实际工时'},
-            ]
-        return []
+    def _get_modifiable_fields(self, target: str, ui_locale: Optional[str] = None) -> List[Dict[str, str]]:
+        """返回目标类型可修改的字段列表（英文字段名 + 标签，随 UI 语言）。"""
+        return modify_modifiable_fields_rows(target, normalize_locale(ui_locale))
     
-    def _generate_line_diff(self, before: Dict, after: Dict, changed_fields: List[str]) -> List[Dict]:
+    def _generate_line_diff(
+        self,
+        before: Dict,
+        after: Dict,
+        changed_fields: List[str],
+        ui_locale: Optional[str] = None,
+    ) -> List[Dict]:
         """生成行级别差异对比"""
         # 不可修改的字段列表
         immutable_fields = {'id', 'type', 'project_id', 'created_at', 'updated_at', 'creator_id', 'plan_id'}
-        
-        field_labels = {
-            'title': '标题',
-            'description': '描述',
-            'status': '状态',
-            'priority': '优先级',
-            'severity': '严重程度',
-            'reproduce_steps': '复现步骤',
-            'expected_result': '预期结果',
-            'actual_result': '实际结果',
-            'assignee_id': '负责人',
-            'assignee': '负责人',
-            'owner': '负责人',  # LLM 可能返回 owner
-            # Bug 字段
-            'steps_to_reproduce': '复现步骤',
-            # BadCase 字段
-            'reproduction_steps': '复现步骤',
-            'answer': '答案',
-            'correct_answer': '正确答案',
-            'badcase_result': 'BadCase结果',
-            'base_problem': '相似问题',
-            # TestCase 字段
-            'case_type': '用例类型',
-            'test_type': '测试类型',
-            'preconditions': '前置条件',
-            'steps': '测试步骤',
-            'remark': '备注',
-            'execution_result': '执行结果',
-            'executed_by': '执行人',
-            'estimated_time': '预估工时',
-            'actual_time': '实际工时',
-            'baseline': '基线'
-        }
+        loc = normalize_locale(ui_locale)
         
         diff_result = []
         assignee_row_added = False  # 负责人只输出一行，且用 display name，field 统一为 assignee
@@ -726,11 +976,674 @@ class ModifyTool(BaseTool):
             
             diff_result.append({
                 'field': out_field,
-                'field_label': field_labels.get(out_field, out_field),
+                'field_label': modify_field_label(out_field, loc),
                 'lines': parsed_lines
             })
         
         return diff_result
+
+    @staticmethod
+    def _sandbox_table_name(target: str) -> str:
+        return {"bug": "bug", "badcase": "bad_case", "testcase": "test_case"}.get(target, "bug")
+
+    @staticmethod
+    def _sandbox_preview_mode() -> str:
+        """
+        沙箱预览执行模式（仅影响 confirm=False 的“写验证”环节，不影响 ORM 读行与 diff 生成）。
+
+        - mysql_temp（默认）：在**同一 MySQL 实例**上 `CREATE TEMPORARY TABLE ... AS SELECT` 拷行后 `UPDATE` 试写；非 MySQL 自动回退 subset（本地 SQLite 子集）
+        - subset：只复制“目标表 + 目标行”到临时 SQLite，再 UPDATE
+        - full_copy：整库 copy2 后在副本上 UPDATE（最安全，最慢）
+        - skip_update：不执行沙箱 UPDATE，仅用 ORM+diff 预览（最快，但无写验证）
+
+        环境变量：MODIFY_SANDBOX_PREVIEW_MODE=full_copy|subset|mysql_temp|skip_update
+        可选：MODIFY_SANDBOX_USE_MYSQL_TEMP_WHEN_AVAILABLE=1 且 mode=subset 时，若当前引擎为 MySQL 则走 mysql_temp。
+        """
+        v = (os.getenv("MODIFY_SANDBOX_PREVIEW_MODE") or "mysql_temp").strip().lower()
+        if v in ("full", "fullcopy", "copy", "full_copy"):
+            return "full_copy"
+        if v in ("subset", "subset_db", "subsetdb"):
+            return "subset"
+        if v in ("mysql_temp", "mysqltemp", "temp_table", "rdbms_temp", "db_temp"):
+            return "mysql_temp"
+        if v in ("skip", "skip_update", "skipupdate", "no_update", "noupdate"):
+            return "skip_update"
+        return "full_copy"
+
+    def _effective_database_uri(self) -> str:
+        u = (self._database_uri or "").strip()
+        if u:
+            return u
+        try:
+            from flask import current_app
+
+            return str(current_app.config.get("SQLALCHEMY_DATABASE_URI") or "").strip()
+        except Exception:
+            return ""
+
+    def _is_mysql_bind(self) -> bool:
+        try:
+            bind = self.db.get_bind()
+            name = getattr(bind.dialect, "name", "") or ""
+            if name == "mysql":
+                return True
+        except Exception:
+            pass
+        uri = self._effective_database_uri().lower()
+        return uri.startswith("mysql") or "+mysql" in uri
+
+    def _resolve_use_mysql_temp(self, mode: str) -> bool:
+        """是否在写验证阶段使用原库 TEMPORARY TABLE（仅 MySQL）。"""
+        if not self._is_mysql_bind():
+            if mode == "mysql_temp":
+                print(
+                    "[MODIFY-SANDBOX] mysql_temp 需要 MySQL 连接，当前非 MySQL，将回退 subset / full_copy",
+                    flush=True,
+                )
+            return False
+        if mode == "mysql_temp":
+            return True
+        if mode == "subset" and self._env_flag_enabled(
+            "MODIFY_SANDBOX_USE_MYSQL_TEMP_WHEN_AVAILABLE", "0"
+        ):
+            return True
+        return False
+
+    def _mysql_temp_write_validate(
+        self,
+        target: str,
+        target_ids: List[int],
+        project_id: int,
+        set_clauses: List[str],
+        combined_sql_shown: str,
+    ) -> Dict[str, Any]:
+        """
+        在同一 MySQL 连接内：CREATE TEMPORARY TABLE AS SELECT 目标行 → UPDATE 临时表 → DROP。
+        不修改业务表；需 CREATE TEMPORARY TABLE / SELECT 权限。
+        """
+        seen: set[int] = set()
+        ids: List[int] = []
+        for x in target_ids or []:
+            try:
+                ix = int(x)
+            except (TypeError, ValueError):
+                continue
+            if ix not in seen:
+                seen.add(ix)
+                ids.append(ix)
+        if not ids or not set_clauses:
+            return {"success": False, "error": "mysql_temp: 无有效 id 或可更新字段"}
+        table_phys = self._sandbox_table_name(target)
+        tmp = f"t_mprev_{uuid.uuid4().hex[:16]}"
+        pid = int(project_id)
+        in_ph = ",".join(["%s"] * len(ids))
+        create_sql = (
+            f"CREATE TEMPORARY TABLE `{tmp}` AS "
+            f"SELECT * FROM `{table_phys}` WHERE project_id = %s AND id IN ({in_ph})"
+        )
+        create_params: List[Any] = [pid] + ids
+        set_part = ", ".join(set_clauses)
+        update_sql = (
+            f"UPDATE `{tmp}` SET {set_part} WHERE project_id = %s AND id IN ({in_ph})"
+        )
+        update_params: List[Any] = [pid] + ids
+
+        perf = os.getenv("PERF_LOG", "").strip() == "1"
+        t_wall0 = time.perf_counter()
+        conn = None
+        cur = None
+        try:
+            bind = self.db.get_bind()
+            if getattr(bind.dialect, "name", "") != "mysql":
+                return {"success": False, "error": "mysql_temp 仅支持 SQLAlchemy MySQL 方言"}
+            conn = bind.raw_connection()
+            cur = conn.cursor()
+            t0 = time.perf_counter()
+            cur.execute(create_sql, create_params)
+            if perf:
+                print(
+                    f"[PERF][modify_sandbox] mysql_temp_prepare_ms={(time.perf_counter() - t0) * 1000.0:.1f} "
+                    f"table=`{table_phys}` tmp=`{tmp}` n={len(ids)}",
+                    flush=True,
+                )
+            cur.execute(f"SELECT COUNT(*) FROM `{tmp}`")
+            row_cnt = cur.fetchone()[0]
+            if int(row_cnt) != len(ids):
+                return {
+                    "success": False,
+                    "error": f"mysql_temp: 临时表 {row_cnt} 行，期望 {len(ids)} 行（检查 id / project_id）",
+                }
+            t1 = time.perf_counter()
+            cur.execute(update_sql, update_params)
+            try:
+                conn.commit()
+            except Exception:
+                pass
+            if perf:
+                print(
+                    f"[PERF][modify_sandbox] mysql_temp_exec_ms={(time.perf_counter() - t1) * 1000.0:.1f} "
+                    f"tmp=`{tmp}`",
+                    flush=True,
+                )
+                print(
+                    f"[PERF][modify_sandbox] mysql_temp_wall_ms={(time.perf_counter() - t_wall0) * 1000.0:.1f} "
+                    f"n={len(ids)}",
+                    flush=True,
+                )
+            return {
+                "success": True,
+                "sql": combined_sql_shown,
+                "sandbox_mode": True,
+                "sandbox_mysql_temp": True,
+                "mysql_temp_table": tmp,
+                "batch_count": len(ids),
+                "message": "沙箱预览完成（原库 TEMPORARY TABLE 试写），确认后将应用到生产库",
+                "execution_result": {"success": True, "mysql_temp_table": tmp},
+            }
+        except Exception as e:
+            err_txt = str(e)
+            print(f"[MODIFY-SANDBOX] mysql_temp 失败: {err_txt}", flush=True)
+            return {"success": False, "error": err_txt or "mysql_temp failed"}
+        finally:
+            if cur is not None:
+                try:
+                    cur.execute(f"DROP TEMPORARY TABLE IF EXISTS `{tmp}`")
+                except Exception:
+                    pass
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            if conn is not None:
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _prepare_subset_db_sqlite(
+        self, target: str, target_ids: List[int], project_id: int
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        轻量子集库：创建一个临时 SQLite 文件，仅包含目标表结构与目标行。
+        返回 (subset_db_path, error)。
+
+        注意：该模式用于“写验证”加速，并不追求与生产库完全一致（如触发器/索引/外键等）。
+        """
+        ids = [int(x) for x in (target_ids or []) if x is not None]
+        if not ids:
+            return None, "empty target_ids"
+        table_name = self._sandbox_table_name(target)
+        src_path = self._sqlite_path_for_sandbox()
+        try:
+            copy_dir = (os.getenv("SANDBOX_DB_COPY_DIR") or "").strip().rstrip("\\/") or tempfile.gettempdir()
+            os.makedirs(copy_dir, exist_ok=True)
+
+            subset_path = os.path.join(copy_dir, f"subset_{table_name}.{uuid.uuid4().hex[:10]}.db")
+            t0 = time.perf_counter()
+            # 建临时库 + 附加源库（只读）
+            conn = sqlite3.connect(subset_path)
+            try:
+                # 降低 IO：临时库可用 WAL/内存 temp_store（仅影响 subset 文件）
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL;")
+                    conn.execute("PRAGMA synchronous=OFF;")
+                    conn.execute("PRAGMA temp_store=MEMORY;")
+                except Exception:
+                    pass
+                conn.execute("ATTACH DATABASE ? AS src;", (src_path,))
+                # 复制表结构（含列名/类型等），不复制索引/触发器/外键约束
+                conn.execute(
+                    f"CREATE TABLE main.{table_name} AS SELECT * FROM src.{table_name} WHERE 0;"
+                )
+                # 仅复制目标行（带 project_id 过滤）
+                ph = ",".join(["?"] * len(ids))
+                conn.execute(
+                    f"INSERT INTO main.{table_name} SELECT * FROM src.{table_name} "
+                    f"WHERE project_id = ? AND id IN ({ph});",
+                    [int(project_id)] + ids,
+                )
+                conn.commit()
+                conn.execute("DETACH DATABASE src;")
+            finally:
+                conn.close()
+            if os.getenv("PERF_LOG") == "1":
+                dt = (time.perf_counter() - t0) * 1000.0
+                try:
+                    attach_abs = os.path.abspath(os.path.normpath(src_path))
+                except OSError:
+                    attach_abs = src_path
+                print(
+                    f"[PERF][modify_sandbox] subset_prepare_ms={dt:.1f} table={table_name} "
+                    f"n={len(ids)} attach_src={attach_abs}",
+                    flush=True,
+                )
+            return subset_path, None
+        except Exception as e:
+            return None, str(e)
+
+    def _exec_update_on_sqlite_path(
+        self, db_path: str, sql: str
+    ) -> tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+        """在指定 SQLite 文件上执行 UPDATE 预览 SQL（用于 full_copy / subset 两类写验证）。"""
+        ok = False
+        err_txt: Optional[str] = None
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.executescript(sql)
+                conn.commit()
+                ok = True
+            except Exception as e:
+                err_txt = str(e)
+            finally:
+                conn.close()
+        except Exception as e:
+            err_txt = str(e)
+        return ok, err_txt, {"batch_local_executescript": True} if ok else None
+
+    def _build_direct_sandbox_set_clauses(
+        self, target: str, modifications: Dict[str, Any], project_id: int
+    ) -> tuple[Optional[List[str]], Optional[str]]:
+        """直出 UPDATE 的 SET 子句列表；与单条沙箱预览语义一致。"""
+        immutable_fields = {"id", "type", "project_id", "created_at", "updated_at", "creator_id", "plan_id"}
+        set_clauses: List[str] = []
+        for field, value in (modifications or {}).items():
+            if field in immutable_fields:
+                print(f"[MODIFY-SANDBOX] 跳过不可修改字段: {field}")
+                continue
+            actual_value = value["new"] if isinstance(value, dict) and "new" in value else value
+            field_name = self._map_field_name(field, target)
+            if field in ["assignee", "assignee_id", "负责人", "creator", "创建人"] and target != "badcase":
+                resolved_value = self._resolve_user_value(actual_value, project_id)
+                if resolved_value != actual_value:
+                    print(f"[MODIFY-SANDBOX] 用户解析: '{actual_value}' -> 用户ID={resolved_value}")
+                    actual_value = resolved_value
+            if isinstance(actual_value, str):
+                esc = actual_value.replace("'", "''")
+                set_clauses.append(f"{field_name} = '{esc}'")
+            elif actual_value is None:
+                set_clauses.append(f"{field_name} = NULL")
+            else:
+                set_clauses.append(f"{field_name} = {actual_value}")
+        if not set_clauses:
+            return None, "没有可更新字段"
+        return set_clauses, None
+
+    async def _execute_batch_sandbox_preview(
+        self,
+        target: str,
+        batch_target_ids: List[int],
+        modifications: Dict[str, Any],
+        project_id: int,
+        loc: Optional[str],
+        _progress,
+        batch_items: Optional[List[Dict[str, Any]]],
+        prefer_orm_read: bool,
+        use_direct_sandbox: bool,
+    ) -> Dict[str, Any]:
+        """多条同字段预览：一次 ORM 批量读行 + 逐条 diff（可流式推送）+ 一次沙箱副本批量 UPDATE。"""
+        print(
+            f"[MODIFY] 批量沙箱预览: n={len(batch_target_ids)} target={target} ids={batch_target_ids}",
+            flush=True,
+        )
+        _progress(modify_tool_progress("sandbox_enter", loc))
+        perf = (os.getenv("PERF_LOG") == "1")
+        _t_gate0 = time.perf_counter()
+        self._ensure_text2sql_if_needed_for_preview(prefer_orm_read, use_direct_sandbox)
+        _text2sql_gate_only_ms = (time.perf_counter() - _t_gate0) * 1000.0
+        if perf:
+            self._perf_modify_trace_context("batch_preview_enter")
+            print(
+                f"[PERF][modify_batch] text2sql_gate_ms={_text2sql_gate_only_ms:.1f} "
+                f"prefer_orm_read={int(prefer_orm_read)} direct_sandbox_sql={int(use_direct_sandbox)} "
+                f"text2sql_loaded={int(self.text2sql is not None)} "
+                f"sandbox_preview_mode={self._sandbox_preview_mode()}",
+                flush=True,
+            )
+
+        plan_by_id: Dict[int, Any] = {}
+        if batch_items:
+            for it in batch_items:
+                if isinstance(it, dict) and it.get("id") is not None:
+                    try:
+                        plan_by_id[int(it["id"])] = it.get("plan_id")
+                    except (TypeError, ValueError):
+                        pass
+
+        stream_rows = self._env_flag_enabled("MODIFY_BATCH_PREVIEW_STREAM", "1")
+        _progress(modify_tool_progress("db_fetch", loc))
+        timings: Dict[str, float] = {}
+        _t_orm0 = time.perf_counter()
+        row_maps = self._fetch_original_rows_batch_orm(target, batch_target_ids, project_id)
+        timings["orm_fetch_ms"] = (time.perf_counter() - _t_orm0) * 1000.0
+        n_total = len(batch_target_ids)
+        all_results: List[Dict[str, Any]] = []
+        mod_summary = modify_modifications_kv_summary(modifications, loc)
+        enrich_ms_acc = 0.0
+        line_diff_ms_acc = 0.0
+        batch_row_max_ms = 0.0
+        stream_emit_ms_acc = 0.0
+        _t_diff0 = time.perf_counter()
+        for idx, tid in enumerate(batch_target_ids):
+            _t_row0 = time.perf_counter()
+            tid_i = int(tid)
+            original_data = row_maps.get(tid_i)
+            if not original_data:
+                return {
+                    "success": False,
+                    "error": modify_error_row_not_found(target, tid_i, loc),
+                    "batch_modify": True,
+                }
+            _progress(modify_tool_progress("sandbox_diff", loc))
+            modified_data = original_data.copy()
+            modified_data.update(modifications)
+            _te0 = time.perf_counter()
+            self._enrich_modified_data_for_preview(target, modified_data, modifications, project_id)
+            enrich_ms_acc += (time.perf_counter() - _te0) * 1000.0
+            _td0 = time.perf_counter()
+            diff_result = self._generate_line_diff(
+                original_data, modified_data, modifications.keys(), ui_locale=loc
+            )
+            line_diff_ms_acc += (time.perf_counter() - _td0) * 1000.0
+            _resolved_plan_id = plan_by_id.get(tid_i)
+            if _resolved_plan_id is None and isinstance(original_data, dict):
+                _rp = original_data.get("plan_id")
+                if _rp is not None:
+                    try:
+                        _resolved_plan_id = int(_rp)
+                    except (TypeError, ValueError):
+                        _resolved_plan_id = None
+            if stream_rows:
+                _ts0 = time.perf_counter()
+                _progress(
+                    {
+                        "kind": "batch_preview_row",
+                        "index": idx,
+                        "total": n_total,
+                        "target": target,
+                        "target_id": tid_i,
+                        "plan_id": _resolved_plan_id,
+                        "record_title": (original_data or {}).get("title"),
+                        "diff": diff_result,
+                        "before": original_data,
+                        "after": modified_data,
+                    }
+                )
+                stream_emit_ms_acc += (time.perf_counter() - _ts0) * 1000.0
+            batch_row_max_ms = max(
+                batch_row_max_ms, (time.perf_counter() - _t_row0) * 1000.0
+            )
+            row_obs: Dict[str, Any] = {
+                "success": True,
+                "confirmation_required": True,
+                "message": modify_message_sandbox_done(loc),
+                "summary": modify_summary_preview(target, tid_i, mod_summary, loc),
+                "target": target,
+                "target_id": tid_i,
+                "before": original_data,
+                "after": modified_data,
+                "diff": diff_result,
+                "modifications": modifications,
+            }
+            all_results.append({"id": tid_i, "plan_id": _resolved_plan_id, "result": row_obs})
+        timings["diff_ms"] = (time.perf_counter() - _t_diff0) * 1000.0
+        timings["enrich_ms"] = enrich_ms_acc
+        timings["line_diff_ms"] = line_diff_ms_acc
+        timings["batch_row_max_ms"] = batch_row_max_ms
+        timings["stream_emit_ms"] = stream_emit_ms_acc
+        timings["text2sql_gate_ms"] = _text2sql_gate_only_ms
+
+        _progress(modify_tool_progress("sandbox_sql", loc))
+        _t_sbx0 = time.perf_counter()
+        sandbox_result = await self._preview_in_sandbox_batch(
+            target, batch_target_ids, modifications, project_id
+        )
+        timings["sandbox_preview_ms"] = (time.perf_counter() - _t_sbx0) * 1000.0
+        _progress(modify_tool_progress("sandbox_wait_confirm", loc))
+
+        for r in all_results:
+            r["result"]["sandbox_preview"] = sandbox_result
+
+        n = len(all_results)
+        batch_results_flat: List[Dict[str, Any]] = []
+        for r in all_results:
+            obs = r["result"]
+            batch_results_flat.append(
+                {
+                    "target_id": r.get("id"),
+                    "plan_id": r.get("plan_id"),
+                    "target": target,
+                    "diff": obs.get("diff", []),
+                    "modifications": modifications,
+                    "before": obs.get("before", {}),
+                    "after": obs.get("after", {}),
+                    "confirmation_required": obs.get("confirmation_required", True),
+                    "success": obs.get("success", False),
+                    "record_title": (obs.get("before") or {}).get("title"),
+                    "result": obs,
+                }
+            )
+
+        ok = bool(sandbox_result.get("success")) and all(
+            r["result"].get("success") for r in all_results
+        )
+        if perf:
+            try:
+                _tp = timings.get("text2sql_gate_ms", 0.0)
+                _in_loop = (
+                    timings.get("enrich_ms", 0.0)
+                    + timings.get("line_diff_ms", 0.0)
+                    + timings.get("stream_emit_ms", 0.0)
+                )
+                print(
+                    "[PERF][modify_preview] "
+                    f"text2sql_gate_ms={_tp:.1f} "
+                    f"orm_fetch_ms={timings.get('orm_fetch_ms', 0.0):.1f} "
+                    f"diff_loop_ms={timings.get('diff_ms', 0.0):.1f} "
+                    f"(enrich_ms={timings.get('enrich_ms', 0.0):.1f} "
+                    f"line_diff_ms={timings.get('line_diff_ms', 0.0):.1f} "
+                    f"stream_emit_ms={timings.get('stream_emit_ms', 0.0):.1f} "
+                    f"batch_row_max_ms={timings.get('batch_row_max_ms', 0.0):.1f} "
+                    f"diff_loop_minus_sub_ms={timings.get('diff_ms', 0.0) - _in_loop:.1f}) "
+                    f"sandbox_preview_ms={timings.get('sandbox_preview_ms', 0.0):.1f} "
+                    f"mode={self._sandbox_preview_mode()} n={n}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+        return {
+            "success": ok,
+            "confirmation_required": True,
+            "message": react_batch_modify_preview_message(n, loc),
+            "summary": react_batch_modify_summary(n, target, modifications, loc),
+            "batch_modify": True,
+            "batch_count": n,
+            "target": target,
+            "results": all_results,
+            "batch_results": batch_results_flat,
+            "sandbox_preview": sandbox_result,
+            "perf": timings,
+        }
+
+    async def _preview_in_sandbox_batch(
+        self,
+        target: str,
+        target_ids: List[int],
+        modifications: Dict[str, Any],
+        project_id: int,
+    ) -> Dict[str, Any]:
+        """同字段多行：一次副本 + executescript 多条 UPDATE；失败时回退为逐条 _preview_in_sandbox。"""
+        use_direct_sql = self._env_flag_enabled("MODIFY_SANDBOX_DIRECT_SQL", "1")
+        table_name = self._sandbox_table_name(target)
+        if not use_direct_sql:
+            last: Optional[Dict[str, Any]] = None
+            for tid in target_ids:
+                last = await self._preview_in_sandbox(target, tid, modifications, project_id)
+            return last or {"success": False, "error": "batch preview empty"}
+
+        set_clauses, err = self._build_direct_sandbox_set_clauses(target, modifications, project_id)
+        if err:
+            return {"success": False, "error": err}
+        assert set_clauses is not None
+        stmts = [
+            f"UPDATE {table_name} SET {', '.join(set_clauses)} "
+            f"WHERE id = {int(tid)} AND project_id = {int(project_id)}"
+            for tid in target_ids
+        ]
+        combined_sql = ";\n".join(stmts) + ";"
+
+        # mode=skip_update：不做写验证（仅给前端展示 diff/preview）
+        mode = self._sandbox_preview_mode()
+        if mode == "skip_update":
+            return {
+                "success": True,
+                "sql": combined_sql,
+                "sandbox_mode": False,
+                "sandbox_skipped": True,
+                "message": "已跳过沙箱 UPDATE 写验证（仅预览 diff）",
+            }
+
+        if self._resolve_use_mysql_temp(mode):
+            _t_mt0 = time.perf_counter()
+            res = self._mysql_temp_write_validate(
+                target, list(target_ids), project_id, list(set_clauses), combined_sql
+            )
+            if os.getenv("PERF_LOG", "").strip() == "1":
+                print(
+                    f"[PERF][modify_sandbox] batch_mysql_temp_ms={(time.perf_counter() - _t_mt0) * 1000.0:.1f} "
+                    f"ok={int(bool(res.get('success')))} n={len(target_ids)}",
+                    flush=True,
+                )
+            return res
+
+        # mode=subset：只抽取目标表+目标行到临时库再执行 UPDATE（mysql_temp 不可用则 mysql_temp 模式会回退到此）
+        if mode == "subset" or (mode == "mysql_temp" and not self._is_mysql_bind()):
+            _t_subset_wall0 = time.perf_counter()
+            subset_path, err2 = self._prepare_subset_db_sqlite(target, target_ids, project_id)
+            if err2 or not subset_path:
+                return {"success": False, "error": f"subset db prepare failed: {err2 or 'unknown'}"}
+            try:
+                t0 = time.perf_counter()
+                ok, err_txt, exec_res = self._exec_update_on_sqlite_path(subset_path, combined_sql)
+                if os.getenv("PERF_LOG") == "1":
+                    dt = (time.perf_counter() - t0) * 1000.0
+                    wall = (time.perf_counter() - _t_subset_wall0) * 1000.0
+                    print(
+                        f"[PERF][modify_sandbox] subset_exec_ms={dt:.1f} ok={int(bool(ok))} n={len(target_ids)}",
+                        flush=True,
+                    )
+                    print(
+                        f"[PERF][modify_sandbox] batch_subset_wall_ms={wall:.1f} n={len(target_ids)} "
+                        f"(prepare+log 见 subset_prepare_ms + exec_ms)",
+                        flush=True,
+                    )
+                if not ok:
+                    return {"success": False, "error": err_txt or "subset sandbox failed"}
+                return {
+                    "success": True,
+                    "sql": combined_sql,
+                    "sandbox_mode": True,
+                    "sandbox_subset": True,
+                    "batch_count": len(target_ids),
+                    "message": "沙箱预览完成（subset 模式），确认后将应用到生产库",
+                    "execution_result": {"success": True, **(exec_res or {})},
+                }
+            finally:
+                try:
+                    os.unlink(subset_path)
+                except OSError:
+                    pass
+
+        from agents.tools.text2sql import get_sandbox_executor, SecurityConfig
+
+        sandbox_config = SecurityConfig(db_use_copy=True, db_read_only=False, timeout=30)
+        sandbox = get_sandbox_executor(security_config=sandbox_config, fallback_to_local=True)
+        db_config = {"path": self._sqlite_path_for_sandbox(), "type": "sqlite"}
+        copy_res = sandbox._prepare_db_copy(db_config)
+        if not copy_res.get("success"):
+            print(f"[MODIFY-SANDBOX-BATCH] 副本失败，回退逐条: {copy_res.get('error')}", flush=True)
+            last = None
+            for tid in target_ids:
+                last = await self._preview_in_sandbox(target, tid, modifications, project_id)
+            return last or {"success": False, "error": copy_res.get("error")}
+
+        copy_path = copy_res["copy_path"]
+        ok = False
+        err_txt: Optional[str] = None
+        t_exec0 = time.perf_counter()
+        try:
+            conn = sqlite3.connect(copy_path)
+            try:
+                conn.executescript(combined_sql)
+                conn.commit()
+                ok = True
+            except Exception as e:
+                err_txt = str(e)
+            finally:
+                conn.close()
+        finally:
+            exec_ms = (time.perf_counter() - t_exec0) * 1000.0
+            if os.getenv("PERF_LOG") == "1":
+                print(
+                    f"[PERF][modify_sandbox] batch_executescript_ms={exec_ms:.1f} ok={int(bool(ok))} n={len(target_ids)}",
+                    flush=True,
+                )
+
+        if not ok:
+            print(f"[MODIFY-SANDBOX-BATCH] executescript 失败，尝试在同一副本内逐条执行: {err_txt}", flush=True)
+            # 复用同一份副本，逐条执行（避免 N 次整库 copy2）
+            last: Optional[Dict[str, Any]] = None
+            per_stmt_err: Optional[str] = None
+            try:
+                conn = sqlite3.connect(copy_path)
+                try:
+                    for tid, stmt in zip(target_ids, stmts):
+                        try:
+                            t1 = time.perf_counter()
+                            conn.execute(stmt)
+                            conn.commit()
+                            if os.getenv("PERF_LOG") == "1":
+                                dt = (time.perf_counter() - t1) * 1000.0
+                                print(
+                                    f"[PERF][modify_sandbox] per_stmt_ms={dt:.1f} id={int(tid)}",
+                                    flush=True,
+                                )
+                            last = {"success": True, "sandbox_mode": True, "sql": stmt}
+                        except Exception as e:
+                            per_stmt_err = str(e)
+                            print(
+                                f"[MODIFY-SANDBOX-BATCH] 单条执行失败 id={int(tid)} err={per_stmt_err}",
+                                flush=True,
+                            )
+                            break
+                finally:
+                    conn.close()
+            finally:
+                try:
+                    os.unlink(copy_path)
+                except OSError:
+                    pass
+            if per_stmt_err:
+                return {"success": False, "error": per_stmt_err}
+            return last or {"success": False, "error": err_txt or "batch sandbox failed"}
+
+        print(f"[MODIFY-SANDBOX-BATCH] 批量 SQL 已执行 n={len(target_ids)}", flush=True)
+        try:
+            os.unlink(copy_path)
+        except OSError:
+            pass
+        return {
+            "success": True,
+            "sql": combined_sql,
+            "sandbox_mode": True,
+            "batch_count": len(target_ids),
+            "message": "沙箱预览完成，确认后将应用到生产库",
+            "execution_result": {"success": True, "batch_local_executescript": True},
+        }
     
     async def _preview_in_sandbox(self, target: str, target_id: int, modifications: Dict, project_id: int) -> Dict[str, Any]:
         """
@@ -741,65 +1654,75 @@ class ModifyTool(BaseTool):
         2. 在副本上执行 UPDATE SQL
         3. 返回预览结果（不修改生产库）
         """
-        if not self.text2sql:
-            return {
-                'success': False,
-                'error': 'Text2SQL Agent 未初始化'
-            }
-        
-        # 不可修改的字段列表
-        immutable_fields = {'id', 'type', 'project_id', 'created_at', 'updated_at', 'creator_id', 'plan_id'}
-        
         try:
-            table_name_map = {
-                'bug': 'bug',
-                'badcase': 'bad_case',
-                'testcase': 'test_case'
-            }
-            table_name = table_name_map.get(target, 'bug')
-            
-            # 构建修改描述
-            set_clauses = []
-            for field, value in modifications.items():
-                # 跳过不可修改的字段
-                if field in immutable_fields:
-                    print(f"[MODIFY-SANDBOX] 跳过不可修改字段: {field}")
-                    continue
-                
-                actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
-                field_name = self._map_field_name(field, target)
-                
-                # 用户相关字段：解析用户名到用户ID（BadCase 除外，因为它的 assignee 是字符串）
-                if field in ['assignee', 'assignee_id', '负责人', 'creator', '创建人'] and target != 'badcase':
-                    resolved_value = self._resolve_user_value(actual_value, project_id)
-                    if resolved_value != actual_value:
-                        print(f"[MODIFY-SANDBOX] 用户解析: '{actual_value}' -> 用户ID={resolved_value}")
-                        actual_value = resolved_value
-                
-                if isinstance(actual_value, str):
-                    set_clauses.append(f"{field_name}改为'{actual_value}'")
-                else:
-                    set_clauses.append(f"{field_name}改为{actual_value}")
-            
-            modify_desc = "、".join(set_clauses)
-            
-            # 构建自然语言更新请求
-            nl_query = f"更新{table_name}表中ID为{target_id}的记录，将{modify_desc}"
-            context = f"项目ID: {project_id}"
-            
-            print(f"[MODIFY-SANDBOX] 沙箱预览: {nl_query}")
-            
-            # 生成 SQL
-            sql_result = self.text2sql.generate_sql(nl_query, context)
-            
-            if not sql_result.get('success'):
-                return {
-                    'success': False,
-                    'error': f'SQL生成失败: {sql_result.get("error")}'
-                }
-            
-            sql = sql_result['sql']
+            table_name = self._sandbox_table_name(target)
+            use_direct_sql = self._env_flag_enabled("MODIFY_SANDBOX_DIRECT_SQL", "1")
+            set_clauses, err = self._build_direct_sandbox_set_clauses(target, modifications, project_id)
+            if err:
+                return {"success": False, "error": err}
+            assert set_clauses is not None
+            if use_direct_sql:
+                sql = (
+                    f"UPDATE {table_name} SET {', '.join(set_clauses)} "
+                    f"WHERE id = {int(target_id)} AND project_id = {int(project_id)};"
+                )
+            else:
+                if not self.text2sql:
+                    return {"success": False, "error": "Text2SQL Agent 未初始化"}
+                modify_desc = "、".join(set_clauses)
+                nl_query = f"更新{table_name}表中ID为{target_id}的记录，将{modify_desc}"
+                context = f"项目ID: {project_id}"
+                print(f"[MODIFY-SANDBOX] 沙箱预览: {nl_query}")
+                sql_result = self.text2sql.generate_sql(nl_query, context)
+                if not sql_result.get("success"):
+                    return {
+                        "success": False,
+                        "error": f"SQL生成失败: {sql_result.get('error')}",
+                    }
+                sql = sql_result["sql"]
             print(f"[MODIFY-SANDBOX] 生成的SQL: {sql}")
+
+            mode = self._sandbox_preview_mode()
+            if mode == "skip_update":
+                return {
+                    "success": True,
+                    "sql": sql,
+                    "sandbox_mode": False,
+                    "sandbox_skipped": True,
+                    "message": "已跳过沙箱 UPDATE 写验证（仅预览 diff）",
+                }
+            if use_direct_sql and self._resolve_use_mysql_temp(mode):
+                return self._mysql_temp_write_validate(
+                    target, [int(target_id)], project_id, list(set_clauses), sql.strip()
+                )
+            if mode == "subset" or (mode == "mysql_temp" and not self._is_mysql_bind()):
+                subset_path, err2 = self._prepare_subset_db_sqlite(target, [int(target_id)], project_id)
+                if err2 or not subset_path:
+                    return {"success": False, "error": f"subset db prepare failed: {err2 or 'unknown'}"}
+                try:
+                    t0 = time.perf_counter()
+                    ok, err_txt, exec_res = self._exec_update_on_sqlite_path(subset_path, sql)
+                    if os.getenv("PERF_LOG") == "1":
+                        dt = (time.perf_counter() - t0) * 1000.0
+                        print(
+                            f"[PERF][modify_sandbox] subset_exec_ms={dt:.1f} ok={int(bool(ok))} id={int(target_id)}",
+                            flush=True,
+                        )
+                    if not ok:
+                        return {"success": False, "error": err_txt or "subset sandbox failed"}
+                    return {
+                        "success": True,
+                        "sql": sql,
+                        "sandbox_mode": True,
+                        "sandbox_subset": True,
+                        "message": "沙箱预览完成（subset 模式），确认后将应用到生产库",
+                        "execution_result": {"success": True, **(exec_res or {})},
+                    }
+                finally:
+                    try:
+                        os.unlink(subset_path)
+                    except OSError:
+                        pass
             
             # 使用沙箱执行器（操作数据库副本）
             from agents.tools.text2sql import get_sandbox_executor, SecurityConfig
@@ -813,10 +1736,9 @@ class ModifyTool(BaseTool):
             # 启用本地回退，当 llm-sandbox 不可用时使用本地执行
             sandbox = get_sandbox_executor(security_config=sandbox_config, fallback_to_local=True)
             
-            # 在沙箱副本上执行 UPDATE
             db_config = {
-                'path': 'instance/badcase_doctor.db',
-                'type': 'sqlite'
+                "path": self._sqlite_path_for_sandbox(),
+                "type": "sqlite",
             }
             
             result = sandbox.execute_sql(sql, db_config, skip_security_check=True)
@@ -824,19 +1746,41 @@ class ModifyTool(BaseTool):
             print(f"[MODIFY-SANDBOX] 沙箱执行结果: success={result.get('success')}")
             
             return {
-                'success': result.get('success', False),
-                'sql': sql,
-                'sandbox_mode': True,
-                'message': '沙箱预览完成，确认后将应用到生产库',
-                'execution_result': result
+                "success": result.get("success", False),
+                "sql": sql,
+                "sandbox_mode": True,
+                "message": "沙箱预览完成，确认后将应用到生产库",
+                "execution_result": result,
             }
             
         except Exception as e:
             print(f"[MODIFY-SANDBOX] 沙箱预览失败: {e}")
             return {
-                'success': False,
-                'error': str(e)
+                "success": False,
+                "error": str(e),
             }
+
+    def _normalize_target_ids(self, raw: Any) -> List[int]:
+        """将 target_id / target_ids 统一归一化为 int 列表。"""
+        if raw is None:
+            return []
+        vals: List[Any]
+        if isinstance(raw, (list, tuple, set)):
+            vals = list(raw)
+        elif isinstance(raw, str):
+            parts = [x.strip() for x in raw.split(",") if x.strip()]
+            vals = parts if parts else [raw]
+        else:
+            vals = [raw]
+        out: List[int] = []
+        for v in vals:
+            try:
+                iv = int(v)
+            except Exception:
+                continue
+            if iv not in out:
+                out.append(iv)
+        return out
     
     async def _apply_modifications(self, target: str, target_id: int, modifications: Dict, project_id: int) -> bool:
         """应用修改到数据库"""
@@ -900,6 +1844,49 @@ class ModifyTool(BaseTool):
             
         except Exception as e:
             print(f"[MODIFY] 应用修改失败: {e}")
+            return False
+
+    async def _apply_modifications_batch(self, target: str, target_ids: List[int], modifications: Dict, project_id: int) -> bool:
+        """批量更新：同表同字段同值时合并为一条 UPDATE ... WHERE id IN (...)."""
+        ids = [int(x) for x in (target_ids or []) if str(x).strip()]
+        if not ids:
+            return False
+        resolved_modifications = {}
+        for field, value in (modifications or {}).items():
+            actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+            if field in ['assignee', 'assignee_id', '负责人', 'creator', '创建人', 'owner']:
+                actual_value = self._resolve_user_value(actual_value, project_id)
+                if target == 'badcase' and field in ['assignee', 'assignee_id', '负责人', 'owner']:
+                    actual_value = str(actual_value)
+            resolved_modifications[field] = actual_value
+        try:
+            from app import db as flask_db
+            if target == 'bug':
+                from app import Bug
+                q = flask_db.session.query(Bug).filter(Bug.project_id == project_id, Bug.id.in_(ids))
+                update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
+            elif target == 'badcase':
+                from app import BadCase
+                q = flask_db.session.query(BadCase).filter(BadCase.project_id == project_id, BadCase.id.in_(ids))
+                update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
+            elif target == 'testcase':
+                from app import TestCase
+                q = flask_db.session.query(TestCase).filter(TestCase.project_id == project_id, TestCase.id.in_(ids))
+                update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
+            else:
+                return False
+            if not update_map:
+                return False
+            affected = q.update(update_map, synchronize_session=False)
+            flask_db.session.commit()
+            print(f"[MODIFY] 批量更新完成: target={target}, ids={ids}, affected={affected}")
+            return affected > 0
+        except Exception as e:
+            print(f"[MODIFY] 批量更新失败: {e}")
+            try:
+                flask_db.session.rollback()
+            except Exception:
+                pass
             return False
     
     def _map_field_name(self, field: str, target: str) -> str:

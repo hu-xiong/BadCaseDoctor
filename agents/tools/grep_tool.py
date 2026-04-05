@@ -7,6 +7,14 @@ import json
 import os
 import time
 from agents.tool_registry import BaseTool
+from agents.locale_prompts import (
+    normalize_locale,
+    grep_tool_progress,
+    grep_plan_material_progress,
+    grep_generate_locate_summary,
+    grep_associate_summary,
+    grep_compare_summary,
+)
 
 
 class GrepTool(BaseTool):
@@ -27,6 +35,7 @@ class GrepTool(BaseTool):
             name="grep",
             description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位BadCase/Bug/测试用例的归属关系和业务场景。"
                          "必须参数：project_id(项目ID)。可选：keywords(标题关键词，支持拆分模糊匹配), target(bug/badcase/testcase/all)，status，plan_id(当前迭代计划ID)。"
+                         "代码结构分析可选：code_paths（逗号/分号分隔的 .py 文件路径）、prefer_ast_structure=true 或 mode=code_ast 时优先 Python AST 解析，结果写入 data.code_ast。"
                          "返回 plan_tree、badcase_analysis、bug_location、testcase_location。建议先用 plan_id 限定迭代计划，再把候选记录交给大模型逐条阅读判断。"
         )
     
@@ -64,9 +73,18 @@ class GrepTool(BaseTool):
         Returns:
             定位分析结果（包含思考过程）
         """
+        if keywords is not None and not isinstance(keywords, str):
+            if isinstance(keywords, (list, tuple)):
+                keywords = " ".join(
+                    str(x).strip() for x in keywords if x is not None and str(x).strip()
+                )
+            else:
+                keywords = str(keywords).strip() or None
         print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target}, status={status}, plan_id={plan_id})")
         
         progress_callback = kwargs.get("progress_callback")
+        loc = normalize_locale(kwargs.get("ui_locale"))
+
         def _progress(msg: str):
             try:
                 s = str(msg)
@@ -75,8 +93,8 @@ class GrepTool(BaseTool):
             except Exception:
                 pass
         
-        _progress("初始化 grep 参数…")
-        
+        _progress(grep_tool_progress("init", loc))
+
         try:
             from app import app, db, BadCase, Bug, Plan
             
@@ -86,57 +104,76 @@ class GrepTool(BaseTool):
                 'thinking_process': [],
                 'data': {}
             }
+
+            # 代码结构分析：优先 AST（Python），无有效结果再依赖后续 DB/文本检索
+            _code_paths = kwargs.get("code_paths")
+            _want_ast = bool(kwargs.get("prefer_ast_structure")) or mode == "code_ast"
+            if _want_ast and _code_paths:
+                try:
+                    from agents.tools.code_ast_parser import analyze_code_paths
+
+                    _ast = analyze_code_paths(_code_paths)
+                    result["data"]["code_ast"] = _ast
+                    if _ast.get("success"):
+                        _progress("code_ast: ok")
+                        result["thinking_process"].append(
+                            {"phase": "code_ast", "merged_symbols": _ast.get("merged_symbols")}
+                        )
+                except Exception as _ast_e:
+                    result["data"]["code_ast"] = {"success": False, "error": str(_ast_e)}
             
             with app.app_context():
                 if mode == "locate":
                     # 【阶段1】数据库查询（支持 plan_id 限定当前迭代，关键词拆分模糊匹配）
-                    _progress("阶段1：获取计划树…")
+                    _progress(grep_tool_progress("phase1_plan_tree", loc))
                     plan_tree = await self._get_plan_tree(project_id)
-                    _progress("阶段1：计划树已就绪")
+                    _progress(grep_tool_progress("phase1_plan_ready", loc))
 
                     # 人类阅读模式：如果指定了 plan_id，则返回该计划及其子计划的树形结构，并挂载各计划下的记录（从上到下、从外到里）
                     plan_records_tree = None
                     if plan_id:
-                        _progress("读取当前迭代计划下的记录材料…")
+                        _progress(grep_tool_progress("plan_material_read", loc))
                         plan_records_tree = await self._build_plan_records_tree(
                             project_id=project_id,
                             root_plan_id=plan_id,
                             progress_callback=progress_callback,
+                            ui_locale=loc,
                         )
-                        _progress("迭代计划材料已就绪")
+                        _progress(grep_tool_progress("plan_material_ready", loc))
                     
                     badcase_list = []
                     bug_list = []
                     testcase_list = []
                     if target in ['all', 'badcase']:
-                        _progress("阶段1：检索 BadCase 候选…")
+                        _progress(grep_tool_progress("phase1_badcase", loc))
                         badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
-                        _progress(f"BadCase 候选获取完成：{len(badcase_list)} 条")
+                        _progress(grep_tool_progress("phase1_badcase_done", loc, n=len(badcase_list)))
                     if target in ['all', 'bug']:
-                        _progress("阶段1：检索 Bug 候选…")
+                        _progress(grep_tool_progress("phase1_bug", loc))
                         bug_list = await self._get_bug_list(project_id, keywords, status, plan_id=plan_id)
-                        _progress(f"Bug 候选获取完成：{len(bug_list)} 条")
+                        _progress(grep_tool_progress("phase1_bug_done", loc, n=len(bug_list)))
                     if target in ['all', 'testcase']:
-                        _progress("阶段1：检索 TestCase 候选…")
+                        _progress(grep_tool_progress("phase1_tc", loc))
                         testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
-                        _progress(f"TestCase 候选获取完成：{len(testcase_list)} 条")
+                        _progress(grep_tool_progress("phase1_tc_done", loc, n=len(testcase_list)))
                     
                     # 【阶段2】分析关联
-                    _progress("阶段2：分析关联归属…")
+                    _progress(grep_tool_progress("phase2_assoc", loc))
                     analysis_result = await self._analyze_associations(
                         keywords=keywords,
                         plan_tree=plan_tree,
                         badcase_list=badcase_list,
                         bug_list=bug_list,
                         testcase_list=testcase_list,
-                        evidence=evidence
+                        evidence=evidence,
+                        ui_locale=loc,
                     )
-                    _progress("阶段2：关联分析完成")
+                    _progress(grep_tool_progress("phase2_done", loc))
                     
                     # 【阶段3】生成对比报告
-                    _progress("阶段3：生成对比报告…")
+                    _progress(grep_tool_progress("phase3_compare", loc))
                     comparison = await self._generate_comparison(project_id, keywords)
-                    _progress("阶段3：对比报告生成完成")
+                    _progress(grep_tool_progress("phase3_done", loc))
                     
                     # 生成导航指令（Bug / BadCase / TestCase，随 grep target 过滤；all 时合并多类）
                     navigation = None
@@ -144,7 +181,7 @@ class GrepTool(BaseTool):
                         plan_tree, target, badcase_list, bug_list, testcase_list
                     )
                     if navigation_list:
-                        _progress("生成导航指令…")
+                        _progress(grep_tool_progress("nav_build", loc))
                         navigation = (
                             navigation_list[0]
                             if len(navigation_list) == 1
@@ -158,7 +195,7 @@ class GrepTool(BaseTool):
                             f"[MODIFY-TRACE] grep_tool: grep_target={target!r}, nav_len={len(navigation_list)} "
                             f"(无 plan_id 的记录不会进导航卡片)"
                         )
-                        _progress("定位完成，导航已生成")
+                        _progress(grep_tool_progress("locate_done_nav", loc))
                     
                     result['data'] = {
                         'plan_tree': plan_tree,
@@ -174,32 +211,32 @@ class GrepTool(BaseTool):
                     
                 elif mode == "associate":
                     # 三向关联模式
-                    _progress("associate：开始三向关联分析…")
+                    _progress(grep_tool_progress("assoc_start", loc))
                     associations = await self._three_way_association(project_id, keywords)
-                    _progress("associate：关联分析完成")
+                    _progress(grep_tool_progress("assoc_done", loc))
                     result['data'] = {
                         'associations': associations,
                         'total_associations': len(associations),
-                        'summary': f"共建立 {len(associations)} 组关联关系"
+                        'summary': grep_associate_summary(len(associations), loc),
                     }
                     
                 elif mode == "compare":
                     # 对比模式
-                    _progress("compare：开始生成对比报告…")
+                    _progress(grep_tool_progress("compare_start", loc))
                     comparison = await self._generate_comparison(project_id, keywords)
-                    _progress("compare：对比报告生成完成")
+                    _progress(grep_tool_progress("compare_done", loc))
                     result['data'] = {
                         'comparison': comparison,
                         'markdown': comparison['markdown'],
                         'changes_count': len(comparison['changes']),
-                        'summary': f"共 {len(comparison['changes'])} 项变更"
+                        'summary': grep_compare_summary(len(comparison['changes']), loc),
                     }
                 
                 return result
                 
         except Exception as e:
             print(f"[GREP] ❌ 定位分析失败: {e}")
-            _progress(f"定位失败：{e}")
+            _progress(grep_tool_progress("locate_fail", loc, err=e))
             import traceback
             traceback.print_exc()
             return {
@@ -212,6 +249,7 @@ class GrepTool(BaseTool):
         project_id: str,
         root_plan_id: str,
         progress_callback: Optional[Callable[[str], None]] = None,
+        ui_locale: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         构建“计划树 + 计划下记录”的阅读结构：
@@ -226,13 +264,14 @@ class GrepTool(BaseTool):
                 pass
 
         from app import db, Plan, BadCase, Bug, TestCase
+        ploc = normalize_locale(ui_locale)
         try:
             root_id = int(root_plan_id)
         except (ValueError, TypeError):
             return None
 
         # 取该项目下所有计划，构建 parent->children
-        _p("计划材料：加载项目下全部计划…")
+        _p(grep_plan_material_progress("load_plans", ploc))
         plans = db.session.query(Plan).filter_by(project_id=project_id).all()
         plan_map = {}
         children_map = {}
@@ -255,11 +294,15 @@ class GrepTool(BaseTool):
                     stack.append(cid)
 
         # 查询三类记录（不做 rerank/不做筛选，仅按 plan_id 归类，模拟人类先把材料拿全）
-        _p(f"计划材料：在 {len(plan_ids)} 个相关计划下查询 BadCase/Bug/TestCase（数据量大时可能需数秒）…")
+        _p(grep_plan_material_progress("query_under_plans", ploc, n=len(plan_ids)))
         badcases = db.session.query(BadCase).filter(BadCase.project_id == int(project_id), BadCase.plan_id.in_(plan_ids)).all() if plan_ids else []
         bugs = db.session.query(Bug).filter(Bug.project_id == int(project_id), Bug.plan_id.in_(plan_ids)).all() if plan_ids else []
         testcases = db.session.query(TestCase).filter(TestCase.project_id == int(project_id), TestCase.plan_id.in_(plan_ids)).all() if plan_ids else []
-        _p(f"计划材料：已取库 BadCase={len(badcases)} Bug={len(bugs)} TestCase={len(testcases)}，正在组装树…")
+        _p(
+            grep_plan_material_progress(
+                "assemble", ploc, bc=len(badcases), b=len(bugs), tc=len(testcases)
+            )
+        )
 
         badcase_by_plan = {}
         for bc in badcases:
@@ -507,10 +550,29 @@ class GrepTool(BaseTool):
         text = re.sub(r'[和与的为]', ' ', keywords.strip())
         # 再按空格拆
         parts = [p.strip() for p in text.split() if p.strip()]
+        # 口语里常写“测试用2”，实际标题常是“测试用例2”，这里做轻量规范化
+        normalized_parts: List[str] = []
+        for p in parts:
+            np = re.sub(r'^测试用(?=\d)', '测试用例', p)
+            normalized_parts.append(np)
         # 去掉纯停用字（单字且为常见连接/助词）
         stop = {'的', '为', '与', '和', '或', '及', '、', '，'}
-        terms = [p for p in parts if p not in stop and (len(p) > 1 or p not in stop)]
-        return terms[:10]  # 最多 10 个词，避免过长
+        terms = [p for p in normalized_parts if p not in stop and (len(p) > 1 or p not in stop)]
+        # FC/自然语言常写「登录相关的」「支付相关」：整段很少出现在标题里，去掉口语后缀再参与 AND，避免误 0 命中
+        out: List[str] = []
+        seen = set()
+        for t in terms:
+            stem = t
+            for suf in ("相关的", "相关", "等问题", "问题"):
+                if len(stem) > len(suf) + 1 and stem.endswith(suf):
+                    stem = stem[: -len(suf)].strip()
+                    break
+            if not stem:
+                stem = t
+            if stem not in seen:
+                seen.add(stem)
+                out.append(stem)
+        return out[:10]  # 最多 10 个词，避免过长
     
     async def _get_badcase_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
         """逐行定位引擎（优化版）"""
@@ -711,7 +773,8 @@ class GrepTool(BaseTool):
         badcase_list: List[Dict[str, Any]],
         bug_list: List[Dict[str, Any]],
         testcase_list: List[Dict[str, Any]] = None,
-        evidence: Dict[str, Any] = None
+        evidence: Dict[str, Any] = None,
+        ui_locale: Optional[str] = None,
     ) -> Dict[str, Any]:
         """分析关联关系（含 BadCase/Bug/TestCase）"""
         testcase_list = testcase_list or []
@@ -777,7 +840,8 @@ class GrepTool(BaseTool):
                 'plan_name': plan_name
             })
         
-        summary = self._generate_summary(
+        summary = grep_generate_locate_summary(
+            ui_locale,
             keywords=keywords,
             badcase_count=len(badcase_list),
             bug_count=len(bug_list),
@@ -786,7 +850,7 @@ class GrepTool(BaseTool):
             related_bug_count=sum(1 for bug in bug_location if bug['related_to_evidence']),
             related_testcase_count=sum(1 for tc in testcase_location if tc['related_to_evidence']),
             attribution_count=len(plan_attribution),
-            bug_location=bug_location
+            bug_location=bug_location,
         )
         
         return {
@@ -880,59 +944,6 @@ class GrepTool(BaseTool):
                 return plan
         
         return None
-    
-    def _generate_summary(
-        self,
-        keywords: str,
-        badcase_count: int,
-        bug_count: int,
-        related_badcase_count: int,
-        related_bug_count: int,
-        attribution_count: int,
-        bug_location: List[Dict[str, Any]] = None,
-        testcase_count: int = 0,
-        related_testcase_count: int = 0
-    ) -> str:
-        """生成分析总结（人类可读）"""
-        parts = []
-        is_query_all = not keywords or keywords.strip() == '' or keywords == '*'
-        
-        if badcase_count > 0:
-            if is_query_all:
-                parts.append(f"🔍 找到 {badcase_count} 条BadCase")
-            elif related_badcase_count > 0:
-                parts.append(f"🔍 定位 {related_badcase_count} 条BadCase（关键词：{keywords}）")
-            else:
-                parts.append(f"🔍 定位 {badcase_count} 条BadCase（关键词：{keywords}）")
-        
-        # 2. Bug定位结果（显示计划名）
-        if bug_count > 0:
-            if related_bug_count > 0:
-                # 提取第一个Bug的计划信息
-                if bug_location and len(bug_location) > 0:
-                    first_bug = bug_location[0]
-                    plan_name = first_bug.get('plan_name', '')
-                    if plan_name:
-                        parts.append(f"🐛 定位 {related_bug_count} 条Bug，关键词为“{keywords}”，位于计划【{plan_name}】")
-                    else:
-                        parts.append(f"🐛 定位 {related_bug_count} 条Bug（关键词：{keywords}）")
-                else:
-                    parts.append(f"🐛 定位 {related_bug_count} 条Bug（关键词：{keywords}）")
-            else:
-                parts.append(f"🐛 定位 {bug_count} 条Bug（关键词：{keywords}）")
-        
-        if testcase_count > 0:
-            if is_query_all:
-                parts.append(f"📋 找到 {testcase_count} 条测试用例")
-            elif related_testcase_count > 0:
-                parts.append(f"📋 定位 {related_testcase_count} 条测试用例（关键词：{keywords}）")
-            else:
-                parts.append(f"📋 定位 {testcase_count} 条测试用例（关键词：{keywords}）")
-        
-        if attribution_count > 0:
-            parts.append(f"🎯 生成 {attribution_count} 条计划归属调整建议")
-        
-        return '\n'.join(parts) if parts else '未找到相关记录'
     
     async def _three_way_association(self, project_id: str, keywords: str) -> List[Dict[str, Any]]:
         """

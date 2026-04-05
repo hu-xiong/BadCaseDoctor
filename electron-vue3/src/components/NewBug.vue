@@ -1,5 +1,5 @@
 <template>
-  <div class="bug-detail-wrapper">
+  <div class="bug-detail-wrapper" :class="{ 'is-embedded': embedded }">
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
       <div class="loading-spinner"></div>
@@ -9,7 +9,7 @@
     <!-- 顶部标题栏：嵌入模式也需要返回/关闭等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
-        <span class="back-arrow" @click="goBack">←</span>
+        <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
         <span class="header-title">{{ isEdit ? '编辑Bug' : '新建Bug' }}</span>
         <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
       </div>
@@ -136,9 +136,10 @@
                     </div>
                     <div class="assignee-avatar">👤</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ currentUser.name }}</div>
-                      <div class="assignee-id">({{ currentUser.email }})</div>
-                      <div class="assignee-dept">{{ currentUser.department || '未设置部门' }}</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(currentUser) }}</div>
+                      <div v-if="personSecondaryLabel(currentUser) || currentUser.department" class="assignee-id">
+                        {{ personSecondaryLabel(currentUser) || currentUser.department || '未设置部门' }}
+                      </div>
                     </div>
                   </div>
                   <div v-else class="no-user-tip">
@@ -163,9 +164,9 @@
                     </div>
                     <div class="assignee-avatar">{{ assignee.avatar }}</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ assignee.name }}</div>
-                      <div class="assignee-id">({{ assignee.id }})</div>
-                      <div class="assignee-dept">{{ assignee.department }}</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(assignee) }}</div>
+                      <div v-if="assignee.id != null" class="assignee-id">ID {{ assignee.id }}</div>
+                      <div v-if="assignee.department" class="assignee-dept">{{ assignee.department }}</div>
                     </div>
                   </div>
                   <div v-else class="no-recent-tip">
@@ -189,9 +190,8 @@
                     </div>
                     <div class="assignee-avatar">👤</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ member.name }}</div>
-                      <div class="assignee-id">({{ member.email }})</div>
-                      <div class="assignee-dept">{{ member.role }} - {{ member.source }}</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(member) }}</div>
+                      <div v-if="personSecondaryLabel(member)" class="assignee-id">{{ personSecondaryLabel(member) }}</div>
                     </div>
                   </div>
                 </div>
@@ -203,9 +203,6 @@
                     <span class="tip-icon">ℹ️</span>
                     <span class="tip-text">该项目暂无成员，请先添加项目成员</span>
                   </div>
-                  <div class="debug-info">
-                    <small>调试信息: 项目ID {{ bug.project_id }}, projectMembers长度: {{ projectMembers.length }}</small>
-                  </div>
                 </div>
                 
                 <!-- 未选择项目时的提示 -->
@@ -215,14 +212,6 @@
                     <span class="tip-icon">⚠️</span>
                     <span class="tip-text">请先选择所属项目</span>
                   </div>
-                </div>
-                
-                <!-- 调试信息 -->
-                <div class="debug-section" style="padding: 8px; background: #f0f0f0; margin: 8px 0; border-radius: 4px; font-size: 12px; color: #666;">
-                  <div>调试信息:</div>
-                  <div>项目ID: {{ bug.project_id || '未选择' }}</div>
-                  <div>项目成员数量: {{ projectMembers.length }}</div>
-                  <div>项目成员数据: {{ JSON.stringify(projectMembers) }}</div>
                 </div>
               </div>
             </div>
@@ -688,7 +677,8 @@
 <script>
 import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
+import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
+import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import user from '../store/user.js'
 import { defineAsyncComponent } from 'vue'
 
@@ -704,6 +694,10 @@ export default {
       default: null
     },
     project_id: {
+      type: [String, Number],
+      default: null
+    },
+    plan_id: {
       type: [String, Number],
       default: null
     },
@@ -1298,18 +1292,18 @@ export default {
         } finally {
           loading.value = false
         }
-      } else if (query.project_id) {
+      } else if (query.project_id || props.project_id) {
         console.log('新建模式，项目ID:', query.project_id)
         console.log('query.project_id类型:', typeof query.project_id)
         console.log('availableProjects:', availableProjects.value)
         
         // 新建模式，设置项目ID
-        bug.project_id = query.project_id
+        bug.project_id = String(query.project_id || props.project_id)
         console.log('设置bug.project_id:', bug.project_id)
         console.log('设置后bug.project_id类型:', typeof bug.project_id)
         
         // 获取项目信息
-        const project = availableProjects.value.find(p => p.id == query.project_id)
+        const project = availableProjects.value.find(p => p.id == bug.project_id)
         if (project) {
           projectInfo.value = project
           console.log('找到项目信息:', project.name)
@@ -1317,12 +1311,30 @@ export default {
           console.log('未找到项目信息，availableProjects:', availableProjects.value)
           console.log('尝试查找项目，query.project_id:', query.project_id)
           console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
+          // 兜底：按 ID 拉项目详情，确保下拉和标题有数据
+          try {
+            const detail = await getProjectDetail(Number(bug.project_id))
+            if (detail.data?.success && detail.data.project) {
+              const prj = detail.data.project
+              if (!availableProjects.value.find(p => p.id == prj.id)) {
+                availableProjects.value.push(prj)
+              }
+              projectInfo.value = prj
+            }
+          } catch (e) {
+            console.error('兜底获取项目详情失败:', e)
+          }
         }
         
+        // 可选：新建时预设 plan_id（优先 route.query，其次 props.plan_id）
+        if (query.plan_id || props.plan_id) {
+          bug.plan = String(query.plan_id || props.plan_id)
+        }
+
         // 获取当前项目的计划列表和成员列表
-        console.log('开始获取项目计划，项目ID:', query.project_id)
-        await fetchProjectPlans(query.project_id)
-        await fetchProjectMembers(query.project_id)
+        console.log('开始获取项目计划，项目ID:', bug.project_id)
+        await fetchProjectPlans(bug.project_id)
+        await fetchProjectMembers(bug.project_id)
         
         // 确保数据同步
         console.log('初始化完成后，当前状态:')
@@ -1798,8 +1810,14 @@ export default {
       
       const ids = Array.isArray(bug.assignee) ? bug.assignee : [bug.assignee]
       const names = ids.map(id => {
-        const member = projectMembers.value.find(m => m.id.toString() === id.toString())
-        return member ? member.name : id
+        const sid = String(id)
+        const member = projectMembers.value.find(m => String(m.id) === sid)
+        if (member) return personPrimaryLabel(member)
+        if (currentUser.value && String(currentUser.value.id) === sid) {
+          return personPrimaryLabel(currentUser.value)
+        }
+        if (/^\d+$/.test(sid)) return `用户#${sid}`
+        return personPrimaryLabel({ name: sid, email: sid })
       })
       
       if (names.length === 1) {
@@ -1929,6 +1947,12 @@ export default {
 
     // 返回上一页
     const goBack = () => {
+      // 嵌入在 ProjectDetail 的工作区 Tab：不要走浏览器历史，直接关闭 Tab
+      if (props.embedded) {
+        console.log('[EMBEDDED] 触发 close 事件')
+        emit('close')
+        return
+      }
       // 如果是通过覆盖层打开的，触发 close 事件
       if (props.id) {
         console.log('[OVERLAY] 触发 close 事件')
@@ -1970,6 +1994,9 @@ export default {
         const bgTasks = []
         console.log('开始后台加载用户信息...')
         bgTasks.push(fetchCurrentUser())
+        
+        // 先拉项目列表，保证右侧「项目名称」下拉有数据，并支持默认选中
+        await fetchProjects()
         
         // 然后初始化Bug
         console.log('开始初始化Bug...')
@@ -2088,6 +2115,8 @@ export default {
       handleProjectChange,
       toggleAssigneeDropdown,
       getAssigneeDisplayText,
+      personPrimaryLabel,
+      personSecondaryLabel,
       isAssigneeSelected,
       toggleAssignee,
       togglePlanDropdown,
@@ -2137,6 +2166,13 @@ export default {
   flex-direction: column;
   height: 100vh;
   background: #f8f9fa;
+}
+
+/* 嵌入在 ProjectDetail：占满父容器，避免底部按钮被裁切 */
+.bug-detail-wrapper.is-embedded {
+  flex: 1;
+  min-height: 0;
+  height: auto;
 }
 
 /* 加载指示器 */
@@ -3184,11 +3220,17 @@ export default {
 
 /* 底部区域 */
 .footer-section {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-top: 24px;
+  padding: 16px 24px;
+  margin: 0 -24px -24px;
   border-top: 1px solid #e9ecef;
+  background: #fff;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
 }
 
 .footer-tip {

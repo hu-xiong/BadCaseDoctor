@@ -11,23 +11,247 @@ ReAct Prompt 工程 - 公用强约束模板
 2. XML 标签 - 固定输出格式
 3. Good/Bad 示例 - 规范思考逻辑
 4. Todo 锚定 - 保持任务焦点
+
+架构：
+- 静态提示词（SYSTEM_STATIC）：固定的系统规则、输出格式
+- 动态提示词（build_dynamic_context）：项目名称、当前 todo list、原始 query
 """
 
 import json
 import os
 import re
-from typing import Any, List, Dict, Union, Optional
+import threading
+from typing import Any, List, Dict, Union, Optional, Tuple
+
+_tools_format_cache_lock = threading.Lock()
+_tools_format_cache_key: Optional[Tuple[Any, ...]] = None
+_tools_format_cache_val: Optional[List[Dict[str, str]]] = None
+
+from .locale_prompts import is_english_locale
 try:
     import xml.etree.ElementTree as ET
 except ImportError:
     ET = None
 
 
+# ============================================================
+# 静态系统提示词 - 固定的规则、格式、行为约束
+# ============================================================
+
+REACT_SYSTEM_STATIC = """<system>
+你是 ReAct 任务执行引擎，负责分析用户请求并调用工具完成任务。
+
+**输出格式（两段，顺序固定）：**
+1) 行动前说明：4～12 句，说明目标、路径、风险；**禁止** XML/JSON/思维链标签
+2) **仅**一个 <decision>...</decision>，结构如下
+
+**决策规则：**
+- 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）
+- create/modify 预览用 confirm=false，禁止直接落库
+- 目标已达成则 execute=false，tool 留空
+- 纯聊天/问候场景：execute=false，不调用工具
+- 涉及搜索、查询、测试、修改时 execute 必须为 true
+- 不确定参数时可简写，服务端会补全
+
+**modify 工具参数格式（重要）：**
+- target: "bug" 或 "badcase" 或 "testcase"
+- target_id: 从 grep 结果获取的 ID（整数或数组）
+- modifications: {"字段名": "新值"}  # 必须嵌套在 modifications 里！
+- confirm: false  # 预览模式
+</system>
+
+<format>
+<decision>
+<execute>true 或 false</execute>
+<tool>工具名（execute=false 时可为空）</tool>
+<params>{"key": "value"}</params>
+<reason>一句决策理由</reason>
+</decision>
+</format>
+"""
+
+
+def build_dynamic_context(
+    *,
+    project_name: str = "",
+    current_todo: str = "",
+    user_query: str = "",
+    round_idx: int = 0,
+    context: dict = None,
+    last_observation: dict = None,
+    available_tools: list = None,
+) -> str:
+    """
+    构建动态提示词 - 当前对话的具体信息
+    
+    参数：
+    - project_name: 当前项目名称（没有则不显示）
+    - current_todo: 当前步骤的待办任务（没有则不显示）
+    - user_query: 用户原始请求
+    - round_idx: 当前轮次
+    - context: 当前上下文信息
+    - last_observation: 上一轮观察结果
+    - available_tools: 可用工具列表
+    """
+    parts = []
+    
+    # 项目信息（有则显示）
+    if project_name:
+        parts.append(f"<project>{project_name}</project>")
+    
+    # 用户原始请求
+    if user_query:
+        parts.append(f"<user_request>{user_query}</user_request>")
+    
+    # 当前轮次
+    parts.append(f"<round_index>{round_idx + 1}</round_index>")
+    
+    # 当前待办任务（有则显示，没有则提示自主决策）
+    if current_todo:
+        parts.append(f"<current_todo>{current_todo}</current_todo>")
+    else:
+        parts.append("<current_todo>（无特定待办，根据上下文自主决策）</current_todo>")
+    
+    # 当前上下文
+    if context:
+        context_str = "\n".join([
+            f"  - {k}: {str(v)[:500]}"
+            for k, v in list(context.items())[:15]
+        ])
+        parts.append(f"<current_context>\n{context_str}\n</current_context>")
+    
+    # 上一轮观察（有则显示）
+    if last_observation:
+        try:
+            obs_str = json.dumps(last_observation, ensure_ascii=False, indent=2)[:8000]
+        except Exception:
+            obs_str = str(last_observation)[:6000]
+        parts.append(f"<last_observation>\n{obs_str}\n</last_observation>")
+    
+    # 可用工具
+    if available_tools:
+        tools_info = "\n".join([
+            f"  <tool id=\"{t['name']}\" description=\"{t['description'][:150]}\"/>"
+            for t in available_tools[:20]
+        ])
+        parts.append(f"<available_tools>\n{tools_info}\n</available_tools>")
+    
+    return "\n".join(parts)
+
+
+def _react_think_fc_enabled() -> bool:
+    return (os.getenv("REACT_THINK_FC", "1") or "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _react_observe_fc_enabled() -> bool:
+    return (os.getenv("REACT_OBSERVE_FC", "1") or "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _react_decide_xml_fallback() -> bool:
+    return (os.getenv("REACT_DECIDE_XML_FALLBACK", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def parse_opening_decision(text: str) -> Dict[str, Any]:
+    """
+    解析首轮 LLM 输出，支持两种格式：
+    1. 纯文本（闲聊）→ {"type": "chat", "message": "..."}
+    2. {"tool": "...", "params": {...}} → {"type": "single", "tool": "...", "params": {...}}
+    
+    不再支持 {"plan": [...]} 格式，复杂任务通过多轮对话完成。
+    
+    返回结构：
+    - type: "chat" | "single" | "unknown"
+    - message: 闲聊消息（仅 chat 类型）
+    - tool/params: 单步任务（仅 single 类型）
+    """
+    if not text or not isinstance(text, str):
+        return {"type": "unknown"}
+    
+    t = text.strip()
+    if not t:
+        return {"type": "unknown"}
+    
+    # 尝试提取 JSON（支持代码块包裹）
+    json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', t)
+    if json_match:
+        json_str = json_match.group(1).strip()
+    else:
+        # 尝试直接匹配 JSON 对象
+        json_match = re.search(r'\{[\s\S]*\}', t)
+        json_str = json_match.group(0) if json_match else None
+    
+    if json_str:
+        try:
+            obj = json.loads(json_str)
+            if isinstance(obj, dict):
+                # 格式 2: 单步任务 {"tool": "...", "params": {...}}
+                if "tool" in obj:
+                    return {
+                        "type": "single",
+                        "tool": str(obj.get("tool", "")).strip(),
+                        "params": obj.get("params") or {},
+                        "raw": t,
+                    }
+                # 不再支持 {"plan": [...]} 格式，忽略 plan 字段
+        except json.JSONDecodeError:
+            pass
+    
+    # 格式 1: 纯文本（闲聊）
+    # 如果没有匹配到 JSON，且文本不包含工具调用相关关键词，视为闲聊
+    tool_keywords = ["grep", "modify", "create", "search", "database", "browser_test", "get_tool_description"]
+    if not any(kw in t.lower() for kw in tool_keywords):
+        return {"type": "chat", "message": t}
+    
+    # 尝试从文本中提取工具调用
+    tool_match = re.search(r'"tool"\s*:\s*"([^"]+)"', t)
+    if tool_match:
+        tool_name = tool_match.group(1)
+        params_match = re.search(r'"params"\s*:\s*(\{[^}]*\})', t)
+        params = {}
+        if params_match:
+            try:
+                params = json.loads(params_match.group(1))
+            except:
+                pass
+        return {"type": "single", "tool": tool_name, "params": params, "raw": t}
+    
+    
+    return {"type": "unknown", "raw": t}
+
+
+def _triple_inference_narrative_zh() -> str:
+    """首轮 THINK / 每轮 decide 正文：三段推断，且多步 Todo 须在（2）中逐项点名。"""
+    return (
+        "【三段推断（正文必写）】用纯文本按下面三段组织（可加小标题；每段至少一句）：\n"
+        "（1）**目标与约束**：用户要什么、范围与边界。\n"
+        "（2）**路径与步骤**：整体计划与本步关系；若存在多步 Todo（如先 grep 再 modify），"
+        "**逐步**说明每一步的目的与顺序，**禁止只写当前步而忽略后续步骤**；规划备忘中的每一步在此段都必须被点名。\n"
+        "（3）**风险与备选**：歧义、空结果、误改等及应对。\n\n"
+    )
+
+
+def _triple_inference_narrative_en() -> str:
+    return (
+        "[Three-part inference (required in prose)] Structure the preamble as: "
+        "(1) **Goals & constraints**; (2) **Path & steps**—if the plan has multiple steps (e.g. grep then modify), "
+        "explain **each** step’s intent in order; do not describe only the first step; "
+        "(3) **Risks & fallbacks**.\n\n"
+    )
+
+
 class ReactPromptTemplates:
     """ReAct Prompt 模板库"""
     
     @staticmethod
-    def think_prompt(user_input: str, available_tools: list, context: dict, todo_list: list) -> str:
+    def think_prompt(
+        user_input: str,
+        available_tools: list,
+        context: dict,
+        todo_list: list,
+        ui_locale: Optional[str] = None,
+        require_json_plan: Optional[bool] = None,
+        force_legacy_xml: bool = False,
+    ) -> str:
         """
         THINK 阶段 Prompt - 生成结构化 Todo 列表
         
@@ -35,7 +259,105 @@ class ReactPromptTemplates:
         - 必须返回 XML 标签包装的 JSON 数组
         - 每项 Todo 对应一个明确的工具或分析步骤
         - 最多 3-5 项，避免过度拆分
+        
+        require_json_plan：是否要求输出一次性 JSON 计划；None 时读环境变量 REACT_THINK_JSON_PLAN（默认开启）。
+        force_legacy_xml：为 True 时强制使用原 XML 模板（供 THINK FC 失败回退）。
         """
+        from .intent_guards import agent_testing_mode
+
+        if not force_legacy_xml and _react_think_fc_enabled():
+            return ReactPromptTemplates.think_prompt_fc(
+                user_input,
+                available_tools,
+                context,
+                todo_list,
+                ui_locale=ui_locale,
+                require_json_plan=require_json_plan,
+            )
+
+        if require_json_plan is None:
+            require_json_plan = (os.getenv("REACT_THINK_JSON_PLAN", "1") or "1").strip().lower() not in (
+                "0",
+                "false",
+                "no",
+                "off",
+            )
+        _json_zh = (
+            "【一次性完整计划 JSON】在简短规划说明之后，必须再输出**一个**合法 JSON 对象（推荐用 ```json 代码块包裹），"
+            "格式严格为：{\"plan\":[{\"id\":1,\"description\":\"……\",\"status\":\"pending\"}, …]}。"
+            "id 为递增整数；description 为可执行步骤（与后续工具调用一致）；首轮全部 status 均为 pending，**禁止**分多轮追加步骤。"
+            "可同时保留 <todo_list> 与 description 对齐（可选）。\n\n"
+        )
+        _json_en = (
+            "【One-shot plan JSON】After a brief plan narrative, emit **one** valid JSON object (```json fenced), "
+            "exactly: {\"plan\":[{\"id\":1,\"description\":\"...\",\"status\":\"pending\"}, ...]}."
+            " All steps in the first turn; every status starts as pending; do not append steps across turns."
+            " Optional <todo_list> may mirror descriptions.\n\n"
+        )
+        _json_block = (_json_en if is_english_locale(ui_locale) else _json_zh) if require_json_plan else ""
+
+        _testing_extra_zh = (
+            "【测试助手分流】仅当用户明确要求：代码测试、缺陷定位、用例生成/补全、覆盖率或工程质检、或项目内 Bug/用例/BadCase 的查询与修改时，"
+            "才输出 <todo_list>。"
+            "寒暄、情绪表达、泛泛日常聊天、与上述无关的元问题：简短友好回复（2～4 句），且不要输出 <todo_list>。\n"
+            "无明确数据操作目标时，请用户一句话说清目标。\n"
+            "Todo 步骤尽量原子化；若两步互不依赖、可同时进行，可写 <item parallel=\"true\">…</item>（与下一无依赖步骤同批并行，由引擎按层调度）。\n"
+            "涉及代码结构分析、根因推断时，优先规划可结构化解析的路径（AST/符号/调用关系），避免只做浅层全文关键词猜测。\n\n"
+        )
+        _testing_extra_en = (
+            "[Testing-assistant routing] Output <todo_list> only when the user clearly asks for: code testing, defect triage, "
+            "test-case authoring/coverage/quality checks, or in-project Bug/test case/BadCase CRUD/search. "
+            "Greetings, venting, small talk, or unrelated meta questions → short warm reply (2–4 sentences); "
+            "do not emit <todo_list>. When unsure and no data action is implied, ask user to clarify goal.\n"
+            "Keep todo steps atomic; independent steps may use <item parallel=\"true\">…</item> to batch with the next independent step.\n"
+            "For code-structure or root-cause work, prefer AST/symbol/call-graph style reasoning over shallow string matching.\n\n"
+        )
+        _testing_block = (
+            (_testing_extra_en if is_english_locale(ui_locale) else _testing_extra_zh)
+            if agent_testing_mode()
+            else ""
+        )
+
+        _gate_block = _testing_block + _json_block
+
+        compact = (os.getenv("REACT_THINK_PROMPT_COMPACT", "1") or "1").strip().lower()
+        if compact not in ("0", "false", "no", "off"):
+            tools_description = "\n".join([
+                f"- {t['name']}: {t['description'][:120]}"
+                for t in available_tools[:12]
+            ])
+            _index_note = ""
+            if (os.getenv("REACT_TOOLS_PROMPT_INDEX", "0") or "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                _index_note = (
+                    "\n\n【工具索引模式】上表为短描述。不确定参数或用法时，先调用 get_tool_description（tool_name=工具名）"
+                    " 获取完整说明，再执行目标工具。"
+                )
+            context_brief = "\n".join([
+                f"- {k}: {str(v)[:120]}"
+                for k, v in list((context or {}).items())[:12]
+            ]) or "无"
+            return f"""{_gate_block}为用户请求生成最短可执行 Todo（优先 1-2 步，最多 3 步）。
+
+<user_request>{user_input}</user_request>
+<available_tools>
+{tools_description}{_index_note}
+</available_tools>
+<context>
+{context_brief}
+</context>
+<rules>
+1) 查询优先 grep；修改优先 grep 再 modify；创建用 create。
+2) 禁止空泛步骤（如“分析问题”）；每步必须可执行；**规划说明**须按「目标与约束 → 路径与步骤（逐步对应每个 &lt;item&gt;）→ 风险与备选」写，禁止只写 grep 而忽略后续 modify 等步骤。
+3) 只输出：
+<todo_list><item>...</item></todo_list>
+</rules>
+"""
+
         tools_description = "\n".join([
             f"  - <tool name=\"{t['name']}\">{t['description']}</tool>"
             for t in available_tools
@@ -46,76 +368,15 @@ class ReactPromptTemplates:
             for k, v in context.items()
         ])
         
-        return f"""你是一个任务规划专家。根据用户请求，生成一个精准的 Todo 列表。
+        return f"""{_gate_block}任务规划：据用户请求生成 Todo（≤3 条），每项对应一个工具。
 
 <system>
-你的角色：分析用户请求，拆分成可执行的任务步骤。
+两段（顺序固定）1) 规划说明 2～10 句中文（须含三段推断：目标与约束；路径与步骤——**逐步对应每个 item，含后续 modify 等**；风险与备选），无 XML。2) 仅 <todo_list>…</todo_list>，每步 <item>。
 
-【输出格式说明（必须遵守）】
-你必须分两段输出（顺序固定）：
-1) 先写「规划说明」：用 2～8 句中文说明你准备如何拆解任务，为什么这样拆。
-   - 这一段禁止使用任何 XML 标签（包含 <todo_list>/<item>/<thinking>）。
-2) 再输出机器可读规划：仅输出一个 <todo_list>...</todo_list> 块。
-
-【项目名称转换规则】
-- 如果上下文中提供了 project_name（项目名称），使用「在 XXX 项目中」而不是「在 project_id=1 中」
-- 如果上下文中提供了 plan_name（计划名称），使用「在 XXX 计划下」而不是「在 plan_id=34 中」
-- 示例：
-  - ❌ 错误：「在 project_id=1 中搜索」→ ✅ 正确：「在 A 计划项目中搜索」
-  - ❌ 错误：「plan_id=34 的记录」→ ✅ 正确：「在一个测试用例的计划下的记录」
-  - ❌ 错误：「target_id=6 的 Bug」→ ✅ 正确：「创建测试用例这条记录」
-- 如果上下文中**只有 project_id 而没有 project_name**，可以使用「当前项目」或直接省略项目描述，绝不能编造项目名称，也不要在文案里出现「project_id=1」等内部字段。
-
-约束条件：
-1. Todo 总数不超过 3 项（保持简洁）
-2. 每项 Todo 必须对应一个可用工具
-3. 使用明确的、可测量的语言
-
-【核心规则 -技能优先的工具流程】：
-
-1. **技能匹配优先**：
-   -检查是否存在匹配的预定义技能
-   - 如果匹配到技能（如 modify_bug、query_bug严格按照技能工作流执行
-   -技能匹配阈值：0.3分以上
-
-2. **标准流程兜底**：
-   如果无匹配技能，按以下标准流程执行：
-
-   **查询操作（单步流程）**：
-   - 使用 grep工具搜索关键词
-   - 查询意图关键词：查询、搜索、查看、找、列出、显示、单个关键字
-
-   **修改操作（两步流程，缺一不可）**：
-   - 第1步：使用 grep 工具搜索定位目标（必选）
-   - 第2步：使用 modify 工具执行修改（必选）
-   - 修改意图关键词：修改、改、更新、设为、改成、调整、期望结果、状态、优先级、负责人、标题
-   - **不可修改的字段**：类型(type)、id、project_id、plan_id 等为系统固定字段，modify 无法修改；若用户要求修改这些字段，系统会单独提示并拒绝执行。
-   - **重要**：
-     - modify 工具支持的目标类型为 bug / badcase / testcase，不要因为早期文档误写而认为不支持 testcase。
-     - 只要用户请求涉及「修改」Bug/BadCase/测试用例（改状态、期望结果、优先级、负责人、标题等），**通常**输出 2 条 Todo（先 grep 再 modify）；如确有必要增加额外校验/说明，总数也不得超过 3 条，且绝不能只输出 1 条（禁止跳过 grep）。
-     - 当用户话语中明确出现「测试用例」「用例」等词时，应将目标类型视为 testcase，而不是随意改写为 Bug 或 BadCase。
-     - 第二步 modify 会自动使用第一步 grep 定位到的 target_id，Todo 描述中只需写「将该测试用例/该Bug/该BadCase 的 XXX 修改为 YYY」，无需写 target_id。
-
-   **创建操作（单步流程）**：
-   - 使用 create 工具创建新的 Bug/BadCase/测试用例
-   - 创建意图关键词：创建、新建、添加、增加
-   - **复制/沿用某条测试用例新建**：在 fields 中传入 `copy_from_testcase_id`（或 `source_testcase_id`）为源用例 id，可与新 `title` 等同用；后端会将新用例的 `plan_id` 与源用例对齐（同一迭代计划）。
-
-【grep 工具参数规范】：
-- keywords: 搜索关键词（必填，如果要查询所有，设置为空字符串 "" 或 "*"）
-- target: 分析目标 - bug/badcase/testcase/all（必填）
-- project_id: 项目 ID（可选）
-- **keywords 由你从用户话里识别**：
-  - 用户若提到具体 BadCase/Bug/测试用例标题（如「雪碧和七喜」「创建测试用例」），必须把用户说的**完整标题原文**作为 keywords，不要将「和」等字替换成空格或省略，否则会查不到记录。
-  - **区分字段名和标题**：用户若说的是字段名（如"前缀条件"、"前置条件"、"步骤"、"预期结果"、"期望结果"、"状态"等），**不要将字段名作为 keywords**，而应该从用户输入中提取**实际的标题**。例如：
-    - 用户说「修改创建测试用例的前缀条件」→ 标题是「创建测试用例」→ keywords=创建测试用例
-    - 用户说「修改登录 bug 的期望结果」→ 标题是「登录 bug」→ keywords=登录 bug
-    - 用户说「修改雪碧和七喜的答案」→ 标题是「雪碧和七喜」→ keywords=雪碧和七喜
-
-示例：使用 grep 工具搜索登录相关的 Bug，keywords=登录，target=bug
-示例：用户说「修改雪碧和七喜的状态」→ 使用 grep 工具定位该 BadCase，keywords=雪碧和七喜，target=badcase
-示例：用户说「修改创建测试用例的前缀条件」→ 使用 grep 工具定位该测试用例，keywords=创建测试用例，target=testcase
-示例：使用 grep 工具查询所有 BadCase，keywords="" 或 keywords="*"，target=badcase
+规则：有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。技能匹配则跟技能流（阈值约 0.3）。
+查询→一步 grep。修改→两步 grep 再 modify（禁止只 modify）。创建→一步 create。browser_test→一步。
+grep：keywords=记录**标题原文**；勿把「期望结果/步骤」等**字段名**当 keywords；target∈bug/badcase/testcase/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
+modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
 </system>
 
 <user_request>
@@ -132,127 +393,277 @@ class ReactPromptTemplates:
 </context>
 
 <examples>
-好的 Todo 列表：
-
-<good_example>
-<request>界面</request>
-<todo_list>
-<item>使用 grep 工具搜索界面相关的Bug，keywords=界面，target=bug</item>
-</todo_list>
-说明：单关键字按查询意图处理，只需一步
-</good_example>
-
-<good_example>
-<request>查询登录相关的Bug</request>
-<todo_list>
-<item>使用 grep 工具搜索登录相关的Bug，keywords=登录，target=bug</item>
-</todo_list>
-说明：查询操作只需一步
-</good_example>
-
-<good_example>
-<request>修改登录Bug的状态为关闭</request>
-<todo_list>
-<item>使用 grep 工具搜索定位登录Bug，keywords=登录，target=bug</item>
-<item>使用 modify 工具将Bug状态修改为closed</item>
-</todo_list>
-说明：修改操作必须两步：grep -> modify
-</good_example>
-
-<good_example>
-<request>把高优先级的Bug都改成P1</request>
-<todo_list>
-<item>使用 grep 工具搜索高优先级Bug，keywords=高优先级，target=bug</item>
-<item>使用 modify 工具批量修改优先级为P1</item>
-</todo_list>
-说明：批量修改也是两步流程
-</good_example>
-
-<good_example>
-<request>把所有的BadCase都修改成已关闭状态</request>
-<todo_list>
-<item>使用 grep 工具查询所有BadCase，keywords=""，target=badcase</item>
-<item>使用 modify 工具批量修改所有BadCase的状态为closed</item>
-</todo_list>
-说明：批量修改只需两个任务：grep 查询所有记录，然后一个 modify 任务批量修改。后端会自动处理所有记录。不要为每个记录生成单独的 modify 任务！
-</good_example>
-
-<good_example>
-<request>所有Bug的状态都改成已解决</request>
-<todo_list>
-<item>使用 grep 工具查询所有Bug，keywords=""，target=bug</item>
-<item>使用 modify 工具批量修改所有Bug的状态为resolved</item>
-</todo_list>
-说明：批量修改只需一个 modify 任务，后端会自动处理全部记录
-</good_example>
-
-<good_example>
-<request>修改创建测试用例7的负责人为33</request>
-<todo_list>
-<item>使用 grep 工具搜索标题为「创建测试用例7」的测试用例，keywords=创建测试用例7，target=testcase</item>
-<item>使用 modify 工具将该测试用例的负责人修改为33</item>
-</todo_list>
-说明：修改测试用例也必须两步，grep 时 target=testcase；modify 会使用上一步 grep 定位到的 target_id，无需在 Todo 中写 target_id。
-</good_example>
-
-<good_example>
-<request>修改创建测试用例6的标题为创建测试用例8</request>
-<todo_list>
-<item>使用 grep 工具搜索标题为「创建测试用例6」的测试用例，keywords=创建测试用例6，target=testcase</item>
-<item>使用 modify 工具将该测试用例的标题修改为创建测试用例8</item>
-</todo_list>
-说明：修改测试用例标题同样先 grep 再 modify，target=testcase。
-</good_example>
-
-<good_example>
-<request>创建一个登录失败的Bug</request>
-<todo_list>
-<item>使用 create 工具创建Bug，标题=登录失败，优先级=高</item>
-</todo_list>
-说明：创建操作只需一步
-</good_example>
-
-<good_example>
-<request>帮我测试登录功能</request>
-<todo_list>
-<item>使用 browser_test 工具执行登录功能测试</item>
-</todo_list>
-说明：browser_test 一次调用即可完成所有测试步骤
-</good_example>
-
-不好的 Todo 列表（避免这样）：
-<bad_example>
-<request>界面</request>
-<todo_list>
-<item>界面</item>
-</todo_list>
-原因：单关键字应生成 grep 查询步骤
-</bad_example>
-
-<bad_example>
-<request>修改这个Bug的状态</request>
-<todo_list>
-<item>使用 modify 工具修改Bug状态</item>
-</todo_list>
-原因：修改操作必须先 grep 定位，再 modify
-</bad_example>
+<good_example><request>界面</request><todo_list><item>grep 界面相关 Bug，keywords=界面，target=bug</item></todo_list></good_example>
+<good_example><request>改登录 Bug 关闭</request><todo_list><item>grep keywords=登录，target=bug</item><item>modify 状态 closed</item></todo_list></good_example>
+<good_example><request>全部 BadCase 关闭</request><todo_list><item>grep keywords=""，target=badcase</item><item>modify 批量 closed</item></todo_list></good_example>
+<good_example><request>改创建测试用例7负责人33</request><todo_list><item>grep keywords=创建测试用例7，target=testcase</item><item>modify 负责人=33</item></todo_list></good_example>
+<good_example><request>新建登录失败 Bug</request><todo_list><item>create 标题登录失败</item></todo_list></good_example>
+<good_example><request>测登录</request><todo_list><item>browser_test 登录</item></todo_list></good_example>
+<bad_example><request>界面</request><todo_list><item>界面</item></todo_list>原因：应 grep</bad_example>
+<bad_example><request>改 Bug 状态</request><todo_list><item>仅 modify</item></todo_list>原因：缺 grep</bad_example>
 </examples>
 
-<format>
-第二段必须是且仅包含：
-- <todo_list>...</todo_list>（不要在该块外再输出 XML）
-- 每一项任务用 <item>...</item> 包裹，多条即多个 <item>，格式稳定、易解析。
-示例：
-<todo_list>
-<item>第一项任务（具体且可执行）</item>
-<item>第二项任务（具体且可执行）</item>
-<item>第三项任务（具体且可执行）</item>
-</todo_list>
-</format>
-
-请先写「规划说明」，再输出 <todo_list>：
-
+<format>第二段仅 <todo_list><item>…</item></todo_list></format>
+先规划说明再 <todo_list>：
 现在请生成 Todo 列表：
+"""
+
+    @staticmethod
+    def think_prompt_fc(
+        user_input: str,
+        available_tools: list,
+        context: dict,
+        todo_list: list,
+        ui_locale: Optional[str] = None,
+        require_json_plan: Optional[bool] = None,
+    ) -> str:
+        """
+        THINK：仅用 function calling（submit_react_think），不要求正文中的 <todo_list> / JSON 计划块。
+        """
+        from .intent_guards import agent_testing_mode
+
+        _testing_extra_zh = (
+            "【测试助手分流】仅当用户明确要求代码测试、缺陷、用例、覆盖率或项目内数据操作时 need_tools=true 并给出 todo_items；"
+            "寒暄与无关闲聊 need_tools=false，message 简短友好，不要 todo_items。\n\n"
+        )
+        _testing_extra_en = (
+            "[Testing routing] need_tools=true only for testing/defect/coverage/in-project data work; "
+            "small talk → need_tools=false with a short message; omit todo_items.\n\n"
+        )
+        _testing_block = (
+            (_testing_extra_en if is_english_locale(ui_locale) else _testing_extra_zh)
+            if agent_testing_mode()
+            else ""
+        )
+        _branch_zh = (
+            "【三分支】据本轮推断**只选其一**，勿折中：\n"
+            "· **直驱工具**：已明确单步、单工具即可（如仅一次 grep、或目标已知的单次 modify），"
+            "need_tools=true，need_todo_list=false，todo_items 必须为空 []；系统不展示 Todo 列表，直接进入工具决策与执行。\n"
+            "· **推断需 Todo**：多步、跨工具、或需要向用户展示执行计划，need_tools=true，need_todo_list=true，"
+            "todo_items 每步一条可执行描述；主循环中每步为观察/决策 → 再思考 → 再调工具。\n"
+            "· **闲聊/寒暄/纯文字**：不涉及项目内 Bug/BadCase/测试用例等的查改，need_tools=false，"
+            "message 写 2～4 句友好回复；不要 todo_items。\n\n"
+        )
+        _branch_en = (
+            "[Three branches] Choose **exactly one** from inference:\n"
+            "· **Direct tool**: one clear atomic step (single grep, single targeted modify, etc.) → "
+            "need_tools=true, need_todo_list=false, todo_items MUST be []. No visible todo list; go straight to decide/execute.\n"
+            "· **Todo plan**: multi-step / cross-tool / user should see the plan → need_tools=true, need_todo_list=true, "
+            "todo_items one string per step; main loop per step: observe/decide → think → tool.\n"
+            "· **Chat only**: small talk / no in-project record work → need_tools=false, message only; omit todo_items.\n\n"
+        )
+        _fc_gate_zh = (
+            "【输出方式】正文可先写简短分析（纯文本，不要用 XML）。"
+            "**必须**调用函数 **submit_react_think** 一次，填写：need_tools、need_todo_list、可选 need_plan_ui、"
+            "need_tools=false 时的 message、need_todo_list=true 时的 todo_items（每步一条）。"
+            "禁止输出 <todo_list> 或 ```json 计划块。\n\n"
+        )
+        _fc_gate_en = (
+            "[Output] You may write a brief analysis in plain text (no XML). "
+            "You **must** call **submit_react_think** once with need_tools, need_todo_list, optional need_plan_ui, "
+            "message when need_tools=false, and todo_items when need_todo_list=true. "
+            "Do not emit <todo_list> or fenced JSON plans.\n\n"
+        )
+        _triple_narr = (
+            _triple_inference_narrative_en()
+            if is_english_locale(ui_locale)
+            else _triple_inference_narrative_zh()
+        )
+        _fc_block = (
+            _testing_block
+            + (_branch_en if is_english_locale(ui_locale) else _branch_zh)
+            + _triple_narr
+            + (_fc_gate_en if is_english_locale(ui_locale) else _fc_gate_zh)
+        )
+
+        compact = (os.getenv("REACT_THINK_PROMPT_COMPACT", "1") or "1").strip().lower()
+        if compact not in ("0", "false", "no", "off"):
+            tools_description = "\n".join([
+                f"- {t['name']}: {t['description'][:120]}"
+                for t in available_tools[:12]
+            ])
+            _index_note = ""
+            if (os.getenv("REACT_TOOLS_PROMPT_INDEX", "0") or "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                _index_note = (
+                    "\n\n【工具索引】上表为短描述。不确定参数时可先调用 get_tool_description（tool_name=工具名）。"
+                )
+            context_brief = "\n".join([
+                f"- {k}: {str(v)[:120]}"
+                for k, v in list((context or {}).items())[:12]
+            ]) or "无"
+            return f"""{_fc_block}为用户请求生成最短可执行路径（优先 1～2 步，最多 3 步）。
+
+<user_request>{user_input}</user_request>
+<available_tools>
+{tools_description}{_index_note}
+</available_tools>
+<context>
+{context_brief}
+</context>
+<rules>
+1) 查询优先 grep；修改优先 grep 再 modify；创建用 create。
+2) need_todo_list=true 时 todo_items 中禁止空泛步骤；每步必须可执行；上文「路径与步骤」须**逐项**覆盖 todo_items，禁止只写第一步。
+3) need_todo_list=false 时 todo_items 必须为空；禁止闲聊却 need_tools=true。
+4) 有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。
+</rules>
+"""
+
+        tools_description = "\n".join([
+            f"  - <tool name=\"{t['name']}\">{t['description']}</tool>"
+            for t in available_tools
+        ])
+        context_str = "\n".join([f"  - {k}: {v}" for k, v in context.items()])
+        return f"""{_fc_block}任务规划（仅通过 submit_react_think 提交）。
+
+<system>
+单步直驱：need_todo_list=false 且 todo_items=[]。多步计划：need_todo_list=true 且 todo_items 逐项列出。
+need_tools=false 时不要 todo_items（闲聊分支）。
+规则：查询→grep。修改→grep 再 modify。创建→create。browser_test→一步。
+多步时：上文三段推断的「路径与步骤」必须与 todo_items **逐步一一对应**（含后续 modify），不得只描述 grep。
+</system>
+
+<user_request>
+{user_input}
+</user_request>
+
+<available_tools>
+{tools_description}
+</available_tools>
+
+<context>
+{context_str if context_str else "无"}
+</context>
+现在请调用 submit_react_think 完成本轮规划：
+"""
+
+    @staticmethod
+    def merged_opening_decide_prompt_fc(
+        user_input: str,
+        available_tools: list,
+        context: dict,
+        *,
+        ui_locale: Optional[str] = None,
+    ) -> str:
+        """
+        合并首轮：根据任务复杂度选择输出模式。
+        - 闲聊：直接回复文本
+        - 简单单步：输出 {"tool": "...", "params": {...}}
+        - 复杂多步：输出 {"plan": [...], "first_tool": "...", "first_params": {...}}
+        """
+        tools_info = "\n".join([
+            f"  - {t['name']}: {t['description'][:150]}"
+            for t in available_tools[:10]
+        ])
+        context_str = "\n".join([
+            f"  - {k}: {str(v)[:100]}"
+            for k, v in list((context or {}).items())[:10]
+        ]) if context else "无"
+
+        _head_zh = """【行为模式·最高优先级】
+你必须直接给出“决定”，不要输出任何元认知语句（例如“我需要分析一下”“让我想想”）。
+
+【三选一输出模式】
+1. **闲聊**：用户只是打招呼或聊天 → 直接回复友好文本
+2. **简单单步**：一次查询或单个操作即可完成 → 输出 JSON：`{"tool": "工具名", "params": {...}}`
+3. **复杂多步**：需要先查询再修改、或涉及多个工具 → 输出 JSON：`{"plan": ["步骤1", "步骤2", ...], "first_tool": "首个工具", "first_params": {...}}`
+
+**判断标准**：
+- 仅查询（grep/search）→ 简单单步
+- 仅创建单条记录（create）→ 简单单步  
+- 先查再改（grep + modify）→ 复杂多步
+- 批量操作或多表关联 → 复杂多步
+
+**禁止事项**：
+- 不要输出 <decision> XML 标签
+- 不要在 JSON 前后写长篇分析
+- 不要输出元认知语句
+"""
+        _head_en = """【Behavior Pattern·Highest Priority】
+You MUST give a "decision" directly. Do NOT output any meta-cognitive statements (e.g., "Let me analyze", "I need to think").
+
+【Choose ONE output mode】
+1. **Chat**: User just says hi or chats → Reply with friendly text directly
+2. **Simple single step**: One query or single operation → Output JSON: `{"tool": "tool_name", "params": {...}}`
+3. **Complex multi-step**: Query then modify, or multiple tools → Output JSON: `{"plan": ["step1", "step2", ...], "first_tool": "first_tool", "first_params": {...}}`
+
+**Decision criteria**:
+- Query only (grep/search) → Simple single step
+- Create single record (create) → Simple single step
+- Query then modify (grep + modify) → Complex multi-step
+- Batch operations or multi-table → Complex multi-step
+
+**Prohibitions**:
+- Do NOT output <decision> XML tags
+- Do NOT write lengthy analysis before/after JSON
+- Do NOT output meta-cognitive statements
+"""
+        head = _head_en if is_english_locale(ui_locale) else _head_zh
+
+        return f"""{head}
+
+<user_request>
+{user_input}
+</user_request>
+
+<available_tools>
+{tools_info}
+</available_tools>
+
+<context>
+{context_str}
+</context>
+
+<rules>
+1. 查询优先 grep；修改优先 grep 再 modify；创建用 create。
+2. 单步任务直接调用工具；多步任务先输出 plan 再调用首个工具。
+3. plan 中的步骤必须具体可执行，不要空泛描述。
+</rules>
+"""
+
+    @staticmethod
+    def decide_prompt_fc(todo: str, user_input: str, available_tools: list, context: dict) -> str:
+        """ACT：仅用 function calling 选择工具；不要求 <decision> XML。"""
+        tools_info = "\n".join([
+            f"  - {t['name']}: {t['description'][:200]}"
+            for t in available_tools
+        ])
+        context_str = "\n".join([
+            f"  - {k}: {str(v)[:100]}"
+            for k, v in (context or {}).items()
+        ]) if context else "无"
+
+        return f"""你是任务执行决策专家。{_triple_inference_narrative_zh()}请先写 5～14 句中文「行动前说明」（纯文本，不要用 XML），
+须完整覆盖上述三段推断；若整体计划含多步（如先 grep 再 modify），在「路径与步骤」中说明本步与后续未执行步骤的关系。
+然后**必须**通过 **function calling** 调用**一条**工具函数，参数为 JSON 对象（与原先 <decision> 内 params 一致）。
+不要输出 <decision> 标签。
+
+绑定规则（最高优先级）：
+- Todo 明确写「使用 grep 工具」→ 只能调用 grep。
+- Todo 明确写「使用 modify 工具」→ 只能调用 modify。
+- 同理 create / browser_test。
+
+原则：涉及搜索/查询/测试/修改项目数据时 execute 对应为 true（通过实际调用工具体现）。
+modify 前若上下文无列表，应先 grep；params 可不全，服务端会合并补参。modify/create 的 confirm 须为 false。
+search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
+
+<current_todo>
+{todo}
+</current_todo>
+<user_request>
+{user_input}
+</user_request>
+<available_tools>
+{tools_info}
+</available_tools>
+<current_context>
+{context_str}
+</current_context>
+请说明后调用工具函数完成决策：
 """
     
     @staticmethod
@@ -267,6 +678,8 @@ class ReactPromptTemplates:
         - 智能选择搜索引擎
         - modify：params 可不全；引擎会按服务端补参逻辑在执行前合并（见 prompt 内「服务端补参」）
         """
+        if not _react_decide_xml_fallback():
+            return ReactPromptTemplates.decide_prompt_fc(todo, user_input, available_tools, context)
         tools_info = "\n".join([
             f"  <tool id=\"{t['name']}\" description=\"{t['description']}\"/>"
             for t in available_tools
@@ -285,6 +698,7 @@ class ReactPromptTemplates:
 2) **机器可读决策**：在说明之后，**单独**输出且仅输出一个 <decision>...</decision> 块。
 
 你的角色：根据 Todo 和当前上下文，做出执行决策
+涉及代码阅读、缺陷根因、结构理解时：优先采用可结构化分析的方式（AST/符号表/调用关系、精确文件与行号），避免仅凭模糊关键词臆测；若工具有模式参数，优先选结构化/精准模式。
 决策原则（严格按以下规则）：
 1. 强制绑定规则（优先级最高，绝不能违反）：
    - 如果 Todo 文本中明确包含「使用 grep 工具」或 \"use grep tool\"，则 tool 字段必须为 \"grep\"。
@@ -659,93 +1073,189 @@ class ReactPromptTemplates:
         round_idx: int,
         last_observation: Optional[dict],
         last_analysis: Optional[dict],
-        plan_hints: List[str],
+        current_todo: str = "",
+        project_name: str = "",
     ) -> str:
         """
         动态 ReAct：每一步根据「当前上下文 + 上一步观察」再决策。
-        输出：先自然语言说明（Agent 行动前推理，非模型深度思考），再输出 <decision>...</decision>。
+        
+        结构：静态系统提示词 + 动态上下文信息
+        """
+        # 构建动态上下文
+        dynamic_context = build_dynamic_context(
+            project_name=project_name,
+            current_todo=current_todo,
+            user_query=user_input,
+            round_idx=round_idx,
+            context=context,
+            last_observation=last_observation,
+            available_tools=available_tools,
+        )
+        
+        # 返回：静态系统提示 + 动态上下文
+        return f"""{REACT_SYSTEM_STATIC}
+
+{dynamic_context}
+
+请先写行动前说明，再输出 <decision>：
+"""
+
+    @staticmethod
+    def react_unified_prompt(
+        user_input: str,
+        available_tools: list,
+        context: dict,
+        *,
+        round_idx: int = 0,
+        prev_observation: Optional[dict] = None,
+        prev_action: Optional[dict] = None,
+        plan_hints: List[str] = None,
+        todo: str = "",
+    ) -> str:
+        """
+        三段式统一 Prompt：一次 LLM 输出 observation + thinking + decision
+        
+        输出格式：
+        <observation>对上一轮结果的观察（首轮为空）</observation>
+        <thinking>当前轮的思考规划</thinking>
+        <decision>执行决策</decision>
+        
+        适用于千帆等 FC 不稳定的模型。
         """
         tools_info = "\n".join([
-            f"  <tool id=\"{t['name']}\" description=\"{t['description']}\"/>"
-            for t in available_tools
+            f"  <tool id=\"{t['name']}\" description=\"{t['description'][:150]}\"/>"
+            for t in available_tools[:20]
         ])
         context_str = "\n".join([
-            f"  - {k}: {str(v)[:500]}"
-            for k, v in (context or {}).items()
+            f"  - {k}: {str(v)[:300]}"
+            for k, v in list((context or {}).items())[:15]
         ]) if context else "无"
-        obs_s = ""
-        if last_observation is not None:
+        
+        # 上一轮观察
+        obs_str = "（这是首轮，还没有上一轮观察）"
+        if prev_observation is not None:
             try:
-                raw = json.dumps(last_observation, ensure_ascii=False, indent=2)
-                obs_s = raw[:12000] + ("…" if len(raw) > 12000 else "")
+                raw = json.dumps(prev_observation, ensure_ascii=False, indent=2)
+                obs_str = raw[:8000] + ("…" if len(raw) > 8000 else "")
             except Exception:
-                obs_s = str(last_observation)[:8000]
-        else:
-            obs_s = "（尚无：这是本轮第一次行动前决策。）"
-        ana_s = ""
-        if last_analysis is not None:
-            try:
-                ana_s = json.dumps(last_analysis, ensure_ascii=False, indent=2)[:6000]
-            except Exception:
-                ana_s = str(last_analysis)[:4000]
-        hints = ""
+                obs_str = str(prev_observation)[:6000]
+        
+        
+        # 上一轮行动
+        action_str = "无"
+        if prev_action:
+            action_str = f"工具: {prev_action.get('tool')}，参数: {json.dumps(prev_action.get('params', {}), ensure_ascii=False)}"
+        
+        
+        # 计划提示
+        hints_str = ""
         if plan_hints:
-            hints = "\n".join(f"  {i + 1}. {h}" for i, h in enumerate(plan_hints[:20]))
-
-        return f"""你是任务执行 Agent。当前是第 {round_idx + 1} 轮「思考 → 行动 → 观察」循环。
+            hints_str = "\n".join(f"  {i+1}. {h}" for i, h in enumerate(plan_hints[:10]))
+        
+        
+        return f"""你是 ReAct 任务执行引擎。一次输出三段：观察分析 → 思考规划 → 决策行动。
 
 <system>
-你必须分两段输出（顺序固定）：
-1) **行动前说明**：用 3～12 句中文，说明「下一步要做什么、为什么、如何执行」，像对同事说明计划一样。
-   - 可在首行使用「💭」作为提示（可选），便于界面展示「思考」。
-   - 这是 Agent 的推理与沟通，**不要**使用任何 XML 标签（含 <thinking>），也不要模仿「模型内部思维链」格式。
-2) **机器可读决策**：在说明之后，**单独**输出且仅输出一个 <decision>...</decision> 块，结构必须与下面 <format> 一致，以便系统解析工具调用。
-决策规则与原有 decide 一致：grep 先于 modify、params 可部分省略由服务端补全、create/modify 的 confirm=false 等。
-若用户目标已达成、无需再调工具，则 <execute>false</execute> 并在 <reason> 中说明「任务已完成」或原因。
+**三段式输出格式（顺序固定，缺一不可）：**
+
+第一段：<observation>...</observation>
+- 首轮：可简写或留空
+- 后续轮：分析上一轮工具执行结果，提炼关键信息（成功/失败、返回数据、异常原因）
+- 长度：2-6 句话
+
+第二段：<thinking>...</thinking>
+- 目标与约束：明确本轮要达成什么目标
+- 路径与步骤：说明选择什么工具、为什么、参数如何填写
+- 风险与备选：可能的问题和应对方案
+- 长度：4-10 句话
+
+第三段：<decision>...</decision>
+- 必须严格按下方 <format> 格式输出
+- execute=true 表示执行工具，false 表示任务完成或闲聊
+- tool 为空表示返回自然语言回复（闲聊场景）
+
+**决策规则：**
+1. 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）
+2. create/modify 预览用 confirm=false，禁止直接落库
+3. 目标已达成则 execute=false，tool 留空
+4. 纯聊天/问候场景：execute=false，不调用工具
+5. 涉及搜索、查询、测试、修改时 execute 必须为 true
+6. 不确定参数时可简写，服务端会补全
+
+**modify 工具参数格式（重要）：**
+- target: "bug" 或 "badcase" 或 "testcase"
+- target_id: 从 grep 结果获取的 ID（整数或数组）
+- modifications: {{"字段名": "新值"}}  # 必须嵌套在 modifications 里！
+- confirm: false  # 预览模式
+
+示例：
+<params>{{"target": "bug", "target_id": 9, "modifications": {{"status": "hold"}}, "confirm": false}}</params>
 </system>
 
 <user_request>
 {user_input}
 </user_request>
 
-<round_index>{round_idx}</round_index>
+<round_index>{round_idx + 1}</round_index>
 
-<initial_plan_hints>
-（仅作背景参考，**非强制步骤顺序**；实际每轮须结合最新观察自主决定。）
-{hints or "（无单独规划列表）"}
-</initial_plan_hints>
+<current_todo>
+{todo or '（无特定待办）'}
+</current_todo>
 
 <current_context>
 {context_str}
 </current_context>
 
-<last_observation>
-{obs_s}
-</last_observation>
+<prev_action>
+{action_str}
+</prev_action>
 
-<last_analysis>
-{ana_s if ana_s else "（无）"}
-</last_analysis>
+<prev_observation>
+{obs_str}
+</prev_observation>
 
 <available_tools>
 {tools_info}
 </available_tools>
 
 <format>
-第二段必须是且仅包含：
 <decision>
 <execute>true 或 false</execute>
-<tool>工具名</tool>
-<params>{{ ... JSON ... }}</params>
-<reason>简短理由</reason>
+<tool>工具名（execute=false 时可为空）</tool>
+<params>{{"key": "value"}}</params>
+<reason>一句决策理由</reason>
+</decision>
+
+**示例：**
+<!-- grep 查询 -->
+<decision>
+<execute>true</execute>
+<tool>grep</tool>
+<params>{{"target": "bug", "keywords": "登录", "project_id": 6}}</params>
+<reason>查询登录相关的 Bug</reason>
+</decision>
+
+<!-- modify 修改 -->
+<decision>
+<execute>true</execute>
+<tool>modify</tool>
+<params>{{"target": "bug", "target_id": 9, "modifications": {{"status": "hold"}}, "confirm": false}}</params>
+<reason>将 Bug 状态改为 hold（预览模式）</reason>
 </decision>
 </format>
 
-请先写「行动前说明」，再写 <decision> 块：
+请按三段式输出（observation → thinking → decision）：
 """
 
     @staticmethod
-    def observe_prompt(todo: str, action: dict, observation: dict, context: dict) -> str:
+    def observe_prompt(
+        todo: str,
+        action: dict,
+        observation: dict,
+        context: dict,
+        *,
+        force_legacy_xml: bool = False,
+    ) -> str:
         """
         OBSERVE 阶段 Prompt - 分析工具结果并提取关键信息
         
@@ -753,116 +1263,60 @@ class ReactPromptTemplates:
         - 必须返回 XML 包装的结构化结果
         - 提取 key_findings / context_updates / next_step
         - 为下一个 Todo 准备上下文
+        force_legacy_xml：为 True 时强制 <result> XML 模板（供 observe FC 失败回退）。
         """
+        if not force_legacy_xml and _react_observe_fc_enabled():
+            return ReactPromptTemplates.observe_prompt_fc(todo, action, observation, context)
         observation_str = json.dumps(observation, ensure_ascii=False, indent=2)
         
-        return f"""你是一个结果分析专家。分析工具执行结果，提取关键信息并更新上下文。
+        return f"""分析工具结果，供下一步决策使用。
 
 <system>
-你必须分两段输出（顺序固定）：
-1) **分析说明**：用若干句中文，说明你从工具结果里看到了什么、对后续步骤的含义；可在首行使用「💭」（可选）。**不要使用 XML 标签**，不要输出 <result> 或 <finding> 等标签。
-2) **机器可读结果**：在说明之后，**单独**输出且仅输出一个 <result>...</result> 块，结构必须与下方 <format> 一致，以便系统解析。
-
-你的角色：分析工具结果，提取关键发现
-分析原则：
-1. 识别关键的 Bug、错误或成功指标
-2. 更新执行上下文（供后续 Todo 使用）
-3. 判断是否需要后续步骤
-4. 提供清晰的结构化输出
-5. 对于搜索工具：总结搜索结果的关键信息和结论，不要罗列原始搜索条目
+两段（顺序固定）：
+1) 分析说明：2～8 句中文；**禁止**在说明里写 <result>/<finding>。
+2) **仅**一个 <result>...</result>，结构见 <format>。
+要点：提炼成败与关键数据；grep 时把 bug_list/badcase_list/testcase 等写入 context_update 供 modify；搜索类总结结论勿堆砌原文。
 </system>
-
-<todo>
-{todo}
-</todo>
-
-<action_taken>
-工具：{action.get('tool')}
-参数：{json.dumps(action.get('params', {}), ensure_ascii=False)}
-</action_taken>
-
+<todo>{todo}</todo>
+<action_taken>工具：{action.get('tool')} 参数：{json.dumps(action.get('params', {}), ensure_ascii=False)}</action_taken>
 <tool_result>
 {observation_str}
 </tool_result>
-
 <current_context>
-{json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"}
+{json.dumps(context, ensure_ascii=False, indent=2) if context else "{{}}"}
 </current_context>
-
-<examples>
-好的分析：
-<good_example>
-<scenario>搜索工具返回10条关于"刘亦菲"的结果</scenario>
-<result>
-<key_findings>
-  <finding type="info">搜索到刘亦菲相关信息，主要包含个人资料、作品和近期新闻</finding>
-  <finding type="info">热门话题集中在影视作品和公众活动</finding>
-</key_findings>
-<context_update>
-  "search_completed": true,
-  "topic": "刘亦菲",
-  "result_count": 10
-</context_update>
-<next_step>已完成搜索，可根据需要进一步分析</next_step>
-</result>
-</good_example>
-
-<good_example>
-<scenario>grep工具定位到登录相关的Bug</scenario>
-<result>
-<key_findings>
-  <finding type="info">定位到2条登录相关的Bug</finding>
-  <finding type="info">Bug ID: 1, 标题: 登录失败, 状态: new, 计划ID: 31</finding>
-  <finding type="info">Bug ID: 2, 标题: 登录页面加载慢, 状态: new, 计划ID: 33</finding>
-</key_findings>
-<context_update>
-  "bugs_found": 2,
-  "bug_list": [
-    {{"id": 1, "title": "登录失败", "status": "new", "plan_id": 31}},
-    {{"id": 2, "title": "登录页面加载慢", "status": "new", "plan_id": 33}}
-  ],
-  "first_bug_id": 1
-</context_update>
-<next_step>可以使用modify工具修改Bug状态，target_id从bug_list中获取</next_step>
-</result>
-</good_example>
-
-<good_example>
-<scenario>测试工具返回登录错误</scenario>
-<result>
-<key_findings>
-  <finding type="bug" severity="high">登录页面返回 500 错误</finding>
-  <finding type="info">数据库连接超时，需要检查网络</finding>
-</key_findings>
-<context_update>
-  "bugs_found": 1,
-  "error_type": "database_timeout",
-  "affected_component": "authentication_service"
-</context_update>
-<next_step>建议查询日志以定位根因</next_step>
-</result>
-</good_example>
-</examples>
-
 <format>
-第二段必须是且仅包含：
 <result>
 <key_findings>
-  <finding type="bug/info/success">发现内容</finding>
-  ...
+  <finding type="bug|info|success">…</finding>
 </key_findings>
-<context_update>
-{{
-  "key": "value"
-}}
-</context_update>
-<next_step>建议的后续步骤</next_step>
+<context_update>{{ "key": "value" }}</context_update>
+<next_step>…</next_step>
 </result>
 </format>
+先说明再 <result>：
+"""
 
-请先写「分析说明」，再写 <result> 块：
+    @staticmethod
+    def observe_prompt_fc(todo: str, action: dict, observation: dict, context: dict) -> str:
+        """OBSERVE：仅用 function calling（submit_observe_analysis），不要求 <result> XML。"""
+        observation_str = json.dumps(observation, ensure_ascii=False, indent=2)
+        return f"""分析工具执行结果，供下一步决策。
 
-现在请分析结果：
+<system>
+两段：1) 先用 2～8 句中文说明分析（纯文本，不要写 XML）。2) **必须**调用函数 **submit_observe_analysis**，传入 findings（字符串数组）、context_update（对象）、next_step（字符串）。
+禁止输出 <result>。
+要点：提炼成败与关键数据；grep 时把列表类结果写入 context_update 供后续 modify。
+</system>
+<todo>{todo}</todo>
+<action_taken>工具：{action.get('tool')} 参数：{json.dumps(action.get('params', {}), ensure_ascii=False)}</action_taken>
+<tool_result>
+{observation_str}
+</tool_result>
+<current_context>
+{json.dumps(context, ensure_ascii=False, indent=2) if context else "{{}}"}
+</current_context>
+先说明再调用 submit_observe_analysis：
 """
 
     @staticmethod
@@ -878,17 +1332,13 @@ class ReactPromptTemplates:
         r = (reason or "").strip()
         rline = f"\n模型简述：{r[:900]}" if r else ""
         tv = (todos_overview or "").strip() or "（仅本步，未提供完整列表）"
-        return f"""你是 ReAct 助手。请先**对照下方完整待办列表**，确认本步在整体任务中的位置，再用 2～8 句中文说明本步**即将执行什么**（工具调用要点：工具名、检索词、目标类型、关键 id）。不要用 JSON/XML/代码块。
+        return f"""用 2～5 句中文说明本步将执行什么（工具、关键词、target、关键 id）。勿 JSON/XML/代码块。
 
-【待办步骤全貌（必须先阅读）】
+待办全貌：
 {tv}
-
-【本步对应的 Todo 条目】
-{todo}
-
+本步 Todo：{todo}
 工具：{tool}
-结构化参数（仅供理解，勿原文复述）：
-{pj}{rline}
+参数要点：{pj}{rline}
 """
 
     @staticmethod
@@ -900,18 +1350,11 @@ class ReactPromptTemplates:
         r = (decision.get("reason") or "").strip()
         rline = f"\n模型决策理由：{r[:1200]}" if r else ""
         tv = (todos_overview or "").strip() or "（仅本步，未提供完整列表）"
-        return f"""请对照【待办步骤全貌】，用 2～8 句中文写清**本步要完成什么**（是否执行、用哪个工具、关键意图）。不要输出 XML/JSON/代码块。
+        return f"""2～5 句中文：是否执行、工具、意图。勿 XML/JSON/代码块。
 
-【待办步骤全貌】
-{tv}
-
-【本步 Todo】
-{todo}
-
-是否执行：{ex}
-工具：{tool}
-参数摘要（仅供理解）：
-{pj}{rline}
+待办：{tv}
+Todo：{todo} | 执行：{ex} | 工具：{tool}
+参数：{pj}{rline}
 """
 
     @staticmethod
@@ -930,33 +1373,68 @@ class ReactPromptTemplates:
         if len(obs_s) > max_len:
             obs_s = obs_s[:max_len] + "\n…（已截断）"
         tv = (todos_overview or "").strip() or "（仅本步，未提供完整列表）"
-        return f"""请对照【待办步骤全貌】，用 2～10 句中文总结**本步执行得怎么样**：成败、关键数据、是否达成该 Todo 的预期、对后续步骤的含义。不要输出 XML/JSON/代码块。
+        return f"""2～6 句中文：本步结果、关键数据、对后续含义。勿 XML/JSON/代码块。
 
-【待办步骤全貌】
-{tv}
-
-【本步 Todo】
-{todo}
-工具：{tool}
-
-工具返回（节选）：
+待办：{tv}
+Todo：{todo} | 工具：{tool}
+返回节选：
 {obs_s}
 """
 
 
 def format_tools_for_prompt(tool_registry) -> list:
-    """格式化工具信息。REACT_TOOL_DESC_MAX_CHARS>0 时截断描述，缩短首轮 THINK prompt（不改模型，仅减 token）。"""
+    """格式化工具信息。REACT_TOOL_DESC_MAX_CHARS>0 时截断描述，缩短首轮 THINK prompt（不改模型，仅减 token）。
+
+    REACT_TOOLS_PROMPT_INDEX=1：除 get_tool_description 外，各工具描述截断为短索引（REACT_TOOL_INDEX_DESC_CHARS，默认 120），
+    与元工具 get_tool_description 配合渐进式披露。
+
+    默认对「同一套工具定义 + 同一截断配置」做进程内缓存，避免每轮对话重复遍历/截断；``REACT_TOOLS_FORMAT_CACHE=0`` 关闭。
+    """
     try:
         max_chars = int(os.getenv("REACT_TOOL_DESC_MAX_CHARS", "0") or "0")
     except Exception:
         max_chars = 0
-    out = []
-    for tool in tool_registry.tools.values():
-        desc = tool.description or ""
+    index_mode = (os.getenv("REACT_TOOLS_PROMPT_INDEX", "0") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    try:
+        index_short = int(os.getenv("REACT_TOOL_INDEX_DESC_CHARS", "120") or "120")
+    except Exception:
+        index_short = 120
+    index_short = max(40, index_short)
+    cache_on = (os.getenv("REACT_TOOLS_FORMAT_CACHE", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    tools = getattr(tool_registry, "tools", None) or {}
+    fp: Tuple[Any, ...] = tuple(
+        (str(name), str(getattr(t, "description", None) or ""))
+        for name, t in sorted(tools.items(), key=lambda kv: str(kv[0]))
+    )
+    key = (max_chars, index_mode, index_short, fp)
+    global _tools_format_cache_key, _tools_format_cache_val
+    if cache_on:
+        with _tools_format_cache_lock:
+            if _tools_format_cache_key == key and _tools_format_cache_val is not None:
+                return [dict(x) for x in _tools_format_cache_val]
+    out: List[Dict[str, str]] = []
+    for _name, tool in sorted(tools.items(), key=lambda kv: str(kv[0])):
+        desc = (getattr(tool, "description", None) or "") or ""
+        if index_mode and str(tool.name) != "get_tool_description" and len(desc) > index_short:
+            desc = desc[:index_short].rstrip() + "…"
         if max_chars > 0 and len(desc) > max_chars:
             desc = desc[:max_chars].rstrip() + "…"
         out.append({"name": tool.name, "description": desc})
-    return out
+    if cache_on:
+        with _tools_format_cache_lock:
+            _tools_format_cache_key = key
+            _tools_format_cache_val = out
+    return [dict(x) for x in out]
 
 
 def extract_xml_field(text: Any, tag: str) -> str:
@@ -1146,10 +1624,35 @@ def parse_xml_decision(text: Any) -> dict:
     
     # 方案 2: 字符串但包含 JSON 格式
     if isinstance(text, str):
+        # 先尝试提取 markdown 代码块中的 JSON
+        text_to_parse = text.strip()
+        
+        # 提取 ```json ... ``` 或 ``` ... ``` 代码块
+        code_block_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', text_to_parse)
+        if code_block_match:
+            text_to_parse = code_block_match.group(1).strip()
+        
         try:
-            parsed = json.loads(text.strip())
+            parsed = json.loads(text_to_parse)
+            # 处理 JSON 数组（千帆 FC 可能返回 [{"name": "grep", "parameters": {...}}]）
+            if isinstance(parsed, list) and len(parsed) > 0:
+                first_item = parsed[0]
+                if isinstance(first_item, dict):
+                    # 提取 name 作为 tool，parameters/arguments 作为 params
+                    tool_name = first_item.get('name', '') or first_item.get('tool', '')
+                    # 兼容多种参数字段名：parameters、arguments、params
+                    params = first_item.get('parameters', {}) or first_item.get('arguments', {}) or first_item.get('params', {})
+                    if tool_name:
+                        result['execute'] = True
+                        result['tool'] = tool_name
+                        result['params'] = params
+                        result['reason'] = f'从 JSON 数组解析出工具调用: {tool_name}'
+                        # 智能选择搜索引擎
+                        if result['tool'] == 'search':
+                            result['params'] = _smart_select_search_engine(result['params'])
+                        return result
             if isinstance(parsed, dict):
-                # ✅ JSON 对象，提取相关字段
+                # JSON 对象，提取相关字段
                 result['execute'] = parsed.get('execute', False) in [True, 'true', 'yes']
                 result['tool'] = parsed.get('tool', '')
                 result['params'] = parsed.get('params', {})
@@ -1165,6 +1668,88 @@ def parse_xml_decision(text: Any) -> dict:
     
     # 方案 3: 默认
     result['execute'] = False
+    return result
+
+
+def parse_unified_response(text: str) -> Dict[str, Any]:
+    """
+    解析三段式 XML 响应：observation + thinking + decision
+    
+    返回结构：
+    {
+        "observation": "观察内容",
+        "thinking": "思考内容",
+        "decision": {"execute": bool, "tool": str, "params": dict, "reason": str},
+        "raw": "原始文本"
+    }
+    """
+    if not text or not isinstance(text, str):
+        return {
+            "observation": "",
+            "thinking": "",
+            "decision": {"execute": False, "tool": "", "params": {}, "reason": ""},
+            "raw": ""
+        }
+    
+    result = {
+        "observation": "",
+        "thinking": "",
+        "decision": {"execute": False, "tool": "", "params": {}, "reason": ""},
+        "raw": text
+    }
+    
+    # 提取 <observation>
+    obs_match = re.search(r'<observation>([\\s\\S]*?)</observation>', text, re.IGNORECASE)
+    if obs_match:
+        result["observation"] = obs_match.group(1).strip()
+    
+    # 提取 <thinking>
+    think_match = re.search(r'<thinking>([\\s\\S]*?)</thinking>', text, re.IGNORECASE)
+    if think_match:
+        result["thinking"] = think_match.group(1).strip()
+    
+    # 提取 <decision>
+    decision_match = re.search(r'<decision>([\\s\\S]*?)</decision>', text, re.IGNORECASE)
+    if decision_match:
+        decision_text = decision_match.group(1)
+        
+        # 解析 execute
+        exec_match = re.search(r'<execute>\\s*(true|false|是|否|1|0)\\s*</execute>', decision_text, re.IGNORECASE)
+        if exec_match:
+            exec_val = exec_match.group(1).lower()
+            result["decision"]["execute"] = exec_val in ("true", "是", "1")
+        
+        # 解析 tool
+        tool_match = re.search(r'<tool>\\s*([^<]*)\\s*</tool>', decision_text)
+        if tool_match:
+            result["decision"]["tool"] = tool_match.group(1).strip()
+        
+        # 解析 params (JSON 格式)
+        params_match = re.search(r'<params>\\s*([\\s\\S]*?)\\s*</params>', decision_text)
+        if params_match:
+            params_str = params_match.group(1).strip()
+            try:
+                # 尝试解析 JSON
+                result["decision"]["params"] = json.loads(params_str)
+            except json.JSONDecodeError:
+                # 如果不是有效 JSON，作为字符串处理
+                if params_str:
+                    result["decision"]["params"] = {"raw": params_str}
+        
+        
+        # 解析 reason
+        reason_match = re.search(r'<reason>\\s*([^<]*)\\s*</reason>', decision_text)
+        if reason_match:
+            result["decision"]["reason"] = reason_match.group(1).strip()
+    
+    
+    # 如果 decision 中没有解析到内容，尝试使用 parse_xml_decision 作为 fallback
+    if not result["decision"].get("tool") and not result["decision"].get("execute"):
+        fallback = parse_xml_decision(text)
+        if fallback.get("tool") or fallback.get("execute"):
+            result["decision"] = fallback
+    
+    
     return result
 
 
@@ -1314,6 +1899,66 @@ def parse_xml_findings(text: Any) -> dict:
             pass
             
     return result
+
+
+def _normalize_plan_item(obj: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return None
+    desc = obj.get("description") or obj.get("name") or obj.get("title")
+    if not desc or not str(desc).strip():
+        return None
+    try:
+        sid = int(obj.get("id", idx + 1))
+    except Exception:
+        sid = idx + 1
+    st = obj.get("status") or "pending"
+    if isinstance(st, str):
+        st = st.strip().lower()
+    else:
+        st = "pending"
+    return {"id": sid, "description": str(desc).strip(), "status": st}
+
+
+def parse_react_json_plan(text: Any) -> Optional[List[Dict[str, Any]]]:
+    """
+    从 THINK 输出中提取一次性完整计划：{"plan":[{"id":1,"description":"...","status":"pending"}, ...]}
+    支持 ```json 代码块或文中裸 JSON 对象。
+    """
+    if not text or not isinstance(text, str):
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+
+    candidates: List[str] = []
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, re.I):
+        chunk = (m.group(1) or "").strip()
+        if chunk.startswith("{") or chunk.startswith("["):
+            candidates.append(chunk)
+    lb, rb = raw.find("{"), raw.rfind("}")
+    if lb >= 0 and rb > lb:
+        candidates.append(raw[lb : rb + 1])
+
+    seen: set = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+        plan = obj.get("plan") if isinstance(obj, dict) else None
+        if not isinstance(plan, list) or not plan:
+            continue
+        out: List[Dict[str, Any]] = []
+        for i, item in enumerate(plan):
+            norm = _normalize_plan_item(item if isinstance(item, dict) else {}, i)
+            if norm:
+                out.append(norm)
+        if out:
+            return out
+    return None
 
 
 def parse_xml_todos(text: Any) -> list:

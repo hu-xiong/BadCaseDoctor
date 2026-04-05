@@ -273,16 +273,14 @@ async function sendMessage() {
           
           const chunk = JSON.parse(jsonStr)
           
-          // 处理不同类型的事件
-          if (chunk.type === 'step' && chunk.data) {
-            const stepEvent = chunk.data
-            
-            // 收集发现的信息
+          if (chunk.type === 'stream' && chunk.payload?.lane === 'engine' && chunk.payload.data) {
+            const stepEvent = chunk.payload.data
             if (stepEvent.event === 'finding' && stepEvent.data) {
               findings.push(stepEvent.data)
-            } else if (stepEvent.event === 'done' && stepEvent.findings) {
-              findings = [...new Set([...findings, ...stepEvent.findings])]
             }
+          }
+          if (chunk.type === 'bye' && chunk.payload?.findings?.length) {
+            findings = [...new Set([...findings, ...chunk.payload.findings])]
           }
         } catch (e) {
           // 解析错误，继续

@@ -9,7 +9,7 @@
     <!-- 顶部标题栏：嵌入模式也需要返回/关闭等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
-        <span class="back-arrow" @click="goBack">←</span>
+        <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
         <span class="header-title">{{ isEdit ? '编辑测试用例' : '新建测试用例' }}</span>
         <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
       </div>
@@ -133,8 +133,8 @@
                     </div>
                     <div class="assignee-avatar">👤</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ currentUser.name }}</div>
-                      <div class="assignee-id">({{ currentUser.email }})</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(currentUser) }}</div>
+                      <div v-if="personSecondaryLabel(currentUser)" class="assignee-id">{{ personSecondaryLabel(currentUser) }}</div>
                     </div>
                   </div>
                   <div v-else class="no-user-tip">
@@ -158,8 +158,8 @@
                     </div>
                     <div class="assignee-avatar">👤</div>
                     <div class="assignee-info">
-                      <div class="assignee-name">{{ member.name }}</div>
-                      <div class="assignee-id">({{ member.email }})</div>
+                      <div class="assignee-name">{{ personPrimaryLabel(member) }}</div>
+                      <div v-if="personSecondaryLabel(member)" class="assignee-id">{{ personSecondaryLabel(member) }}</div>
                     </div>
                   </div>
                 </div>
@@ -199,7 +199,7 @@
                   v-for="plan in testcasePlans" 
                   :key="plan.value"
                   class="plan-option"
-                  :class="{ 'selected': testcase.plan_id === plan.value }"
+                  :class="{ 'selected': String(testcase.plan) === String(plan.value) }"
                   @click.stop="selectPlan(plan.value)"
                 >
                   <span class="plan-icon">{{ plan.icon || '📋' }}</span>
@@ -441,6 +441,15 @@
                 <option value="skip">跳过</option>
               </select>
             </div>
+            <div
+              v-if="embedded && openDiagnosticTerminal && testcase.execution_result === 'fail'"
+              class="form-group"
+            >
+              <button type="button" class="action-btn save-btn" @click="onOpenDiagnosticTerminal">
+                打开诊断终端
+              </button>
+              <p class="field-hint">在底部打开终端并预填 AI 描述，便于生成排查命令。</p>
+            </div>
           </div>
         </div>
 
@@ -473,9 +482,13 @@
           </div>
           <div v-if="testcase.associate_project" class="project-select">
             <label class="select-label">项目名称:</label>
-            <select v-model="testcase.project_id" class="form-select" @change="handleProjectChange">
+            <select
+              class="form-select"
+              :value="testcase.project_id == null ? '' : String(testcase.project_id)"
+              @change="onProjectSelectChange"
+            >
               <option value="">请选择</option>
-              <option v-for="project in availableProjects" :key="project.id" :value="project.id.toString()">
+              <option v-for="project in availableProjects" :key="project.id" :value="String(project.id)">
                 {{ project.name }}
               </option>
             </select>
@@ -714,12 +727,19 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjectEditContext, getProjectPlans, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
+import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectEditContext, getProjectDetail, getProjectPlans, getPlanDetail, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
+import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import { defineAsyncComponent } from 'vue'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
+
+/** 与后端 / 历史数据兼容：test_case、testcase、TESTCASE 等 */
+function isTestCasePlanType(planType) {
+  const s = String(planType || '').toLowerCase().replace(/-/g, '_')
+  return s === 'test_case' || s === 'testcase'
+}
 
 export default {
   name: 'NewTestCase',
@@ -730,6 +750,10 @@ export default {
       default: null
     },
     project_id: {
+      type: [String, Number],
+      default: null
+    },
+    plan_id: {
       type: [String, Number],
       default: null
     },
@@ -751,10 +775,25 @@ export default {
     const route = useRoute()
     const router = useRouter()
 
-    // 从测试用例计划“快速新建”跳转时，route 含 project_id/plan_id，应优先使用
-    const projectId = (route.query.project_id ? Number(route.query.project_id) : null) || (props.project_id ? Number(props.project_id) : null)
+    /** 与路由、props 同步解析项目 ID（避免 NaN、数组 query、路由复用时丢参） */
+    const readProjectIdFromRoute = () => {
+      const q = route.query.project_id
+      const rawQ = Array.isArray(q) ? q[0] : q
+      if (rawQ != null && rawQ !== '') {
+        const n = Number(rawQ)
+        if (Number.isFinite(n) && n > 0) return n
+      }
+      if (props.project_id != null && props.project_id !== '') {
+        const n = Number(props.project_id)
+        if (Number.isFinite(n) && n > 0) return n
+      }
+      return null
+    }
+
     const testcaseId = props.id ? Number(props.id) : (route.query.id ? Number(route.query.id) : null)
     const isEdit = !!testcaseId
+
+    const openDiagnosticTerminal = inject('openDiagnosticTerminal', null)
 
     const loading = ref(false)
     const saving = ref(false)
@@ -796,7 +835,7 @@ export default {
       assignee_id: null,
       execution_result: '',
       associate_project: true,
-      project_id: projectId,
+      project_id: readProjectIdFromRoute(),
       plan: 'unplanned',
       document_type: '',
       attachments: [],
@@ -829,8 +868,14 @@ export default {
       
       const ids = Array.isArray(testcase.assignee) ? testcase.assignee : [testcase.assignee]
       const names = ids.map(id => {
-        const member = projectMembers.value.find(m => m.id.toString() === id.toString())
-        return member ? member.name : id
+        const sid = String(id)
+        const member = projectMembers.value.find(m => String(m.id) === sid)
+        if (member) return personPrimaryLabel(member)
+        if (currentUser.value && String(currentUser.value.id) === sid) {
+          return personPrimaryLabel(currentUser.value)
+        }
+        if (/^\d+$/.test(sid)) return `用户#${sid}`
+        return personPrimaryLabel({ name: sid, email: sid })
       })
       
       if (names.length === 1) {
@@ -862,8 +907,14 @@ export default {
     }
 
     const selectPlan = (planValue) => {
-      testcase.plan = planValue
-      testcase.plan_id = planValue === 'unplanned' ? null : planValue
+      if (planValue === 'unplanned') {
+        testcase.plan = 'unplanned'
+        testcase.plan_id = null
+      } else {
+        testcase.plan = String(planValue)
+        const n = Number(planValue)
+        testcase.plan_id = Number.isFinite(n) ? n : null
+      }
       showPlanDropdown.value = false
     }
 
@@ -871,8 +922,26 @@ export default {
       if (!testcase.plan || testcase.plan === 'unplanned') {
         return '未计划'
       }
-      const plan = testcasePlans.value.find(p => p.value === testcase.plan || p.value === testcase.plan.toString())
+      const plan = testcasePlans.value.find(p => String(p.value) === String(testcase.plan))
       return plan ? plan.label : testcase.plan
+    }
+
+    const ensurePlanOptionVisible = async (planKey) => {
+      if (planKey == null || planKey === '' || String(planKey) === 'unplanned') return
+      const key = String(planKey)
+      if (testcasePlans.value.some(p => String(p.value) === key)) return
+      try {
+        const resp = await getPlanDetail(Number(key))
+        if (resp.data?.success && resp.data.plan) {
+          const pl = resp.data.plan
+          testcasePlans.value = [
+            ...testcasePlans.value,
+            { value: String(pl.id), label: pl.name, icon: '🧪' }
+          ]
+        }
+      } catch (e) {
+        console.warn('补全计划名称失败:', e)
+      }
     }
 
     const refreshProjectPlans = async () => {
@@ -889,7 +958,7 @@ export default {
         if (response.data.success) {
           const allPlans = response.data.plans || []
           console.log('fetchProjectPlans: 所有计划:', allPlans)
-          const plans = allPlans.filter(p => (p.plan_type === 'test_case' || p.plan_type === 'testcase'))
+          const plans = allPlans.filter(p => isTestCasePlanType(p.plan_type))
           console.log('fetchProjectPlans: 过滤后的test_case类型计划:', plans)
           testcasePlans.value = [
             { value: 'unplanned', label: '未计划', icon: '📋' },
@@ -910,7 +979,7 @@ export default {
       const result = []
       const walk = (nodes) => {
         ;(nodes || []).forEach(p => {
-          if (p.plan_type === 'test_case' || p.plan_type === 'testcase') result.push(p)
+          if (isTestCasePlanType(p.plan_type)) result.push(p)
           if (p.children && p.children.length) walk(p.children)
         })
       }
@@ -945,6 +1014,62 @@ export default {
         }
       } catch (error) {
         console.error('获取当前用户失败:', error)
+      }
+    }
+
+    const loadUserProjectsForSelect = async () => {
+      try {
+        const resp = await getProjects()
+        if (resp.data?.success && Array.isArray(resp.data.projects)) {
+          availableProjects.value = resp.data.projects.slice()
+        }
+      } catch (e) {
+        console.error('加载项目列表失败:', e)
+      }
+    }
+
+    const mergeProjectIntoOptions = (prj) => {
+      if (!prj || prj.id == null) return
+      if (!availableProjects.value.find(p => p.id == prj.id)) {
+        availableProjects.value.push({
+          id: prj.id,
+          name: prj.name,
+          description: prj.description,
+          status: prj.status
+        })
+      }
+    }
+
+    const loadProjectWorkspace = async (pid) => {
+      if (pid == null || !Number.isFinite(Number(pid)) || Number(pid) <= 0) return
+      const projectId = Number(pid)
+      try {
+        const resp = await getProjectEditContext(projectId)
+        if (resp.data?.success) {
+          const prj = resp.data.project
+          if (prj) {
+            Object.assign(projectInfo, { name: prj.name || '' })
+            mergeProjectIntoOptions(prj)
+          }
+          projectMembers.value = resp.data.members || []
+          await setTestcasePlansFromTree(resp.data.plans || [])
+        } else {
+          throw new Error(resp.data?.error || 'edit-context 未返回 success')
+        }
+      } catch (e) {
+        console.error('获取编辑页上下文失败:', e)
+        try {
+          const detail = await getProjectDetail(projectId)
+          if (detail.data?.success && detail.data.project) {
+            const prj = detail.data.project
+            Object.assign(projectInfo, { name: prj.name || '' })
+            mergeProjectIntoOptions(prj)
+          }
+          await fetchProjectPlans(projectId)
+          await fetchProjectMembers(projectId)
+        } catch (e2) {
+          console.error('回退加载项目详情失败:', e2)
+        }
       }
     }
 
@@ -1131,8 +1256,9 @@ export default {
     })
 
     const handleProjectChange = () => {
-      const projectId = parseInt(testcase.project_id)
-      if (projectId) {
+      const pid = testcase.project_id
+      const projectId = pid != null && pid !== '' ? Number(pid) : NaN
+      if (Number.isFinite(projectId) && projectId > 0) {
         fetchProjectPlans(projectId)
         fetchProjectMembers(projectId)
       } else {
@@ -1140,6 +1266,12 @@ export default {
         projectMembers.value = []
         testcase.assignee = []
       }
+    }
+
+    const onProjectSelectChange = (e) => {
+      const raw = e.target.value
+      testcase.project_id = raw === '' ? null : Number(raw)
+      handleProjectChange()
     }
 
     const copyDocumentLink = () => {
@@ -1363,6 +1495,12 @@ export default {
     }
 
     const goBack = () => {
+      // 嵌入在 ProjectDetail 的工作区 Tab：不要走浏览器历史，直接关闭 Tab
+      if (props.embedded) {
+        console.log('[EMBEDDED] 触发 close 事件')
+        emit('close')
+        return
+      }
       // 如果是通过覆盖层打开的，触发 close 事件
       if (props.id) {
         console.log('[OVERLAY] 触发 close 事件')
@@ -1472,8 +1610,6 @@ export default {
       }
     }
 
-    // 编辑页不需要拉全量项目列表（包含头像等），避免额外慢接口
-
     onMounted(async () => {
       console.log('=== NewTestCase onMounted 开始 ===')
       console.log('route.query:', route.query)
@@ -1493,35 +1629,23 @@ export default {
           }
         }
 
-        // 后台并行加载用户信息（不阻塞首屏）
         const bgTasks = []
         bgTasks.push(fetchCurrentUser())
-        
-        // 项目相关上下文：用最小接口一次性取
-        if (testcase.project_id) {
-          try {
-            const resp = await getProjectEditContext(testcase.project_id)
-            if (resp.data?.success) {
-              projectInfo.value = resp.data.project || projectInfo.value
-              projectMembers.value = resp.data.members || projectMembers.value
-              // 将当前项目添加到 availableProjects 中，确保下拉框能显示
-              if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
-                availableProjects.value.push(resp.data.project)
-              }
-              await setTestcasePlansFromTree(resp.data.plans || [])
-            }
-          } catch (e) {
-            console.error('获取编辑页上下文失败:', e)
-          }
-        }
 
-        // 新建且 URL 带 plan_id：从测试用例迭代计划“快速新建”进入，自动关联所属计划
-        if (!isEdit && route.query.plan_id) {
-          const rid = String(route.query.plan_id)
-          const planIdNum = parseInt(rid)
+        const rid = readProjectIdFromRoute()
+        if (rid != null) testcase.project_id = rid
+
+        await loadUserProjectsForSelect()
+        await loadProjectWorkspace(testcase.project_id)
+
+        // 新建且带 plan_id：优先 route.query，其次 props.plan_id（嵌入在 ProjectDetail 的 Tab 新建）
+        if (!isEdit && (route.query.plan_id || props.plan_id)) {
+          const rid = String(route.query.plan_id || props.plan_id)
+          const planIdNum = parseInt(rid, 10)
           if (!isNaN(planIdNum)) {
             testcase.plan = rid
             testcase.plan_id = planIdNum
+            await ensurePlanOptionVisible(rid)
           }
         }
         
@@ -1570,6 +1694,9 @@ export default {
               }))
             }
           }
+          if (testcase.plan && testcase.plan !== 'unplanned') {
+            await ensurePlanOptionVisible(testcase.plan)
+          }
         }
 
         // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
@@ -1612,6 +1739,17 @@ export default {
       }
     })
 
+    watch(
+      () => readProjectIdFromRoute(),
+      async (pid) => {
+        if (pid == null || !Number.isFinite(pid)) return
+        if (testcase.project_id === pid) return
+        testcase.project_id = pid
+        await loadUserProjectsForSelect()
+        await loadProjectWorkspace(pid)
+      }
+    )
+
     // 嵌入模式下 id 可能由父组件稍后传入，监听后补拉详情
     watch(() => props.id, async (newId) => {
       const id = newId ? Number(newId) : null
@@ -1650,6 +1788,15 @@ export default {
       }
     }, { immediate: false })
 
+    function onOpenDiagnosticTerminal() {
+      if (!openDiagnosticTerminal) return
+      const title = (testcase.title || '测试用例').trim()
+      const idPart = testcaseId ? `#${testcaseId}` : ''
+      const aiText =
+        `请结合当前项目环境，生成用于排查「测试用例 ${idPart} ${title}」执行失败的 shell 命令（例如查看日志、健康检查、服务状态等）。`
+      openDiagnosticTerminal({ aiText })
+    }
+
     return {
       loading,
       saving,
@@ -1672,6 +1819,8 @@ export default {
       isEdit,
       getStatusText,
       getAssigneeDisplayText,
+      personPrimaryLabel,
+      personSecondaryLabel,
       isAssigneeSelected,
       toggleAssignee,
       togglePlanDropdown,
@@ -1701,6 +1850,7 @@ export default {
       commentEditorActive,
       commentText,
       handleProjectChange,
+      onProjectSelectChange,
       copyDocumentLink,
       addAttachment,
       removeAttachment,
@@ -1718,7 +1868,9 @@ export default {
       pendingDiff,
       confirmFieldChange,
       cancelFieldChange,
-      applyFieldChange
+      applyFieldChange,
+      openDiagnosticTerminal,
+      onOpenDiagnosticTerminal
     }
   }
 }
@@ -1923,6 +2075,13 @@ export default {
 .field-label {
   font-size: 14px;
   color: #666;
+}
+
+.field-hint {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #888;
+  line-height: 1.5;
 }
 
 .field-value {

@@ -55,6 +55,18 @@ except ImportError:
 
 # ========== 安全配置 ==========
 
+def default_sandbox_db_copy_dir() -> str:
+    """
+    SQLite 沙箱副本所在**父目录**（其下再生成带时间戳的 .copy 文件）。
+    - 优先读环境变量 ``SANDBOX_DB_COPY_DIR``（可指 SSD、RAM 盘、Linux tmpfs 挂载点等）
+    - 未设置时使用 ``tempfile.gettempdir()/badcase_sandbox_db_copy``，避免默认写死 ``/sandbox/db_copy`` 在 Windows 上不可用
+    """
+    v = (os.getenv("SANDBOX_DB_COPY_DIR") or "").strip().rstrip("\\/")
+    if v:
+        return v
+    return os.path.join(tempfile.gettempdir(), "badcase_sandbox_db_copy")
+
+
 @dataclass
 class SecurityConfig:
     """沙箱安全配置 - 三大核心：资源限制 + 操作黑名单 + 数据隔离"""
@@ -124,7 +136,7 @@ class SecurityConfig:
     # 数据库隔离
     db_read_only: bool = True           # 数据库只读模式
     db_use_copy: bool = True            # 使用数据库副本（非生产库）
-    db_copy_dir: str = "/sandbox/db_copy"  # 数据库副本目录
+    db_copy_dir: str = field(default_factory=default_sandbox_db_copy_dir)  # 见 SANDBOX_DB_COPY_DIR
     
     # 环境变量隔离
     clean_env: bool = True              # 清理敏感环境变量
@@ -947,8 +959,8 @@ class UnifiedSandboxExecutor:
                     'error': f'数据库文件不存在: {source_path}'
                 }
             
-            # 创建副本目录
-            copy_dir = self.security_config.db_copy_dir
+            # 副本目录：环境变量可覆盖单次运行中的路径；否则用 SecurityConfig.db_copy_dir（默认已含 SANDBOX_DB_COPY_DIR / TEMP）
+            copy_dir = (os.getenv("SANDBOX_DB_COPY_DIR") or "").strip().rstrip("\\/") or self.security_config.db_copy_dir
             os.makedirs(copy_dir, exist_ok=True)
             
             # 生成副本文件名（带时间戳）
@@ -959,8 +971,21 @@ class UnifiedSandboxExecutor:
             copy_filename = f"{db_name}.{timestamp}.{unique_id}.copy"
             copy_path = os.path.join(copy_dir, copy_filename)
             
-            # 复制数据库
+            # 复制数据库（该步骤耗时常与 SQLite 文件大小近似线性相关）
+            t0 = time.perf_counter()
             shutil.copy2(source_path, copy_path)
+            copy_ms = (time.perf_counter() - t0) * 1000.0
+            if os.getenv("PERF_LOG") == "1":
+                try:
+                    src_sz = os.path.getsize(source_path)
+                except OSError:
+                    src_sz = None
+                sz_mb = (src_sz / (1024 * 1024)) if isinstance(src_sz, (int, float)) else None
+                sz_txt = f"{sz_mb:.1f}MB" if isinstance(sz_mb, (int, float)) else "unknown"
+                print(
+                    f"[PERF][sandbox] db_copy_ms={copy_ms:.1f} size={sz_txt} dir={copy_dir}",
+                    flush=True,
+                )
             
             return {
                 'success': True,

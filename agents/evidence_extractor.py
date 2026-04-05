@@ -4,8 +4,82 @@
 用于向前端展示"真实执行发生了什么"
 """
 
+import asyncio
 import json
-from typing import Dict, Any, List
+import queue as _stdlib_queue
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Dict, List
+
+_MPQueue_TYPE = None
+try:
+    from multiprocessing.queues import Queue as _MPQueueType
+
+    _MPQueue_TYPE = _MPQueueType
+except Exception:  # pragma: no cover
+    pass
+
+
+def deep_sse_json_safe(obj: Any, _depth: int = 0, _max_depth: int = 64) -> Any:
+    """SSE/JSON：递归剔除 Queue、回调等不可序列化对象，避免 json.dumps 抛错拉断连接。"""
+    if _depth > _max_depth:
+        return None
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, Decimal):
+        try:
+            return float(obj)
+        except Exception:
+            return str(obj)
+    if isinstance(obj, (date, datetime)):
+        try:
+            return obj.isoformat()
+        except Exception:
+            return str(obj)
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            return obj.decode("utf-8", "replace")
+        except Exception:
+            return str(obj)
+    if isinstance(obj, _stdlib_queue.Queue):
+        return None
+    if isinstance(obj, _stdlib_queue.SimpleQueue):
+        return None
+    if _MPQueue_TYPE is not None and isinstance(obj, _MPQueue_TYPE):
+        return None
+    if isinstance(obj, asyncio.Queue):
+        return None
+    if callable(obj) and not isinstance(obj, type):
+        return None
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            out[k] = deep_sse_json_safe(v, _depth + 1, _max_depth)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [deep_sse_json_safe(x, _depth + 1, _max_depth) for x in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [deep_sse_json_safe(x, _depth + 1, _max_depth) for x in obj]
+    return str(obj)
+
+
+def _json_safe_tool_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """SSE/落库用：去掉 progress_queue、回调及不可 JSON 序列化的对象。"""
+    if not isinstance(params, dict):
+        return {}
+    skip_keys = frozenset({"progress_queue", "progress_callback"})
+    out: Dict[str, Any] = {}
+    for k, v in params.items():
+        if k in skip_keys:
+            continue
+        if callable(v) and not isinstance(v, type):
+            continue
+        if isinstance(v, _stdlib_queue.Queue):
+            continue
+        if isinstance(v, asyncio.Queue):
+            continue
+        out[k] = v
+    return out
 
 
 class EvidenceExtractor:
@@ -26,7 +100,7 @@ class EvidenceExtractor:
         """
         evidence = {
             'tool_used': tool_name,
-            'tool_params': params,
+            'tool_params': _json_safe_tool_params(params or {}),
             'url_accessed': None,
             'execution_time_ms': None,
             'results': [],
@@ -65,7 +139,9 @@ class EvidenceExtractor:
                 if isinstance(value, list):
                     evidence['results'].extend([str(item) for item in value])
                 elif isinstance(value, dict):
-                    evidence['results'].append(json.dumps(value, ensure_ascii=False))
+                    evidence['results'].append(
+                        json.dumps(deep_sse_json_safe(value), ensure_ascii=False)
+                    )
                 else:
                     evidence['results'].append(str(value))
         

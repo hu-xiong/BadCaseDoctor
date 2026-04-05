@@ -1,7 +1,10 @@
 import axios from 'axios'
 
-// 统一后端 Host；必须与前端同站点以携带登录 Cookie
-export const BACKEND_BASE_URL = 'http://localhost:5000'
+// 开发环境走 Vite 代理（与页面同源），登录 Cookie 才能可靠带到 /api 与 /socket.io，避免直连 :5000 与 127.0.0.1/localhost 混用导致会话丢失。
+// 生产 / Electron 打包仍指向实际后端（可通过 VITE_BACKEND_URL 覆盖）。
+export const BACKEND_BASE_URL =
+  import.meta.env.VITE_BACKEND_URL ||
+  (import.meta.env.DEV ? '' : 'http://localhost:5000')
 
 const api = axios.create({
   baseURL: BACKEND_BASE_URL,
@@ -55,6 +58,10 @@ export function getProjectPlans(projectId) {
 // 获取计划下的Bug列表
 export function getPlanBugs(planId) {
   return api.get(`/api/plans/${planId}/bugs`)
+}
+// 计划详情（用于新建页补全「所属计划」名称等）
+export function getPlanDetail(planId) {
+  return api.get(`/api/plans/${planId}`)
 }
 // 创建计划
 export function createPlan(data) {
@@ -219,8 +226,8 @@ export function createChatSession(projectId, data) {
 }
 
 // 获取会话详情
-export function getChatSession(sessionId) {
-  return api.get(`/api/chat-sessions/${sessionId}`)
+export function getChatSession(sessionId, params = undefined) {
+  return api.get(`/api/chat-sessions/${sessionId}`, { params })
 }
 
 // 更新会话
@@ -240,7 +247,8 @@ export function deleteChatSession(sessionId) {
 
 // 添加消息
 export function addChatMessage(sessionId, data) {
-  return api.post(`/api/chat-sessions/${sessionId}/messages`, data)
+  // Agent 消息后 steps/modify_navigation 等 JSON 较大，持久化可能超过默认 30s
+  return api.post(`/api/chat-sessions/${sessionId}/messages`, data, { timeout: 120000 })
 }
 
 // ==================== Bug API ====================

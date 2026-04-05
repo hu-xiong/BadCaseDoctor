@@ -1,59 +1,40 @@
 <template>
   <div class="agent-task-run" v-if="steps && steps.length">
-    <!-- 1) 待办概览：与步数无关，始终展示（便于对照下方逐步执行） -->
-    <div v-if="steps.length >= 1" class="agent-plan">
-      <div
-        class="agent-plan-header"
-        role="button"
-        tabindex="0"
-        :title="planExpanded ? '点击收起' : '点击展开'"
-        @click="togglePlan"
-        @keydown.enter.prevent="togglePlan"
-        @keydown.space.prevent="togglePlan"
-      >
-        <div class="agent-plan-header-left">
-          <img class="agent-plan-list-icon" :src="todoListIcon" alt="" />
-          <span class="agent-plan-title">规划备忘</span>
-        </div>
-        <img
-          class="agent-plan-chevron"
-          :src="planExpanded ? chevronDownIcon : chevronRightIcon"
-          alt=""
-          :title="planExpanded ? '点击收起' : '点击展开'"
-        />
-      </div>
-      <div v-show="planExpanded" class="agent-plan-rows">
-        <div
-          v-for="(s, i) in steps"
-          :key="'p-' + i"
-          class="agent-plan-row"
-          :class="{
-            'is-running': s.status === 'running',
-            'is-done': s.status === 'completed',
-            'is-skip': s.status === 'skipped',
-            'is-err': s.status === 'error'
-          }"
-        >
-          <span class="agent-plan-icon" aria-hidden="true">{{ planIcon(s) }}</span>
-          <span class="agent-plan-num">{{ i + 1 }}.</span>
-          <span class="agent-plan-text">{{ planRowShown(s, i) }}</span>
-          <span v-if="s.status === 'running'" class="agent-plan-badge">进行中</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 2) Thought → 执行 → 决策与观察 -->
+    <!-- Thought → 规划备忘 → 执行 → 决策与观察（推断与分支叙述只在「思考」折叠正文内展示，眉标与步骤序号对齐） -->
     <div class="agent-logs">
       <div
         v-for="(s, i) in steps"
         :key="'l-' + i"
-        v-show="showLogBlock(s)"
-        class="agent-step-outer"
+        class="agent-step-wrap"
       >
+        <div v-if="showPendingNextCue(i)" class="agent-between-steps-cue" role="status">
+          {{ t('agentTask.preparingNextStep') }}
+        </div>
+        <div v-show="showLogBlock(s, i)" class="agent-step-outer">
         <div v-if="i > 0" class="agent-step-divider agent-step-divider--between" />
+        <!-- 第 0 行：THINK 与首条待办同捆一步；眉标已隐藏，不显示步骤序号 -->
+        <!-- <div class="agent-step-eyebrow" role="presentation">
+          <span class="agent-step-eyebrow-bar" aria-hidden="true" />
+          <span class="agent-step-eyebrow-text">{{ stepEyebrowLabel(i) }}</span>
+        </div> -->
 
-        <!-- Thought：仅行动前说明（decide / agent_thought）；观察段正文不在此展示 -->
-        <div v-if="hasStepThought(s)" class="agent-preface-thought">
+        <!-- Thought：仅行动前说明；phase_wait 且无正文时只显示三点，不出现「Thought」标题与单字符流式碎片 -->
+        <div
+          v-if="hasStepThought(s) && thoughtUiDotsOnly(s) && !(i === 0 && hidePrefacePlaceholder)"
+          class="agent-preface-thought agent-preface-thought--dots-only"
+        >
+          <div class="agent-phase-wait" role="status" :aria-label="t('agentTask.waitAria')">
+            <span class="agent-phase-wait-dots" aria-hidden="true">
+              <span class="agent-phase-wait-dot"></span>
+              <span class="agent-phase-wait-dot"></span>
+              <span class="agent-phase-wait-dot"></span>
+            </span>
+          </div>
+        </div>
+        <div
+          v-else-if="hasStepThought(s) && !(i === 0 && hidePrefacePlaceholder)"
+          class="agent-preface-thought"
+        >
           <div class="agent-preface-thought-inner">
             <button
               type="button"
@@ -68,16 +49,18 @@
             <div
               v-show="
                 thoughtOpen(i) &&
-                (hasReasoningBody(s) || thoughtBodyFallback(s) || (s.phaseWait && s.phaseWait.active))
+                (thoughtBodySubstantive(s) ||
+                  (s.phaseWait && s.phaseWait.active) ||
+                  hasReasoningBody(s))
               "
               class="agent-preface-thought-feed"
             >
               <!-- ReAct Thought：自然语言 Markdown；后端已分轨不推送原始 XML -->
               <div
-                v-if="s.phaseWait?.active"
+                v-if="s.phaseWait?.active && !thoughtBodySubstantive(s)"
                 class="agent-phase-wait"
                 role="status"
-                aria-label="等待中"
+                :aria-label="t('agentTask.waitAria')"
               >
                 <span class="agent-phase-wait-dots" aria-hidden="true">
                   <span class="agent-phase-wait-dot"></span>
@@ -86,29 +69,74 @@
                 </span>
               </div>
               <div
-                v-if="thoughtReasoningRaw(s).trim()"
+                v-if="showThoughtReasoningBlock(s)"
                 class="agent-thought-deep-reason agent-thought-rich reasoning-markdown agent-thought-md"
                 v-html="formatThoughtMarkdown(thoughtReasoningRaw(s))"
               />
               <div
-                v-if="thoughtContentRaw(s).trim()"
+                v-if="showThoughtContentBlock(s)"
                 class="agent-thought-deep-content agent-thought-rich reasoning-markdown agent-thought-md"
                 v-html="formatThoughtMarkdown(thoughtContentRaw(s))"
               />
-              <div
-                v-if="!thoughtReasoningRaw(s).trim() && !thoughtContentRaw(s).trim()"
-                class="agent-preface-thought-plain agent-preface-fallback"
-              >{{ thoughtBodyFallback(s) }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 规划备忘：紧随第 0 步「思考」正文之后 -->
+        <div
+          v-if="i === 0 && steps.length >= 1 && !suppressPlanOverview"
+          class="agent-plan agent-plan--after-thought"
+        >
+          <div
+            class="agent-plan-header"
+            role="button"
+            tabindex="0"
+            :title="planExpanded ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
+            @click="togglePlan"
+            @keydown.enter.prevent="togglePlan"
+            @keydown.space.prevent="togglePlan"
+          >
+            <div class="agent-plan-header-left">
+              <img class="agent-plan-list-icon" :src="todoListIcon" alt="" />
+              <span class="agent-plan-title">{{ t('agentTask.planMemo') }}</span>
+            </div>
+            <img
+              class="agent-plan-chevron"
+              :src="planExpanded ? chevronDownIcon : chevronRightIcon"
+              alt=""
+              :title="planExpanded ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
+            />
+          </div>
+          <div v-show="planExpanded" class="agent-plan-rows">
+            <div
+              v-for="(ps, pi) in steps"
+              :key="'p-' + pi"
+              class="agent-plan-row"
+              :class="{
+                'is-running': ps.status === 'running',
+                'is-done': ps.status === 'completed',
+                'is-skip': ps.status === 'skipped',
+                'is-err': ps.status === 'error' || ps.status === 'failed'
+              }"
+            >
+              <span class="agent-plan-icon" aria-hidden="true">{{ planIcon(ps) }}</span>
+              <span class="agent-plan-num">{{ pi + 1 }}.</span>
+              <span class="agent-plan-text">{{ planRowShown(ps, pi) }}</span>
+              <span v-if="ps.status === 'running'" class="agent-plan-badge">{{ t('agentTask.running') }}</span>
             </div>
           </div>
         </div>
 
         <!-- 工具执行：每种工具单独一种卡片样式，标题即工具名 -->
         <div
+          v-if="showToolExecCard(s)"
           class="agent-step-card agent-tool-exec-card"
           :class="[
             'agent-tool-exec-card--' + execToolKind(s),
-            { 'agent-step-card--after-thought': hasStepThought(s) }
+            {
+              'agent-step-card--after-thought':
+                hasStepThought(s) || (i === 0 && !suppressPlanOverview)
+            }
           ]"
           :data-agent-step="i"
         >
@@ -123,18 +151,18 @@
                 :class="'agent-step-pre--tool-' + execToolKind(s)"
               >{{ execStreamShown(s, i) }}</pre>
             </div>
-            <div v-if="s.resultSummary" class="agent-step-exec-result">{{ s.resultSummary }}</div>
+            <div v-if="displayStepResultSummary(s)" class="agent-step-exec-result">{{ displayStepResultSummary(s) }}</div>
           </div>
 
           <div
             v-if="s.grepNavigation && s.grepNavigation.type === 'multiple' && s.grepNavigation.items?.length"
             class="agent-step-section agent-step-grep-nav"
           >
-            <div class="agent-step-label">定位结果</div>
+            <div class="agent-step-label">{{ t('agentTask.locateResults') }}</div>
             <details class="agent-grep-nav-details" open>
               <summary class="agent-grep-nav-summary">
                 <span class="agent-grep-nav-title">{{ grepNavSectionTitle(s.grepNavigation.items) }}</span>
-                <span class="agent-grep-nav-count">{{ s.grepNavigation.items.length }} 条</span>
+                <span class="agent-grep-nav-count">{{ t('chat.navRecords', { n: s.grepNavigation.items.length }) }}</span>
               </summary>
               <div class="agent-grep-nav-list">
                 <button
@@ -153,31 +181,26 @@
           </div>
 
           <div v-if="s.stepDurationMs != null && s.stepDurationMs >= 0" class="agent-step-dur">
-            耗时 <strong>{{ (s.stepDurationMs / 1000).toFixed(2) }}s</strong>
+            {{ t('agentTask.duration') }} <strong>{{ (s.stepDurationMs / 1000).toFixed(2) }}s</strong>
           </div>
         </div>
         <!-- /agent-step-card -->
 
-        <!-- 决策与观察：工具执行结束后再展示；与 Planning 合并为同一标题（仅副文案提示流式观察中） -->
-        <div v-if="showDecisionBlock(s)" class="agent-decision-panel">
-          <div class="agent-step-phase agent-step-phase--decide">
-            <div class="agent-step-phase-eyebrow agent-decide-eyebrow">
-              决策与观察
-              <span v-if="showObserveWaiting(s)" class="agent-step-planning-inline"> · Planning next moves</span>
-            </div>
-            <div v-if="hasParamsSummary(s)" class="agent-step-section agent-step-section--nest">
-              <div class="agent-step-sublabel">入参说明</div>
-              <pre class="agent-step-pre agent-step-pre--params agent-step-pre--stream agent-step-pre--decide">{{ paramsSummaryShown(s, i) }}</pre>
-            </div>
-            <div v-if="hasLlmDraft(s)" class="agent-step-section agent-step-section--nest">
-              <div class="agent-step-sublabel">观察结论</div>
-              <div
-                v-if="String(s.llmDraft || '').trim()"
-                class="agent-decision-observe-rich agent-thought-rich agent-step-pre--decide reasoning-markdown agent-thought-md"
-                v-html="formatThoughtMarkdown(String(s.llmDraft || ''))"
-              />
-            </div>
+        <!-- 决策观察内容：去标题、纯内容无缝衔接，视觉与对话面板统一 -->
+        <div v-if="showDecisionBlock(s)" class="agent-decision-panel agent-decision-panel--plain">
+          <div
+            v-if="hasLlmDraft(s) && String(s.llmDraft || '').trim()"
+            class="agent-decision-observe-rich agent-decision-observe-rich--plain agent-thought-rich agent-step-pre--decide reasoning-markdown agent-thought-md"
+            v-html="formatThoughtMarkdown(String(s.llmDraft || ''))"
+          />
+          <pre
+            v-else-if="hasParamsSummary(s)"
+            class="agent-step-pre agent-step-pre--params agent-step-pre--stream agent-step-pre--decide agent-step-pre--plain"
+          >{{ paramsSummaryShown(s, i) }}</pre>
+          <div v-if="showObserveWaiting(s)" class="agent-step-planning-inline agent-step-planning-inline--plain">
+            {{ t('agentTask.planningNextMoves') }}
           </div>
+        </div>
         </div>
       </div>
     </div>
@@ -186,15 +209,31 @@
 
 <script setup>
 import { ref, watch, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
 import todoListIcon from '../assets/todo-list-icon.svg'
 import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
 
+const { t } = useI18n()
+
 const props = defineProps({
   steps: { type: Array, default: () => [] },
   /** 历史会话等：计划行不要逐字动画，直接显示全文 */
-  instantPlan: { type: Boolean, default: false }
+  instantPlan: { type: Boolean, default: false },
+  /** 线上流式：按 SSE 增量实时直出，避免二次打字机追赶导致观感滞后 */
+  realtimeStream: { type: Boolean, default: true },
+  /** 与 v1 plan.suppress_plan_ui 对齐：隐藏顶部「规划备忘」，仍保留下方步骤执行区 */
+  suppressPlanOverview: { type: Boolean, default: false },
+  /**
+   * hello 占位 step 已挂起但 THINK 正文尚在消息层：在首段实质思考出现前隐藏本步 Thought 区，
+   * 仅由 SimpleChatPanel 顶部一组「...」占位，避免与 AgentTaskRun 内第二、第三段「...」重复。
+   */
+  hidePrefacePlaceholder: { type: Boolean, default: false },
+  /**
+   * 与 SimpleChatPanel 沙箱「是否仍有待采纳」对齐。为 false 时，批量 modify 步骤里原先写死的「请在沙箱确认」摘要改为已闭环文案。
+   */
+  modifySandboxPending: { type: Boolean, default: true }
 })
 
 const emit = defineEmits(['grep-bug-click'])
@@ -218,11 +257,14 @@ const togglePlan = () => {
 }
 
 const grepNavSectionTitle = (items) => {
-  if (!items?.length) return '点击跳转到列表'
+  if (!items?.length) return t('chat.grepJumpList')
   const ts = [...new Set(items.map((i) => (i?.target || 'bug').toString().toLowerCase()))]
-  const map = { bug: 'Bug', badcase: 'BadCase', testcase: '测试用例' }
-  if (ts.length === 1) return `点击跳转到 ${map[ts[0]] || ts[0]}`
-  return '点击跳转到列表'
+  const labelKey = { bug: 'chat.navLabelBug', badcase: 'chat.navLabelBadcase', testcase: 'chat.navLabelTestcase' }
+  if (ts.length === 1) {
+    const k = ts[0]
+    return t('chat.grepJumpTo', { type: t(labelKey[k] || 'chat.navLabelBug') })
+  }
+  return t('chat.grepJumpList')
 }
 
 const grepNavItemTitle = (navItem) => (navItem && (navItem.title || navItem.bug_title)) || ''
@@ -231,7 +273,7 @@ const planIcon = (s) => {
   if (s.status === 'completed') return '✅'
   if (s.status === 'running') return '▢'
   if (s.status === 'skipped') return '⏭'
-  if (s.status === 'error') return '⚠'
+  if (s.status === 'error' || s.status === 'failed') return '⚠'
   return '▢'
 }
 
@@ -262,6 +304,7 @@ watch(
  * observe 段（工具结果后的模型解读）不放入此处，避免与 grep 执行区 / 观察结论重复。
  */
 const thoughtReasoningRaw = (s) => {
+  if (s.thoughtReasoningSnapshot) return String(s.thoughtReasoningSnapshot)
   const chunks = [s.agentThoughtDraft, s.reasoningDecideDraft, s.reasoningStepDraft]
     .map((x) => (x && String(x).trim()) || '')
     .filter(Boolean)
@@ -269,11 +312,66 @@ const thoughtReasoningRaw = (s) => {
   const u = (s.thoughtReasoningDraft || '').trim()
   return u ? String(s.thoughtReasoningDraft) : ''
 }
-/** 深度思考 content 侧（一般为空：XML 不再注入此处） */
-const thoughtContentRaw = (s) => String(s.thoughtContentDraft || '')
+/**
+ * 深度思考 content 侧（一般为空：XML 不再注入此处）
+ * 过滤掉XML标签内容，避免在思考区显示原始XML结构（如 <decision> 内容）
+ * 这些内容应该在 phase_wait 加载效果期间隐藏
+ */
+const thoughtContentRaw = (s) => {
+  if (s.thoughtContentSnapshot) return String(s.thoughtContentSnapshot)
+  const raw = String(s.thoughtContentDraft || '')
+  // 过滤掉包含XML标签的内容（如 <decision>, <execute>, <tool>, <params> 等）
+  // 这些是结构化输出，不应显示在思考区
+  if (/<decision|<execute|<tool\b|<params|<reason\b|<result\b/i.test(raw)) {
+    return ''
+  }
+  return raw
+}
 
 const hasReasoningBody = (s) =>
   !!(String(thoughtReasoningRaw(s)).trim() || String(thoughtContentRaw(s)).trim())
+
+/** 与 SimpleChatPanel 一致：流式首包常只有括号/标点，不单独占一块 Markdown */
+const _thoughtStripVisible = (t) => String(t || '').replace(/\u200b/g, '').trim()
+const _thoughtHasMeaningfulChar = (t) => /[\u4e00-\u9fa5A-Za-z0-9]/.test(_thoughtStripVisible(t))
+const thoughtReasoningMarkdownVisible = (s) =>
+  _thoughtStripVisible(thoughtReasoningRaw(s)).length >= 2 && _thoughtHasMeaningfulChar(thoughtReasoningRaw(s))
+const thoughtContentMarkdownVisible = (s) =>
+  _thoughtStripVisible(thoughtContentRaw(s)).length >= 2 && _thoughtHasMeaningfulChar(thoughtContentRaw(s))
+const thoughtBodySubstantive = (s) =>
+  thoughtReasoningMarkdownVisible(s) || thoughtContentMarkdownVisible(s)
+
+/** 流式阶段仍用「≥2 字有意义」过滤碎字；完成后展示快照全文 */
+const showThoughtReasoningBlock = (s) => {
+  const raw = thoughtReasoningRaw(s)
+  if (!String(raw).trim()) return false
+  if (s.thoughtReasoningSnapshot) return true
+  if (s.status === 'completed' || s.status === 'error' || s.status === 'skipped') return true
+  return thoughtReasoningMarkdownVisible(s)
+}
+const showThoughtContentBlock = (s) => {
+  const raw = thoughtContentRaw(s)
+  if (!String(raw).trim()) return false
+  if (s.thoughtContentSnapshot) return true
+  if (s.status === 'completed' || s.status === 'error' || s.status === 'skipped') return true
+  return thoughtContentMarkdownVisible(s)
+}
+
+/**
+ * 尚无≥2 字有意义正文时：不显示孤零零的「思考」标题（仅 pill、无下文），改与 phase_wait 一致只显示三点。
+ * 覆盖：本步已 running 且已记 stepStartedAt，但 decide/Thought 流尚未到达的前置间隙（原会先闪一帧 agentTask.thought）。
+ */
+const thoughtUiDotsOnly = (s) => {
+  if (thoughtBodySubstantive(s)) return false
+  if (s.phaseWait && s.phaseWait.active) return true
+  if (s.status === 'running' && s.stepStartedAt != null && !hasReasoningBody(s)) return true
+  return false
+}
+
+/** 眉标：与规划备忘序号一致（步骤 1、2…）；分步/分支推断仅在下方「思考」折叠区内展示，不在眉标单独写「推断 Todo」 */
+const stepEyebrowLabel = (i) => {
+  return t('agentTask.stepIndex', { n: i + 1 })
+}
 
 /** 短工具名，强调原子动作而非「步骤序号」 */
 const toolChipShort = (s) => {
@@ -297,6 +395,38 @@ const execToolKind = (s) => {
   return 'other'
 }
 
+/** 与 chat.stepBatchModify 模板一致：流式落库后不会随采纳重写，需在展示侧切换为已闭环 */
+const isBatchModifyAwaitingSandboxSummary = (summary) => {
+  const x = String(summary || '')
+  if (!x.trim()) return false
+  if (/批量修改预览\s*\d+\s*条/.test(x) && (x.includes('沙箱') || x.includes('确认'))) return true
+  if (/Batch modify preview/i.test(x) && /sandbox/i.test(x)) return true
+  return false
+}
+
+const displayStepResultSummary = (s) => {
+  const raw = s.resultSummary
+  if (raw == null || !String(raw).trim()) return ''
+  if (
+    props.modifySandboxPending === false &&
+    execToolKind(s) === 'modify' &&
+    isBatchModifyAwaitingSandboxSummary(raw)
+  ) {
+    return t('chat.stepBatchModifyDone')
+  }
+  return String(raw)
+}
+
+const sanitizeBatchModifyLineInExecLog = (s, text) => {
+  if (props.modifySandboxPending !== false) return text
+  if (execToolKind(s) !== 'modify') return text
+  let tx = String(text || '')
+  const done = t('chat.stepBatchModifyDone')
+  tx = tx.replace(/批量修改预览\s*\d+\s*条[^\n]*/g, done)
+  tx = tx.replace(/Batch modify preview[^\n]*/gi, (m) => (/sandbox/i.test(m) ? done : m))
+  return tx
+}
+
 const execToolIcon = (s) => {
   const k = execToolKind(s)
   const map = {
@@ -310,52 +440,45 @@ const execToolIcon = (s) => {
   return map[k] || map.other
 }
 
-/** 尚无 Agent 说明 / reasoning/content 流时占位 */
-const thoughtBodyFallback = (s) => {
-  if (hasReasoningBody(s)) return ''
-  if (s.status === 'running') {
-    return '（等待本步 Agent 行动说明流式输出…）'
-  }
-  return '（本步未收到 Agent 行动说明。）'
-}
-
 const stepThoughtTitle = (s) => {
   void thoughtUiTick.value
-  const t = s.thoughtTiming
-  if (t && t.durationMs != null) {
-    const thr = t.briefThresholdMs ?? 800
+  const timing = s.thoughtTiming
+  if (timing && timing.durationMs != null) {
+    const thr = timing.briefThresholdMs ?? 800
     // 以累计毫秒为准（行动前叙述轨）；observe 不计入 Thought 展示
-    if (t.durationMs < thr) return 'Thought briefly'
-    return `Thought for ${(t.durationMs / 1000).toFixed(1)}s`
+    if (timing.durationMs < thr) return t('agentTask.thoughtBriefly')
+    return t('agentTask.thoughtFor', { s: (timing.durationMs / 1000).toFixed(1) })
   }
   // 无后端 reasoning_timing 时：用「本步开始 → 首次 executing」近似思考时长；勿把工具执行（modify 等）算进 Thought
-  if (s.stepStartedAt != null && hasReasoningBody(s)) {
+  if (s.stepStartedAt != null && thoughtBodySubstantive(s)) {
     const endWall =
       s.thoughtPhaseEndAtMs != null ? s.thoughtPhaseEndAtMs : s.status === 'running' ? Date.now() : null
     if (endWall != null) {
       const sec = Math.max(0, (endWall - s.stepStartedAt) / 1000)
       if (s.status === 'running' || s.thoughtPhaseEndAtMs != null) {
-        return `Thought for ${sec.toFixed(1)}s`
+        return t('agentTask.thoughtFor', { s: sec.toFixed(1) })
       }
     }
   }
-  if (s.status === 'running' && hasReasoningBody(s)) return 'Thinking…'
-  return 'Thought'
+  if (s.status === 'running' && thoughtBodySubstantive(s)) return t('agentTask.thinking')
+  return t('agentTask.thought')
 }
 
 const thoughtSecondsMuted = (s) => {
-  const t = s.thoughtTiming
+  const timing = s.thoughtTiming
   // 实时标题已含秒数，不再右侧重复
-  if (s.status === 'running' && (!t || t.durationMs == null) && s.stepStartedAt) return ''
-  if (!t || t.durationMs == null) return ''
-  const thr = t.briefThresholdMs ?? 800
-  if (t.durationMs < thr) return ''
-  return `${(t.durationMs / 1000).toFixed(1)}s`
+  if (s.status === 'running' && (!timing || timing.durationMs == null) && s.stepStartedAt) return ''
+  if (!timing || timing.durationMs == null) return ''
+  const thr = timing.briefThresholdMs ?? 800
+  if (timing.durationMs < thr) return ''
+  return `${(timing.durationMs / 1000).toFixed(1)}s`
 }
 
-// 有可展示正文、或正在等待结构化 XML（phase_wait）时展示 Thought
+// 有可展示正文、或 phase_wait、或本步已启动但 decide 流尚未到达（避免上一步「观察结论」已写完，下一步 Thought 整块 v-if 晚十几秒才挂载）
 const hasStepThought = (s) =>
-  hasReasoningBody(s) || !!(s.phaseWait && s.phaseWait.active)
+  hasReasoningBody(s) ||
+  !!(s.phaseWait && s.phaseWait.active) ||
+  (s.status === 'running' && s.stepStartedAt != null)
 
 const thoughtOpen = (i) => {
   const k = String(i)
@@ -363,10 +486,13 @@ const thoughtOpen = (i) => {
   if (v !== undefined) return v
   const s = props.steps[i]
   if (!s) return true
+  if (thoughtBodySubstantive(s)) return true
   if (hasReasoningBody(s)) return true
   if (s.phaseWait && s.phaseWait.active) return true
-  // 仅有占位说明时默认折叠，与 Cursor「先见 Thought 条、再点开」一致
-  if (thoughtBodyFallback(s)) return false
+  // 进行中尚无正文：默认展开（仅显示 phase 三点或空白，不再渲染「Agent 行动说明」类提示文案）
+  if (s.status === 'running' && !thoughtBodySubstantive(s)) return true
+  // 已结束仍无正文：默认折叠
+  if (!thoughtBodySubstantive(s) && s.status !== 'running') return false
   if (!s.thoughtTiming) return true
   return false
 }
@@ -376,8 +502,16 @@ const toggleThought = (i) => {
   thoughtPanelOpen.value = { ...thoughtPanelOpen.value, [k]: !thoughtOpen(i) }
 }
 
+/** 上一步已完成、本步仍为 pending 时显示（轮次间隙，后端尚未 todo_start） */
+const showPendingNextCue = (i) => {
+  const cur = props.steps[i]
+  if (!cur || cur.status !== 'pending') return false
+  if (i === 0) return false
+  return props.steps[i - 1]?.status === 'completed'
+}
+
 const planLineText = (s, i) => {
-  const raw = (s.originalTodo || s.title || `备忘 ${i + 1}`).trim()
+  const raw = (s.originalTodo || s.title || t('agentTask.memoFallback', { n: i + 1 })).trim()
   if (raw.length > 120) return raw.slice(0, 118) + '…'
   return raw
 }
@@ -388,12 +522,12 @@ const planTargetStrings = ref([])
 let rafPlan = null
 
 const planRowShown = (s, i) => {
-  if (props.instantPlan) return planLineText(s, i)
+  if (props.instantPlan || props.realtimeStream) return planLineText(s, i)
   return planLineDisplay.value[i] ?? ''
 }
 
 const runPlanTypewriter = () => {
-  if (props.instantPlan) return
+  if (props.instantPlan || props.realtimeStream) return
   const tick = () => {
     rafPlan = null
     const tg = planTargetStrings.value
@@ -405,7 +539,9 @@ const runPlanTypewriter = () => {
       const shown = cur[i] || ''
       if (shown.length < target.length) {
         const backlog = target.length - shown.length
-        const n = Math.min(backlog, Math.max(1, Math.ceil(backlog / 8)))
+        // 规划备忘：保持复选框旁“打字机”效果；真正的节奏由 SSE 增量 plan_update 决定
+        // 每帧只推进 1 字，避免一次性整块出现
+        const n = Math.min(backlog, 1)
         cur[i] = target.slice(0, shown.length + n)
         needMore = true
       }
@@ -422,7 +558,7 @@ const runPlanTypewriter = () => {
 watch(
   () => props.steps,
   (steps) => {
-    if (props.instantPlan) {
+    if (props.instantPlan || props.realtimeStream) {
       if (rafPlan != null) {
         cancelAnimationFrame(rafPlan)
         rafPlan = null
@@ -490,11 +626,13 @@ const paramsStreamVisible = ref([])
 let rafStream = null
 
 const execStreamShown = (s, i) => {
-  if (props.instantPlan) return execStreamTarget(s)
+  if (props.instantPlan || props.realtimeStream) {
+    return sanitizeBatchModifyLineInExecLog(s, execStreamTarget(s))
+  }
   return execStreamVisible.value[i] ?? ''
 }
 const paramsSummaryShown = (s, i) => {
-  if (props.instantPlan) return String(s.paramsSummaryDraft || '')
+  if (props.instantPlan || props.realtimeStream) return String(s.paramsSummaryDraft || '')
   return paramsStreamVisible.value[i] ?? ''
 }
 
@@ -530,10 +668,17 @@ const showDecisionBlock = (s) => {
 }
 
 /** 执行区：工具过程 + 一行结果摘要 */
-const showExecBlock = (s) => !!(streamText(s) || (s.resultSummary && String(s.resultSummary).trim()))
+const showExecBlock = (s) => !!(streamText(s) || String(displayStepResultSummary(s) || '').trim())
+const thoughtStillRunning = (s) =>
+  !!(s && s.status === 'running' && hasStepThought(s) && s.thoughtPhaseEndAtMs == null)
+const showToolExecCard = (s) =>
+  !thoughtStillRunning(s) &&
+  (showExecBlock(s) ||
+    !!(s.grepNavigation && s.grepNavigation.type === 'multiple' && s.grepNavigation.items?.length) ||
+    (s.stepDurationMs != null && s.stepDurationMs >= 0))
 
 const runStreamTypewriters = () => {
-  if (props.instantPlan) return
+  if (props.instantPlan || props.realtimeStream) return
   const tick = () => {
     rafStream = null
     const n = props.steps?.length || 0
@@ -549,7 +694,8 @@ const runStreamTypewriters = () => {
         const shown = cur[i] || ''
         if (shown.length < target.length) {
           const backlog = target.length - shown.length
-          const add = Math.min(backlog, Math.max(1, Math.ceil(backlog / 8)))
+          // 执行/推理/参数流式：同样放慢，避免首包后瞬间刷屏
+          const add = Math.min(backlog, 1)
           cur[i] = target.slice(0, shown.length + add)
           needMore = true
         }
@@ -601,7 +747,7 @@ watch(
     reasoningTargets.value = newR
     paramsTargets.value = newP
 
-    if (props.instantPlan) {
+    if (props.instantPlan || props.realtimeStream) {
       execStreamVisible.value = newE.slice()
       reasoningVisible.value = newR.slice()
       paramsStreamVisible.value = newP.slice()
@@ -673,10 +819,17 @@ onUnmounted(() => {
   }
 })
 
-const showLogBlock = (s) => {
+const showLogBlock = (s, i = 0) => {
+  // 占位首步：Thought 区由 SimpleChatPanel 顶部「...」统一承接；无工具/决策/日志时不渲染空壳
+  if (i === 0 && props.hidePrefacePlaceholder) {
+    if (!showToolExecCard(s) && !showDecisionBlock(s) && !(s.detailLog && s.detailLog.length)) {
+      return false
+    }
+  }
   return (
     s.status === 'running' ||
     s.status === 'completed' ||
+    s.status === 'failed' ||
     s.status === 'error' ||
     (s.phaseWait && s.phaseWait.active) ||
     (s.detailLog && s.detailLog.length) ||
@@ -690,7 +843,10 @@ const showLogBlock = (s) => {
     (s.thoughtReasoningDraft && String(s.thoughtReasoningDraft).trim()) ||
     (s.thoughtContentDraft && String(s.thoughtContentDraft).trim()) ||
     s.thoughtTiming ||
-    (s.toolCall && s.toolCall.output && s.toolCall.output !== '执行中...') ||
+    (s.toolCall &&
+      s.toolCall.output &&
+      s.toolCall.output !== t('chat.toolExecuting') &&
+      s.toolCall.output !== '执行中...') ||
     (s.grepNavigation && s.grepNavigation.items?.length)
   )
 }
@@ -705,6 +861,18 @@ const showLogBlock = (s) => {
   border-radius: 0;
   overflow: visible;
   background: transparent;
+}
+
+.agent-step-wrap {
+  display: block;
+}
+
+.agent-between-steps-cue {
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 6px 2px 8px;
+  margin: 0 0 2px;
+  letter-spacing: 0.02em;
 }
 
 /* ReAct Thought：深度思考 reasoning（浅）/ content（亮） */
@@ -858,6 +1026,10 @@ const showLogBlock = (s) => {
   background: rgba(15, 23, 42, 0.35);
 }
 
+.agent-plan--after-thought {
+  margin-top: 8px;
+}
+
 .agent-plan-header {
   display: flex;
   align-items: center;
@@ -971,6 +1143,29 @@ const showLogBlock = (s) => {
   margin: 0;
 }
 
+.agent-step-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 0 2px;
+}
+
+.agent-step-eyebrow-bar {
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: rgba(59, 130, 246, 0.5);
+  flex-shrink: 0;
+}
+
+.agent-step-eyebrow-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: #94a3b8;
+  letter-spacing: 0.02em;
+}
+
 .agent-step-divider--between {
   margin: 0 0 12px;
 }
@@ -982,6 +1177,18 @@ const showLogBlock = (s) => {
 }
 
 /* 与 SimpleChatPanel 首轮 cursor-reasoning 对齐：前置思考独立块 */
+.agent-preface-thought--dots-only {
+  margin: 6px 0 0;
+  max-width: 100%;
+}
+.agent-preface-thought--dots-only .agent-phase-wait {
+  margin-bottom: 0;
+  min-height: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
 .agent-preface-thought {
   margin: 6px 0 0;
   max-width: 100%;
@@ -1146,6 +1353,13 @@ const showLogBlock = (s) => {
   background: rgba(15, 23, 42, 0.28);
 }
 
+.agent-decision-panel--plain {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
 .agent-decide-eyebrow {
   display: flex;
   flex-wrap: wrap;
@@ -1160,6 +1374,11 @@ const showLogBlock = (s) => {
   letter-spacing: 0.02em;
   text-transform: none;
   color: #64748b;
+}
+
+.agent-step-planning-inline--plain {
+  margin-top: 4px;
+  display: inline-block;
 }
 
 .agent-step-log-title {
@@ -1212,6 +1431,23 @@ const showLogBlock = (s) => {
   overflow: auto;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.agent-decision-observe-rich--plain {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  max-height: none;
+  overflow: visible;
+}
+
+.agent-step-pre--plain {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .agent-step-pre--exec {

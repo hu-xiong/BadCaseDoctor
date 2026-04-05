@@ -18,6 +18,38 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import json
 from datetime import datetime, timedelta, timezone
+
+# 统一日志：用 logging 代替零散 print，默认带时间戳（便于 PERF_LOG=1 追踪耗时）。
+import logging
+import datetime as _dt
+
+class _LocalTZFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = _dt.datetime.fromtimestamp(record.created).astimezone()
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat(timespec="milliseconds")
+
+def _setup_logging():
+    perf_on = (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    root = logging.getLogger()
+    if root.handlers:
+        # 避免重复挂 handler（debug reloader / 多次 import）
+        return
+    level = logging.INFO if perf_on else logging.WARNING
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(
+        _LocalTZFormatter(
+            fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            datefmt="%H:%M:%S.%f",
+        )
+    )
+    root.addHandler(handler)
+    root.setLevel(level)
+    # Flask/Werkzeug 的请求日志也走同一套 handler
+    logging.getLogger("werkzeug").setLevel(level)
+
+_setup_logging()
 import pandas as pd
 import pymysql
 from dotenv import load_dotenv
@@ -29,7 +61,7 @@ from flask_cors import CORS
 import boto3
 from botocore.exceptions import ClientError
 import mimetypes
-from sqlalchemy import text, inspect, Enum
+from sqlalchemy import text, inspect, Enum, or_
 from PIL import Image
 import io
 import time
@@ -53,6 +85,10 @@ from routers.sandbox_client import sandbox_client_bp
 from routers.proposal import proposal_bp
 from routers.sql_preview import sql_preview_bp
 from routers.summary import summary_bp
+from routers.memory import memory_bp
+from routers.terminal_api import terminal_bp
+from flask_socketio import SocketIO
+from routers.terminal_socket import register_terminal_socket_handlers
 
 # 导入 Prometheus
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -105,22 +141,41 @@ app.config.from_object(Config)
 
 # Flask应用配置
 app.config['SECRET_KEY'] = 'hxReligi12.-badcase-doctor-secret-key-2025'  # 添加SECRET_KEY配置
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///badcase_doctor.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Session Cookie 配置：确保 Socket.IO 连接能携带 Cookie
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # 允许同站请求携带 Cookie
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = False  # 开发环境使用 HTTP
+# SQLALCHEMY_DATABASE_URI 仅来自 Config / 环境变量 DATABASE_URL，主业务库固定为 MySQL（见下方校验）
+
+# 数据库连接池（默认加大；可用环境变量覆盖，避免多进程×多 worker 撑爆 MySQL max_connections）
+try:
+    _sql_pool_size = int((os.getenv("SQLALCHEMY_POOL_SIZE") or "1000").strip())
+except Exception:
+    _sql_pool_size = 1000
+try:
+    _sql_max_overflow = int((os.getenv("SQLALCHEMY_MAX_OVERFLOW") or "0").strip())
+except Exception:
+    _sql_max_overflow = 0
+_sql_pool_size = max(1, min(_sql_pool_size, 2000))
+_sql_max_overflow = max(0, min(_sql_max_overflow, 500))
+
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': _sql_pool_size,
+    'pool_timeout': 300,
+    'pool_recycle': 3600,
+    'max_overflow': _sql_max_overflow,
     'pool_pre_ping': True,
-    'pool_recycle': 300,
+    'echo': False,
 }
 
-# 数据库连接池配置 - 解决MySQL连接断开问题
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 15,  # 增加连接池大小
-    'pool_timeout': 30,  # 增加超时时间
-    'pool_recycle': 3600,  # 1小时后回收连接
-    'max_overflow': 30,  # 增加最大溢出连接数
-    'pool_pre_ping': True,  # 连接前ping一下，确保连接有效
-    'echo': False,  # 关闭SQL日志，提高性能
-}
+# 主应用 ORM 仅允许 MySQL（与 config.py 中 DATABASE_URL 一致）；勿使用 sqlite 作为主库
+_main_db_uri = str(app.config.get('SQLALCHEMY_DATABASE_URI') or '').strip().lower()
+if not _main_db_uri.startswith('mysql'):
+    raise RuntimeError(
+        '主业务数据库必须使用 MySQL：请在环境变量 DATABASE_URL 中配置 mysql+pymysql://... '
+        '（或兼容的 mysql:// 方言）。禁止将主应用 SQLALCHEMY_DATABASE_URI 指向 SQLite。'
+        + (f" 当前: {_main_db_uri[:120]}" if _main_db_uri else ' 当前: (未配置)')
+    )
 
 # 添加CORS支持
 CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8080', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173', 'http://127.0.0.1:8080'])
@@ -154,6 +209,23 @@ app.register_blueprint(sandbox_client_bp)
 app.register_blueprint(proposal_bp)
 app.register_blueprint(sql_preview_bp)
 app.register_blueprint(summary_bp)
+app.register_blueprint(memory_bp)
+app.register_blueprint(terminal_bp)
+
+# 嵌入式终端（Socket.IO + PTY），与前端 xterm 通过 /socket.io 通信
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+    ],
+    async_mode="threading",
+    logger=False,
+    engineio_logger=False,
+)
+register_terminal_socket_handlers(socketio, app)
 
 # MinIO配置
 MINIO_CONFIG = {
@@ -621,6 +693,40 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
+# 压缩 JSON 响应（尤其是聊天历史/终端输出这类大 payload）
+@app.after_request
+def _gzip_large_json_response(resp):
+    try:
+        if not resp:
+            return resp
+        from flask import request as _req
+        ae = (_req.headers.get('Accept-Encoding') or '').lower()
+        if 'gzip' not in ae:
+            return resp
+        # 仅压缩 JSON；避免对图片/流式等产生副作用
+        ctype = (resp.headers.get('Content-Type') or '').lower()
+        if 'application/json' not in ctype:
+            return resp
+        if resp.headers.get('Content-Encoding'):
+            return resp
+        # 保险：某些响应可能 direct_passthrough=True，get_data 为空/抛异常
+        try:
+            resp.direct_passthrough = False
+        except Exception:
+            pass
+        data = resp.get_data(as_text=False)
+        if not data or len(data) < 2048:
+            return resp
+        import gzip
+        gz = gzip.compress(data, compresslevel=6)
+        resp.set_data(gz)
+        resp.headers['Content-Encoding'] = 'gzip'
+        resp.headers['Content-Length'] = str(len(gz))
+        resp.headers['Vary'] = 'Accept-Encoding'
+        return resp
+    except Exception:
+        return resp
+
 # 自定义未授权处理器，让API路由返回JSON错误
 @login_manager.unauthorized_handler
 def unauthorized():
@@ -1059,7 +1165,7 @@ class ChatMessage(db.Model):
 
 
 class DiffReviewState(db.Model):
-    """每条记录仅保留一份当前 Diff 状态（pending/adopted/rejected/superseded）"""
+    """主表仅保留 pending；采纳/拒绝后在业务路径上物理删除，避免膨胀与状态双写"""
     __tablename__ = 'diff_review_state'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -1078,6 +1184,8 @@ class DiffReviewState(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     adopted_at = db.Column(db.DateTime, nullable=True)
     rejected_at = db.Column(db.DateTime, nullable=True)
+    # 待采纳/待拒绝 Diff 的操作者：仅该用户可见 pending 与可执行采纳/拒绝（NULL 为历史数据兼容）
+    operator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True, index=True)
 
     project = db.relationship('Project', backref='diff_review_states')
 
@@ -1100,6 +1208,37 @@ class PromptTemplate(db.Model):
     content = db.Column(db.Text, nullable=False)
     project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class AgentTask(db.Model):
+    """ReAct 工具调用的持久化任务单元，支持 DAG 依赖与恢复（见 docs/需求文档_Agent任务状态管理与DAG并发调度_MySQL.md）。"""
+    __tablename__ = 'agent_tasks'
+
+    id = db.Column(db.String(36), primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending', index=True)
+    params = db.Column(db.JSON, nullable=True)
+    result = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    dependencies = db.Column(db.JSON, nullable=True)
+    session_id = db.Column(db.String(64), nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+
+class TerminalAudit(db.Model):
+    """嵌入式终端审计：会话开始、AI 建议等（不含逐键记录）。"""
+    __tablename__ = 'terminal_audit'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=True, index=True)
+    event_type = db.Column(db.String(40), nullable=False)
+    client_session_id = db.Column(db.String(64), nullable=True, index=True)
+    detail = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -1519,18 +1658,19 @@ def badcase_detail(badcase_id):
         flash('无权访问此BadCase')
         return redirect(url_for('dashboard'))
     
-    # 获取项目成员
-    project_members = []
-    permissions = ProjectPermission.query.filter_by(project_id=badcase.project_id).all()
-    for permission in permissions:
-        user = User.query.get(permission.user_id)
-        if user:
-            project_members.append({
-                'id': user.id,
-                'name': user.name,
-                'email': user.email,
-                'role': permission.role
-            })
+    # 获取项目成员（避免 N+1：一次 JOIN 查询）
+    from sqlalchemy.orm import joinedload
+    permissions = (
+        db.session.query(ProjectPermission)
+        .join(User, User.id == ProjectPermission.user_id)
+        .filter(ProjectPermission.project_id == badcase.project_id)
+        .add_columns(User.id, User.name, User.email)
+        .all()
+    )
+    project_members = [
+        {'id': uid, 'name': uname, 'email': uemail, 'role': perm.role}
+        for perm, uid, uname, uemail in permissions
+    ]
     
     comments = Comment.query.filter_by(badcase_id=badcase_id).order_by(Comment.created_at.desc()).all()
     
@@ -2052,6 +2192,38 @@ def _fingerprint_for_diff(target, target_id, modifications):
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
+def _delete_diff_review_state_rows(project_id, target, target_ids, operator_user_id=None):
+    """采纳/拒绝后物理删除 pending 行；target_ids 为 int 列表。"""
+    nt = _normalize_diff_target(target)
+    ids = []
+    for x in target_ids:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return 0
+    q = DiffReviewState.query.filter(
+        DiffReviewState.project_id == project_id,
+        DiffReviewState.target == nt,
+        DiffReviewState.target_id.in_(ids),
+    )
+    if operator_user_id is not None:
+        q = q.filter(
+            or_(
+                DiffReviewState.operator_id == operator_user_id,
+                DiffReviewState.operator_id.is_(None),
+            )
+        )
+    rows = q.all()
+    n = len(rows)
+    for r in rows:
+        db.session.delete(r)
+    if n:
+        db.session.commit()
+    return n
+
+
 def _upsert_diff_review_state(
     project_id,
     target,
@@ -2061,8 +2233,9 @@ def _upsert_diff_review_state(
     modifications,
     source_message_id=None,
     source_session_id=None,
+    operator_id=None,
 ):
-    """同一记录只维护一份当前 Diff 状态；已采纳/已拒绝且 fingerprint 相同不再回到 pending。"""
+    """主表仅 pending：无则插入；有 pending 则更新；遗留 adopted/rejected/superseded 整键删掉后新建 pending。"""
     nt = _normalize_diff_target(target)
     tid = int(target_id)
     canonical_mods = _canonical_modifications(modifications)
@@ -2089,45 +2262,51 @@ def _upsert_diff_review_state(
             modifications_payload=json.dumps(canonical_mods, ensure_ascii=False),
             source_message_id=source_message_id,
             source_session_id=source_session_id,
+            operator_id=operator_id,
             updated_at=now,
         )
         db.session.add(row)
         db.session.flush()
         return row, False
 
-    if row.status in ('adopted', 'rejected', 'superseded') and row.diff_fingerprint == fp:
+    if row.status == 'pending':
+        row.plan_id = plan_id
+        row.diff_fingerprint = fp
+        row.diff_payload = json.dumps(diff or [], ensure_ascii=False)
+        row.modifications_payload = json.dumps(canonical_mods, ensure_ascii=False)
         row.updated_at = now
+        if operator_id is not None:
+            row.operator_id = operator_id
         if source_message_id is not None:
             row.source_message_id = source_message_id
         if source_session_id is not None:
             row.source_session_id = source_session_id
-        # 其余同键历史行统一标记 superseded，避免旧 pending 被误读
         for old in all_rows[1:]:
-            if old.status != 'superseded':
-                old.status = 'superseded'
-                old.updated_at = now
+            db.session.delete(old)
         db.session.flush()
-        return row, True
+        return row, False
 
-    if row.status != 'pending':
-        row.lifecycle_id = int(row.lifecycle_id or 0) + 1
-        row.adopted_at = None
-        row.rejected_at = None
-    row.status = 'pending'
-    row.plan_id = plan_id
-    row.diff_fingerprint = fp
-    row.diff_payload = json.dumps(diff or [], ensure_ascii=False)
-    row.modifications_payload = json.dumps(canonical_mods, ensure_ascii=False)
-    row.updated_at = now
-    if source_message_id is not None:
-        row.source_message_id = source_message_id
-    if source_session_id is not None:
-        row.source_session_id = source_session_id
-    # 其余同键历史行统一标记 superseded，保证“同记录只有一份当前状态”
-    for old in all_rows[1:]:
-        if old.status != 'superseded':
-            old.status = 'superseded'
-            old.updated_at = now
+    # 遗留非 pending：删键后重建一条 pending
+    prev_lifecycle = int(row.lifecycle_id or 1)
+    for old in all_rows:
+        db.session.delete(old)
+    db.session.flush()
+    row = DiffReviewState(
+        project_id=project_id,
+        target=nt,
+        target_id=tid,
+        plan_id=plan_id,
+        lifecycle_id=prev_lifecycle + 1,
+        diff_fingerprint=fp,
+        status='pending',
+        diff_payload=json.dumps(diff or [], ensure_ascii=False),
+        modifications_payload=json.dumps(canonical_mods, ensure_ascii=False),
+        source_message_id=source_message_id,
+        source_session_id=source_session_id,
+        operator_id=operator_id,
+        updated_at=now,
+    )
+    db.session.add(row)
     db.session.flush()
     return row, False
 
@@ -2152,6 +2331,7 @@ def api_upsert_diff_review(project_id):
             modifications=data.get('modifications') or {},
             source_message_id=data.get('message_id'),
             source_session_id=data.get('session_id'),
+            operator_id=current_user.id,
         )
         db.session.commit()
         return jsonify({
@@ -2197,27 +2377,14 @@ def api_resolve_diff_review(project_id):
             return jsonify({'success': True, 'message': '无可更新记录（幂等）'})
         row = rows[0]
 
-        now = datetime.utcnow()
-        if action == 'confirm':
-            row.status = 'adopted'
-            row.adopted_at = now
-            row.rejected_at = None
-        else:
-            row.status = 'rejected'
-            row.rejected_at = now
-            row.adopted_at = None
-        if data.get('message_id') is not None:
-            row.source_message_id = data.get('message_id')
-        if data.get('session_id') is not None:
-            row.source_session_id = data.get('session_id')
-        row.updated_at = now
-        # 其余历史行全部 superseded，避免旧 pending 残留
-        for old in rows[1:]:
-            if old.status != 'superseded':
-                old.status = 'superseded'
-                old.updated_at = now
+        if row.operator_id is not None and row.operator_id != current_user.id:
+            return jsonify({'success': False, 'error': '无权处理他人待确认的变更'}), 403
+
+        # 采纳与拒绝均物理删除；采纳主路径在 POST /modify 内已删，此处幂等兼容旧客户端仅调 resolve 的场景
+        for r in rows:
+            db.session.delete(r)
         db.session.commit()
-        return jsonify({'success': True, 'status': row.status})
+        return jsonify({'success': True, 'status': 'deleted'})
     except Exception as e:
         db.session.rollback()
         print(f"[DIFF-RESOLVE] 失败: {e}")
@@ -2230,7 +2397,8 @@ def api_list_diff_reviews(project_id):
     try:
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '无权访问此项目'}), 403
-        status = (request.args.get('status') or 'pending').strip().lower()
+        status_raw = (request.args.get('status') or 'pending').strip().lower()
+        status_filter = {s.strip() for s in status_raw.split(',') if s and s.strip()}
         rows = (
             DiffReviewState.query
             .filter_by(project_id=project_id)
@@ -2245,8 +2413,11 @@ def api_list_diff_reviews(project_id):
                 latest_by_key[k] = r
         result = []
         for r in latest_by_key.values():
-            if status and r.status != status:
+            if status_filter and r.status not in status_filter:
                 continue
+            if r.status in ('pending', 'rejected'):
+                if r.operator_id is not None and r.operator_id != current_user.id:
+                    continue
             try:
                 diff = json.loads(r.diff_payload) if r.diff_payload else []
             except Exception:
@@ -2266,11 +2437,41 @@ def api_list_diff_reviews(project_id):
                 'modifications': mods,
                 'message_id': r.source_message_id,
                 'session_id': r.source_session_id,
+                'operator_id': r.operator_id,
             })
         return jsonify({'success': True, 'items': result})
     except Exception as e:
         print(f"[DIFF-LIST] 失败: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def _normalize_chat_message_id(message_id):
+    if message_id is None:
+        return None
+    try:
+        return int(message_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nullify_chat_message_modify_preview(message_id):
+    """采纳成功后清空 chat_message 上沙箱 JSON，避免历史会话仍带 confirmation_required 导致列表再次 pending。"""
+    mid = _normalize_chat_message_id(message_id)
+    if mid is None:
+        return
+    try:
+        db.session.expire_all()
+        msg = db.session.get(ChatMessage, mid)
+        if not msg:
+            print(f"[MODIFY-BG] ChatMessage id={mid} 不存在，跳过清理预览字段")
+            return
+        msg.modify_groups = None
+        msg.modify_navigation = None
+        db.session.commit()
+        print(f"[MODIFY-BG] 已清空消息 {mid} 的 modify_groups / modify_navigation")
+    except Exception as e:
+        print(f"[MODIFY-BG] 清空消息预览字段失败 id={mid}: {e}")
+        db.session.rollback()
 
 
 def _run_modify_in_background(project_id, target, target_id, modifications, message_id, db_uri):
@@ -2289,35 +2490,39 @@ def _run_modify_in_background(project_id, target, target_id, modifications, mess
                 confirm=True
             ))
             if result.get('success') and message_id:
-                try:
-                    message = ChatMessage.query.get(message_id)
-                    if message:
-                        # 采纳后：清理预览 diff，避免刷新后仍显示
-                        message.modify_groups = None
-                        message.modify_navigation = None
-                        db.session.commit()
-                except Exception:
-                    pass
-            if result.get('success'):
-                try:
-                    nt = _normalize_diff_target(target)
-                    row = DiffReviewState.query.filter_by(
-                        project_id=project_id,
-                        target=nt,
-                        target_id=int(target_id),
-                    ).first()
-                    if row:
-                        row.status = 'adopted'
-                        row.adopted_at = datetime.utcnow()
-                        row.rejected_at = None
-                        row.updated_at = datetime.utcnow()
-                        if message_id:
-                            row.source_message_id = message_id
-                        db.session.commit()
-                except Exception as _e:
-                    print(f"[MODIFY-BG] 更新 diff_review_state 为 adopted 失败: {_e}")
+                _nullify_chat_message_modify_preview(message_id)
         except Exception as e:
             print(f"[MODIFY-BG] 后台采纳失败: {e}")
+
+
+def _run_modify_batch_in_background(project_id, target, items, message_id, db_uri):
+    """同一线程内顺序采纳多条，仅结束时清理消息预览一次；用于前端单次 HTTP 批量采纳。"""
+    import asyncio
+
+    with app.app_context():
+        from agents.tools.modify_tool import ModifyTool
+
+        modify_tool = ModifyTool(db.session, database_uri=db_uri)
+        any_success = False
+        try:
+            for it in items:
+                tid = int(it["target_id"])
+                modifications = dict(it["modifications"])
+                result = asyncio.run(
+                    modify_tool.execute(
+                        target=target,
+                        target_id=tid,
+                        modifications=modifications,
+                        project_id=project_id,
+                        confirm=True,
+                    )
+                )
+                if result.get("success"):
+                    any_success = True
+        except Exception as e:
+            print(f"[MODIFY-BG-BATCH] 批量采纳失败: {e}")
+        if any_success and message_id:
+            _nullify_chat_message_modify_preview(message_id)
 
 
 @app.route('/api/projects/<int:project_id>/modify', methods=['POST'])
@@ -2331,20 +2536,83 @@ def api_project_modify(project_id):
     from flask import current_app
     
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         target = data.get('target', 'bug')
         target_id = data.get('target_id')
         modifications = data.get('modifications', {})
         confirm = data.get('confirm', True)
-        message_id = data.get('message_id')
-        
+        message_id = _normalize_chat_message_id(data.get('message_id'))
+        db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
+
+        # ---------- 批量采纳：单次 HTTP，body.items = [{ target_id, modifications }, ...] ----------
+        raw_items = data.get('items')
+        if raw_items is not None:
+            if not isinstance(raw_items, list) or len(raw_items) == 0:
+                return jsonify({"success": False, "error": "items 必须为非空数组"}), 400
+            if not confirm:
+                return jsonify({"success": False, "error": "批量仅支持采纳(confirm=true)"}), 400
+            nt = _normalize_diff_target(target)
+            normalized = []
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    return jsonify({"success": False, "error": "items 元素必须为对象"}), 400
+                tid = it.get('target_id')
+                mods = it.get('modifications')
+                if tid is None or not mods:
+                    return jsonify({"success": False, "error": "每项需含 target_id 与 modifications"}), 400
+                normalized.append({"target_id": int(tid), "modifications": dict(mods)})
+            for it in normalized:
+                tid = it['target_id']
+                pend = (
+                    DiffReviewState.query.filter_by(
+                        project_id=project_id, target=nt, target_id=tid
+                    )
+                    .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
+                    .first()
+                )
+                if pend and pend.status == 'pending':
+                    if pend.operator_id is not None and pend.operator_id != current_user.id:
+                        return jsonify(
+                            {"success": False, "error": f"无权采纳他人待确认的变更 (target_id={tid})"}
+                        ), 403
+            _delete_diff_review_state_rows(
+                project_id,
+                target,
+                [it["target_id"] for it in normalized],
+                current_user.id,
+            )
+            thread = threading.Thread(
+                target=_run_modify_batch_in_background,
+                args=(project_id, target, normalized, message_id, db_uri),
+                daemon=True,
+            )
+            thread.start()
+            return jsonify({
+                "success": True,
+                "message": "正在批量保存",
+                "async": True,
+                "batch": True,
+                "count": len(normalized),
+            })
+
         if not target_id or not modifications:
             return jsonify({"success": False, "error": "target_id 和 modifications 不能为空"}), 400
         
-        db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
-        
         if confirm:
-            # 采纳即落库：后台异步执行 ModifyTool，立即返回
+            nt = _normalize_diff_target(target)
+            tid = int(target_id)
+            pend = (
+                DiffReviewState.query.filter_by(
+                    project_id=project_id, target=nt, target_id=tid
+                )
+                .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
+                .first()
+            )
+            if pend and pend.status == 'pending':
+                if pend.operator_id is not None and pend.operator_id != current_user.id:
+                    return jsonify({"success": False, "error": "无权采纳他人待确认的变更"}), 403
+            _delete_diff_review_state_rows(project_id, target, [tid], current_user.id)
+            # 采纳即落库：后台异步执行 ModifyTool，立即返回（diff 行已同步删除）
             thread = threading.Thread(
                 target=_run_modify_in_background,
                 args=(project_id, target, target_id, dict(modifications), message_id, db_uri),
@@ -3120,6 +3388,30 @@ def api_send_verification_code():
     except Exception as e:
         return jsonify({'success': False, 'error': f'发送邮件失败: {str(e)}'}), 500
 
+
+def _safe_parse_project_login_configs(raw):
+    """解析 project.login_configs；迁移/脏数据下可能不是合法 JSON，避免拖垮项目详情接口。"""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return [raw]
+    s = str(raw).strip()
+    if not s:
+        return []
+    try:
+        v = json.loads(s)
+        if isinstance(v, list):
+            return v
+        if isinstance(v, dict):
+            return [v]
+        return []
+    except (json.JSONDecodeError, TypeError, ValueError):
+        print(f"[_safe_parse_project_login_configs] 无效 JSON，已置空 preview={s[:160]!r}")
+        return []
+
+
 # API端点 - 项目管理
 @app.route('/api/projects', methods=['GET'])
 @login_required
@@ -3265,7 +3557,10 @@ def api_get_project_detail(project_id):
     
     try:
         # 只获取项目基本信息，不包含BadCase列表（并避免重复查询 Project）
-        project = Project.query.get_or_404(project_id)
+        # 勿用 get_or_404：NotFound 会被下方 except Exception 吞掉并误返回 500
+        project = Project.query.get(project_id)
+        if not project:
+            return jsonify({'success': False, 'error': '项目不存在'}), 404
         if project.user_id != current_user.id:
             has_perm = ProjectPermission.query.filter_by(
                 user_id=current_user.id,
@@ -3276,16 +3571,30 @@ def api_get_project_detail(project_id):
                 return jsonify({'success': False, 'error': '无权访问此项目'}), 403
         print(f"项目信息获取成功: {project.name}")
         
-        # 获取BadCase统计信息（快速统计）
-        badcase_stats = db.session.query(
-            db.func.count(BadCase.id).label('total'),
-            db.func.sum(db.case((BadCase.status == 'pending', 1), else_=0)).label('pending'),
-            db.func.sum(db.case((BadCase.status == 'resolved', 1), else_=0)).label('resolved'),
-            db.func.sum(db.case((BadCase.status == 'close', 1), else_=0)).label('close')
-        ).filter_by(project_id=project_id).first()
-        
-        print(f"BadCase统计完成: 总计={badcase_stats.total}, 待处理={badcase_stats.pending}, 已解决={badcase_stats.resolved}, 已关闭={badcase_stats.close}")
-        
+        # 获取BadCase统计信息（快速统计）；状态与 BadCaseStatus 枚举对齐（closed 非 close）
+        total_bc = pending_bc = resolved_bc = closed_bc = 0
+        try:
+            st = db.session.query(
+                db.func.count(BadCase.id),
+                db.func.sum(db.case((BadCase.status == BadCaseStatus.PENDING, 1), else_=0)),
+                db.func.sum(db.case((BadCase.status == BadCaseStatus.RESOLVED, 1), else_=0)),
+                db.func.sum(db.case((BadCase.status == BadCaseStatus.CLOSED, 1), else_=0)),
+            ).filter(BadCase.project_id == project_id).first()
+            if st:
+                total_bc = int(st[0] or 0)
+                pending_bc = int(st[1] or 0)
+                resolved_bc = int(st[2] or 0)
+                closed_bc = int(st[3] or 0)
+        except Exception as se:
+            print(f"[api_get_project_detail] BadCase 统计查询失败(已降级为0): {se}")
+            import traceback
+            traceback.print_exc()
+
+        print(
+            f"BadCase统计完成: 总计={total_bc}, 待处理={pending_bc}, "
+            f"已解决={resolved_bc}, 已关闭={closed_bc}"
+        )
+
         return jsonify({
             'success': True,
             'project': {
@@ -3296,18 +3605,20 @@ def api_get_project_detail(project_id):
                 'owner': project.owner,
                 'intro': project.intro,
                 'status': project.status,
-                'login_configs': json.loads(project.login_configs) if project.login_configs else [],
-                'created_at': project.created_at.isoformat(),
+                'login_configs': _safe_parse_project_login_configs(project.login_configs),
+                'created_at': project.created_at.isoformat() if project.created_at else None,
                 'badcase_stats': {
-                    'total': badcase_stats.total or 0,
-                    'pending': badcase_stats.pending or 0,
-                    'resolved': badcase_stats.resolved or 0,
-                    'close': badcase_stats.close or 0
+                    'total': total_bc,
+                    'pending': pending_bc,
+                    'resolved': resolved_bc,
+                    'close': closed_bc,
                 }
             }
         })
     except Exception as e:
         print(f"获取项目详情失败: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': '获取项目信息失败'}), 500
 
@@ -3316,7 +3627,9 @@ def api_get_project_detail(project_id):
 def api_get_project_edit_context(project_id):
     """编辑页专用：一次性返回最小必要上下文（project + plans + members）"""
     try:
-        project = Project.query.get_or_404(project_id)
+        project = Project.query.get(project_id)
+        if not project:
+            return jsonify({'success': False, 'error': '项目不存在'}), 404
         if project.user_id != current_user.id:
             has_perm = ProjectPermission.query.filter_by(
                 user_id=current_user.id,
@@ -3361,7 +3674,13 @@ def api_get_project_edit_context(project_id):
         def _sort_key(p: Plan):
             pinned = 1 if getattr(p, "is_pinned", False) else 0
             created = getattr(p, "created_at", None)
-            return (-pinned, -(created.timestamp() if created else 0))
+            ts = 0
+            if created:
+                try:
+                    ts = int(created.timestamp())
+                except Exception:
+                    ts = 0
+            return (-pinned, -ts)
 
         def build_plan_tree(plan: Plan):
             children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
@@ -4205,6 +4524,8 @@ def sync_database_schema():
                     'owner VARCHAR(100)',
                     'intro TEXT',
                     'status VARCHAR(20) DEFAULT "published"',
+                    # 与 ORM Project.login_configs 对齐；缺列时由上方向现有表 ADD COLUMN
+                    'login_configs TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'user_id INT NOT NULL',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
@@ -4451,9 +4772,39 @@ def sync_database_schema():
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'adopted_at DATETIME',
                     'rejected_at DATETIME',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)'
+                    'operator_id INT',
+                    'FOREIGN KEY (project_id) REFERENCES project(id)',
+                    'FOREIGN KEY (operator_id) REFERENCES user(id)'
                 ]
-            }
+            },
+            'agent_tasks': {
+                'columns': [
+                    'id VARCHAR(36) PRIMARY KEY',
+                    'name VARCHAR(100) NOT NULL',
+                    'status VARCHAR(20) NOT NULL DEFAULT "pending"',
+                    'params TEXT',
+                    'result TEXT',
+                    'error TEXT',
+                    'dependencies TEXT',
+                    'session_id VARCHAR(64)',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'started_at DATETIME',
+                    'finished_at DATETIME',
+                ]
+            },
+            'terminal_audit': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTO_INCREMENT',
+                    'user_id INT NOT NULL',
+                    'project_id INT',
+                    'event_type VARCHAR(40) NOT NULL',
+                    'client_session_id VARCHAR(64)',
+                    'detail TEXT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'FOREIGN KEY (user_id) REFERENCES user(id)',
+                    'FOREIGN KEY (project_id) REFERENCES project(id)',
+                ]
+            },
         }
         
         # 检查并创建/更新每个表
@@ -4491,9 +4842,13 @@ def sync_database_schema():
         
         # 先清理 diff_review_state 历史脏数据（同记录多条状态），再建索引
         cleanup_diff_review_duplicates()
+        # 旧数据 operator_id 为空时回填为指定用户（默认 id=33）
+        backfill_diff_review_legacy_operator(33)
 
         # 创建性能优化索引
         create_performance_indexes()
+
+        reset_agent_tasks_stuck_running()
         
         # 创建测试用户（如果不存在）
         test_user = User.query.filter_by(email='test@example.com').first()
@@ -4532,6 +4887,28 @@ def sync_database_schema():
         db.session.rollback()
         return False
 
+def reset_agent_tasks_stuck_running():
+    """进程重启后：将 agent_tasks 中 running 重置为 pending，便于调度器重新领取（需求 6.5）。"""
+    try:
+        if not inspect(db.engine).has_table('agent_tasks'):
+            return
+        n = (
+            AgentTask.query.filter(AgentTask.status == 'running')
+            .update(
+                {'status': 'pending', 'started_at': None},
+                synchronize_session=False,
+            )
+        )
+        if n:
+            db.session.commit()
+            print(f"[AGENT_TASK] 已将 {n} 条 running 任务重置为 pending")
+        else:
+            db.session.commit()
+    except Exception as e:
+        print(f"[AGENT_TASK] running→pending 重置失败: {e}")
+        db.session.rollback()
+
+
 def cleanup_diff_review_duplicates():
     """清理 diff_review_state 脏数据：同 (project_id,target,target_id) 仅保留最新一条。"""
     try:
@@ -4565,6 +4942,30 @@ def cleanup_diff_review_duplicates():
     except Exception as e:
         print(f"[DIFF-CLEANUP] 清理失败: {e}")
         db.session.rollback()
+
+
+def backfill_diff_review_legacy_operator(default_user_id=33):
+    """历史 diff_review_state.operator_id 为 NULL 时回填为指定用户 id（默认 33）。"""
+    try:
+        if not inspect(db.engine).has_table('diff_review_state'):
+            return
+        cols = [c['name'] for c in inspect(db.engine).get_columns('diff_review_state')]
+        if 'operator_id' not in cols:
+            return
+        if db.session.get(User, default_user_id) is None:
+            print(f"[DIFF-BACKFILL] 用户 id={default_user_id} 不存在，跳过 operator_id 回填")
+            return
+        res = db.session.execute(
+            text('UPDATE diff_review_state SET operator_id = :uid WHERE operator_id IS NULL'),
+            {'uid': default_user_id},
+        )
+        db.session.commit()
+        n = getattr(res, 'rowcount', None)
+        if n is not None and n > 0:
+            print(f'[DIFF-BACKFILL] 已将 {n} 条 operator_id 为空的记录回填为 user_id={default_user_id}')
+    except Exception as e:
+        db.session.rollback()
+        print(f'[DIFF-BACKFILL] 回填失败: {e}')
 
 
 def create_performance_indexes():
@@ -4636,7 +5037,13 @@ def create_performance_indexes():
             ("idx_diff_review_project_target", "CREATE INDEX idx_diff_review_project_target ON diff_review_state(project_id, target, target_id)"),
             ("idx_diff_review_project_status", "CREATE INDEX idx_diff_review_project_status ON diff_review_state(project_id, status)"),
             ("idx_diff_review_plan", "CREATE INDEX idx_diff_review_plan ON diff_review_state(project_id, plan_id)"),
-            ("unique_diff_review_record", "CREATE UNIQUE INDEX unique_diff_review_record ON diff_review_state(project_id, target, target_id)")
+            ("unique_diff_review_record", "CREATE UNIQUE INDEX unique_diff_review_record ON diff_review_state(project_id, target, target_id)"),
+
+            # 聊天历史：按会话分页取最新（GET /api/chat-sessions/:id?limit&before_id）
+            # 关键查询形态：WHERE session_id=? AND id<? ORDER BY id DESC LIMIT ?
+            ("idx_chat_message_session_id_id", "CREATE INDEX idx_chat_message_session_id_id ON chat_message(session_id, id)"),
+            # 兼容旧路径（按时间排序/统计）
+            ("idx_chat_message_session_created", "CREATE INDEX idx_chat_message_session_created ON chat_message(session_id, created_at)"),
         ]
         
         # 执行索引创建
@@ -4975,6 +5382,45 @@ def api_pin_plan(plan_id):
         print(f"置顶计划失败: {e}")
         return jsonify({'success': False, 'error': '置顶计划失败'}), 500
 
+
+def _plan_api_status_and_type(plan_status):
+    """计划列表 API：把库里任意 status 归一为前端侧边栏可用的 status + status_type。
+    旧逻辑只有 status=='active' 才算进行中，MySQL/迁移后常见 draft、pending、空串等，会被标成 unplanned，
+    导致「进行中计划」整组为空；归档类状态统一归为 archived。"""
+    if plan_status is None:
+        return 'active', 'in_progress'
+    s = str(plan_status).strip()
+    if not s:
+        return 'active', 'in_progress'
+    sl = s.lower()
+    archived = frozenset(
+        {'archived', 'completed', 'finished', 'done', 'closed', 'cancelled', 'canceled'}
+    )
+    if sl in archived:
+        return s, 'archived'
+    ongoing = frozenset(
+        {
+            'active',
+            'in_progress',
+            'running',
+            'open',
+            'doing',
+            'draft',
+            'pending',
+            'new',
+            'todo',
+            'processing',
+            'ongoing',
+        }
+    )
+    if sl in ongoing:
+        return s, 'in_progress'
+    if s in ('进行中', '未归档'):
+        return 'active', 'in_progress'
+    # 未知字符串：默认归为进行中，避免侧边栏空白（可按需在后端数据修正）
+    return s, 'in_progress'
+
+
 @app.route('/api/projects/<int:project_id>/plans', methods=['GET'])
 @login_required
 def api_get_project_plans(project_id):
@@ -5060,9 +5506,16 @@ def api_get_project_plans(project_id):
 
         def _sort_key(p: Plan):
             # 置顶优先，其次创建时间倒序（与原接口保持一致）
+            # Windows 下 datetime.timestamp() 对极端日期可能抛 OSError([Errno 22] Invalid argument)
             pinned = 1 if getattr(p, "is_pinned", False) else 0
             created = getattr(p, "created_at", None)
-            return (-pinned, -(created.timestamp() if created else 0))
+            ts = 0
+            if created:
+                try:
+                    ts = int(created.timestamp())
+                except Exception:
+                    ts = 0
+            return (-pinned, -ts)
 
         def build_plan_tree(plan: Plan):
             """递归构建计划树（children 从 children_map 取）；数量含自身+所有子计划"""
@@ -5078,8 +5531,7 @@ def api_get_project_plans(project_id):
                 bc += c.get('badcase_count', 0)
                 bug += c.get('bug_count', 0)
                 tc += c.get('test_case_count', 0)
-            st = plan.status or 'active'
-            st_type = 'in_progress' if st == 'active' else ('archived' if st == 'archived' else 'unplanned')
+            st, st_type = _plan_api_status_and_type(plan.status)
             return {
                 'id': plan.id,
                 'name': plan.name,
@@ -5148,8 +5600,8 @@ def api_get_project_plans(project_id):
         
     except Exception as e:
         import traceback
-        print(f"获取项目计划失败: {e}")
-        print(f"错误详情: {traceback.format_exc()}")
+        print(f"获取项目计划失败: {e}", flush=True)
+        print(f"错误详情: {traceback.format_exc()}", flush=True)
         return jsonify({'success': False, 'error': f'获取项目计划失败: {str(e)}'}), 500
 
     # 团队管理API接口
@@ -6222,6 +6674,7 @@ def api_create_chat_session(project_id):
 def api_get_chat_session(session_id):
     """获取会话详情"""
     try:
+        t_total0 = time.perf_counter()
         session = ChatSession.query.get(session_id)
         if not session:
             return jsonify({'success': False, 'error': '会话不存在'}), 404
@@ -6230,26 +6683,110 @@ def api_get_chat_session(session_id):
         if session.user_id != current_user.id:
             return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
         
-        # 获取消息
+        limit = request.args.get('limit', type=int)
+        before_id = request.args.get('before_id', type=int)
+        lite = request.args.get('lite') in ('1', 'true', 'yes')
+        lim = min(max(int(limit or 0), 0), 200)
+
+        # tail 模式：只取需要的列，避免 ORM 实体构造 + 不必要字段加载
+        t0 = time.perf_counter()
+        if lite:
+            q = db.session.query(
+                ChatMessage.id,
+                ChatMessage.is_user,
+                ChatMessage.content,
+                ChatMessage.final_response,
+                ChatMessage.created_at,
+            ).filter(ChatMessage.session_id == session_id)
+        else:
+            q = db.session.query(
+                ChatMessage.id,
+                ChatMessage.is_user,
+                ChatMessage.content,
+                ChatMessage.understanding,
+                ChatMessage.reasoning,
+                ChatMessage.steps,
+                ChatMessage.execution_results,
+                ChatMessage.agent_result,
+                ChatMessage.evidences,
+                ChatMessage.navigation,
+                ChatMessage.modify_navigation,
+                ChatMessage.modify_groups,
+                ChatMessage.final_response,
+                ChatMessage.created_at,
+            ).filter(ChatMessage.session_id == session_id)
+        if before_id:
+            q = q.filter(ChatMessage.id < before_id)
+        q = q.order_by(ChatMessage.id.desc())
+        if lim:
+            q = q.limit(lim)
+        msg_rows_desc = q.all()
+        t_sql = (time.perf_counter() - t0) * 1000
+        msg_rows = list(reversed(msg_rows_desc))
+        include_memory = request.args.get('include_memory') in ('1', 'true', 'yes')
+        t0 = time.perf_counter()
         messages = []
-        for msg in session.messages:
-            messages.append({
-                'id': msg.id,
-                'is_user': msg.is_user,
-                'content': msg.content,
-                'understanding': msg.understanding,
-                'reasoning': msg.reasoning,
-                'steps': msg.steps,
-                'execution_results': msg.execution_results,
-                'agent_result': msg.agent_result,
-                'evidences': msg.evidences,
-                'navigation': msg.navigation,
-                'modify_navigation': msg.modify_navigation,
-                'modify_groups': msg.modify_groups,  # 添加 modify_groups
-                'final_response': msg.final_response,
-                'created_at': msg.created_at.isoformat()
-            })
+        if lite:
+            # lite：只返回渲染“最新一屏”所需字段，避免无意义的 null 键占用 payload
+            for (mid, is_user, content, final_response, created_at) in msg_rows:
+                messages.append({
+                    'id': mid,
+                    'is_user': is_user,
+                    'content': content,
+                    'final_response': final_response,
+                    'created_at': created_at.isoformat() if created_at else None
+                })
+        else:
+            for (
+                mid,
+                is_user,
+                content,
+                understanding,
+                reasoning,
+                steps,
+                execution_results,
+                agent_result,
+                evidences,
+                navigation,
+                modify_navigation,
+                modify_groups,
+                final_response,
+                created_at,
+            ) in msg_rows:
+                messages.append({
+                    'id': mid,
+                    'is_user': is_user,
+                    'content': content,
+                    'understanding': understanding,
+                    'reasoning': reasoning,
+                    'steps': steps,
+                    'execution_results': execution_results,
+                    'agent_result': agent_result,
+                    'evidences': evidences,
+                    'navigation': navigation,
+                    'modify_navigation': modify_navigation,
+                    'modify_groups': modify_groups,  # 添加 modify_groups
+                    'final_response': final_response,
+                    'created_at': created_at.isoformat() if created_at else None
+                })
+        t_build = (time.perf_counter() - t0) * 1000
         
+        has_more = False
+        next_before_id = None
+        if lim and msg_rows_desc:
+            # 若本次取到了 limit 条，认为可能还有更早数据（前端滚动到顶再请求验证）
+            has_more = len(msg_rows_desc) >= lim
+            # msg_rows 已反转为正序；第一个就是“当前最早”
+            next_before_id = int(messages[0]['id']) if messages else int(msg_rows_desc[-1][0])
+
+        try:
+            print(
+                f"[PERF] GET /api/chat-sessions/{session_id} sql={t_sql:.1f}ms build={t_build:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms rows={len(messages)} lim={lim} before_id={before_id} lite={1 if lite else 0}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
         return jsonify({
             'success': True,
             'session': {
@@ -6257,10 +6794,13 @@ def api_get_chat_session(session_id):
                 'title': session.title,
                 'is_active': session.is_active,
                 'memory_enabled': session.memory_enabled,
-                'memory_data': session.memory_data,
+                # 默认不返回大块 memory_data，减轻 JSON 体积与前端 parse 耗时；需要时 GET ?include_memory=1
+                'memory_data': (session.memory_data if include_memory else None),
                 'created_at': session.created_at.isoformat(),
                 'updated_at': session.updated_at.isoformat(),
-                'messages': messages
+                'messages': messages,
+                'has_more': has_more,
+                'next_before_id': next_before_id
             }
         })
         
@@ -6538,10 +7078,14 @@ if __name__ == '__main__':
     else:
         print("❌ Redis初始化失败，缓存功能将不可用")
 
-    # 开发热重载：默认开启（修改 .py 后自动重启子进程）。关闭：FLASK_DEBUG=0 或 FLASK_ENV=production
+    # 开发热重载：默认开启（修改 .py 后自动重启子进程）。
+    # 但在 PERF_LOG=1 性能定位场景下强制关闭，避免 reloader 分裂出父/子多进程抢占端口导致请求落到“旧进程”。
+    # 关闭：FLASK_DEBUG=0 或 FLASK_ENV=production
     _fd = os.getenv("FLASK_DEBUG", "1").strip().lower()
     _use_reload = _fd not in ("0", "false", "no", "off", "")
     if os.getenv("FLASK_ENV", "").strip().lower() == "production":
+        _use_reload = False
+    if os.getenv("PERF_LOG", "").strip() == "1":
         _use_reload = False
     try:
         _port = int(os.getenv("PORT", "5000") or "5000")
@@ -6553,4 +7097,12 @@ if __name__ == '__main__':
     else:
         print("ℹ️ 热重载已关闭（FLASK_DEBUG=0 或 FLASK_ENV=production）")
 
-    app.run(debug=_use_reload, use_reloader=_use_reload, host=_host, port=_port)
+    # Socket.IO 与嵌入式终端：使用 socketio.run（threading 模式）
+    socketio.run(
+        app,
+        debug=_use_reload,
+        use_reloader=_use_reload,
+        host=_host,
+        port=_port,
+        allow_unsafe_werkzeug=True,
+    )

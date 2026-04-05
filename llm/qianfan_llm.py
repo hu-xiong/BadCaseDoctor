@@ -121,6 +121,165 @@ class QianfanLLM:
         else:
             return f"Error: {response.text}"
 
+    async def chat_completion_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: Any = "auto",
+        parallel_tool_calls: bool = False,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        千帆 v2 OpenAI 兼容接口：非流式，携带 tools / tool_choice / parallel_tool_calls。
+        返回 choices[0].message 字典（含 content、tool_calls 等）。
+        """
+        url = "https://qianfan.baidubce.com/v2/chat/completions"
+        model_to_use = self.model
+        if getattr(self, "force_disable_thinking", False) and isinstance(
+            model_to_use, str
+        ) and model_to_use.lower().startswith("ernie-x1"):
+            model_to_use = "ernie-4.5-turbo-128k"
+
+        payload: Dict[str, Any] = {
+            "model": model_to_use,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel_tool_calls,
+            "temperature": Config.QIANFAN_TEMPERATURE,
+            "top_p": Config.QIANFAN_TOP_P,
+            "stream": False,
+        }
+        if max_tokens is not None and max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        def _do_request():
+            timeout = (
+                float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+                float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+            )
+            return get_session().request(
+                "POST", url, headers=headers, json=payload, timeout=timeout
+            )
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _do_request)
+        if response.status_code != 200:
+            raise RuntimeError(response.text or f"HTTP {response.status_code}")
+        res_json = response.json()
+        choices = res_json.get("choices") or []
+        if not choices:
+            return {}
+        msg = (choices[0] or {}).get("message") or {}
+        return msg if isinstance(msg, dict) else {}
+
+    def chat_completion_with_tools_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: Any = "auto",
+        parallel_tool_calls: bool = False,
+        max_tokens: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        千帆 v2 流式 FC：SSE data 行解析为与 OpenAI 兼容的整包 JSON（choices[0].delta）。
+        """
+        url = "https://qianfan.baidubce.com/v2/chat/completions"
+        model_to_use = self.model
+        if getattr(self, "force_disable_thinking", False) and isinstance(
+            model_to_use, str
+        ) and model_to_use.lower().startswith("ernie-x1"):
+            model_to_use = "ernie-4.5-turbo-128k"
+
+        payload: Dict[str, Any] = {
+            "model": model_to_use,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel_tool_calls,
+            "temperature": Config.QIANFAN_TEMPERATURE,
+            "top_p": Config.QIANFAN_TOP_P,
+            "stream": True,
+        }
+        if max_tokens is not None and max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        timeout = (
+            float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+            float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+        )
+        with get_session().post(
+            url, headers=headers, json=payload, stream=True, timeout=timeout
+        ) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(resp.text or f"HTTP {resp.status_code}")
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                s = line.strip()
+                if not s.startswith("data:"):
+                    continue
+                data = s[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    j = json.loads(data)
+                except Exception:
+                    continue
+                if isinstance(j, dict):
+                    yield j
+
+    async def chat_completion_messages(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """v2 非流式，仅 messages（第二轮 FC / 观察续写，不传 tools）。"""
+        url = "https://qianfan.baidubce.com/v2/chat/completions"
+        model_to_use = self.model
+        if getattr(self, "force_disable_thinking", False) and isinstance(
+            model_to_use, str
+        ) and model_to_use.lower().startswith("ernie-x1"):
+            model_to_use = "ernie-4.5-turbo-128k"
+        payload: Dict[str, Any] = {
+            "model": model_to_use,
+            "messages": messages,
+            "temperature": Config.QIANFAN_TEMPERATURE,
+            "top_p": Config.QIANFAN_TOP_P,
+            "stream": False,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        def _do_request():
+            timeout = (
+                float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+                float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
+            )
+            return get_session().request(
+                "POST", url, headers=headers, json=payload, timeout=timeout
+            )
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _do_request)
+        if response.status_code != 200:
+            raise RuntimeError(response.text or f"HTTP {response.status_code}")
+        res_json = response.json()
+        choices = res_json.get("choices") or []
+        if not choices:
+            return {}
+        msg = (choices[0] or {}).get("message") or {}
+        return msg if isinstance(msg, dict) else {}
+
     async def chat_with_reasoning(self, prompt: str, history: list = None) -> Dict[str, Any]:
         """
         返回整段结果；实现上只复用 chat_stream_with_reasoning 的流式 SSE，再汇总，
@@ -166,8 +325,14 @@ class QianfanLLM:
                 messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
         messages.append({"role": "user", "content": prompt})
 
+        model_to_use = self.model
+        if getattr(self, "force_disable_thinking", False) and isinstance(
+            model_to_use, str
+        ) and model_to_use.lower().startswith("ernie-x1"):
+            model_to_use = "ernie-4.5-turbo-128k"
+
         payload = {
-            "model": self.model,
+            "model": model_to_use,
             "messages": messages,
             "temperature": Config.QIANFAN_TEMPERATURE,
             "top_p": Config.QIANFAN_TOP_P,
@@ -279,10 +444,19 @@ class QianfanLLM:
         yield {"type": "done"}
 
     def chat_stream(self, prompt: str, history: list = None, locale: Optional[str] = None):
-        """流式对话"""
+        """
+        流式对话：与 Qwen/Zhipu 一致逐段 yield 正文字符串。
+        复用 chat_stream_with_reasoning 的 SSE，只转发 content_delta（不透出 reasoning）。
+        """
         from agents.locale_prompts import wrap_general_user_prompt
 
-        prompt = wrap_general_user_prompt(prompt, locale)
-        # 这里简化为非流式，因为 requests 处理流式比较麻烦，且后端桥接需要稳定
-        result = asyncio.run(self.chat(prompt, history))
-        yield result
+        p = wrap_general_user_prompt(prompt, locale)
+        for item in self.chat_stream_with_reasoning(p, history):
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "reasoning_delta":
+                continue
+            if item.get("type") == "content_delta":
+                d = item.get("delta") or ""
+                if isinstance(d, str) and d:
+                    yield d

@@ -564,8 +564,9 @@
             :is="mainEditorComponent"
             :key="mainEditorCacheKey"
             :project_id="projectId"
+            :plan_id="mainEditorPlanId"
             :id="mainEditorItemId"
-            :edit="true"
+            :edit="mainEditorEdit"
             :show_diff="mainEditorShowDiff"
             :embedded="true"
             @close="closeMainEditor"
@@ -600,8 +601,8 @@
           :toggleDetailExpand="toggleDetailExpand"
           :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
           :getConsecutiveGroupSize="getConsecutiveGroupSize"
-          :confirmConsecutiveGroup="confirmConsecutiveGroup"
-          :cancelConsecutiveGroup="cancelConsecutiveGroup"
+          :confirmModify="confirmConsecutiveGroup"
+          :cancelModify="cancelConsecutiveGroup"
           :confirmCreate="confirmCreate"
           :cancelCreate="cancelCreate"
           :getBadcaseStatusText="getBadcaseStatusText"
@@ -617,18 +618,17 @@
           'with-collapsed-sidebar': !leftSidebarHidden && planCollapsed
         }" :style="{ 
           height: bottomPanelHeight + 'px',
+          right: showAIAssistant ? rightSidebarWidth + 'px' : '0px',
           zIndex: 100
         }">
           <!-- 拖拽手柄 -->
           <div class="drag-handle-horizontal" @mousedown="startDragBottomPanel"></div>
           
-          <div class="panel-tabs">
-            <div class="tab-item active">Terminal</div>
-            <div class="tab-item">Output</div>
-          </div>
           <div class="panel-content">
-            <!-- 使用XTerminal组件 -->
-            <XTerminal />
+            <EmbeddedTerminalWorkspace
+              :working-directory="currentWorkingDir"
+              :project-id="projectId"
+            />
           </div>
         </div>
       </div>
@@ -1073,14 +1073,14 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, provide } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { persistLocale } from '../i18n/index.js'
 import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
 import { getBadCaseStatusText } from '../constants/status.js'
 import TeamManagement from './TeamManagement.vue'
-import XTerminal from './XTerminal.vue'
+import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
 import UserProfile from './UserProfile.vue'
 import ProjectWorkspaceShell from './ProjectWorkspaceShell.vue'
@@ -1117,7 +1117,7 @@ export default {
     BugListPanel,
     TestCaseListPanel,
     TeamManagement,
-    XTerminal,
+    EmbeddedTerminalWorkspace,
     SimpleChatPanel,
     UserProfile
   },
@@ -1125,12 +1125,12 @@ export default {
     const router = useRouter()
     const route = useRoute()
     const { t, locale } = useI18n()
-    
+
     // 项目信息
     const projectName = ref('')
     const projectId = ref(null)
-    // 工作目录（保留用于Terminal组件）
-    const currentWorkingDir = ref('/Users/v_huxiong/Documents/PythonProject/baidu/war-wolf/BadCaseDoctor')
+    // 嵌入式终端初始 cwd：空则后端在进程默认目录下开 shell（勿写死他人机器路径）
+    const currentWorkingDir = ref('')
     // 搜索和过滤
     const planSearchText = ref('')
     const showOnlyMine = ref(false)
@@ -1276,12 +1276,65 @@ export default {
     // 布局控制状态
     const showTerminal = ref(false)
     const showAIAssistant = ref(false)
+
+    const terminalCtl = ref(null)
+    provide('terminalCtl', terminalCtl)
+    const chatComposerPreset = ref({ token: 0, text: '' })
+    provide('chatComposerPreset', chatComposerPreset)
+
+    const badcaseDraftPreset = ref({ token: 0, description: '' })
+    provide('badcaseDraftPreset', badcaseDraftPreset)
+
+    /** 打开项目时拉取最近长期记忆，随每条 ReAct 请求传入（不在每条对话后端 embed） */
+    const projectLongMemoryContext = ref(null)
+    provide('projectLongMemoryContext', projectLongMemoryContext)
+
+    const loadProjectLongMemoryBootstrap = async () => {
+      const pid = projectId.value
+      if (pid == null || pid === '') {
+        projectLongMemoryContext.value = null
+        return
+      }
+      try {
+        const r = await fetch(`${BACKEND_BASE_URL}/api/memory/retrieve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            query: '',
+            project_id: Number(pid),
+            mode: 'recent'
+          })
+        })
+        const j = await r.json().catch(() => ({}))
+        if (j?.code === 200 && j?.data) {
+          const merged = String(j.data.merged || '').trim()
+          const memories = j.data.memories || []
+          if (merged || (Array.isArray(memories) && memories.length)) {
+            projectLongMemoryContext.value = {
+              long_memory_text: merged,
+              long_memory_items: memories
+            }
+          } else {
+            projectLongMemoryContext.value = null
+          }
+        } else {
+          projectLongMemoryContext.value = null
+        }
+      } catch (e) {
+        console.warn('[long-memory] project bootstrap failed', e)
+        projectLongMemoryContext.value = null
+      }
+    }
+
     const leftSidebarHidden = ref(false)
     
     // 主区域挂载 Editor（用于替代 overlay 的一种模式）
     const showMainEditor = ref(false)
     const mainEditorComponent = ref(null)
     const mainEditorItemId = ref(null)
+    const mainEditorEdit = ref(true)
+    const mainEditorPlanId = ref(null)
     const mainEditorShowDiff = ref(false)
     /** 嵌入详情：badcase | bug | test_case，与 mainEditorItemId 组成稳定 keep-alive 键 */
     const embeddedEditorKind = ref('badcase')
@@ -1289,8 +1342,13 @@ export default {
     /** 详情区 keep-alive：同一实体 Tab 切换时复用实例，避免反复挂载与 mainEditorKey 强刷 */
     const mainEditorCacheKey = computed(() => {
       const id = mainEditorItemId.value
-      if (id == null || id === '') return 'detail-empty'
-      return `detail-${embeddedEditorKind.value}-${id}-${mainEditorShowDiff.value ? '1' : '0'}`
+      const editFlag = mainEditorEdit.value ? '1' : '0'
+      const diffFlag = mainEditorShowDiff.value ? '1' : '0'
+      const pid = mainEditorPlanId.value == null ? 'na' : String(mainEditorPlanId.value)
+      if (id == null || id === '') {
+        return `editor-${embeddedEditorKind.value}-create-${pid}-${editFlag}-${diffFlag}`
+      }
+      return `editor-${embeddedEditorKind.value}-detail-${id}-${pid}-${editFlag}-${diffFlag}`
     })
 
     /** Cursor 式工作区：计划列表 / 未计划 / 详情 各为一个 Tab，标题为短名 */
@@ -1360,6 +1418,8 @@ export default {
     const badcasePerPage = ref(20)
     const totalBadcases = ref(0)
     const pendingModifications = ref({}) // 存储待确认的修改
+    /** 须在 restorePendingDiffReviews 之前声明：route watch immediate 会立刻恢复 diff，避免 TDZ */
+    const highlightRowId = ref(null) // 高亮的列表行，用于滚动&样式
     const pendingCreates = ref([]) // 存储待确认的新建（无 before diff）
     const processedCreateKeyMap = reactive({})
     const createdIdByCreateKey = reactive({})
@@ -1520,6 +1580,16 @@ export default {
       LABEL_TO_FIELD[label] = key
     })
     LABEL_TO_FIELD['期望结果'] = 'expected_result' // 常见说法
+    ;['Owner', 'owner', 'Assignee', 'assignee'].forEach((k) => {
+      LABEL_TO_FIELD[k] = 'assignee'
+    })
+
+    /** diff 行字段名归一化：与 modify 工具、列表 LIST_FIELDS 对齐，避免仅英文标签时误判为「详情字段」而只打开详情、不展示列表行内 diff */
+    const normalizeDiffFieldKey = (rawField) => {
+      const raw = rawField ?? ''
+      const mapped = LABEL_TO_FIELD[raw] || raw
+      return mapped === 'assignee_id' ? 'assignee' : mapped
+    }
 
     // 列表字段（在表格列中即可直接看到/编辑的字段）
     const LIST_FIELDS = [
@@ -1565,13 +1635,26 @@ export default {
     })
     
     const planMatchesInProgress = (plan) => {
+      if (plan.status_type === 'archived') return false
+      const st = String(plan.status ?? '').toLowerCase()
+      if (['archived', 'completed', 'finished', 'done', 'closed', 'cancelled', 'canceled'].includes(st)) {
+        return false
+      }
+      // 旧接口：非 active 常被标成 status_type=unplanned，但 status 实为 draft/pending 等，应出现在「进行中」
+      const legacyUnplannedButOngoing =
+        plan.status_type === 'unplanned' &&
+        st &&
+        !['unplanned', 'new'].includes(st)
       return (
         plan.status_type === 'in_progress' ||
+        legacyUnplannedButOngoing ||
         plan.status === 'active' ||
         plan.status === 'in_progress' ||
         plan.status === 'running' ||
         plan.status === 'open' ||
-        plan.status === 'doing'
+        plan.status === 'doing' ||
+        plan.status === 'draft' ||
+        plan.status === 'pending'
       )
     }
 
@@ -1610,12 +1693,20 @@ export default {
     
     const unplannedPlans = computed(() => {
       // 兼容更多可能的状态值，包括新创建和待处理状态
-      const plans = projectPlans.value.filter(plan => 
-        (plan.status_type === 'unplanned') || 
-        (plan.status === 'unplanned') || 
-        (plan.status === 'new') ||
-        (!plan.status && !plan.status_type)
-      )
+      const plans = projectPlans.value.filter(plan => {
+        const st = String(plan.status ?? '').toLowerCase()
+        const mistypedUnplanned =
+          plan.status_type === 'unplanned' &&
+          st &&
+          !['unplanned', 'new'].includes(st)
+        if (mistypedUnplanned) return false
+        return (
+          (plan.status_type === 'unplanned') ||
+          (plan.status === 'unplanned') ||
+          (plan.status === 'new') ||
+          (!plan.status && !plan.status_type)
+        )
+      })
 
       // 去重逻辑：针对名称为“未计划BadCase”的自动创建计划，只保留第一个
       const seenUnplannedSystemPlan = new Set()
@@ -1766,7 +1857,7 @@ export default {
     }) => {
       try {
         if (!projectId.value || targetId == null) return
-        await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/diff-reviews/upsert`, {
+        const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/diff-reviews/upsert`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -1780,6 +1871,10 @@ export default {
             session_id: currentSession.value ?? null
           })
         })
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => '')
+          console.warn('[DIFF] upsert pending 非成功:', resp.status, txt?.slice?.(0, 500) || txt)
+        }
       } catch (e) {
         console.warn('[DIFF] upsert pending 失败(忽略不阻断):', e)
       }
@@ -1820,21 +1915,82 @@ export default {
         if (!resp.ok) return
         const data = await resp.json()
         const items = Array.isArray(data?.items) ? data.items : []
-        if (!items.length) return
-        const batchItems = items.map((it) => ({
-          targetId: Number(it.target_id),
-          target: normalizeDiffTargetForApi(it.target),
-          diff: Array.isArray(it.diff) ? it.diff : [],
-          modifications: it.modifications && typeof it.modifications === 'object' ? it.modifications : {},
-          plan_id: it.plan_id ?? null,
-          executed: false,
-          messageId: it.message_id ?? null,
-          batchIndex: 0,
-          peerTargetIds: [Number(it.target_id)],
-          suppressAutoOpenDetail: true
-        })).filter((x) => Number.isFinite(x.targetId) && x.targetId > 0)
-        if (!batchItems.length) return
+
+        const clearModifyDiffMemory = () => {
+          if (Object.keys(pendingModifications.value).length > 0) {
+            pendingModifications.value = {}
+          }
+          if (highlightRowId.value != null) {
+            highlightRowId.value = null
+          }
+          try {
+            sessionStorage.removeItem('pendingModifyDiff')
+          } catch (_e) {
+            /* ignore */
+          }
+        }
+
+        // 持久化无当前用户可见的待采纳/rejected：清空列表 modify 黄条内存，避免 SPA 长驻与 DB 脱钩
+        if (!items.length) {
+          clearModifyDiffMemory()
+          return
+        }
+
+        const batchItems = items
+          .map((it) => ({
+            targetId: Number(it.target_id),
+            target: normalizeDiffTargetForApi(it.target),
+            diff: Array.isArray(it.diff) ? it.diff : [],
+            modifications: it.modifications && typeof it.modifications === 'object' ? it.modifications : {},
+            plan_id: it.plan_id ?? null,
+            executed: false,
+            messageId: it.message_id ?? null,
+            batchIndex: 0,
+            peerTargetIds: [Number(it.target_id)],
+            suppressAutoOpenDetail: true
+          }))
+          .filter((x) => Number.isFinite(x.targetId) && x.targetId > 0)
+        if (!batchItems.length) {
+          clearModifyDiffMemory()
+          return
+        }
+
         await handleShowModifyInList({ detail: { __modifyListBatch: true, items: batchItems } })
+
+        // 以本次 GET 为权威：删掉内存里不在返回集合中的 target_id（他处已采纳/拒绝后本地残留）
+        const allowed = new Set(batchItems.map((x) => x.targetId))
+        const next = { ...pendingModifications.value }
+        let changed = false
+        for (const k of Object.keys(next)) {
+          const id = Number(k)
+          if (!Number.isFinite(id)) continue
+          if (!allowed.has(id)) {
+            delete next[k]
+            changed = true
+          }
+        }
+        if (changed) {
+          pendingModifications.value = next
+        }
+        if (highlightRowId.value != null && !allowed.has(Number(highlightRowId.value))) {
+          highlightRowId.value = null
+        }
+        try {
+          const raw = sessionStorage.getItem('pendingModifyDiff')
+          if (raw) {
+            const o = JSON.parse(raw)
+            const tid = o && o.targetId != null ? Number(o.targetId) : NaN
+            if (Number.isFinite(tid) && !allowed.has(tid)) {
+              sessionStorage.removeItem('pendingModifyDiff')
+            }
+          }
+        } catch (_e) {
+          try {
+            sessionStorage.removeItem('pendingModifyDiff')
+          } catch (__e) {
+            /* ignore */
+          }
+        }
       } catch (e) {
         console.warn('[DIFF] 恢复 pending 失败(忽略不阻断):', e)
       }
@@ -2067,7 +2223,40 @@ export default {
         alert(t('project.sessionCreateError'))
       }
     }
-    
+
+    async function openAiComposerPrefill(text) {
+      showAIAssistant.value = true
+      if (!currentSession.value) {
+        await createNewSession()
+      }
+      await nextTick()
+      chatComposerPreset.value = { token: Date.now(), text: String(text || '') }
+    }
+    provide('openAiComposerPrefill', openAiComposerPrefill)
+
+    async function openDiagnosticTerminal(opts) {
+      showTerminal.value = true
+      showAIAssistant.value = true
+      const text = opts && opts.aiText != null ? String(opts.aiText) : ''
+      if (!currentSession.value) {
+        await createNewSession()
+      }
+      await nextTick()
+      chatComposerPreset.value = { token: Date.now(), text }
+    }
+    provide('openDiagnosticTerminal', openDiagnosticTerminal)
+
+    watch(
+      () => route.query.terminal_cmd,
+      async (cmd) => {
+        if (cmd == null || cmd === '') return
+        showTerminal.value = true
+        showAIAssistant.value = true
+        await openAiComposerPrefill(String(cmd))
+      },
+      { immediate: true }
+    )
+
     const closeSessionTab = (sessionId) => {
       // 这里的逻辑改为关闭右侧面板
       setLayout('left')
@@ -2323,6 +2512,8 @@ export default {
       showMainEditor.value = false
       mainEditorComponent.value = null
       mainEditorItemId.value = null
+      mainEditorEdit.value = true
+      mainEditorPlanId.value = null
       mainEditorShowDiff.value = false
     }
 
@@ -2359,7 +2550,7 @@ export default {
       }
     }
 
-    const mountEditorComponents = (itemId, editorPlanType, showDiff) => {
+    const mountEditorComponents = (itemId, editorPlanType, showDiff, edit = true, planId = null) => {
       if (editorPlanType === 'bug') {
         mainEditorComponent.value = NewBug
       } else if (editorPlanType === 'test_case') {
@@ -2369,6 +2560,8 @@ export default {
       }
       embeddedEditorKind.value = editorPlanType
       mainEditorItemId.value = itemId
+      mainEditorEdit.value = !!edit
+      mainEditorPlanId.value = planId
       mainEditorShowDiff.value = showDiff
       showMainEditor.value = true
     }
@@ -3032,7 +3225,12 @@ export default {
       activeWorkbenchTabId.value = tabId
       if (tab.kind === 'detail') {
         const { entityId, editorPlanType, showDiff } = tab.meta || {}
-        mountEditorComponents(entityId, editorPlanType, !!showDiff)
+        mountEditorComponents(entityId, editorPlanType, !!showDiff, true, null)
+        return
+      }
+      if (tab.kind === 'create') {
+        const { editorPlanType, planId } = tab.meta || {}
+        mountEditorComponents(null, editorPlanType, false, false, planId ?? null)
         return
       }
       clearEmbeddedEditor()
@@ -3267,22 +3465,14 @@ export default {
     }
     
     const createNewBadcase = () => {
-      // 根据当前计划类型决定跳转到哪个路由
-      let basePath = '/new-badcase'
-      if (currentPlanType.value === 'bug') {
-        basePath = '/new-bug'
-      } else if (currentPlanType.value === 'test_case') {
-        basePath = '/new-testcase'
-      }
-      
-      let url = `${basePath}?project_id=${projectId.value}`
-      
-      // 如果选中了具体计划，传递 plan_id
-      if (selectedPlan.value && selectedPlan.value !== 'unplanned') {
-        url += `&plan_id=${selectedPlan.value}`
-      }
-      
-      router.push(url)
+      // 新建也走工作区 Tab（不离开 ProjectDetail）
+      const pid =
+        selectedPlan.value && selectedPlan.value !== 'unplanned'
+          ? typeof selectedPlan.value === 'number'
+            ? selectedPlan.value
+            : parseInt(String(selectedPlan.value), 10)
+          : null
+      openMainCreateEditor(currentPlanType.value, Number.isFinite(pid) ? pid : null)
     }
 
     // 编辑 BadCase/Bug/TestCase（统一入口）
@@ -3300,6 +3490,7 @@ export default {
     const openMainEditor = (itemId, itemType, showDiff = false) => {
       console.log('[MAIN-EDITOR] 打开主区域编辑:', { itemId, itemType, showDiff })
       const et = mapToEditorPlanType(itemType)
+      const returnTo = activeWorkbenchTabId.value
       const tid = `detail-${et}-${itemId}`
       const row = badcases.value.find((b) => b.id == itemId)
       const title = truncateForTab(row?.title, '编辑')
@@ -3307,20 +3498,67 @@ export default {
         id: tid,
         kind: 'detail',
         title,
-        meta: { entityId: itemId, editorPlanType: et, showDiff: !!showDiff }
+        meta: { entityId: itemId, editorPlanType: et, showDiff: !!showDiff, returnTo }
       })
       activeWorkbenchTabId.value = tid
-      mountEditorComponents(itemId, et, showDiff)
+      mountEditorComponents(itemId, et, showDiff, true, null)
       console.log('[MAIN-EDITOR] 设置后 mainEditorItemId:', mainEditorItemId.value)
     }
+
+    const openMainCreateEditor = (itemType, planId = null) => {
+      const et = mapToEditorPlanType(itemType)
+      const returnTo = activeWorkbenchTabId.value
+      const pidKey = planId == null || planId === '' ? 'unplanned' : String(planId)
+      const tid = `create-${et}-${pidKey}`
+      const titleMap = {
+        badcase: '新建 BadCase',
+        bug: '新建 Bug',
+        test_case: '新建 测试用例'
+      }
+      upsertWorkbenchTab({
+        id: tid,
+        kind: 'create',
+        title: truncateForTab(titleMap[et] || '新建', '新建'),
+        meta: { editorPlanType: et, planId: planId ?? null, returnTo }
+      })
+      activeWorkbenchTabId.value = tid
+      mountEditorComponents(null, et, false, false, planId ?? null)
+    }
+
+    function openNewBadcaseFromTerminal(text) {
+      const snippet = String(text || '').trim()
+      if (!snippet) return
+      badcaseDraftPreset.value = { token: Date.now(), description: snippet.slice(0, 12000) }
+      const pid =
+        selectedPlan.value && selectedPlan.value !== 'unplanned'
+          ? typeof selectedPlan.value === 'number'
+            ? selectedPlan.value
+            : parseInt(String(selectedPlan.value), 10)
+          : null
+      openMainCreateEditor('badcase', Number.isFinite(pid) ? pid : null)
+    }
+    provide('openNewBadcaseFromTerminal', openNewBadcaseFromTerminal)
 
     const closeMainEditor = async () => {
       console.log('[MAIN-EDITOR] 关闭主区域编辑')
       const tid = activeWorkbenchTabId.value
       const tab = tid ? workbenchTabs.value.find((t) => t.id === tid) : null
-      if (tab?.kind === 'detail') {
+      if (tab?.kind === 'detail' || tab?.kind === 'create') {
+        const returnTo = tab?.meta?.returnTo
+        const canReturn =
+          returnTo &&
+          returnTo !== tid &&
+          workbenchTabs.value.some((t) => t.id === returnTo)
+
+        // 先切换 active 到来源 Tab，让 closeWorkbenchTab 走“非 active 关闭”的分支
+        if (canReturn) {
+          activeWorkbenchTabId.value = returnTo
+        }
         clearEmbeddedEditor()
         await closeWorkbenchTab(tid, null)
+        if (canReturn) {
+          await activateWorkbenchTab(returnTo)
+        }
       } else {
         clearEmbeddedEditor()
         refreshBadcases()
@@ -3332,9 +3570,10 @@ export default {
       router.push('/dashboard')
     }
     
-    // 确认修改
-    const confirmModify = async (bugId) => {
-      console.log('[MODIFY] 确认修改 Bug:', bugId)
+    // 确认修改（单条）。opts.skipRestoreFetch=true 时不在末尾 restore/拉列表，供连续组合批末尾统一执行，减少闪烁。
+    const confirmModify = async (bugId, opts = {}) => {
+      const skipRestoreFetch = opts.skipRestoreFetch === true
+      console.log('[MODIFY] 确认修改 Bug:', bugId, skipRestoreFetch ? '(batch中间步，defer restore/fetch)' : '')
       const modifyData = pendingModifications.value[bugId]
       if (!modifyData) {
         console.log('[MODIFY] 没有待修改数据')
@@ -3386,8 +3625,8 @@ export default {
       
       console.log('[MODIFY] UI 已乐观更新')
       
-      // ======== 异步发送后端请求（不阻塞 UI）========
-      fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/modify`, {
+      // 必须 await 到 resolve + restore 完成，否则连续组内多条并发会互相把对方从 diff-reviews 再次刷回列表
+      return fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/modify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',  // 携带 cookies
@@ -3399,33 +3638,33 @@ export default {
           message_id: modifyData._messageId
         })
       })
-      .then(response => response.json())
+      .then((response) => response.json())
       .then(async (result) => {
         console.log('[MODIFY] 后端修改结果:', result)
         if (result.success) {
-          await resolveDiffReviewState({
-            target: targetType,
-            targetId: bugId,
-            action: 'confirm',
-            messageId: modifyData._messageId
-          })
-          // 成功后刷新列表确保一致性
-          fetchBadcases()
-        } else {
-          // 失败时回滚 UI
-          console.error('[MODIFY] 后端修改失败，回滚 UI:', result.error)
-          if (item) {
-            for (const [field, value] of Object.entries(oldValues)) {
-              if (item.hasOwnProperty(field)) {
-                item[field] = value
-              }
+          // diff_review_state 在 POST /modify 内已同步删除，无需再 resolve confirm
+          if (!skipRestoreFetch) {
+            try {
+              await restorePendingDiffReviews()
+            } catch (e) {
+              console.warn('[DIFF] restorePendingDiffReviews 失败:', e)
+            }
+            fetchBadcases()
+          }
+          return result
+        }
+        console.error('[MODIFY] 后端修改失败，回滚 UI:', result.error)
+        if (item) {
+          for (const [field, value] of Object.entries(oldValues)) {
+            if (item.hasOwnProperty(field)) {
+              item[field] = value
             }
           }
-          // 恢复待修改标记
-          pendingModifications.value[bugId] = modifyData
         }
+        pendingModifications.value[bugId] = modifyData
+        return result
       })
-      .catch(error => {
+      .catch((error) => {
         console.error('[MODIFY] 后端请求失败，回滚 UI:', error)
         if (item) {
           for (const [field, value] of Object.entries(oldValues)) {
@@ -3434,14 +3673,121 @@ export default {
             }
           }
         }
-        // 恢复待修改标记
         pendingModifications.value[bugId] = modifyData
+        throw error
       })
     }
+
+    /** 连续多条一次 HTTP：POST /modify body.items；后端单线程顺序落库并更新 diff_review_state */
+    const confirmModifyBatch = async (groupIds) => {
+      const snapshots = []
+      for (const bugId of groupIds) {
+        const modifyData = pendingModifications.value[bugId]
+        if (!modifyData) continue
+        const modifications = {}
+        const oldValues = {}
+        for (const [field, value] of Object.entries(modifyData)) {
+          if (field === '_target' || field === '_messageId') continue
+          if (typeof value === 'object' && value !== null && 'new' in value) {
+            modifications[field] = value.new
+            oldValues[field] = value.old
+          } else {
+            modifications[field] = value
+          }
+        }
+        snapshots.push({ bugId, modifyData, modifications, oldValues })
+      }
+      if (snapshots.length === 0) return
+      if (snapshots.length === 1) {
+        return confirmModify(snapshots[0].bugId)
+      }
+
+      const targetType =
+        snapshots[0].modifyData._target ||
+        (currentPlanType.value === 'bug'
+          ? 'bug'
+          : currentPlanType.value === 'test_case'
+            ? 'testcase'
+            : 'badcase')
+      const messageId = snapshots[0].modifyData._messageId
+      const items = snapshots.map((s) => ({
+        target_id: s.bugId,
+        modifications: s.modifications
+      }))
+
+      const rollback = () => {
+        for (const s of snapshots) {
+          const row = badcases.value.find((b) => b.id === s.bugId)
+          if (row) {
+            for (const [field, value] of Object.entries(s.oldValues)) {
+              if (row.hasOwnProperty(field)) row[field] = value
+            }
+          }
+        }
+        const next = { ...pendingModifications.value }
+        for (const s of snapshots) {
+          next[s.bugId] = s.modifyData
+        }
+        pendingModifications.value = next
+      }
+
+      for (const s of snapshots) {
+        const row = badcases.value.find((b) => b.id === s.bugId)
+        if (row) {
+          for (const [field, value] of Object.entries(s.modifications)) {
+            if (row.hasOwnProperty(field)) row[field] = value
+          }
+        }
+      }
+      const newPending = { ...pendingModifications.value }
+      for (const s of snapshots) delete newPending[s.bugId]
+      pendingModifications.value = newPending
+
+      for (const s of snapshots) {
+        window.dispatchEvent(
+          new CustomEvent('modify-confirmed', {
+            detail: { targetId: s.bugId },
+            bubbles: true
+          })
+        )
+      }
+
+      try {
+        const response = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId.value}/modify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            confirm: true,
+            target: targetType,
+            message_id: messageId,
+            items
+          })
+        })
+        const result = await response.json()
+        if (result.success) {
+          try {
+            await restorePendingDiffReviews()
+          } catch (e) {
+            console.warn('[DIFF] restorePendingDiffReviews 失败:', e)
+          }
+          fetchBadcases()
+          return result
+        }
+        console.error('[MODIFY] 批量采纳失败:', result.error)
+        rollback()
+        return result
+      } catch (error) {
+        console.error('[MODIFY] 批量请求异常:', error)
+        rollback()
+        throw error
+      }
+    }
     
-    // 取消修改
-    const cancelModify = async (bugId) => {
-      console.log('[MODIFY] 取消修改 Bug:', bugId)
+    // 取消修改。opts.skipRestore=true 时不在末尾 restore，供连续组批量末尾统一 restore。
+    const cancelModify = async (bugId, opts = {}) => {
+      const skipRestore = opts.skipRestore === true
+      console.log('[MODIFY] 取消修改 Bug:', bugId, skipRestore ? '(batch中间步，defer restore)' : '')
       const modifyData = pendingModifications.value[bugId]
       // 创建新对象触发响应式更新
       const newPending = { ...pendingModifications.value }
@@ -3460,6 +3806,9 @@ export default {
         action: 'reject',
         messageId: modifyData?._messageId
       })
+      if (!skipRestore) {
+        await restorePendingDiffReviews()
+      }
     }
     
     
@@ -3569,12 +3918,10 @@ export default {
     
     // 批量确认所有修改
     const confirmAllModify = async () => {
-      const pendingIds = Object.keys(pendingModifications.value)
+      const pendingIds = Object.keys(pendingModifications.value).map(Number)
       console.log('[MODIFY] 批量确认修改:', pendingIds)
-      
-      for (const id of pendingIds) {
-        await confirmModify(parseInt(id))
-      }
+      if (!pendingIds.length) return
+      await confirmModifyBatch(pendingIds)
     }
     
     // 批量取消所有修改
@@ -3587,23 +3934,22 @@ export default {
       }
     }
     
-    // 确认连续组
+    // 确认连续组（列表上「N条」+ ✓）：多条时单次 POST items[]，仅一条时走原单条接口
     const confirmConsecutiveGroup = async (id) => {
       const group = getConsecutiveGroup(id)
       console.log('[MODIFY] 确认连续组:', group)
-      
-      for (const groupId of group) {
-        await confirmModify(groupId)
-      }
+      if (!group.length) return
+      return confirmModifyBatch(group)
     }
     
     // 取消连续组
     const cancelConsecutiveGroup = async (id) => {
       const group = getConsecutiveGroup(id)
       console.log('[MODIFY] 取消连续组:', group)
-      
-      for (const groupId of group) {
-        await cancelModify(groupId)
+      if (!group.length) return
+      for (let i = 0; i < group.length; i++) {
+        const last = i === group.length - 1
+        await cancelModify(group[i], { skipRestore: !last })
       }
     }
     
@@ -4714,6 +5060,7 @@ export default {
       if (newId) {
         projectId.value = newId
         console.log('项目id发生变化:', newId)
+        await loadProjectLongMemoryBootstrap()
         await manualRefreshPlans()
         await restorePendingDiffReviews()
         await fetchSessions()
@@ -5078,8 +5425,6 @@ export default {
       pendingModifications.value = newPending
       console.log('[MODIFY] 已清除 pendingModifications:', pendingModifications.value)
     }
-        
-    const highlightRowId = ref(null) // 高亮的列表行，用于滚动&样式
 
     // 同一条批量/合并预览里，部分记录的 diff 可能为空，导致未写入 pending；用同组 id 从已有 pending 补齐
     const applyPeerPendingSync = (currentId, peerTargetIds) => {
@@ -5107,17 +5452,224 @@ export default {
       pendingModifications.value = next
     }
 
+    /** 与 handleShowModifyInList 内逻辑一致，供批量同步写入 pending 时复用 */
+    const buildModifyDataFromShowModifyDetail = (detail) => {
+      const modifyData = {}
+      const diff = detail?.diff
+      const modifications = detail?.modifications
+      if (diff && Array.isArray(diff) && diff.length > 0) {
+        diff.forEach((fieldDiff) => {
+          const rawField = fieldDiff.field ?? fieldDiff.field_label
+          const fieldKey = normalizeDiffFieldKey(rawField)
+          const oldLine = fieldDiff.lines?.find((l) => l.type === 'delete')
+          const newLine = fieldDiff.lines?.find((l) => l.type === 'add')
+          const unchangedLine = fieldDiff.lines?.find((l) => l.type === 'unchanged')
+          if (oldLine && newLine) {
+            modifyData[fieldKey] = { old: oldLine.content, new: newLine.content }
+          } else if (unchangedLine) {
+            modifyData[fieldKey] = {
+              old: unchangedLine.content,
+              new: unchangedLine.content,
+              unchanged: true
+            }
+          }
+        })
+      } else if (modifications && typeof modifications === 'object') {
+        for (const [field, value] of Object.entries(modifications)) {
+          const fk = normalizeDiffFieldKey(field)
+          if (value && typeof value === 'object' && 'new' in value) {
+            modifyData[fk] = value
+          } else {
+            modifyData[fk] = { old: '', new: value }
+          }
+        }
+      }
+      return modifyData
+    }
+
+    /** 同步写入一条待确认（不 await），避免同组多条 async 交错导致黄条逐个出现 */
+    const syncApplyShowModifyListPendingFromDetail = (detail, opts = {}) => {
+      const writeSession = opts.sessionStorageWrite === true
+      if (detail.executed === true) return
+      const modifyData = buildModifyDataFromShowModifyDetail(detail)
+      const fieldKeys = Object.keys(modifyData)
+      if (fieldKeys.length === 0) return
+      const hasDetailFields = fieldKeys.some((field) =>
+        DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
+      )
+      const allListFields = fieldKeys.every((field) =>
+        LIST_FIELDS.includes(normalizeDiffFieldKey(field))
+      )
+      const intTargetId = parseInt(detail.targetId, 10)
+      if (Number.isNaN(intTargetId)) return
+      const { target, diff, messageId, batchIndex } = detail
+
+      if (diff && Array.isArray(diff) && diff.length > 0 && writeSession) {
+        sessionStorage.removeItem('pendingModifyDiff')
+        sessionStorage.setItem(
+          'pendingModifyDiff',
+          JSON.stringify({
+            targetId: intTargetId,
+            target: target,
+            diff: diff,
+            modifications: modifyData,
+            messageId: messageId,
+            batchIndex: batchIndex
+          })
+        )
+      }
+
+      if (diff && Array.isArray(diff) && diff.length > 0 && allListFields && !hasDetailFields) {
+        const newModifyData = {
+          ...Object.fromEntries(
+            fieldKeys.map((field) => {
+              const v = modifyData[field]
+              return [field, typeof v === 'object' && v && 'new' in v ? v : { old: '', new: v }]
+            })
+          ),
+          _target: target,
+          _messageId: messageId
+        }
+        const next = { ...pendingModifications.value }
+        next[intTargetId] = { ...(next[intTargetId] || {}), ...newModifyData }
+        pendingModifications.value = next
+      }
+    }
+
     const handleShowModifyInList = async (event) => {
           const dtop = event.detail || {}
           if (dtop.__modifyListBatch === true && Array.isArray(dtop.items) && dtop.items.length > 0) {
-            for (const it of dtop.items) {
-              await handleShowModifyInList({ detail: { ...it, __modifyListBatchItem: true } })
+            const items = dtop.items
+            for (let i = 0; i < items.length; i++) {
+              if (items[i].executed === true) continue
+              syncApplyShowModifyListPendingFromDetail(items[i], { sessionStorageWrite: i === 0 })
             }
+            const p0 = items[0]
+            if (p0?.peerTargetIds && Array.isArray(p0.peerTargetIds) && p0.peerTargetIds.length >= 2) {
+              applyPeerPendingSync(parseInt(p0.targetId, 10), p0.peerTargetIds)
+            }
+            await Promise.all(
+              items
+                .filter((it) => it.executed !== true)
+                .map(async (it) => {
+                  const modifyData = buildModifyDataFromShowModifyDetail(it)
+                  const tid = parseInt(it.targetId, 10)
+                  await persistPendingDiffReview({
+                    target: it.target,
+                    targetId: tid,
+                    planId: it.plan_id ?? null,
+                    diff: Array.isArray(it.diff) ? it.diff : [],
+                    modifications: modifyData,
+                    messageId: it.messageId
+                  })
+                })
+            )
+            const navItem = items.find((x) => x.executed !== true) || items[0]
+            await handleShowModifyInList({
+              detail: {
+                ...navItem,
+                __modifyListBatchItem: true,
+                __pendingSyncedBatch: true
+              }
+            })
             await awaitCoalescedFetchBadcasesForModifyList()
             return
           }
           const skipModifyListFetch = dtop.__modifyListBatchItem === true
           const { targetId, target, diff, modifications, plan_id, executed, messageId, batchIndex, peerTargetIds, suppressAutoOpenDetail } = event.detail
+          const intTargetId = parseInt(targetId)
+
+          if (dtop.__pendingSyncedBatch === true) {
+            const modifyDataPre = buildModifyDataFromShowModifyDetail(dtop)
+            const fieldKeysPre = Object.keys(modifyDataPre)
+            const hasDetailFieldsPre = fieldKeysPre.some((field) =>
+              DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
+            )
+            if (
+              diff &&
+              Array.isArray(diff) &&
+              diff.length > 0 &&
+              hasDetailFieldsPre &&
+              suppressAutoOpenDetail !== true
+            ) {
+              openMainEditor(intTargetId, target, true)
+              return
+            }
+            if (target === 'bug') {
+              urlContentType.value = 'bug'
+            } else if (target === 'badcase') {
+              urlContentType.value = 'badcase'
+            } else if (target === 'testcase') {
+              urlContentType.value = 'test_case'
+            }
+            let targetPlanId = plan_id ? parseInt(plan_id) : null
+            if (!targetPlanId && diff) {
+              const planIdDiff = diff.find((d) => (d.field ?? d.field_label) === 'plan_id')
+              if (planIdDiff) {
+                const newLine = planIdDiff.lines.find((l) => l.type === 'add')
+                if (newLine) targetPlanId = parseInt(newLine.content)
+              }
+            }
+            if (!targetPlanId) {
+              const item = badcases.value.find((b) => b.id == intTargetId)
+              if (item) {
+                targetPlanId = item.plan_id
+              } else {
+                const oldSelectedPlan = selectedPlan.value
+                selectedPlan.value = null
+                await fetchBadcases(1)
+                await nextTick()
+                const newItem = badcases.value.find((b) => b.id == intTargetId)
+                if (newItem) {
+                  targetPlanId = newItem.plan_id
+                }
+                if (targetPlanId) {
+                  selectedPlan.value = targetPlanId
+                } else {
+                  selectedPlan.value = oldSelectedPlan
+                }
+              }
+            }
+            const uctForNav =
+              target === 'bug' ? 'bug' : target === 'testcase' ? 'test_case' : 'badcase'
+            const navMeta = targetPlanId
+              ? { planId: targetPlanId, urlContentType: uctForNav }
+              : { planId: null, urlContentType: uctForNav }
+            let listLoadedByTabNavigation = false
+            if (suppressAutoOpenDetail === true) {
+              if (targetPlanId) selectedPlan.value = targetPlanId
+              else selectedPlan.value = null
+            } else {
+              await upsertAndActivatePlanListTab(navMeta)
+              listLoadedByTabNavigation = true
+            }
+            if (!skipModifyListFetch && !listLoadedByTabNavigation) {
+              await awaitCoalescedFetchBadcasesForModifyList()
+            }
+            if (targetPlanId) {
+              await nextTick()
+              await new Promise((resolve) => setTimeout(resolve, 100))
+              if (!expandedPlans.value.includes(targetPlanId)) {
+                expandedPlans.value.push(targetPlanId)
+              }
+            }
+            highlightRowId.value = intTargetId
+            const rowSel = `[data-bug-id="${intTargetId}"]`
+            let targetRow = null
+            for (let i = 0; i < 12; i++) {
+              await nextTick()
+              await new Promise((resolve) => setTimeout(resolve, i === 0 ? 280 : 130))
+              targetRow = document.querySelector(rowSel)
+              if (targetRow) break
+            }
+            if (targetRow) {
+              targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
+              targetRow.classList.add('highlight-row')
+              setTimeout(() => targetRow.classList.remove('highlight-row'), 3000)
+            }
+            return
+          }
+
           const clearPendingForIds = (ids) => {
             const uniq = [...new Set((ids || []).map((x) => Number(x)).filter((n) => !isNaN(n)))]
             if (uniq.length === 0) return
@@ -5149,8 +5701,6 @@ export default {
           }
 
           console.log('[DEBUG-show-modify-in-list at ProjectDetail]', JSON.stringify(event.detail, null, 2))
-          // 确保 targetId 是整数
-          const intTargetId = parseInt(targetId)
           console.log('[MODIFY] 收到列表显示指令 (原始事件):', event.detail)
           console.log('[MODIFY] 解析后的 targetId/intTargetId:', { targetId, intTargetId })
           console.log('[MODIFY] diff 内容:', diff)
@@ -5166,8 +5716,7 @@ export default {
             console.log('[MODIFY] 使用 diff 构造 modifyData, diff.length:', diff.length)
             diff.forEach(fieldDiff => {
               const rawField = fieldDiff.field ?? fieldDiff.field_label
-              // 负责人：后端可能返回 assignee_id，统一存为 assignee 便于列表展示 diff
-              const fieldKey = (LABEL_TO_FIELD[rawField] || rawField) === 'assignee_id' ? 'assignee' : (LABEL_TO_FIELD[rawField] || rawField)
+              const fieldKey = normalizeDiffFieldKey(rawField)
               console.log('[MODIFY] diff 字段:', rawField, '-> key:', fieldKey)
               const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
               const newLine = fieldDiff.lines?.find(l => l.type === 'add')
@@ -5189,11 +5738,11 @@ export default {
           } else if (modifications && typeof modifications === 'object') {
             console.log('[MODIFY] 使用 modifications 构造 modifyData')
             for (const [field, value] of Object.entries(modifications)) {
-              // 处理 modifications 中值可能是对象的情况
+              const fk = normalizeDiffFieldKey(field)
               if (value && typeof value === 'object' && 'new' in value) {
-                modifyData[field] = value
+                modifyData[fk] = value
               } else {
-                modifyData[field] = {
+                modifyData[fk] = {
                   old: '',
                   new: value
                 }
@@ -5207,13 +5756,13 @@ export default {
 
           // 是否包含详情字段（只能在详情页编辑）；assignee_id 按 assignee 视为列表字段
           const hasDetailFields = fieldKeys.some(field => {
-            const normalized = (LABEL_TO_FIELD[field] || field) === 'assignee_id' ? 'assignee' : (LABEL_TO_FIELD[field] || field)
+            const normalized = normalizeDiffFieldKey(field)
             return DETAIL_FIELDS.includes(normalized)
           })
 
           // 是否全部都是列表字段（可只在列表展示 diff，跳转列表不高亮详情）
           const allListFields = fieldKeys.length > 0 && fieldKeys.every(field => {
-            const normalized = (LABEL_TO_FIELD[field] || field) === 'assignee_id' ? 'assignee' : (LABEL_TO_FIELD[field] || field)
+            const normalized = normalizeDiffFieldKey(field)
             return LIST_FIELDS.includes(normalized)
           })
 
@@ -5250,17 +5799,15 @@ export default {
                   _target: target,
                   _messageId: messageId
                 }
-                const idsToSet = peerTargetIds && Array.isArray(peerTargetIds) && peerTargetIds.length >= 2
-                  ? [...new Set(peerTargetIds.map(Number).filter((n) => !isNaN(n)))]
-                  : [intTargetId]
                 const next = { ...pendingModifications.value }
-                for (const pid of idsToSet) {
-                  next[pid] = {
-                    ...(next[pid] || {}),
-                    ...newModifyData
-                  }
+                next[intTargetId] = {
+                  ...(next[intTargetId] || {}),
+                  ...newModifyData
                 }
                 pendingModifications.value = next
+                if (peerTargetIds && Array.isArray(peerTargetIds) && peerTargetIds.length >= 2) {
+                  applyPeerPendingSync(intTargetId, peerTargetIds)
+                }
               } else {
                 // executed === true：若列表上还有残留的 pendingModifications，清理掉
                 if (pendingModifications.value[intTargetId]) {
@@ -5387,8 +5934,8 @@ export default {
             // 优先使用 diff，如果没有 diff 则从 modifications 生成
             if (diff && Array.isArray(diff)) {
               diff.forEach(fieldDiff => {
-                const rawField = fieldDiff.field
-                const fieldKey = LABEL_TO_FIELD[rawField] || rawField
+                const rawField = fieldDiff.field ?? fieldDiff.field_label
+                const fieldKey = normalizeDiffFieldKey(rawField)
                 const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
                 const newLine = fieldDiff.lines?.find(l => l.type === 'add')
                 const unchangedLine = fieldDiff.lines?.find(l => l.type === 'unchanged')
@@ -5404,7 +5951,7 @@ export default {
               })
             } else if (modifications && typeof modifications === 'object') {
               for (const [field, value] of Object.entries(modifications)) {
-                const fieldKey = LABEL_TO_FIELD[field] || field
+                const fieldKey = normalizeDiffFieldKey(field)
                 modifyDataLocal[fieldKey] = { old: '', new: value }
               }
             }
@@ -5448,7 +5995,7 @@ export default {
             }
 
             // pending 状态落库：同记录只保留一份（由后端 upsert 统一去重/覆盖）
-            persistPendingDiffReview({
+            await persistPendingDiffReview({
               target,
               targetId: intTargetId,
               planId: targetPlanId ?? plan_id ?? null,
@@ -5460,11 +6007,16 @@ export default {
 
           applyPeerPendingSync(intTargetId, peerTargetIds)
           
-          // 滚动到目标行并高亮
-          await nextTick()
-          await new Promise(resolve => setTimeout(resolve, 200)) // 等待DOM更新
-          const targetRow = document.querySelector(`[data-bug-id="${intTargetId}"]`)
-          console.log('[MODIFY] 查找目标行:', `[data-bug-id="${intTargetId}"]`, targetRow)
+          // 滚动到目标行并高亮（Tab 切换后列表异步渲染，需短暂重试）
+          const rowSel = `[data-bug-id="${intTargetId}"]`
+          let targetRow = null
+          for (let i = 0; i < 12; i++) {
+            await nextTick()
+            await new Promise((resolve) => setTimeout(resolve, i === 0 ? 280 : 130))
+            targetRow = document.querySelector(rowSel)
+            if (targetRow) break
+          }
+          console.log('[MODIFY] 查找目标行:', rowSel, targetRow)
           if (targetRow) {
             targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
             targetRow.classList.add('highlight-row')
@@ -5475,6 +6027,11 @@ export default {
         const handleGrepNavigate = async (event) => {
       const detail = event.detail || {}
       const rawPlanId = detail.planId
+      const rawRecordIds = detail.recordIds
+      const recordIdsBatch =
+        Array.isArray(rawRecordIds) && rawRecordIds.length > 0
+          ? [...new Set(rawRecordIds.map((x) => Number(x)).filter((n) => !Number.isNaN(n) && n > 0))]
+          : null
       const recordId = detail.recordId != null ? detail.recordId : detail.bugId
       const targetRaw = (detail.target || 'bug').toString().toLowerCase()
       const target = targetRaw === 'test_case' ? 'testcase' : targetRaw
@@ -5482,7 +6039,13 @@ export default {
         detail.openDetail === true ||
         detail.navigateMode === 'detail' ||
         detail.context === 'detail'
-      console.log('[GREP-NAV] 收到导航指令:', { rawPlanId, recordId, bugId: detail.bugId, target })
+      console.log('[GREP-NAV] 收到导航指令:', {
+        rawPlanId,
+        recordId,
+        recordIdsBatch,
+        bugId: detail.bugId,
+        target
+      })
 
       const uctFromTarget =
         target === 'badcase' ? 'badcase' : target === 'testcase' ? 'test_case' : 'bug'
@@ -5504,7 +6067,28 @@ export default {
       await upsertAndActivatePlanListTab(meta)
 
       await nextTick()
-      await new Promise((resolve) => setTimeout(resolve, 450))
+
+      /** 批量列表定位：同一次闪动多条，避免逐条 dispatch 造成一行行动画 */
+      if (recordIdsBatch && recordIdsBatch.length > 0 && !openDetail) {
+        let anyEl = null
+        for (let i = 0; i < 12; i++) {
+          await nextTick()
+          await new Promise((r) => setTimeout(r, i === 0 ? 400 : 130))
+          anyEl = document.querySelector(`[data-bug-id="${recordIdsBatch[0]}"]`)
+          if (anyEl) break
+        }
+        if (anyEl) {
+          anyEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+        for (const id of recordIdsBatch) {
+          const el = document.querySelector(`[data-bug-id="${id}"]`)
+          if (el) {
+            el.classList.add('highlight-flash')
+            setTimeout(() => el.classList.remove('highlight-flash'), 2000)
+          }
+        }
+        return
+      }
 
       if (recordId != null && recordId !== '') {
         if (openDetail) {
@@ -5512,8 +6096,15 @@ export default {
           openMainEditor(recordId, target, false)
           return
         }
-        const bugElement = document.querySelector(`[data-bug-id="${recordId}"]`)
-        console.log('[GREP-NAV] 查找列表行元素:', bugElement)
+        const sel = `[data-bug-id="${recordId}"]`
+        let bugElement = null
+        for (let i = 0; i < 12; i++) {
+          await nextTick()
+          await new Promise((r) => setTimeout(r, i === 0 ? 400 : 130))
+          bugElement = document.querySelector(sel)
+          if (bugElement) break
+        }
+        console.log('[GREP-NAV] 查找列表行元素:', bugElement, sel)
         if (bugElement) {
           bugElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
           bugElement.classList.add('highlight-flash')
@@ -5577,6 +6168,8 @@ export default {
       showMainEditor,
       mainEditorComponent,
       mainEditorItemId,
+      mainEditorEdit,
+      mainEditorPlanId,
       mainEditorShowDiff,
       embeddedEditorKind,
       mainEditorCacheKey,

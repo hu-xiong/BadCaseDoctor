@@ -6,20 +6,69 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 
 性能 / 体验（环境变量，可选）：
 - REACT_THOUGHT_BRIEF_MS：低于该毫秒数则前端显示「Thought briefly」（默认 800）
-- REACT_SKIP_THINK_HINT=1：跳过首轮用户向说明注入，略减首包延迟
-- REACT_TOOL_DESC_MAX_CHARS：>0 时截断各工具 description，缩短首轮 THINK prompt（见 prompts.format_tools_for_prompt）
+- REACT_SKIP_THINK_HINT：首轮 THINK 前是否注入 ``_reasoning_summary_from_user_input`` 说明。**默认 1（跳过）**，略减首包延迟；设为 ``0``/``false`` 恢复注入（不截断工具描述或模型输出）
+- REACT_THINK_MAX_TOKENS：>0 且底层 ``chat_stream`` / 流式接口支持 ``max_tokens`` 时，首轮 THINK 输出上限，缩短 ``todos_ready`` 尾延迟；不设则不限制（与 observe/decide 的 max_tokens 开关独立）
+- REACT_TOOL_DESC_MAX_CHARS：>0 时截断各工具 description，缩短首轮 THINK prompt（见 prompts.format_tools_for_prompt）。同配置下 ``format_tools_for_prompt`` 默认进程内缓存；``REACT_TOOLS_FORMAT_CACHE=0`` 关闭
+- REACT_PROJECT_PLAN_NAME_CACHE_TTL：按 ``(project_id, plan_id)`` 缓存名称秒数（默认 **45**）；``0`` 关闭缓存。查库在 **线程池** 执行，避免阻塞 asyncio 事件循环
+- REACT_DECIDE_FUNCTION_CALL=1：决策步走 function calling（Qwen 百炼 OpenAI 兼容、千帆 v2）；失败或无 tools 时回退流式/XML
+- REACT_FC_TOOL_CHOICE：auto / none / required，或 JSON 如 {"type":"function","function":{"name":"grep"}}；默认 auto
+- REACT_THINK_FC_TOOL_CHOICE：**未设置时**首轮 THINK 流式 FC 强制 ``{"type":"function","function":{"name":"submit_react_think"}}``（避免千帆等 ``auto`` 只出正文、无 tool_calls）；设 ``auto``/``false``/``off`` 则仍用 ``REACT_FC_TOOL_CHOICE``
+- REACT_FC_DECIDE_EXCLUDE_TOOLS：决策步 FC 不向模型暴露的工具名（逗号分隔），默认 ``get_tool_description``，避免占步、grep 不执行；设 ``none``/空则不排除
+- REACT_FC_PARALLEL_TOOL_CALLS=1：允许模型并行 tool_calls（默认关；ReAct 单步仍只消费第一条）
+- REACT_PLAN_SSE_MIN_STEPS：≥该步数才下发完整「计划区」UI（plan 事件仍可省略首包 mirror）；默认 3，见 §6.6
+- REACT_PLAN_MEMO_AFTER_THINK：默认 **1**。为 1 时 ``plan_init`` **始终**带 ``suppress_plan_ui``，避免「规划备忘」早于首轮 Agent Thought 正文出现；前端在 THINK 有足够正文后再揭示。设为 ``0``/``false`` 恢复旧行为（与步数阈值无关的首包即展示规划区）
+- REACT_INTENT_PLAN_UI_ENABLED=1（默认）：首轮意图 JSON 可含 need_plan_ui；为 false 时**始终**隐藏规划备忘（与步数阈值无关）。为 true 或未返回时仍受 REACT_PLAN_SSE_MIN_STEPS 约束。=0 时忽略 need_plan_ui（与旧版一致，仅步数阈值）
+- SSE_V1_EMIT_PHASE=0：关闭 ``type=phase`` 边沿包（默认发）
 - GREP_PLAN_TREE_CACHE_TTL：grep 内计划树缓存秒数（默认 60，0 关闭），见 GrepTool._get_plan_tree
-- PERF_LOG=1：打印各阶段耗时，便于对比模型与链路瓶颈
+- PERF_LOG=1：打印各阶段耗时，便于对比模型与链路瓶颈；grep 后观察链路见 ``[PERF][observe]``（stream_observe_ms / xml_parse_ms / ui_observe_summary_ms / total_ms）；轮次衔接见 ``[PERF][round-bridge]``（观察流结束→todo_end、todo_start→FC/流式 decide）
+- 主循环前：技能 match_skill 与首轮 THINK 并行启动，THINK 结束后再 await 收口，减少串行等待
+- REACT_OBSERVE_UI_PARALLEL=1（默认）：observe 与 ``react_ui_stream(decision_observe)`` 并行跑 LLM；SSE 在 **ui_lead 首包之后** 与 observe 事件 **交错** 下发（避免 observe 独占总带宽拖慢 UI 首包，也避免整段 UI 发完才 flush observe 导致 Thought 长期空白）；``0`` 为串行
+- REACT_OBSERVE_UI_LLM=0：``decision_observe`` 不调用 ``ui_observe_summary`` 专用 LLM，改为使用本步已有的 ``summary_nl``（``_summarize_observation_nl``）分块下发，通常可省数秒～数十秒；默认 ``1`` 保持原行为
+- REACT_OBSERVE_FAST_STUB=1（默认）：modify 且沙箱预览/待确认/batch 等场景**跳过大模型 observe_prompt**（``_stream_agent_observe_with_narrative``），用本地 ``<result>`` 占位 + ``summary_nl``，避免预览已出后仍等 10～30s；``0`` 关闭（恢复旧行为、利于排查）
+- REACT_GREP_OBSERVE_FAST_STUB=1（默认）：grep 且 ``mode=locate``、``success=true`` 时**跳过 observe_prompt 大模型**（工具已产出 ``summary_nl``/结构化结果，决策与观察阶段不再多等一轮 10s+ 级 LLM）；``associate``/``compare`` 等仍走完整 observe；``0`` 关闭
+- REACT_AGENT_TASK_DAG=1：工具执行写入 ``agent_tasks`` 表（pending→running→done/failed），便于审计与后续多任务 DAG；默认 ``0``。会话维度键由 ``agent_session_id``（如 ``react_request_id``）传入
+- REACT_OBSERVE_NL_STREAM_CHARS：上项为 ``0`` 时，每条 ``react_ui_stream`` delta 的最大字符数（默认 240）
+- REACT_OBSERVE_PROMPT_SHRINK=0：关闭 observe 用 prompt 内对 ``observation`` / ``context`` 的列表与长字符串裁剪（默认开启）
+- REACT_OBSERVE_PROMPT_LIST_CAP：裁剪后单列表最大条数（默认 15）；REACT_OBSERVE_PROMPT_STR_CHARS：单字符串最大字符（默认 500）；REACT_OBSERVE_PROMPT_MAX_DEPTH：JSON 递归深度上限（默认 14）
+- REACT_OBSERVE_MAX_TOKENS：>0 且底层 ``chat_stream`` 支持 ``max_tokens`` 时（当前 Qwen 兼容实现），observe 流式输出上限，抑制冗长生成
+- REACT_DECIDE_PROMPT_SHRINK=0：关闭对 decide 步传入的 ``result_context`` / ``last_observation`` / ``last_analysis`` 的 JSON 裁剪（默认开）；``REACT_DECIDE_PROMPT_LIST_CAP`` / ``REACT_DECIDE_PROMPT_STR_CHARS`` / ``REACT_DECIDE_PROMPT_MAX_DEPTH`` 未设时回落到对应 ``REACT_OBSERVE_PROMPT_*``
+- REACT_DECIDE_MAX_TOKENS：流式 decide（非 FC）时可选 ``max_tokens``，同 observe
+- REACT_DECIDE_FC_MAX_TOKENS：Function Calling 决策（``chat_completion_with_tools``）可选输出上限；**未设置时回落到** ``REACT_DECIDE_MAX_TOKENS``（仍不设则不传 max_tokens）
+- **grep 后下一轮 decide**（缩短观察结束→Thought 间隔）：上一工具为 ``grep`` 时，默认对 decide 侧 JSON 做**更紧裁剪**（``REACT_DECIDE_AFTER_GREP_SHRINK=1`` 默认开，``=0`` 关闭）；``REACT_DECIDE_AFTER_GREP_LIST_CAP``（默认 8）、``REACT_DECIDE_AFTER_GREP_STR_CHARS``（默认 280）、``REACT_DECIDE_AFTER_GREP_MAX_DEPTH``（默认 12），与通用 ``REACT_DECIDE_PROMPT_*`` 取 **更严（更小）** 值。另可设 ``REACT_DECIDE_AFTER_GREP_MAX_TOKENS`` 覆盖该轮流式 decide 输出上限；FC 轮次另可读 ``REACT_DECIDE_AFTER_GREP_FC_MAX_TOKENS``，未设则回落到 ``REACT_DECIDE_AFTER_GREP_MAX_TOKENS``
+- P0 体积/延迟（仅环境变量）：首轮说明默认已跳过（``REACT_SKIP_THINK_HINT=0`` 可开）；``REACT_TOOL_DESC_MAX_CHARS`` 等为**截断**，与「尽量不截断」冲突时勿开
+- REACT_LONG_MEMORY_QUERY_EACH_MESSAGE：``1`` 时每条对话按当前 ``user_input`` 做向量检索注入；**默认 0**——由前端打开项目时 ``POST /api/memory/retrieve``（``mode: recent``）拉取后，随 ``long_memory_context`` 传入 ``/api/agent/react``。
+- REACT_NEED_TODO_LIST_HEURISTIC：模型未给出 ``need_todo_list`` 时的降级；**默认 1**（多步/多工具线索 → 生成计划）；``0`` 时恒按「需要可解析计划」处理（保守）。
+- REACT_THINK_JSON_PLAN=1（默认）：THINK 要求一次性输出 ``{"plan":[{id,description,status},...]}``；解析见 ``parse_react_json_plan``。
+- REACT_SELF_DRIVE_TOOL_LOOP=1：每步用 ``_extract_todo_params`` 直接决策工具，跳过本步 decide LLM（仍走 observe 等后续）。
+- REACT_STOP_AFTER_STEP_FAIL=1（默认）：步骤失败或（严格模式下）grep 空命中后暂停自动推进并发 ``step_failed`` 提示。
+- REACT_STRICT_PLAN_FAIL=1（默认）：grep 成功但三类列表均空时视为失败。
+- REACT_PLAN_SSE_LIVE_STEPS=1（默认）：每轮同步 ``plan_update``（单 in_progress）；``=0`` 关闭。
+- REACT_MERGE_FIRST_THINK_INTO_DECIDE=1：跳过独立首轮 THINK；``todo_items``（及可选 ``first_tool``/``first_params``）在 **主循环第 0 步** 通过 **submit_react_think** 一次 FC 完成（须 ``REACT_DECIDE_FUNCTION_CALL=1`` 且 LLM 支持 FC）。默认 ``0``。
+- REACT_THINK_QUEUE_POLL_S：首轮 THINK 从队列取块时的轮询间隔秒数（默认 ``0.03``）；略缩可更快响应首 token，过小占 CPU。范围约 0.02～0.2
+- REACT_CHAT_REPLY_STREAM=1（默认）：纯对话路径用 ``summary_stream`` 分块输出；``REACT_CHAT_REPLY_STREAM_CHARS`` 每块字符数（默认 2）
+- REACT_SUMMARY_STREAM_GAP_MS：``summary_stream`` / 统一总结 LLM 流等分片之间的暂停毫秒数（默认 22；``0`` 关闭）。单靠 ``asyncio.sleep(0)`` 易与单次 TCP/读缓冲合并，前端像「一次性整块」
+- REACT_RUNNING_SUMMARY_STREAM_GAP_MS：终局 ``running_summary_stream`` 分片间隔；**未设置**时与 ``REACT_SUMMARY_STREAM_GAP_MS`` 相同
+- REACT_INCREMENTAL_SUMMARY：每步 observation 后合并「增量运行总览」Markdown。**默认开**；``0``/``false``/``off`` 关闭。``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``（默认 2048）；``REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL=1``（默认）时终局不再跑统一总结 LLM
+- REACT_INCREMENTAL_SUMMARY_STREAM_SSE（默认 ``1``）：仅影响 **主循环结束后** 下发运行总览的方式。``1``：发 ``running_summary_done`` 整块（与 REPLACE_FINAL 等配合）；``0``：走 ``final_wire`` 切片重放 ``running_summary_stream``。**中途**每步合并一律 asyncio 后台队列 + 静默 LLM，不阻塞「准备下一步」、不向中途 SSE 推流（函数 ``_merge_running_summary_incremental_to_sse`` 保留供专项实验，主路径不再调用）
+- REACT_INCREMENTAL_SUMMARY_BLOCK_LOOP：``1`` 时每步在主循环内 ``await`` 静默合并（排障/复现卡顿用）。**默认 ``0``：后台 worker 串行合并**
+- REACT_DECIDE_FC_STREAM=1（默认）：decide 步在支持 ``chat_completion_with_tools_stream`` 的 LLM 上走**流式 FC**（边收 content/tool_calls delta 边 ``agent_thought``）；失败回退整包 ``chat_completion_with_tools``。设为 ``0`` 强制整包 FC。
+- REACT_DECIDE_FC_INSTANT_HINT=1（默认）：整包 FC 时在 ``await chat_completion_with_tools`` 前先 ``agent_thought`` 占位；**流式 FC 时仍以真实 delta 为主**，占位可关。设为 ``0`` 关闭占位。
 
+- REACT_GREP_RESULT_CACHE_TTL：>0 时对本引擎内 grep 成功结果做内存缓存（秒，按 project_id/keywords/target/mode/plan_id/userId 键）；短 TTL 内重复查询可省 DB；默认 0 关闭；数据变更后短时内可能读到旧结果
 进一步提速方向（需产品/架构取舍，不单靠开关）：
-- 合并多步 LLM（decide+observe 合一）、缩短 prompt、工具结果缓存
+- 合并多步 LLM（decide+observe 合一）、缩短 prompt
 - 模型侧：更低延迟 endpoint、适当减小 max_tokens（本仓库不强制改模型）
 - 工具侧：DB 索引、grep 范围缩小、异步 I/O
+- modify 批量预览：`MODIFY_BATCH_PREVIEW_STREAM=1`（默认）每条 diff 经 progress_queue 推送 `batch_preview_row` SSE，不必等整批结束
+- modify 快速落库：`MODIFY_ALLOW_FAST_APPLY=1` 且工具参数 ``skip_preview=true``，且修改字段仅为状态/负责人时，跳过沙箱直接 ORM 落库（返回带 ``fast_apply`` / ``sandbox_skipped``）；**无自动回滚**，需运维/备份兜底
 """
 
 import contextlib
+import html
 import asyncio
 import concurrent.futures
+import functools
+import copy
 import json
 import time
 import os
@@ -27,11 +76,25 @@ import threading
 import queue
 import re
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, List, Optional, AsyncIterator, Tuple
+from typing import Dict, Any, Iterator, List, Optional, AsyncIterator, Tuple, Union
 
 #原依赖
 from .prompts import ReactPromptTemplates, format_tools_for_prompt
-from .prompts import parse_xml_todos, parse_xml_decision, parse_xml_findings
+from .prompts import (
+    parse_xml_todos,
+    parse_xml_decision,
+    parse_xml_findings,
+    parse_react_json_plan,
+    parse_opening_decision,
+    parse_unified_response,
+)
+from .react_function_call import (
+    use_react_decide_function_call,
+    use_react_decide_fc_stream,
+    FcStreamAccumulator,
+    use_react_observe_fc,
+    use_react_decide_xml_fallback,
+)
 from .self_correction import SelfCorrectionEngine
 from .evidence_extractor import EvidenceExtractor
 
@@ -40,23 +103,50 @@ from .skill_loader import SkillLoader
 from .skill_registry import skill_registry
 from .skill import Skill
 from .skill_integration import get_skill_integration  # Skill 集成管理器（懒加载）
+from .sse_react_v1 import (
+    ClientWireType,
+    engine_dict_to_wire_packets,
+    is_wire_v1_packet,
+    react_phase_wire_payload,
+    sse_v1_emit_phase_packets_enabled,
+)
 from .intent_guards import (
     is_vague_generic_todo,
     infer_modify_target_from_user,
-    needs_modify_vs_create_clarification,
-    intent_clarification_message,
-    needs_low_signal_clarification,
-    low_signal_clarification_message,
 )
 from .locale_prompts import (
     normalize_locale,
     is_english_locale,
+    react_tools_chat_fallback_message,
     react_phase_wait_message,
     react_observe_section_header,
+    react_decide_fc_first_token_hint,
     react_fallback_decision_line,
     react_findings_bulleted_summary_prompt,
     react_unified_final_summary_prompt,
+    incremental_running_summary_prompt,
     wrap_react_user_prompt,
+    modify_modifications_kv_summary,
+    react_batch_modify_preview_message,
+    react_batch_modify_summary,
+    react_summarize_observation_nl_skipped_gate,
+    react_summarize_observation_nl_skipped_generic,
+    react_summarize_observation_nl_tool_failed,
+    react_summarize_observation_nl_tool_failed_short,
+    react_summarize_grep_done_empty,
+    react_summarize_grep_done_hits,
+    react_summarize_modify_done,
+    react_summarize_tool_done_ok,
+    react_executing_modify_about_to,
+    react_executing_grep_about_to,
+    react_executing_create_about_to,
+    react_executing_database_query_about_to,
+    react_retry_grep_for_modify,
+    react_modify_progress_wait,
+    react_modify_executing_fallback_reason,
+    react_modify_single_record_reason,
+    react_tool_missing_error,
+    react_modify_timeout,
 )
 
 # Text2SQL
@@ -66,6 +156,29 @@ try:
 except ImportError:
     TEXT2SQL_AVAILABLE = False
     print("[REACT]⚠  Text2SQLAgent 未安装，使用传统查询模式")
+
+
+_CONTEXT_UPDATE_FROM_LLM_IGNORE_KEYS = frozenset(
+    {
+        "badcase_list",
+        "bug_list",
+        "testcase_list",
+        "grep_result",
+        "first_badcase_id",
+        "first_bug_id",
+        "first_testcase_id",
+        "_last_grep_keywords",
+        "_last_grep_target",
+        "badcase_analysis",
+    }
+)
+
+
+def _scrub_grep_grounded_keys_from_context_update(raw: Any) -> Dict[str, Any]:
+    """observe 的 <context_update> 不得覆盖 grep 工具写入的定位列表；modify Observe 后模型常臆造 badcase_list，下一轮会串表。"""
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k not in _CONTEXT_UPDATE_FROM_LLM_IGNORE_KEYS}
 
 
 def get_text2sql_tool(db_path="instance/badcase_doctor.db"):
@@ -192,12 +305,165 @@ def robust_parse_todos(raw: Any) -> List[str]:
     return []
 
 
-def react_plan_steps_payload(todos: List[str]) -> List[Dict[str, Any]]:
+def parse_think_response_for_plan(
+    text: Any,
+) -> Tuple[List[str], Optional[List[Dict[str, Any]]]]:
     """
-    SSE「plan」事件：与「todos」同步的结构化列表（id 从 1 起），供前端静态概览与 step_id 对齐。
-    执行仍为 for 循环内 decide→工具→observe 的状态机，非一次性脚本。
+    优先解析 THINK 中的一次性 JSON 计划；失败则回退 XML/文本 todos。
+    返回 (description 列表, 原始 plan 元数据或 None)。
     """
-    return [{"id": i + 1, "name": str(t), "status": "pending"} for i, t in enumerate(todos)]
+    if text is None:
+        return [], None
+    s = text if isinstance(text, str) else str(text)
+    jp = parse_react_json_plan(s)
+    if jp:
+        todos = [str(x.get("description") or "").strip() for x in jp]
+        todos = [t for t in todos if t]
+        if todos:
+            try:
+                cap = int((os.getenv("REACT_TODO_MAX_STEPS", "2") or "2").strip())
+            except Exception:
+                cap = 2
+            cap = max(1, cap)
+            if len(todos) > cap:
+                todos = todos[:cap]
+                jp = jp[:cap]
+            return todos, jp
+    return _cap_todos_for_speed(robust_parse_todos(s)), None
+
+
+def _cap_todos_for_speed(todos: List[str]) -> List[str]:
+    """性能优先：限制首轮 todo 数量，降低整体链路时延。"""
+    try:
+        cap = int((os.getenv("REACT_TODO_MAX_STEPS", "2") or "2").strip())
+    except Exception:
+        cap = 2
+    cap = max(1, cap)
+    if len(todos) > cap:
+        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+            print(f"[REACT-planing] todo_count capped: {len(todos)} -> {cap}")
+        return todos[:cap]
+    return todos
+
+
+def _use_react_unified_xml() -> bool:
+    """检查是否启用三段式 XML 模式（替代 FC）。"""
+    return (os.getenv("REACT_UNIFIED_XML", "0") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _iter_direct_chat_reply_stream_chunks(text: str):
+    """纯对话回复按小块产出，走 summary_stream 车道供前端拼接 finalResponse（打字机）。"""
+    s = text if isinstance(text, str) else ""
+    if not s:
+        return
+    raw = (os.getenv("REACT_CHAT_REPLY_STREAM") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        yield s
+        return
+    try:
+        step = max(1, int((os.getenv("REACT_CHAT_REPLY_STREAM_CHARS") or "2").strip()))
+    except Exception:
+        step = 2
+    for i in range(0, len(s), step):
+        yield s[i : i + step]
+
+
+def react_plan_steps_payload(
+    todos: List[str],
+    *,
+    json_plan_meta: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    SSE「plan」事件：与「todos」同步的结构化列表，供前端静态概览与 step_id 对齐。
+    json_plan_meta：THINK 一次性 JSON 计划中的条目（含 id/description/status）。
+    """
+    if json_plan_meta:
+        steps: List[Dict[str, Any]] = []
+        for idx, it in enumerate(json_plan_meta):
+            if not isinstance(it, dict):
+                continue
+            try:
+                sid = int(it.get("id", idx + 1))
+            except Exception:
+                sid = idx + 1
+            desc = str(it.get("description") or it.get("name") or "").strip()
+            if not desc and idx < len(todos):
+                desc = str(todos[idx])
+            st = str(it.get("status") or "pending").lower()
+            steps.append({"id": sid, "name": desc, "description": desc, "status": st})
+        if steps:
+            steps[0]["status"] = "in_progress"
+            return steps
+    return [{"id": i + 1, "name": str(t), "description": str(t), "status": "pending"} for i, t in enumerate(todos)]
+
+
+def _plan_rows_from_json_or_todos(
+    todos: List[str],
+    json_plan_meta: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """task_state['plan'] 行：与 react_plan_steps_payload 字段对齐，供 plan_init / plan_update。"""
+    payload = react_plan_steps_payload(todos, json_plan_meta=json_plan_meta)
+    rows: List[Dict[str, Any]] = []
+    for i, row in enumerate(payload):
+        rows.append(
+            {
+                "id": row.get("id", i + 1),
+                "name": row.get("name") or row.get("description") or "",
+                "tool": None,
+                "params": {},
+                "status": row.get("status") or "pending",
+                "result": None,
+            }
+        )
+    return rows
+
+
+def _normalize_plan_rows_for_sse(plan_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for r in plan_rows:
+        out.append(
+            {
+                "id": r.get("id"),
+                "name": r.get("name") or "",
+                "description": r.get("name") or "",
+                "status": r.get("status") or "pending",
+            }
+        )
+    return out
+
+
+def _grep_observation_empty_lists(observation: Dict[str, Any]) -> bool:
+    """grep locate 成功但三类列表均为空时视为无命中。"""
+    if not isinstance(observation, dict):
+        return True
+    data = observation.get("data") or {}
+    if not isinstance(data, dict):
+        return True
+    n = 0
+    for k in ("bug_location", "badcase_analysis", "testcase_location"):
+        x = data.get(k)
+        if isinstance(x, list):
+            n += len(x)
+    return n == 0
+
+
+def _sync_plan_single_in_progress(plan_rows: List[Dict[str, Any]], current_index: int) -> None:
+    """全局仅一个 in_progress，其余非终态为 pending。"""
+    for j, row in enumerate(plan_rows):
+        st = str(row.get("status") or "pending").lower()
+        if st in ("failed", "complete", "done"):
+            continue
+        if j < current_index:
+            row["status"] = "complete"
+        elif j == current_index:
+            row["status"] = "in_progress"
+        else:
+            row["status"] = "pending"
 
 
 def new_task_state(mode: str) -> Dict[str, Any]:
@@ -208,6 +474,652 @@ def new_task_state(mode: str) -> Dict[str, Any]:
         "current_step": 0,
         "observations": [],
         "finished": False,
+    }
+
+
+def _react_plan_sse_suppress_ui(todos_count: int) -> bool:
+    """§6.6：待办步数少于阈值时不发「计划区」首包 mirror，plan_init 带 suppress_plan_ui。"""
+    try:
+        min_steps = int(os.getenv("REACT_PLAN_SSE_MIN_STEPS", "3"))
+    except Exception:
+        min_steps = 3
+    return min_steps > 0 and todos_count < min_steps
+
+
+def _plan_memo_defer_until_after_think() -> bool:
+    """首轮流式思考前不暴露「规划备忘」SSE 镜像：plan_init 强制 suppress，由前端 THINK 就绪后揭示。"""
+    v = (os.getenv("REACT_PLAN_MEMO_AFTER_THINK", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _should_suppress_plan_ui(
+    todos_count: int, intent_wants_plan_ui: Optional[bool]
+) -> bool:
+    """
+    统一「规划备忘」是否隐藏：
+    - 步数 < REACT_PLAN_SSE_MIN_STEPS（默认 3）时隐藏。
+    """
+    plan_ui_enabled = (os.getenv("REACT_INTENT_PLAN_UI_ENABLED", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    npu = intent_wants_plan_ui if plan_ui_enabled else None
+    if npu is False:
+        return True
+    return _react_plan_sse_suppress_ui(todos_count)
+
+
+def use_react_observe_ui_llm() -> bool:
+    """REACT_OBSERVE_UI_LLM=0 时 decision_observe 走 summary_nl，不调 ui_observe_summary LLM。"""
+    v = (os.getenv("REACT_OBSERVE_UI_LLM", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def use_react_incremental_running_summary() -> bool:
+    """默认开启；REACT_INCREMENTAL_SUMMARY=0/false/off 关闭。"""
+    v = (os.getenv("REACT_INCREMENTAL_SUMMARY", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def use_react_incremental_running_summary_block_loop() -> bool:
+    """REACT_INCREMENTAL_SUMMARY_BLOCK_LOOP=1 时主循环内 await 每步静默合并（旧行为）。"""
+    v = (os.getenv("REACT_INCREMENTAL_SUMMARY_BLOCK_LOOP", "0") or "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def use_react_incremental_running_summary_stream_sse() -> bool:
+    """
+    REACT_INCREMENTAL_SUMMARY_STREAM_SSE=0 关闭；默认 1：
+    仅影响「主循环结束」后下发方式（running_summary_done 整块 vs final_wire 切片重放）。
+    每步中途合并默认走后台队列静默 LLM，不阻塞主循环、不在中途占用 SSE（与底部隐藏策略一致）。
+    """
+    v = (os.getenv("REACT_INCREMENTAL_SUMMARY_STREAM_SSE", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+_react_project_plan_name_cache_lock = threading.Lock()
+# (project_id, plan_id) -> (project_name, plan_name, monotonic_ts)
+# 进程级内存缓存作为 L1，Redis 作为 L2
+_react_project_plan_name_cache: Dict[Tuple[int, int], Tuple[Optional[str], Optional[str], float]] = {}
+
+
+def _react_project_plan_name_cache_ttl_s() -> float:
+    """项目/计划名称缓存秒数；<=0 表示不缓存。默认 300（5分钟），见 REACT_PROJECT_PLAN_NAME_CACHE_TTL。"""
+    try:
+        v = float((os.getenv("REACT_PROJECT_PLAN_NAME_CACHE_TTL") or "300").strip())
+    except Exception:
+        v = 300.0
+    return v
+
+
+def _get_redis_client_for_cache():
+    """获取 Redis 客户端（用于缓存），失败返回 None。"""
+    try:
+        from app import get_redis_client
+        return get_redis_client()
+    except Exception:
+        return None
+
+
+def _sync_load_project_plan_names(
+    project_id: Optional[int],
+    plan_id: Optional[int],
+    perf: bool,
+) -> Tuple[Optional[str], Optional[str]]:
+    """在 app_context 内查 Project/Plan 名称；优先 Redis 缓存，其次进程内存缓存，最后查库。"""
+    v_lookup = (os.getenv("REACT_PROJECT_PLAN_NAME_LOOKUP", "1") or "1").strip().lower()
+    if v_lookup in ("0", "false", "no", "off"):
+        if perf:
+            print("[PERF][react] project_plan_lookup_skipped=1")
+        return None, None
+    
+    if plan_id is None or (isinstance(plan_id, (int, str)) and str(plan_id).strip() in ("", "0", "None", "null")):
+        plan_id = 0
+    pid = int(project_id) if project_id is not None else 0
+    plid = int(plan_id) if plan_id is not None else 0
+    if pid <= 0 and plid <= 0:
+        return None, None
+    
+    key = (pid, plid)
+    redis_key = f"react:project_plan_name:{pid}:{plid}"
+    ttl = _react_project_plan_name_cache_ttl_s()
+    now = time.monotonic()
+    
+    # L1: 进程内存缓存
+    if ttl > 0:
+        with _react_project_plan_name_cache_lock:
+            hit = _react_project_plan_name_cache.get(key)
+            if hit is not None:
+                pn0, pln0, t0 = hit
+                if now - t0 < ttl:
+                    if perf:
+                        print("[PERF][react] project_plan_lookup_memory_cache_hit=1")
+                    return pn0, pln0
+    
+    # L2: Redis 缓存
+    redis_client = _get_redis_client_for_cache()
+    if redis_client is not None:
+        try:
+            cached = redis_client.get(redis_key)
+            if cached:
+                import json
+                data = json.loads(cached)
+                project_name = data.get("project_name")
+                plan_name = data.get("plan_name")
+                if perf:
+                    print("[PERF][react] project_plan_lookup_redis_cache_hit=1")
+                # 写入 L1 内存缓存
+                if ttl > 0:
+                    with _react_project_plan_name_cache_lock:
+                        _react_project_plan_name_cache[key] = (project_name, plan_name, now)
+                return project_name, plan_name
+        except Exception as e:
+            if perf:
+                print(f"[PERF][react] project_plan_lookup_redis_error={e}")
+    
+    # L3: 查库
+    project_name: Optional[str] = None
+    plan_name: Optional[str] = None
+    try:
+        from app import app, db, Project, Plan
+
+        with app.app_context():
+            t_db0 = time.perf_counter()
+            if pid > 0:
+                project = db.session.get(Project, pid)
+                if project is not None:
+                    project_name = project.name
+            if plid > 0:
+                plan = db.session.get(Plan, plid)
+                if plan is not None:
+                    plan_name = plan.name
+            if perf:
+                print(f"[PERF][react] project_plan_lookup_db_ms={(time.perf_counter()-t_db0)*1000:.1f}")
+    except Exception as e:
+        print(f"[REACT] 获取项目/计划名称失败：{e}")
+    
+    # 写入 L1 内存缓存
+    if ttl > 0:
+        with _react_project_plan_name_cache_lock:
+            _dead = [
+                k
+                for k, (_, _, t0) in _react_project_plan_name_cache.items()
+                if now - t0 >= ttl
+            ]
+            for k in _dead:
+                del _react_project_plan_name_cache[k]
+            _react_project_plan_name_cache[key] = (project_name, plan_name, now)
+    
+    # 写入 L2 Redis 缓存
+    if redis_client is not None and ttl > 0:
+        try:
+            import json
+            redis_client.setex(redis_key, int(ttl), json.dumps({
+                "project_name": project_name,
+                "plan_name": plan_name,
+            }))
+        except Exception:
+            pass
+    
+    return project_name, plan_name
+
+
+def _react_think_queue_poll_s() -> float:
+    """首轮 THINK 流式队列轮询 sleep；默认 0.03s，见 REACT_THINK_QUEUE_POLL_S。"""
+    try:
+        v = float((os.getenv("REACT_THINK_QUEUE_POLL_S") or "0.03").strip())
+    except Exception:
+        v = 0.03
+    return max(0.02, min(v, 0.2))
+
+
+def _summary_stream_yield_gap_s() -> float:
+    """summary 类 SSE 分片之间的墙钟暂停，便于浏览器逐帧显示。REACT_SUMMARY_STREAM_GAP_MS，默认 22ms。"""
+    try:
+        ms = int((os.getenv("REACT_SUMMARY_STREAM_GAP_MS") or "22").strip())
+    except Exception:
+        ms = 22
+    return max(0, ms) / 1000.0
+
+
+def _running_summary_wire_yield_gap_s() -> float:
+    """终局 running_summary_stream 分片间隔；未单独设置时与 _summary_stream_yield_gap_s 一致。"""
+    raw = (os.getenv("REACT_RUNNING_SUMMARY_STREAM_GAP_MS") or "").strip()
+    if raw:
+        try:
+            ms = int(raw)
+        except Exception:
+            ms = 22
+        return max(0, ms) / 1000.0
+    return _summary_stream_yield_gap_s()
+
+
+def react_think_max_tokens() -> Optional[int]:
+    """REACT_THINK_MAX_TOKENS：正整数则限制首轮规划流式输出长度；否则 None（不传）。"""
+    raw = (os.getenv("REACT_THINK_MAX_TOKENS") or "").strip()
+    if raw.isdigit():
+        v = int(raw)
+        return v if v > 0 else None
+    return None
+
+
+def prefer_nl_observe_summary(tool: Optional[str], observation: Any) -> bool:
+    """沙箱预览/待确认等场景优先走 summary_nl，避免 observe 总结首字等待。"""
+    t = str(tool or "").strip().lower()
+    d = observation if isinstance(observation, dict) else {}
+    dd = d.get("data") if isinstance(d.get("data"), dict) else {}
+    batch_results = d.get("batch_results") if isinstance(d.get("batch_results"), list) else []
+    # modify + 预览确认场景：用现成 summary_nl 即可，没必要再等一轮 LLM 总结
+    if t == "modify":
+        if d.get("confirmation_required") or dd.get("confirmation_required"):
+            return True
+        if d.get("batch_modify") or dd.get("batch_modify") or len(batch_results) > 0:
+            return True
+        if d.get("sandbox_preview") or dd.get("sandbox_preview"):
+            return True
+    # grep 定位结果已有高质量 summary（含数量/目标等），不再额外调用一轮 UI 总结 LLM，
+    # 否则会在「决策与观察」阶段引入显著等待（常见 10s+）。
+    if t == "grep":
+        return True
+    # 通用兜底：只要出现 sandbox 预览结构，也优先直出
+    if d.get("sandbox_preview") or dd.get("sandbox_preview"):
+        return True
+    return False
+
+
+def prefer_fast_observe_stub(tool: Optional[str], observation: Any) -> bool:
+    """
+    modify 且沙箱预览/待确认/批量：跳过大模型 observe_prompt，用本地 <result> 占位。
+    与 prefer_nl_observe_summary 不同：后者只省 UI 总结 LLM；本开关省整条 observe 分析流。
+    """
+    v = (os.getenv("REACT_OBSERVE_FAST_STUB", "1") or "1").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    t = str(tool or "").strip().lower()
+    if t != "modify":
+        return False
+    d = observation if isinstance(observation, dict) else {}
+    dd = d.get("data") if isinstance(d.get("data"), dict) else {}
+    dr = d.get("result") if isinstance(d.get("result"), dict) else {}
+    if (
+        d.get("sandbox_preview")
+        or dd.get("sandbox_preview")
+        or dr.get("sandbox_preview")
+    ):
+        return True
+    if (
+        d.get("confirmation_required")
+        or dd.get("confirmation_required")
+        or dr.get("confirmation_required")
+    ):
+        return True
+    if d.get("batch_modify") or dd.get("batch_modify") or dr.get("batch_modify"):
+        return True
+    br = d.get("batch_results")
+    if isinstance(br, list) and len(br) > 0:
+        return True
+    return False
+
+
+def prefer_fast_observe_stub_grep(tool: Optional[str], observation: Any) -> bool:
+    """
+    grep 定位（locate）成功时跳过 observe_prompt LLM，用 summary_nl 生成最小 <result>。
+    associate/compare 等仍走完整观察分析，避免丢合并/对比类结论。
+    """
+    v = (os.getenv("REACT_GREP_OBSERVE_FAST_STUB", "1") or "1").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if str(tool or "").strip().lower() != "grep":
+        return False
+    d = observation if isinstance(observation, dict) else {}
+    if d.get("success") is False:
+        return False
+    mode = str(d.get("mode") or "locate").strip().lower()
+    if mode != "locate":
+        return False
+    return True
+
+
+def stub_observe_result_xml(nl: str) -> str:
+    """供 parse_xml_findings 解析的最小 <result>，正文来自 summary_nl。"""
+    safe = (nl or "").strip()
+    if not safe:
+        safe = "沙箱预览已生成，请确认变更。"
+    safe = html.escape(safe, quote=False)
+    return (
+        "<result><key_findings>"
+        f'<finding type="info">{safe}</finding>'
+        "</key_findings>"
+        "<context_update>{}</context_update>"
+        "<next_step></next_step>"
+        "</result>"
+    )
+
+
+def use_react_merge_observe_decide() -> bool:
+    """已下线：observe+decide 合并链路，固定关闭。"""
+    return False
+
+
+def observe_prompt_shrink_enabled() -> bool:
+    v = (os.getenv("REACT_OBSERVE_PROMPT_SHRINK", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def decide_prompt_shrink_enabled() -> bool:
+    v = (os.getenv("REACT_DECIDE_PROMPT_SHRINK", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _shrink_json_payload(
+    obj: Any, *, cap_list: int, cap_str: int, max_depth: int
+) -> Any:
+    def _walk(x: Any, depth: int) -> Any:
+        if depth <= 0:
+            return "…"
+        if isinstance(x, str):
+            if len(x) > cap_str:
+                return x[:cap_str] + f"…(截断,len={len(x)})"
+            return x
+        if isinstance(x, list):
+            if len(x) > cap_list:
+                x = x[:cap_list]
+            return [_walk(y, depth - 1) for y in x]
+        if isinstance(x, dict):
+            return {str(k): _walk(v, depth - 1) for k, v in x.items()}
+        if isinstance(x, (int, float, bool)) or x is None:
+            return x
+        return str(x)[:cap_str]
+
+    try:
+        clone = json.loads(json.dumps(obj, ensure_ascii=False, default=str))
+    except Exception:
+        return obj
+    return _walk(clone, max_depth)
+
+
+def shrink_payload_for_observe_prompt(obj: Any) -> Any:
+    """缩小 observe_prompt / ui_observe_summary 中的 JSON，降 prompt 体积与 TTFT。"""
+    if not observe_prompt_shrink_enabled() or obj is None:
+        return obj
+    try:
+        cap_list = max(1, int((os.getenv("REACT_OBSERVE_PROMPT_LIST_CAP") or "15").strip()))
+    except Exception:
+        cap_list = 15
+    try:
+        cap_str = max(32, int((os.getenv("REACT_OBSERVE_PROMPT_STR_CHARS") or "500").strip()))
+    except Exception:
+        cap_str = 500
+    try:
+        max_depth = max(1, int((os.getenv("REACT_OBSERVE_PROMPT_MAX_DEPTH") or "14").strip()))
+    except Exception:
+        max_depth = 14
+    return _shrink_json_payload(obj, cap_list=cap_list, cap_str=cap_str, max_depth=max_depth)
+
+
+def decide_prompt_shrink_caps_base() -> Tuple[int, int, int]:
+    """通用 decide 裁剪参数（与原先 shrink_payload_for_decide_prompt 一致）。"""
+    try:
+        cl_o = max(1, int((os.getenv("REACT_OBSERVE_PROMPT_LIST_CAP") or "15").strip()))
+    except Exception:
+        cl_o = 15
+    raw_cl = (os.getenv("REACT_DECIDE_PROMPT_LIST_CAP") or "").strip()
+    try:
+        cap_list = max(1, int(raw_cl)) if raw_cl else cl_o
+    except Exception:
+        cap_list = cl_o
+    try:
+        cs_o = max(32, int((os.getenv("REACT_OBSERVE_PROMPT_STR_CHARS") or "500").strip()))
+    except Exception:
+        cs_o = 500
+    raw_cs = (os.getenv("REACT_DECIDE_PROMPT_STR_CHARS") or "").strip()
+    try:
+        cap_str = max(32, int(raw_cs)) if raw_cs else cs_o
+    except Exception:
+        cap_str = cs_o
+    try:
+        md_o = max(1, int((os.getenv("REACT_OBSERVE_PROMPT_MAX_DEPTH") or "14").strip()))
+    except Exception:
+        md_o = 14
+    raw_md = (os.getenv("REACT_DECIDE_PROMPT_MAX_DEPTH") or "").strip()
+    try:
+        max_depth = max(1, int(raw_md)) if raw_md else md_o
+    except Exception:
+        max_depth = md_o
+    return cap_list, cap_str, max_depth
+
+
+def use_react_decide_after_grep_tight_shrink() -> bool:
+    """上一工具为 grep 时是否对 decide prompt 再收紧列表/字符串/深度（默认开）。"""
+    v = (os.getenv("REACT_DECIDE_AFTER_GREP_SHRINK", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def decide_prompt_shrink_caps_for_prev_tool(prev_tool: Optional[str]) -> Tuple[int, int, int]:
+    bl, bs, bd = decide_prompt_shrink_caps_base()
+    if str(prev_tool or "").strip().lower() != "grep":
+        return bl, bs, bd
+    if not use_react_decide_after_grep_tight_shrink():
+        return bl, bs, bd
+    try:
+        tg_l = max(1, int((os.getenv("REACT_DECIDE_AFTER_GREP_LIST_CAP") or "8").strip()))
+    except Exception:
+        tg_l = 8
+    try:
+        tg_s = max(32, int((os.getenv("REACT_DECIDE_AFTER_GREP_STR_CHARS") or "280").strip()))
+    except Exception:
+        tg_s = 280
+    try:
+        tg_d = max(1, int((os.getenv("REACT_DECIDE_AFTER_GREP_MAX_DEPTH") or "12").strip()))
+    except Exception:
+        tg_d = 12
+    return min(bl, tg_l), min(bs, tg_s), min(bd, tg_d)
+
+
+def shrink_payload_for_decide_prompt(
+    obj: Any, prev_tool: Optional[str] = None
+) -> Any:
+    """缩小 decide_prompt 中的上下文与上一步观察/分析。prev_tool 为上一执行工具名（如 grep）时可收紧裁剪。"""
+    if not decide_prompt_shrink_enabled() or obj is None:
+        return obj
+    cap_list, cap_str, max_depth = decide_prompt_shrink_caps_for_prev_tool(prev_tool)
+    return _shrink_json_payload(obj, cap_list=cap_list, cap_str=cap_str, max_depth=max_depth)
+
+
+def resolve_decide_max_tokens_for_prev_tool(prev_tool: Optional[str]) -> Optional[int]:
+    """流式 decide 的 max_tokens：grep 后一轮可读 REACT_DECIDE_AFTER_GREP_MAX_TOKENS 覆盖。"""
+    mt_raw = (os.getenv("REACT_DECIDE_MAX_TOKENS") or "").strip()
+    out: Optional[int] = int(mt_raw) if mt_raw.isdigit() else None
+    if out is not None and out <= 0:
+        out = None
+    if str(prev_tool or "").strip().lower() != "grep":
+        return out
+    ag = (os.getenv("REACT_DECIDE_AFTER_GREP_MAX_TOKENS") or "").strip()
+    if ag.isdigit():
+        v = int(ag)
+        if v > 0:
+            return v
+    return out
+
+
+async def merge_observe_parallel_ui_first(
+    gen_observe: AsyncIterator[Dict[str, Any]],
+    gen_ui: AsyncIterator[Dict[str, Any]],
+    *,
+    ui_lead: Optional[List[Dict[str, Any]]] = None,
+    timings_ms: Optional[Dict[str, float]] = None,
+) -> AsyncIterator[Dict[str, Any]]:
+    """
+    observe 与 decision_observe 并行跑 LLM。先发 ui_lead（首包标题等仍优先），
+    之后 **交错** 下发：在等新 UI token 前先 flush 已到达的 observe 事件，
+    避免「整段 UI 总结发完后才 flush observe」——合并流里靠后的 agent_thought
+    会让 Thought 区长时间空白（主卡片已显示观察结论）。
+    """
+    q: asyncio.Queue = asyncio.Queue()
+    SENT = object()
+
+    async def pump_observe() -> None:
+        t0 = time.perf_counter()
+        try:
+            async for ev in gen_observe:
+                await q.put(ev)
+        finally:
+            if timings_ms is not None:
+                timings_ms["observe_stream"] = (time.perf_counter() - t0) * 1000.0
+            await q.put(SENT)
+
+    obs_task = asyncio.create_task(pump_observe())
+    try:
+        t_ui = time.perf_counter()
+        if ui_lead:
+            for ev in ui_lead:
+                yield ev
+
+        ui_it = gen_ui.__aiter__()
+        obs_closed = False
+        _pending_ui: Optional[Dict[str, Any]] = None
+
+        def _flush_ob_nowait() -> Iterator[Dict[str, Any]]:
+            nonlocal obs_closed
+            while True:
+                try:
+                    item = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                if item is SENT:
+                    obs_closed = True
+                    return
+                yield item
+
+        while True:
+            if _pending_ui is not None:
+                yield _pending_ui
+                _pending_ui = None
+                for ev in _flush_ob_nowait():
+                    yield ev
+                if obs_closed:
+                    try:
+                        async for ev in ui_it:
+                            yield ev
+                    except StopAsyncIteration:
+                        pass
+                    break
+                continue
+
+            for ev in _flush_ob_nowait():
+                yield ev
+            if obs_closed:
+                try:
+                    async for ev in ui_it:
+                        yield ev
+                except StopAsyncIteration:
+                    pass
+                break
+
+            get_t = asyncio.create_task(q.get())
+            ui_t = asyncio.create_task(ui_it.__anext__())
+            done, _ = await asyncio.wait(
+                {get_t, ui_t}, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if get_t in done:
+                item = get_t.result()
+                if ui_t in done:
+                    try:
+                        _pending_ui = ui_t.result()
+                    except StopAsyncIteration:
+                        _pending_ui = None
+                else:
+                    ui_t.cancel()
+                    try:
+                        await ui_t
+                    except asyncio.CancelledError:
+                        pass
+                if item is SENT:
+                    obs_closed = True
+                    if _pending_ui is not None:
+                        yield _pending_ui
+                        _pending_ui = None
+                    try:
+                        async for ev in ui_it:
+                            yield ev
+                    except StopAsyncIteration:
+                        pass
+                    break
+                yield item
+                continue
+
+            get_t.cancel()
+            try:
+                await get_t
+            except asyncio.CancelledError:
+                pass
+            try:
+                ev = ui_t.result()
+                yield ev
+            except StopAsyncIteration:
+                while True:
+                    item = await q.get()
+                    if item is SENT:
+                        break
+                    yield item
+                break
+
+        if timings_ms is not None:
+            timings_ms["ui_summary"] = (time.perf_counter() - t_ui) * 1000.0
+        await obs_task
+    finally:
+        if not obs_task.done():
+            obs_task.cancel()
+            try:
+                await obs_task
+            except asyncio.CancelledError:
+                pass
+
+
+def _modify_wait_heartbeat_should_emit(
+    last_emitted_bucket: Optional[int], waited_s: float
+) -> Tuple[bool, int]:
+    """
+    modify 轮询「修改中…已等待 Ns」：同一整数 N 只下发一次，避免 0.28s 一轮时 N 秒重复刷多行。
+    返回 (是否下发, 用于展示的 N)。last_emitted_bucket 为 None 表示尚未下发过心跳。
+    """
+    b = int(max(0.0, waited_s))
+    if last_emitted_bucket is None:
+        return True, b
+    if b > last_emitted_bucket:
+        return True, b
+    return False, b
+
+
+def _modify_progress_to_stream_event(
+    msg: Union[str, Any], step_index: int, reason: str
+) -> Dict[str, Any]:
+    """modify 进度队列：普通进度文案，或批量预览结构化事件（前缀见 modify_tool.MODIFY_BATCH_ROW_PREFIX）。"""
+    from agents.tools.modify_tool import MODIFY_BATCH_ROW_PREFIX
+
+    sm = str(msg)
+    if sm.startswith(MODIFY_BATCH_ROW_PREFIX):
+        try:
+            row = json.loads(sm[len(MODIFY_BATCH_ROW_PREFIX) :])
+        except Exception:
+            row = None
+        if isinstance(row, dict):
+            return {
+                "event": "batch_preview_row",
+                "tool": "modify",
+                "reason": reason,
+                "index": step_index,
+                "row": row,
+            }
+    return {
+        "event": "executing",
+        "tool": "modify",
+        "reason": reason,
+        "index": step_index,
+        "message": sm,
     }
 
 
@@ -237,6 +1149,7 @@ class SimplifiedReActEngine:
         self._tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="react_tool")
         self._ui_locale = "zh"
         self._pending_diff_context = {}
+        self._grep_result_cache: Dict[str, Tuple[float, Any]] = {}
 
     @staticmethod
     def _normalize_modify_target(target: Any) -> str:
@@ -443,52 +1356,114 @@ class SimplifiedReActEngine:
         del stream_kind  # unused
         yield
 
-    def _resolve_chat_stream_iter(self, prompt: str, history: Optional[list] = None):
+    def _resolve_chat_stream_iter(
+        self,
+        prompt: str,
+        history: Optional[list] = None,
+        max_tokens: Optional[int] = None,
+    ):
         """
         统一流式迭代：优先 chat_stream_with_reasoning，否则 chat_stream_fallback_chunks（直连 prompt，禁止 parse_intent 聚合）。
+        max_tokens：若被调用方签名支持则传入（如部分 Qwen 实现）；否则忽略。
         """
+        import inspect
+
         fn = getattr(self.llm, "chat_stream_with_reasoning", None)
         if callable(fn):
-            return fn(prompt, history)
+            _kw: Dict[str, Any] = {}
+            if max_tokens is not None:
+                try:
+                    if "max_tokens" in inspect.signature(fn).parameters:
+                        _kw["max_tokens"] = max_tokens
+                except (TypeError, ValueError):
+                    pass
+            return fn(prompt, history, **_kw) if _kw else fn(prompt, history)
         fb = getattr(self.llm, "chat_stream_fallback_chunks", None)
         if callable(fb):
-            return fb(prompt, history)
+            _kw2: Dict[str, Any] = {}
+            if max_tokens is not None:
+                try:
+                    if "max_tokens" in inspect.signature(fb).parameters:
+                        _kw2["max_tokens"] = max_tokens
+                except (TypeError, ValueError):
+                    pass
+            return fb(prompt, history, **_kw2) if _kw2 else fb(prompt, history)
         raise RuntimeError(
             f"LLM {type(self.llm).__name__} 须实现 chat_stream_with_reasoning 或 chat_stream_fallback_chunks"
         )
 
-    def _resolve_chat_stream_iter_content_only(self, prompt: str, history: Optional[list] = None):
+    def _resolve_chat_stream_iter_content_only(
+        self,
+        prompt: str,
+        history: Optional[list] = None,
+        max_tokens: Optional[int] = None,
+    ):
         """
         仅正文流：不启用模型侧 enable_thinking / reasoning_delta，用于 Agent 自然语言与 decide/observe 正文。
         首轮 ReAct think 在 REACT_THINK_CONTENT_ONLY=1 时走本方法：上游无 reasoning_delta，SSE 侧以 todos_stream 承载主文流。
+        max_tokens：若 LLM.chat_stream 签名支持则传入（如 Qwen 兼容）；否则忽略。
         """
-        with self._llm_no_thinking():
-            fn = getattr(self.llm, "chat_stream", None)
-            if callable(fn):
+        import inspect
 
-                def _gen():
+        # 须在实际迭代 LLM 流时保持 force_disable_thinking：若用外层 with + return generator，
+        # 会在首次 next 之前 __exit__，导致 Qwen 仍带 enable_thinking、千帆仍用 X1 推理模型。
+        fn = getattr(self.llm, "chat_stream", None)
+        if callable(fn):
+            stream_kw: Dict[str, Any] = {}
+            if max_tokens is not None:
+                try:
+                    if "max_tokens" in inspect.signature(fn).parameters:
+                        stream_kw["max_tokens"] = max_tokens
+                except (TypeError, ValueError):
+                    pass
+
+            def _gen():
+                try:
+                    if hasattr(self.llm, "force_disable_thinking"):
+                        setattr(self.llm, "force_disable_thinking", True)
                     try:
-                        for piece in fn(prompt, history):
+                        for piece in fn(prompt, history, **stream_kw):
                             if isinstance(piece, str) and piece:
                                 yield {"type": "content_delta", "delta": piece}
                     except Exception as e:
                         yield {"type": "content_delta", "delta": f"Error: {e}"}
                     yield {"type": "done"}
+                finally:
+                    if hasattr(self.llm, "force_disable_thinking"):
+                        setattr(self.llm, "force_disable_thinking", False)
 
-                return _gen()
-            fn2 = getattr(self.llm, "chat_stream_with_reasoning", None)
-            if callable(fn2):
+            return _gen()
+        fn2 = getattr(self.llm, "chat_stream_with_reasoning", None)
+        if callable(fn2):
 
-                def _gen2():
+            def _gen2():
+                try:
+                    if hasattr(self.llm, "force_disable_thinking"):
+                        setattr(self.llm, "force_disable_thinking", True)
                     try:
-                        for item in fn2(prompt, history):
+                        _f2_kw: Dict[str, Any] = {}
+                        if max_tokens is not None:
+                            try:
+                                if "max_tokens" in inspect.signature(fn2).parameters:
+                                    _f2_kw["max_tokens"] = max_tokens
+                            except (TypeError, ValueError):
+                                pass
+                        _it2 = (
+                            fn2(prompt, history, **_f2_kw)
+                            if _f2_kw
+                            else fn2(prompt, history)
+                        )
+                        for item in _it2:
                             if isinstance(item, dict) and item.get("type") == "content_delta":
                                 yield item
                     except Exception as e:
                         yield {"type": "content_delta", "delta": f"Error: {e}"}
                     yield {"type": "done"}
+                finally:
+                    if hasattr(self.llm, "force_disable_thinking"):
+                        setattr(self.llm, "force_disable_thinking", False)
 
-                return _gen2()
+            return _gen2()
         raise RuntimeError(
             f"LLM {type(self.llm).__name__} 须实现 chat_stream 或 chat_stream_with_reasoning"
         )
@@ -515,14 +1490,686 @@ class SimplifiedReActEngine:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._tool_executor, _sync_collect)
 
+    async def _stream_llm_text(self, prompt: str):
+        """
+        流式收集 LLM 文本输出，边收边 yield。
+        用于合并模式下首轮决定。
+        """
+        q: asyncio.Queue = asyncio.Queue()
+        DONE = object()
+        # 在主线程获取事件循环，避免子线程中获取失败（Python 3.12）
+        main_loop = asyncio.get_running_loop()
+        
+        def _sync_producer():
+            try:
+                for item in self._resolve_chat_stream_iter(prompt):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get('type') == 'content_delta':
+                        d = item.get('delta') or ''
+                        if d:
+                            # 使用主线程的事件循环
+                            asyncio.run_coroutine_threadsafe(q.put(d), main_loop)
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(q.put(f'Error: {e}'), main_loop)
+            finally:
+                asyncio.run_coroutine_threadsafe(q.put(DONE), main_loop)
+        
+        # 启动生产者线程
+        threading.Thread(target=_sync_producer, daemon=True).start()
+        
+        # 异步消费
+        while True:
+            item = await q.get()
+            if item is DONE:
+                break
+            if isinstance(item, str):
+                yield item
+
+    async def _collect_llm_text_content_only(
+        self, prompt: str, max_tokens: Optional[int] = None
+    ) -> str:
+        """与 observe 流式同源：仅正文 + 可选 max_tokens（Qwen chat_stream 等）。用于同步 run() observe。"""
+        def _sync_collect():
+            parts: List[str] = []
+            try:
+                for item in self._resolve_chat_stream_iter_content_only(
+                    prompt, None, max_tokens
+                ):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "content_delta":
+                        d = item.get("delta") or ""
+                        if d:
+                            parts.append(d)
+            except Exception as e:
+                return f"Error: {e}"
+            return "".join(parts).strip()
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._tool_executor, _sync_collect)
+
+    @staticmethod
+    def _grep_cache_key(params: Dict[str, Any]) -> str:
+        facet = {
+            k: params.get(k)
+            for k in (
+                "project_id",
+                "keywords",
+                "target",
+                "mode",
+                "plan_id",
+                "userId",
+            )
+        }
+        return json.dumps(facet, sort_keys=True, ensure_ascii=False, default=str)
+
+    def _parse_react_fc_tool_choice(self) -> Any:
+        raw = os.getenv("REACT_FC_TOOL_CHOICE", "auto").strip() or "auto"
+        if raw.startswith("{"):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return "auto"
+        return raw
+
+    @staticmethod
+    def _fc_normalize_assistant_message(resp: Any) -> Any:
+        if resp is None:
+            return None
+        if isinstance(resp, dict):
+            ch = resp.get("choices")
+            if isinstance(ch, (list, tuple)) and ch:
+                m = (ch[0] or {}).get("message")
+                if m is not None:
+                    return m
+            return resp
+        ch = getattr(resp, "choices", None)
+        if ch and len(ch) > 0:
+            return getattr(ch[0], "message", None) or ch[0]
+        return resp
+
+    async def _react_decide_function_call(
+        self,
+        decision_prompt: str,
+        *,
+        step_index: int,
+        prev_tool: Optional[str] = None,
+        opening_merge: bool = False,
+    ) -> Tuple[Dict[str, Any], str]:
+        from .react_function_call import (
+            build_react_decision_tools_from_registry,
+            decision_from_assistant_message,
+        )
+
+        # 合并模式：不使用 FC 工具，直接让 LLM 输出 JSON
+        if opening_merge:
+            text = await self._collect_llm_text(decision_prompt)
+            # 使用新的解析函数
+            _parsed = parse_opening_decision(text)
+            _type = _parsed.get("type")
+            
+            if _type == "single":
+                decision = {
+                    "execute": True,
+                    "tool": _parsed.get("tool", ""),
+                    "params": _parsed.get("params", {}),
+                    "reason": "opening_single_step_fc",
+                }
+            elif _type == "multi":
+                decision = {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "opening_multi_step",
+                    "plan": _parsed.get("plan", []),
+                }
+            elif _type == "chat":
+                decision = {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "chat",
+                    "message": _parsed.get("message", ""),
+                }
+            else:
+                # unknown 类型，尝试从原始文本解析
+                decision = parse_xml_decision(text) if use_react_decide_xml_fallback() else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "opening_unknown",
+                }
+            
+            return decision, text
+
+        # 非合并模式：使用 FC 工具
+        tools = build_react_decision_tools_from_registry(self.tools)
+        if not tools:
+            text = await self._collect_llm_text(decision_prompt)
+            return (
+                parse_xml_decision(text)
+                if use_react_decide_xml_fallback()
+                else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "decide_fc_empty_registry",
+                },
+                text,
+            )
+
+        _xml_hint = (
+            "若无法调用函数，可输出 <decision>...</decision>。"
+            if use_react_decide_xml_fallback()
+            else ""
+        )
+        prompt_fc = (
+            decision_prompt
+            + "\n\n（请用 function calling 指定工具与参数；不要输出 <decision> XML。"
+            + (_xml_hint and " " + _xml_hint)
+            + "）"
+        )
+        messages = [{"role": "user", "content": prompt_fc}]
+        llm = self.llm
+        tool_choice = self._parse_react_fc_tool_choice()
+        parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        max_tok_fc: Optional[int] = None
+        for _k in ("REACT_DECIDE_FC_MAX_TOKENS", "REACT_DECIDE_MAX_TOKENS"):
+            _raw_mt = (os.getenv(_k) or "").strip()
+            if _raw_mt.isdigit():
+                _v = int(_raw_mt)
+                if _v > 0:
+                    max_tok_fc = _v
+                    break
+        if str(prev_tool or "").strip().lower() == "grep":
+            _ag_fc = (
+                (os.getenv("REACT_DECIDE_AFTER_GREP_FC_MAX_TOKENS") or "").strip()
+                or (os.getenv("REACT_DECIDE_AFTER_GREP_MAX_TOKENS") or "").strip()
+            )
+            if _ag_fc.isdigit():
+                _v_ag = int(_ag_fc)
+                if _v_ag > 0:
+                    max_tok_fc = _v_ag
+
+        import inspect
+
+        try:
+            fn = getattr(llm, "chat_completion_with_tools")
+            _fc_kw: Dict[str, Any] = {
+                "tool_choice": tool_choice,
+                "parallel_tool_calls": parallel,
+            }
+            if max_tok_fc is not None:
+                try:
+                    if "max_tokens" in inspect.signature(fn).parameters:
+                        _fc_kw["max_tokens"] = max_tok_fc
+                except (TypeError, ValueError):
+                    pass
+            if asyncio.iscoroutinefunction(fn):
+                raw = await fn(messages, tools, **_fc_kw)
+            else:
+                loop = asyncio.get_event_loop()
+                raw = await loop.run_in_executor(
+                    self._tool_executor,
+                    functools.partial(fn, messages, tools, **_fc_kw),
+                )
+        except Exception as e:
+            print(
+                f"[REACT-FC] step={step_index} chat_completion_with_tools 失败，回退流式+XML: {e}"
+            )
+            text = await self._collect_llm_text(decision_prompt)
+            return (
+                parse_xml_decision(text)
+                if use_react_decide_xml_fallback()
+                else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": f"decide_fc_exception:{e}",
+                },
+                text,
+            )
+
+        msg = self._fc_normalize_assistant_message(raw)
+        if msg is None:
+            text = await self._collect_llm_text(decision_prompt)
+            return (
+                parse_xml_decision(text)
+                if use_react_decide_xml_fallback()
+                else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "decide_fc_no_message",
+                },
+                text,
+            )
+
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content") or ""
+        else:
+            content = getattr(msg, "content", None) or ""
+
+        decision = decision_from_assistant_message(msg)
+        if decision is None:
+            decision = (
+                parse_xml_decision(content)
+                if use_react_decide_xml_fallback()
+                else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "decide_fc_no_tool_calls",
+                }
+            )
+
+        raw_log = (content or "").strip()
+        try:
+            tcs = (
+                msg.get("tool_calls")
+                if isinstance(msg, dict)
+                else getattr(msg, "tool_calls", None)
+            )
+            if tcs:
+                raw_log = (
+                    f"{raw_log} | tool_calls={len(tcs)}"
+                    if raw_log
+                    else f"tool_calls={len(tcs)}"
+                )
+        except Exception:
+            pass
+
+        print(
+            f"[REACT-FC] step={step_index} tool={decision.get('tool')!r} "
+            f"execute={decision.get('execute')!r}"
+        )
+        return decision, raw_log or (content or "")
+
+    async def _iter_fc_decide_stream(
+        self,
+        decision_prompt: str,
+        *,
+        step_index: int,
+        prev_tool: Optional[str] = None,
+        result_out: List[Tuple[Dict[str, Any], str]],
+        opening_merge: bool = False,
+    ):
+        """
+        流式 FC：边收模型 delta 边 yield agent_thought；结束后写入 result_out[0] = (decision, raw_log)。
+        合并模式下：直接收集文本输出，使用 parse_opening_decision 解析。
+        """
+        import inspect
+
+        result_out.clear()
+        
+        # 合并模式：不使用 FC，直接流式收集文本
+        if opening_merge:
+            content_parts = []
+            try:
+                async for chunk in self._stream_llm_text(decision_prompt):
+                    if chunk:
+                        content_parts.append(chunk)
+                        yield {"event": "agent_thought", "delta": chunk, "index": step_index}
+            except Exception as e:
+                print(f"[REACT-FC-STREAM] opening_merge 流式失败: {e}")
+            
+            text = "".join(content_parts)
+            _parsed = parse_opening_decision(text)
+            _type = _parsed.get("type")
+            
+            if _type == "single":
+                decision = {
+                    "execute": True,
+                    "tool": _parsed.get("tool", ""),
+                    "params": _parsed.get("params", {}),
+                    "reason": "opening_single_step_stream",
+                }
+            elif _type == "multi":
+                # 多步任务：提取 plan 和首个工具调用
+                _plan_list = _parsed.get("plan", [])
+                _first_tool = _parsed.get("first_tool", "")
+                _first_params = _parsed.get("first_params", {})
+                if _first_tool:
+                    decision = {
+                        "execute": True,
+                        "tool": _first_tool,
+                        "params": _first_params or {},
+                        "reason": "opening_multi_step_stream",
+                        "plan": _plan_list,
+                    }
+                else:
+                    decision = {
+                        "execute": False,
+                        "tool": "",
+                        "params": {},
+                        "reason": "opening_multi_step_no_first_tool",
+                        "plan": _plan_list,
+                    }
+            elif _type == "chat":
+                decision = {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "chat",
+                    "message": _parsed.get("message", ""),
+                }
+            else:
+                decision = parse_xml_decision(text) if use_react_decide_xml_fallback() else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "opening_unknown",
+                }
+            
+            result_out.append((decision, text))
+            print(f"[REACT-FC-STREAM] opening_merge type={_type} tool={decision.get('tool')!r}")
+            return
+
+        # 非合并模式：使用 FC 工具
+        from .react_function_call import (
+            build_react_decision_tools_from_registry,
+            decision_from_assistant_message,
+        )
+        
+        tools = build_react_decision_tools_from_registry(self.tools)
+        assert tools, "流式 FC 要求非空 tools（调用方应先降级）"
+
+        _xml_hint = (
+            "若无法调用函数，可输出 <decision>...</decision>。"
+            if use_react_decide_xml_fallback()
+            else ""
+        )
+        prompt_fc = (
+            decision_prompt
+            + "\n\n（请用 function calling 指定工具与参数；不要输出 <decision> XML。"
+            + (_xml_hint and " " + _xml_hint)
+            + "）"
+        )
+        messages = [{"role": "user", "content": prompt_fc}]
+        llm = self.llm
+        tool_choice = self._parse_react_fc_tool_choice()
+        parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        max_tok_fc: Optional[int] = None
+        for _k in ("REACT_DECIDE_FC_MAX_TOKENS", "REACT_DECIDE_MAX_TOKENS"):
+            _raw_mt = (os.getenv(_k) or "").strip()
+            if _raw_mt.isdigit():
+                _v = int(_raw_mt)
+                if _v > 0:
+                    max_tok_fc = _v
+                    break
+        if str(prev_tool or "").strip().lower() == "grep":
+            _ag_fc = (
+                (os.getenv("REACT_DECIDE_AFTER_GREP_FC_MAX_TOKENS") or "").strip()
+                or (os.getenv("REACT_DECIDE_AFTER_GREP_MAX_TOKENS") or "").strip()
+            )
+            if _ag_fc.isdigit():
+                _v_ag = int(_ag_fc)
+                if _v_ag > 0:
+                    max_tok_fc = _v_ag
+
+        stream_fn = getattr(llm, "chat_completion_with_tools_stream", None)
+        if stream_fn is None:
+            raise RuntimeError("LLM 无 chat_completion_with_tools_stream")
+        _fc_kw: Dict[str, Any] = {
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel,
+        }
+        if max_tok_fc is not None:
+            try:
+                if "max_tokens" in inspect.signature(stream_fn).parameters:
+                    _fc_kw["max_tokens"] = max_tok_fc
+            except (TypeError, ValueError):
+                pass
+
+        it = stream_fn(messages, tools, **_fc_kw)
+        acc = FcStreamAccumulator()
+        loop = asyncio.get_event_loop()
+
+        def _next_or_stop(gen):
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+
+        while True:
+            chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
+            if chunk is None:
+                break
+            piece = acc.feed(chunk)
+            if piece:
+                yield {"event": "agent_thought", "delta": piece, "index": step_index}
+
+        msg = acc.build_assistant_message()
+        msg = self._fc_normalize_assistant_message(msg)
+        if msg is None:
+            text = await self._collect_llm_text(decision_prompt)
+            d = parse_xml_decision(text) if use_react_decide_xml_fallback() else {
+                "execute": False,
+                "tool": "",
+                "params": {},
+                "reason": "decide_fc_no_message",
+            }
+            result_out.append((d, text))
+            return
+
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content") or ""
+        else:
+            content = getattr(msg, "content", None) or ""
+
+        decision = decision_from_assistant_message(msg)
+        if decision is None:
+            decision = (
+                parse_xml_decision(content)
+                if use_react_decide_xml_fallback()
+                else {
+                    "execute": False,
+                    "tool": "",
+                    "params": {},
+                    "reason": "decide_fc_no_tool_calls",
+                }
+            )
+
+        raw_log = (content or "").strip()
+        try:
+            tcs = (
+                msg.get("tool_calls")
+                if isinstance(msg, dict)
+                else getattr(msg, "tool_calls", None)
+            )
+            if tcs:
+                raw_log = (
+                    f"{raw_log} | tool_calls={len(tcs)}"
+                    if raw_log
+                    else f"tool_calls={len(tcs)}"
+                )
+        except Exception:
+            pass
+
+        print(
+            f"[REACT-FC-STREAM] step={step_index} tool={decision.get('tool')!r} "
+            f"execute={decision.get('execute')!r}"
+        )
+        result_out.append((decision, raw_log or (content or "")))
+
+
+
+    async def _iter_observe_fc_stream(
+        self,
+        observe_prompt: str,
+        *,
+        step_index: int,
+        full_text_sink: List[str],
+        analysis_out: List[Optional[Dict[str, Any]]],
+    ):
+        from .react_function_call import (
+            build_react_observe_fc_tools,
+            observe_fc_result_from_assistant_message,
+            use_react_observe_xml_fallback,
+        )
+        import inspect
+
+        analysis_out.clear()
+        analysis_out.append(None)
+        full_text_sink.clear()
+        full_text_sink.append("")
+
+        tools = build_react_observe_fc_tools()
+        prompt_fc = (
+            observe_prompt
+            + "\n\n（必须 function calling 调用 submit_observe_analysis；不要输出 <result>。）"
+        )
+        messages = [{"role": "user", "content": prompt_fc}]
+        stream_fn = getattr(self.llm, "chat_completion_with_tools_stream", None)
+        if stream_fn is None:
+            raise RuntimeError("LLM 无 chat_completion_with_tools_stream")
+        tool_choice = self._parse_react_fc_tool_choice()
+        parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        max_tok_fc: Optional[int] = None
+        _raw_mt = (os.getenv("REACT_OBSERVE_MAX_TOKENS") or "").strip()
+        if _raw_mt.isdigit():
+            _v = int(_raw_mt)
+            if _v > 0:
+                max_tok_fc = _v
+        _fc_kw: Dict[str, Any] = {
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel,
+        }
+        if max_tok_fc is not None:
+            try:
+                if "max_tokens" in inspect.signature(stream_fn).parameters:
+                    _fc_kw["max_tokens"] = max_tok_fc
+            except (TypeError, ValueError):
+                pass
+
+        it = stream_fn(messages, tools, **_fc_kw)
+        acc = FcStreamAccumulator()
+        loop = asyncio.get_event_loop()
+
+        def _next_or_stop(gen):
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+
+        while True:
+            chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
+            if chunk is None:
+                break
+            piece = acc.feed(chunk)
+            if piece:
+                yield {
+                    "event": "reasoning_step",
+                    "content": piece,
+                    "segment": "observe",
+                    "index": step_index,
+                }
+
+        msg = acc.build_assistant_message()
+        msg = self._fc_normalize_assistant_message(msg)
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content") or ""
+        else:
+            content = getattr(msg, "content", None) or ""
+        full_text_sink[0] = content
+
+        parsed = observe_fc_result_from_assistant_message(msg)
+        if parsed is None:
+            analysis_out[0] = (
+                parse_xml_findings(content) if use_react_observe_xml_fallback() else {"findings": [], "context_update": {}, "next_step": ""}
+            )
+        else:
+            analysis_out[0] = parsed
+
+    async def _react_observe_fc_sync(
+        self, observe_prompt: str, max_tokens: Optional[int]
+    ) -> Dict[str, Any]:
+        """同步跑 observe 的 FC（无流式），供非 SSE run 路径使用。"""
+        from .react_function_call import (
+            build_react_observe_fc_tools,
+            observe_fc_result_from_assistant_message,
+            use_react_observe_xml_fallback,
+        )
+        import inspect
+
+        tools = build_react_observe_fc_tools()
+        prompt_fc = (
+            observe_prompt
+            + "\n\n（必须 function calling 调用 submit_observe_analysis；不要输出 <result>。）"
+        )
+        messages = [{"role": "user", "content": prompt_fc}]
+        fn = getattr(self.llm, "chat_completion_with_tools", None)
+        if fn is None:
+            return {"findings": [], "context_update": {}, "next_step": ""}
+        tool_choice = self._parse_react_fc_tool_choice()
+        parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        _fc_kw: Dict[str, Any] = {
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel,
+        }
+        if max_tokens is not None:
+            try:
+                if "max_tokens" in inspect.signature(fn).parameters:
+                    _fc_kw["max_tokens"] = max_tokens
+            except (TypeError, ValueError):
+                pass
+        try:
+            if asyncio.iscoroutinefunction(fn):
+                raw = await fn(messages, tools, **_fc_kw)
+            else:
+                loop = asyncio.get_event_loop()
+                raw = await loop.run_in_executor(
+                    self._tool_executor,
+                    functools.partial(fn, messages, tools, **_fc_kw),
+                )
+        except Exception as _e:
+            print(f"[REACT-OBSERVE-FC] sync FC 失败: {_e}")
+            return {"findings": [], "context_update": {}, "next_step": ""}
+        msg = self._fc_normalize_assistant_message(raw)
+        parsed = observe_fc_result_from_assistant_message(msg) if msg else None
+        if parsed is not None:
+            return parsed
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content") or ""
+        else:
+            content = getattr(msg, "content", None) or ""
+        return (
+            parse_xml_findings(content)
+            if use_react_observe_xml_fallback()
+            else {"findings": [], "context_update": {}, "next_step": ""}
+        )
+
     async def _stream_llm_prompt_collect(
         self,
         prompt: str,
         *,
         step_index: Optional[int] = None,
-        stream_kind: str = 'think',
+        stream_kind: str = "think",
         full_text_sink: Optional[List[str]] = None,
         suppress_content_stream: bool = False,
+        content_only_max_tokens: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         统一流式：复用 chat_stream_with_reasoning，边收边 yield。
@@ -550,10 +2197,17 @@ class SimplifiedReActEngine:
             def _worker():
                 try:
                     _use_co = stream_kind in ("observe", "summary")
+                    _think_mt = (
+                        react_think_max_tokens() if stream_kind == "think" else None
+                    )
                     _stream_it = (
-                        self._resolve_chat_stream_iter_content_only(prompt)
+                        self._resolve_chat_stream_iter_content_only(
+                            prompt, None, content_only_max_tokens
+                        )
                         if _use_co
-                        else self._resolve_chat_stream_iter(prompt)
+                        else self._resolve_chat_stream_iter(
+                            prompt, None, _think_mt
+                        )
                     )
                     for it in _stream_it:
                         q.put(it)
@@ -646,10 +2300,36 @@ class SimplifiedReActEngine:
                                 if _pt and len(_pt) > _last_partial_n:
                                     _last_partial_n = len(_pt)
                                     yield {'event': 'todos_partial', 'data': _pt}
+                                    # 真·SSE 流式规划备忘：随着 todos_partial 增量下发 plan_update（steps 逐步增长）
+                                    if len(_pt) >= 1:
+                                        yield {
+                                            'event': 'plan_update',
+                                            'steps': react_plan_steps_payload(_pt),
+                                            'reason': 'todos_partial_stream',
+                                            'suppress_plan_ui': False,
+                                        }
                             except Exception:
                                 pass
-                    elif stream_kind == 'summary':
-                        yield {'event': 'summary_stream', 'delta': delta}
+                    elif stream_kind == "summary":
+                        try:
+                            _slice = int(
+                                (os.getenv("REACT_SUMMARY_STREAM_SLICE_CHARS") or "24").strip()
+                            )
+                        except Exception:
+                            _slice = 24
+                        _slice = max(8, _slice)
+                        # 按片下发，避免整段只在一次事件里到达、前端像「一次性出来」
+                        if _slice > 0 and len(delta) > 0:
+                            _sgap = _summary_stream_yield_gap_s()
+                            for i in range(0, len(delta), _slice):
+                                yield {
+                                    "event": "summary_stream",
+                                    "delta": delta[i : i + _slice],
+                                }
+                                if _sgap > 0:
+                                    await asyncio.sleep(_sgap)
+                        else:
+                            yield {"event": "summary_stream", "delta": delta}
                     else:
                         ev: Dict[str, Any] = {
                             'event': 'llm_text_stream',
@@ -705,6 +2385,7 @@ class SimplifiedReActEngine:
         *,
         step_index: int,
         full_text_sink: List[str],
+        max_tokens: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         两阶段：先自然语言（agent_thought 流式），再 <decision>...</decision> 一次性缓冲解析。
@@ -717,7 +2398,15 @@ class SimplifiedReActEngine:
 
         def _worker():
             try:
-                for it in self._resolve_chat_stream_iter_content_only(prompt):
+                max_tok: Optional[int] = max_tokens
+                if max_tok is None:
+                    mt_raw = (os.getenv("REACT_DECIDE_MAX_TOKENS") or "").strip()
+                    max_tok = int(mt_raw) if mt_raw.isdigit() else None
+                    if max_tok is not None and max_tok <= 0:
+                        max_tok = None
+                for it in self._resolve_chat_stream_iter_content_only(
+                    prompt, None, max_tok
+                ):
                     q.put(it)
             except Exception as e:
                 q.put({"type": "content_delta", "delta": f"Error: {e}"})
@@ -728,8 +2417,33 @@ class SimplifiedReActEngine:
         buf = ""
         emitted = 0
         wait_decision_xml = False
+        _wait_stream_active = False
+        _last_wait_emit = 0.0
         while True:
-            item = q.get()
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                now_w = time.time()
+                if now_w - _last_wait_emit >= 0.8:
+                    _last_wait_emit = now_w
+                    _wait_stream_active = True
+                    yield {
+                        "event": "phase_wait",
+                        "kind": "decision_stream",
+                        "active": True,
+                        "index": step_index,
+                        "message": "正在生成决策思考…",
+                    }
+                await asyncio.sleep(0.12)
+                continue
+            if _wait_stream_active:
+                _wait_stream_active = False
+                yield {
+                    "event": "phase_wait",
+                    "kind": "decision_stream",
+                    "active": False,
+                    "index": step_index,
+                }
             if item is DONE:
                 break
             if not isinstance(item, dict):
@@ -750,6 +2464,7 @@ class SimplifiedReActEngine:
                     yield {"event": "agent_thought", "delta": nar[emitted:], "index": step_index}
                     emitted = len(nar)
                 if _dec_close.search(buf):
+                    # decision XML 闭合后，加载效果消失
                     if wait_decision_xml:
                         yield {
                             "event": "phase_wait",
@@ -759,6 +2474,7 @@ class SimplifiedReActEngine:
                         }
                         wait_decision_xml = False
                 else:
+                    # decision XML 开始输出，显示加载效果
                     if not wait_decision_xml:
                         wait_decision_xml = True
                         yield {
@@ -772,6 +2488,7 @@ class SimplifiedReActEngine:
                 if len(buf) > emitted:
                     yield {"event": "agent_thought", "delta": buf[emitted:], "index": step_index}
                     emitted = len(buf)
+        # 确保 phase_wait 被清除
         if wait_decision_xml:
             yield {
                 "event": "phase_wait",
@@ -800,7 +2517,13 @@ class SimplifiedReActEngine:
 
         def _worker():
             try:
-                for it in self._resolve_chat_stream_iter_content_only(prompt):
+                mt_raw = (os.getenv("REACT_OBSERVE_MAX_TOKENS") or "").strip()
+                max_tok: Optional[int] = int(mt_raw) if mt_raw.isdigit() else None
+                if max_tok is not None and max_tok <= 0:
+                    max_tok = None
+                for it in self._resolve_chat_stream_iter_content_only(
+                    prompt, None, max_tok
+                ):
                     q.put(it)
             except Exception as e:
                 q.put({"type": "content_delta", "delta": f"Error: {e}"})
@@ -811,8 +2534,33 @@ class SimplifiedReActEngine:
         buf = ""
         emitted = 0
         wait_result_xml = False
+        _wait_stream_active = False
+        _last_wait_emit = 0.0
         while True:
-            item = q.get()
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                now_w = time.time()
+                if now_w - _last_wait_emit >= 0.8:
+                    _last_wait_emit = now_w
+                    _wait_stream_active = True
+                    yield {
+                        "event": "phase_wait",
+                        "kind": "observe_stream",
+                        "active": True,
+                        "index": step_index,
+                        "message": "正在生成观察分析…",
+                    }
+                await asyncio.sleep(0.12)
+                continue
+            if _wait_stream_active:
+                _wait_stream_active = False
+                yield {
+                    "event": "phase_wait",
+                    "kind": "observe_stream",
+                    "active": False,
+                    "index": step_index,
+                }
             if item is DONE:
                 break
             if not isinstance(item, dict):
@@ -876,6 +2624,23 @@ class SimplifiedReActEngine:
         full_text_sink.clear()
         full_text_sink.append(buf)
 
+    async def _stream_observe_stub_quick(
+        self,
+        stub_xml: str,
+        *,
+        step_index: int,
+        full_text_sink: List[str],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """不调用 observe_prompt 大模型；仅写入占位 XML，供 parse_xml_findings 与后续轮次使用。"""
+        full_text_sink.clear()
+        full_text_sink.append(stub_xml)
+        yield {
+            "event": "reasoning_step",
+            "content": "",
+            "segment": "observe",
+            "index": step_index,
+        }
+
     async def _stream_react_ui_text(
         self,
         prompt: str,
@@ -898,8 +2663,33 @@ class SimplifiedReActEngine:
                 q.put(DONE)
 
         threading.Thread(target=_worker, daemon=True).start()
+        _wait_stream_active = False
+        _last_wait_emit = 0.0
         while True:
-            item = q.get()
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                now_w = time.time()
+                if now_w - _last_wait_emit >= 0.8:
+                    _last_wait_emit = now_w
+                    _wait_stream_active = True
+                    yield {
+                        "event": "phase_wait",
+                        "kind": "agent_thought_stream",
+                        "active": True,
+                        "index": step_index,
+                        "message": "正在生成步骤思考…",
+                    }
+                await asyncio.sleep(0.12)
+                continue
+            if _wait_stream_active:
+                _wait_stream_active = False
+                yield {
+                    "event": "phase_wait",
+                    "kind": "agent_thought_stream",
+                    "active": False,
+                    "index": step_index,
+                }
             if item is DONE:
                 break
             if not isinstance(item, dict):
@@ -913,6 +2703,265 @@ class SimplifiedReActEngine:
                         'delta': delta,
                         'index': step_index,
                     }
+
+    async def _stream_decision_observe_from_nl(
+        self,
+        summary_nl: str,
+        *,
+        step_index: int,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """无 LLM：用 observation 的 summary_nl 充当前端 decision_observe。"""
+        raw = (summary_nl or "").strip()
+        if not raw:
+            raw = (
+                "（本步无简要结论文案，详见上方工具输出。）"
+                if not is_english_locale(self._ui_locale)
+                else "(No brief summary; see tool output above.)"
+            )
+        try:
+            chunk_sz = max(1, int((os.getenv("REACT_OBSERVE_NL_STREAM_CHARS") or "240").strip()))
+        except Exception:
+            chunk_sz = 240
+        for start in range(0, len(raw), chunk_sz):
+            yield {
+                "event": "react_ui_stream",
+                "channel": "decision_observe",
+                "delta": raw[start : start + chunk_sz],
+                "index": step_index,
+            }
+            await asyncio.sleep(0)
+
+    async def _merge_running_summary_incremental_silent(
+        self,
+        state: Dict[str, Any],
+        step_index: int,
+        tool: str,
+        todo: str,
+        nl_obs: str,
+    ) -> None:
+        """每步结束后仅后台合并运行总览，更新 state；不向 SSE 推流（避免中途半篇展示）。"""
+        if not use_react_incremental_running_summary():
+            return
+        try:
+            next_ver = int(state.get("version") or 0) + 1
+        except Exception:
+            next_ver = 1
+        prev = str(state.get("text") or "")
+        prompt = incremental_running_summary_prompt(
+            self._ui_locale,
+            prev,
+            step_index,
+            tool,
+            todo,
+            nl_obs,
+        )
+        q: "queue.Queue[object]" = queue.Queue()
+        DONE = object()
+
+        def _worker():
+            try:
+                with self._llm_no_thinking():
+                    try:
+                        _mt = int(
+                            (os.getenv("REACT_INCREMENTAL_SUMMARY_MAX_TOKENS") or "2048").strip()
+                        )
+                    except Exception:
+                        _mt = 2048
+                    _mt_kw = _mt if _mt > 0 else None
+                    for it in self._resolve_chat_stream_iter_content_only(
+                        prompt, None, max_tokens=_mt_kw
+                    ):
+                        q.put(it)
+            except Exception as e:
+                _em = f"（运行总览生成失败：{e}）" if not is_english_locale(self._ui_locale) else f"(Running summary failed: {e})"
+                q.put({"type": "content_delta", "delta": _em})
+            finally:
+                q.put(DONE)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        full_parts: List[str] = []
+        while True:
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.12)
+                continue
+            if item is DONE:
+                break
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "content_delta":
+                continue
+            delta = item.get("delta") or ""
+            if delta:
+                full_parts.append(str(delta))
+        full_text = "".join(full_parts).strip()
+        if full_text:
+            state["text"] = full_text
+            state["version"] = next_ver
+
+    async def _merge_running_summary_incremental_to_sse(
+        self,
+        state: Dict[str, Any],
+        step_index: int,
+        tool: str,
+        todo: str,
+        nl_obs: str,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """增量运行总览：LLM 流式产出时即 yield running_summary_stream（真·后端 SSE）。"""
+        if not use_react_incremental_running_summary():
+            return
+        try:
+            next_ver = int(state.get("version") or 0) + 1
+        except Exception:
+            next_ver = 1
+        prev = str(state.get("text") or "")
+        prompt = incremental_running_summary_prompt(
+            self._ui_locale,
+            prev,
+            step_index,
+            tool,
+            todo,
+            nl_obs,
+        )
+        yield {"event": "running_summary_stream_reset", "version": next_ver}
+
+        q: "queue.Queue[object]" = queue.Queue()
+        DONE = object()
+
+        def _worker():
+            try:
+                with self._llm_no_thinking():
+                    try:
+                        _mt = int(
+                            (os.getenv("REACT_INCREMENTAL_SUMMARY_MAX_TOKENS") or "2048").strip()
+                        )
+                    except Exception:
+                        _mt = 2048
+                    _mt_kw = _mt if _mt > 0 else None
+                    for it in self._resolve_chat_stream_iter_content_only(
+                        prompt, None, max_tokens=_mt_kw
+                    ):
+                        q.put(it)
+            except Exception as e:
+                _em = (
+                    f"（运行总览生成失败：{e}）"
+                    if not is_english_locale(self._ui_locale)
+                    else f"(Running summary failed: {e})"
+                )
+                q.put({"type": "content_delta", "delta": _em})
+            finally:
+                q.put(DONE)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        try:
+            _slice = int((os.getenv("REACT_SUMMARY_STREAM_SLICE_CHARS") or "24").strip())
+        except Exception:
+            _slice = 24
+        _slice = max(8, _slice)
+        _sgap = _running_summary_wire_yield_gap_s()
+
+        full_parts: List[str] = []
+        while True:
+            item = await asyncio.to_thread(q.get)
+            if item is DONE:
+                break
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "content_delta":
+                continue
+            delta = item.get("delta") or ""
+            if not delta:
+                continue
+            s = str(delta)
+            full_parts.append(s)
+            if _slice > 0 and len(s) > 0:
+                for j in range(0, len(s), _slice):
+                    yield {
+                        "event": "running_summary_stream",
+                        "delta": s[j : j + _slice],
+                        "version": next_ver,
+                        "index": step_index,
+                    }
+                    if _sgap > 0:
+                        await asyncio.sleep(_sgap)
+            else:
+                yield {
+                    "event": "running_summary_stream",
+                    "delta": s,
+                    "version": next_ver,
+                    "index": step_index,
+                }
+
+        full_text = "".join(full_parts).strip()
+        if full_text:
+            state["text"] = full_text
+            state["version"] = next_ver
+
+    async def _shutdown_incr_sum_background_worker(
+        self,
+        q: Optional[asyncio.Queue],
+        task: Optional[asyncio.Task],
+    ) -> None:
+        """收口异步静默运行总览 worker：先发完队列内任务再结束协程。"""
+        if q is None or task is None:
+            return
+        try:
+            await q.join()
+            await q.put(None)
+            await q.join()
+        except Exception as e:
+            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                print(f"[REACT] incr_sum queue shutdown: {e}")
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                print(f"[REACT] incr_sum worker: {e}")
+
+    async def _stream_running_summary_final_wire(
+        self,
+        state: Dict[str, Any],
+        *,
+        last_step_index: int,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """主循环已全部结束后，将最终运行总览按块流式下发（仅此时走 SSE）。"""
+        text = str(state.get("text") or "").strip()
+        if not text:
+            return
+        try:
+            ver = int(state.get("version") or 0)
+        except Exception:
+            ver = 1
+        yield {"event": "running_summary_stream_reset", "version": ver}
+        try:
+            _slice = int((os.getenv("REACT_SUMMARY_STREAM_SLICE_CHARS") or "24").strip())
+        except Exception:
+            _slice = 24
+        _slice = max(1, _slice)
+        _rgap = _running_summary_wire_yield_gap_s()
+        _first_chunk = True
+        for j in range(0, len(text), _slice):
+            if _first_chunk:
+                yield {"event": "unified_summary_loading", "active": False}
+                _first_chunk = False
+            yield {
+                "event": "running_summary_stream",
+                "delta": text[j : j + _slice],
+                "version": ver,
+                "index": last_step_index,
+            }
+            if _rgap > 0:
+                await asyncio.sleep(_rgap)
+        yield {
+            "event": "running_summary_done",
+            "full_text": text,
+            "version": ver,
+            "index": last_step_index,
+        }
 
     async def _stream_skill_plan_thought(
         self, prompt: str, *, step_index: int
@@ -956,7 +3005,6 @@ class SimplifiedReActEngine:
         todos: List[str],
         skill_ref: Skill,
         fallback_workflow_tools: List[str],
-        _prefer_modify_skill: bool,
         result_context: Dict[str, Any],
         project_id: Optional[int],
         last_observation: Optional[Dict[str, Any]],
@@ -1021,27 +3069,9 @@ class SimplifiedReActEngine:
                     if 'modifications' not in params or not params.get('modifications'):
                         params['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
                 elif mapped == 'create':
-                    # 仲裁/启发式：更倾向改已有 → unknown→create 改为 grep
-                    if _prefer_modify_skill:
-                        mapped = 'grep'
-                        tool_name = 'grep'
-                        todo_params['tool'] = 'grep'
-                        params.setdefault('mode', 'locate')
-                        params['target'] = infer_modify_target_from_user(user_input)
-                        params.setdefault(
-                            'keywords',
-                            self._extract_title_keywords_for_grep(user_input, todo) or '',
-                        )
-                        if 'modify' in (fallback_workflow_tools or []):
-                            params['target'] = 'all'
-                        print(
-                            f"[INTENT-GATE] workflow 映射 unknown→create 改为 grep（prefer_modify），"
-                            f"step_index={i}"
-                        )
-                    else:
-                        params.setdefault('target', 'bug')
-                        params.setdefault('fields', {})
-                        params['confirm'] = False
+                    params.setdefault('target', 'bug')
+                    params.setdefault('fields', {})
+                    params['confirm'] = False
                 todo_params['params'] = params
                 print(f"[REACT-planing] 🔧 todo 工具兜底映射: index={i}, unknown -> {mapped}")
         
@@ -1049,31 +3079,13 @@ class SimplifiedReActEngine:
         if tool_name == 'unknown':
             t = (todo or '').lower()
             if 'create' in t:
-                if _prefer_modify_skill:
-                    tool_name = 'grep'
-                    todo_params['tool'] = 'grep'
-                    p = todo_params.get('params') or {}
-                    p.setdefault('mode', 'locate')
-                    p['target'] = infer_modify_target_from_user(user_input)
-                    p.setdefault(
-                        'keywords',
-                        self._extract_title_keywords_for_grep(user_input, todo) or '',
-                    )
-                    if 'modify' in (fallback_workflow_tools or []):
-                        p['target'] = 'all'
-                    todo_params['params'] = p
-                    print(
-                        f"[INTENT-GATE] secondary: create 字样 + prefer_modify → grep，"
-                        f"target={p.get('target')}"
-                    )
-                else:
-                    tool_name = 'create'
-                    todo_params['tool'] = 'create'
-                    p = todo_params.get('params') or {}
-                    p.setdefault('target', 'bug')
-                    p.setdefault('fields', {})
-                    p['confirm'] = False
-                    todo_params['params'] = p
+                tool_name = 'create'
+                todo_params['tool'] = 'create'
+                p = todo_params.get('params') or {}
+                p.setdefault('target', 'bug')
+                p.setdefault('fields', {})
+                p['confirm'] = False
+                todo_params['params'] = p
             elif 'grep' in t or 'search' in t:
                 tool_name = 'grep'
                 todo_params['tool'] = 'grep'
@@ -1146,6 +3158,8 @@ class SimplifiedReActEngine:
                     'message': '正在补充定位记录（用于修改）…',
                 }
                 grep_obs = await self._execute_tool({'execute': True, 'tool': 'grep', 'params': gparams})
+                for _tte in self._drain_tool_task_sse_buffer_list():
+                    yield _tte
                 if grep_obs.get('success'):
                     self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
                     grep_result = result_context.get('grep_result', {})
@@ -1176,7 +3190,12 @@ class SimplifiedReActEngine:
                         exploration = await asyncio.wait_for(
                             loop.run_in_executor(
                                 self._tool_executor,
-                                lambda: modify_tool.explore_record(target_type, target_id, params.get('project_id') or self.project_id),
+                                lambda: modify_tool.explore_record(
+                                    target_type,
+                                    target_id,
+                                    params.get("project_id") or self.project_id,
+                                    getattr(self, "_ui_locale", None),
+                                ),
                             ),
                             timeout=15,
                         )
@@ -1259,70 +3278,44 @@ class SimplifiedReActEngine:
         out['decision'] = {'execute': True, 'tool': tool_name, 'params': params}
         out['skill_skip'] = skill_skip_modify
 
-    async def _prefer_modify_over_create(self, user_input: Optional[str]) -> bool:
-        """
-        True = 按「改已有」处理；False = 允许走新建。
-        明确启发式直接定；模糊时 DashScope 短调用仲裁（见 intent_guards.arbitrate_modify_or_create），
-        同一次 run_stream 内结果缓存，避免重复请求。
-        """
-        cached = getattr(self, "_intent_prefer_modify_cache", None)
-        if isinstance(cached, bool):
-            return cached
-
-        from .intent_guards import intent_bucket, arbitrate_modify_or_create
-
-        b = intent_bucket(user_input)
-        if b == "modify":
-            self._intent_prefer_modify_cache = True
-            return True
-        if b == "create":
-            self._intent_prefer_modify_cache = False
-            return False
-
-        loop = asyncio.get_running_loop()
-        try:
-            r = await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._tool_executor,
-                    lambda u=user_input: arbitrate_modify_or_create(u),
-                ),
-                timeout=18.0,
-            )
-            prefer = (r or "modify").lower().strip() == "modify"
-            print(f"[INTENT-ARB] 模糊意图 → 仲裁结果={r!r} → prefer_modify={prefer}")
-            self._intent_prefer_modify_cache = prefer
-            return prefer
-        except asyncio.TimeoutError:
-            print("[INTENT-ARB] 仲裁超时，默认 prefer_modify=True（避免误 create）")
-            self._intent_prefer_modify_cache = True
-            return True
-        except Exception as e:
-            print(f"[INTENT-ARB] 仲裁异常，默认 prefer_modify=True: {e}")
-            self._intent_prefer_modify_cache = True
-            return True
-
     def _summarize_observation_nl(self, tool: Optional[str], observation: Any) -> str:
         """将工具结果转为简短自然语言观察（供 task_state.observations 与可选展示）。"""
+        loc = getattr(self, "_ui_locale", None)
         if not isinstance(observation, dict):
             return (str(observation) or "")[:800]
         if observation.get("skipped"):
-            return "步骤已跳过（参数未就绪或稳定性门控）。"
+            why = str(observation.get("stability_gate") or observation.get("error") or "").strip()
+            if why:
+                return react_summarize_observation_nl_skipped_gate(why, loc)
+            return react_summarize_observation_nl_skipped_generic(loc)
         if isinstance(observation.get("summary"), str) and observation["summary"].strip():
             return observation["summary"].strip()[:2000]
         if isinstance(observation.get("message"), str) and observation["message"].strip():
             return observation["message"].strip()[:2000]
         ok = observation.get("success")
+        err = str(observation.get("error") or "").strip()
+        if ok is False:
+            # 严格模式将「grep 成功但零命中」标为失败；对用户应说明是未命中而非工具异常
+            if (tool or "").lower() == "grep" and err == "grep_empty_hits":
+                return react_summarize_grep_done_empty(loc)
+            if err:
+                return react_summarize_observation_nl_tool_failed(tool, err, loc)
+            return react_summarize_observation_nl_tool_failed_short(tool, loc)
         if (tool or "").lower() == "grep":
             data = observation.get("data") or {}
-            n = 0
-            for k in ("bug_location", "badcase_analysis", "testcase_location"):
-                x = data.get(k)
-                if isinstance(x, list):
-                    n += len(x)
-            return f"grep 完成：success={ok}，约 {n} 条相关记录。"
+            bug_n = len(data.get("bug_location") or []) if isinstance(data.get("bug_location"), list) else 0
+            bc_n = len(data.get("badcase_analysis") or []) if isinstance(data.get("badcase_analysis"), list) else 0
+            tc_n = len(data.get("testcase_location") or []) if isinstance(data.get("testcase_location"), list) else 0
+            n = bug_n + bc_n + tc_n
+            if n == 0:
+                return react_summarize_grep_done_empty(loc)
+            return react_summarize_grep_done_hits(n, bug_n, bc_n, tc_n, loc)
         if (tool or "").lower() == "modify":
-            return f"modify 完成：success={ok}，需确认={observation.get('confirmation_required')}"
-        return f"{tool or 'tool'} 执行完成：success={ok}"
+            diff_n = len(observation.get("diff") or []) if isinstance(observation.get("diff"), list) else 0
+            return react_summarize_modify_done(
+                ok, observation.get("confirmation_required"), diff_n, loc
+            )
+        return react_summarize_tool_done_ok(tool, ok, loc)
 
     async def _build_structured_plan_rows(
         self,
@@ -1332,10 +3325,8 @@ class SimplifiedReActEngine:
         skill_guided: bool,
         skill_ref: Optional[Any],
         fallback_workflow_tools: List[str],
-        prefer_modify_skill: bool,
     ) -> List[Dict[str, Any]]:
         """从 todos 解析出每步 tool/params（技能引导时对齐 workflow 兜底 unknown）。"""
-        _ = prefer_modify_skill  # 预留与 create→grep 仲裁一致；执行阶段由 _skill_plan_step_stream_prepare 补全
         rows: List[Dict[str, Any]] = []
         for i, todo in enumerate(todos):
             tp = await self._extract_todo_params(todo, user_input)
@@ -1409,60 +3400,87 @@ class SimplifiedReActEngine:
         del task_state, user_input, todos, step_index, result_context, project_id
         return None
 
-    async def run_stream(
+    async def _run_stream_raw(
         self,
         user_input: str,
         project_id: int = None,
         plan_id: int = None,
         locale: Optional[str] = None,
         pending_diff_context: Optional[List[Dict[str, Any]]] = None,
+        agent_session_id: Optional[str] = None,
+        long_memory_prefetch: Optional[Dict[str, Any]] = None,
     ):
-        """流式执行 ReAct 循环（使用 Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下的记录（人类式先看本迭代）。"""
+        """内部实现：yield 带 ``event`` 的引擎字典；对外请用 ``run_stream``（出口统一 v1）。"""
         print(f"\n[REACT] ReAct Stream Loop Start")
         perf = (os.getenv("PERF_LOG") == "1")
         t0 = time.perf_counter()
         self._ui_locale = normalize_locale(locale)
+        self._agent_session_id = (agent_session_id or "").strip() or None
+        self._tool_task_event_buffer = []
         self.project_id = project_id
         self.plan_id = plan_id  # 当前迭代计划，供 grep 按计划检索
         self._index_pending_context(pending_diff_context or [])
-        self._intent_prefer_modify_cache = None  # 每轮对话重置，供 _prefer_modify_over_create 缓存
+        self.use_todo = True
         start_time = time.time()
-            
-        # 获取项目名称和计划名称（用于思考过程展示，必须在 Flask app_context 内查库）
-        # 优化：与 tools_info 构造并行，减少 THINK 前置耗时
-        async def _load_names():
-            project_name = None
-            plan_name = None
-            try:
-                from app import app, db, Project, Plan
-                with app.app_context():
-                    t_db0 = time.perf_counter()
-                    if project_id:
-                        project = db.session.query(Project).filter(Project.id == project_id).first()
-                        if project:
-                            project_name = project.name
-                    if plan_id:
-                        plan = db.session.query(Plan).filter(Plan.id == plan_id).first()
-                        if plan:
-                            plan_name = plan.name
-                    if perf:
-                        print(f"[PERF][react] project_plan_lookup_ms={(time.perf_counter()-t_db0)*1000:.1f}")
-            except Exception as e:
-                print(f"[REACT] 获取项目/计划名称失败：{e}")
-            return project_name, plan_name
 
+        preloop_skill_task: Optional[asyncio.Task] = None
         result_context = {}
-        # 并行：项目/计划名查询 与 工具说明格式化（省 THINK 前串行等待）
-        (project_name, plan_name), tools_info = await asyncio.gather(
-            _load_names(),
-            asyncio.to_thread(format_tools_for_prompt, self.tools),
-        )
+        try:
+            # pending 摘要仅依赖已索引的 diff + user_input；名称查库走线程池 + 可选短缓存，避免阻塞事件循环
+            _t_names = asyncio.create_task(asyncio.to_thread(_sync_load_project_plan_names, project_id, plan_id, perf))
+            _t_tools = asyncio.create_task(asyncio.to_thread(format_tools_for_prompt, self.tools))
+            _t_pending = asyncio.create_task(asyncio.to_thread(self._relevant_pending_for_llm, user_input))
+
+            # 合并首轮时：在 await gather 前先给前端一个可见 thought，避免前置阶段空白。
+            try:
+                yield {
+                    "event": "agent_thought",
+                    "delta": "正在准备上下文并生成执行计划…\n",
+                    "index": 0,
+                }
+            except Exception:
+                pass
+
+            (project_name, plan_name), tools_info, _pending_for_llm = await asyncio.gather(
+                _t_names,
+                _t_tools,
+                _t_pending,
+            )
+        except BaseException:
+            raise
         if perf:
-            print(f"[PERF][react] gather_names_and_tools_parallel=1")
+            print(f"[PERF][react] gather_names_tools_pending_parallel=1")
         if plan_id is not None:
             result_context['plan_id'] = plan_id  # 供 LLM 传给 grep，先检索本计划再阅读
             if plan_name:
                 result_context['plan_name'] = plan_name
+
+        # 长期记忆：默认不在每条消息做向量检索；优先用请求带入的 prefetch（项目打开时拉取）
+        _lm_each_msg = (os.getenv("REACT_LONG_MEMORY_QUERY_EACH_MESSAGE", "0") or "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if isinstance(long_memory_prefetch, dict) and long_memory_prefetch:
+            _lmt = str(
+                long_memory_prefetch.get("long_memory_text")
+                or long_memory_prefetch.get("merged")
+                or ""
+            ).strip()
+            _lmi = long_memory_prefetch.get("long_memory_items") or long_memory_prefetch.get("memories")
+            if _lmt:
+                result_context["long_memory_text"] = _lmt
+            if isinstance(_lmi, list) and _lmi:
+                result_context["long_memory_items"] = _lmi
+        elif _lm_each_msg:
+            await self._inject_long_memory_into_context(
+                user_input=user_input,
+                result_context=result_context,
+                project_id=project_id,
+                plan_id=plan_id,
+                agent_session_id=self._agent_session_id,
+            )
 
         # modify 流程要求不带思考：为支持的 LLM 提供一个临时开关
         def _set_force_disable_thinking(v: bool):
@@ -1484,8 +3502,7 @@ class SimplifiedReActEngine:
             if project_name:
                 result_context['project_name'] = project_name
 
-        # 仅把“与本次对话相关 + 有实际改动”的 pending diff 摘要注入给大模型，避免无关噪声。
-        _pending_for_llm = self._relevant_pending_for_llm(user_input)
+        # 仅把“与本次对话相关 + 有实际改动”的 pending diff 摘要注入给大模型（已在 gather 中与查库/工具表并行算好）
         if _pending_for_llm:
             result_context['pending_diff_summary'] = [
                 {
@@ -1498,416 +3515,75 @@ class SimplifiedReActEngine:
             
         findings = []
         steps = []
-        thinking_start_time = time.time()  # 用于统计「思考了多少秒」
 
-        # 信息量过低（如只输入「1」）：先请用户说清楚目标，避免无意义 grep/工具调用
-        if needs_low_signal_clarification(user_input):
-            _clarify = low_signal_clarification_message(self._ui_locale)
-            print(f"[INTENT-CLARIFY] 低信息量，请求用户澄清: {_clarify[:80]!r}…")
-            yield {"event": "intent_clarification", "message": _clarify, "kind": "low_signal"}
-            yield {
-                "event": "done",
-                "findings": [_clarify],
-                "steps_count": 0,
-                "duration": time.time() - start_time,
-                "thinking_time": 0.0,
-                "summary": _clarify,
-            }
-            return
-
-        # 意图冲突或业务相关但说不清「改已有 vs 新建」：先请用户澄清，避免白跑 THINK/工具
-        if needs_modify_vs_create_clarification(user_input):
-            _clarify = intent_clarification_message(user_input, self._ui_locale)
-            print(f"[INTENT-CLARIFY] 请求用户澄清（跳过 THINK）: {_clarify[:100]!r}…")
-            yield {"event": "intent_clarification", "message": _clarify, "kind": "modify_vs_create"}
-            yield {
-                "event": "done",
-                "findings": [_clarify],
-                "steps_count": 0,
-                "duration": time.time() - start_time,
-                "thinking_time": 0.0,
-                "summary": _clarify,
-            }
-            return
+        def _cancel_preloop_tasks() -> None:
+            nonlocal preloop_skill_task
+            if preloop_skill_task is not None and not preloop_skill_task.done():
+                preloop_skill_task.cancel()
+            preloop_skill_task = None
 
         try:
-            # ===== STEP 1: THINK =====
-            # 不再发送 thought 事件，直接让 LLM 生成 reasoning 内容
-            # 关键体验优化：在 LLM 首 token 前先推一个不可见字符，让前端立刻出现「深度思考」块
-            # （前端 v-if=reasoningContent；\u200b 为零宽空格，用户不可见但可触发渲染）
-            yield {"event": "reasoning", "content": "\u200b"}
-            # 可选：跳过首轮「说明」注入，略减首包延迟（REACT_SKIP_THINK_HINT=1）
-            if (os.getenv("REACT_SKIP_THINK_HINT", "") or "").strip() not in ("1", "true", "yes"):
-                try:
-                    _hint = self._reasoning_summary_from_user_input(user_input)
-                    if _hint and str(_hint).strip():
-                        yield {'event': 'reasoning', 'content': str(_hint).strip() + '\n\n'}
-                except Exception:
-                    pass
-            prompt = self._wrap_prompt(
-                ReactPromptTemplates.think_prompt(
-                    user_input,
-                    tools_info,
-                    result_context,
-                    [],
+            _incr_merge_q: Optional[asyncio.Queue] = None
+            _incr_worker_task: Optional[asyncio.Task] = None
+            # ===== 极简两步循环：思考+行动合并，每次只决策一步 =====
+            if preloop_skill_task is None:
+                preloop_skill_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        get_skill_integration().match_skill, user_input, result_context
+                    )
                 )
-            )
             if perf:
-                print(f"[PERF][react] think_prompt_build_ms={(time.perf_counter()-t0)*1000:.1f}")
-            
-            # 首轮思考：本处一律用 chat_stream_with_reasoning 边收边 yield（真流式）。
-            # LLM 的 chat_with_reasoning 已改为「复用同一条流式迭代再汇总」，仅作无 stream 方法或上面流式失败时的回退，不再单独维护一套 DashScope 调用。
-            response = None
-            stream_attempted = False
-            stream_ok = False
-            print(
-                f"[REACT-thought] LLM 流式：chat_stream_with_reasoning={hasattr(self.llm, 'chat_stream_with_reasoning')}, "
-                f"chat_stream_fallback_chunks={hasattr(self.llm, 'chat_stream_fallback_chunks')}, "
-                f"chat_with_reasoning={hasattr(self.llm, 'chat_with_reasoning')}"
-            )
-            stream_attempted = True
-            try:
-                content_parts = []
-                # Cursor 式「Thought briefly / Thought for X.Xs」：从首段 reasoning 到首段正文（或首 token）
-                try:
-                    brief_ms = max(0, int(os.getenv("REACT_THOUGHT_BRIEF_MS", "800")))
-                except Exception:
-                    brief_ms = 800
-                _t_stream_start = time.time()
-                _t_first_reasoning = None
-                _reasoning_timing_sent = False
-                # 真正实时：在后台线程读取流式结果，通过队列逐段推送到 SSE（统一 _resolve_chat_stream_iter）
-                q: "queue.Queue[object]" = queue.Queue()
-                DONE = object()
-
-                def _worker():
-                    try:
-                        # 首轮 think 流式源（与前端 Thought / todos_stream 对齐）：
-                        # - REACT_THINK_CONTENT_ONLY=1（默认）：_resolve_chat_stream_iter_content_only，模型侧不取 reasoning_delta，
-                        #   主输出全是 content_delta；后端将其拆成 narrative + <todo_list> 等，对外 SSE 主要为 event=todos_stream。
-                        # - =0：完整 chat_stream_with_reasoning，可同时产出 reasoning_delta→event=reasoning 与 content_delta→todos_stream。
-                        _think_co = (os.getenv("REACT_THINK_CONTENT_ONLY", "1") or "1").strip().lower() not in (
-                            "0",
-                            "false",
-                            "no",
-                            "off",
-                        )
-                        _stream_it = (
-                            self._resolve_chat_stream_iter_content_only(prompt)
-                            if _think_co
-                            else self._resolve_chat_stream_iter(prompt)
-                        )
-                        for chunk in _stream_it:
-                            q.put(chunk)
-                    except Exception as e:
-                        q.put({"type": "content_delta", "delta": f"Error: {e}"})
-                    finally:
-                        q.put(DONE)
-
-                t = threading.Thread(target=_worker, daemon=True)
-                t.start()
-
-                # 实时流式下发思考过程，不缓冲
-                reasoning_buffer = ""
-                first_reasoning_sent = False
-
-                # 首轮「任务列表」正文流式：边收边推给前端，并择机解析出部分 Todo（无需等整段结束）
-                _todo_buf = ""
-                _partial_parse_tick = 0
-                _last_partial_n = 0
-                _todo_open = re.compile(r"<\s*todo_list\b", re.IGNORECASE)
-                _todo_close = re.compile(r"<\s*/\s*todo_list\s*>", re.IGNORECASE)
-                _todo_stream_emitted = 0
-                _todo_wait_active = False
-
-                while True:
-                    item = q.get()
-                    if item is DONE:
-                        break
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("type") == "done":
-                        continue
-                    if item.get("type") == "reasoning_delta":
-                        delta = item.get("delta")
-                        if delta is not None and isinstance(delta, str):
-                            reasoning_buffer += delta
-                            if _t_first_reasoning is None and reasoning_buffer.strip():
-                                _t_first_reasoning = time.time()
-                            if perf and not first_reasoning_sent:
-                                first_reasoning_sent = True
-                                print(f"[PERF][react] first_reasoning_delta_ms={(time.perf_counter()-t0)*1000:.1f}")
-                            yield {"event": "reasoning", "content": delta}
-                    elif item.get("type") == "content_delta":
-                        delta = item.get("delta") or ""
-                        if delta:
-                            if not _reasoning_timing_sent:
-                                now = time.time()
-                                if _t_first_reasoning is not None:
-                                    duration_ms = int((now - _t_first_reasoning) * 1000)
-                                    had_r = True
-                                else:
-                                    duration_ms = int((now - _t_stream_start) * 1000)
-                                    had_r = False
-                                kind = "brief" if duration_ms < brief_ms else "normal"
-                                yield {
-                                    "event": "reasoning_timing",
-                                    "segment": "think",
-                                    "duration_ms": duration_ms,
-                                    "kind": kind,
-                                    "had_reasoning": had_r,
-                                    "brief_threshold_ms": brief_ms,
-                                }
-                                _reasoning_timing_sent = True
-                            content_parts.append(delta)
-                            _todo_buf += delta
-                            _m_todo = _todo_open.search(_todo_buf)
-                            if _m_todo:
-                                _narr = _todo_buf[: _m_todo.start()]
-                                if len(_narr) > _todo_stream_emitted:
-                                    yield {"event": "todos_stream", "delta": _narr[_todo_stream_emitted:]}
-                                    _todo_stream_emitted = len(_narr)
-                                if _todo_close.search(_todo_buf):
-                                    if _todo_wait_active:
-                                        yield {
-                                            "event": "phase_wait",
-                                            "kind": "todo_xml",
-                                            "active": False,
-                                            "message": "规划结构接收完成",
-                                        }
-                                        _todo_wait_active = False
-                                else:
-                                    if not _todo_wait_active:
-                                        _todo_wait_active = True
-                                        yield {
-                                            "event": "phase_wait",
-                                            "kind": "todo_xml",
-                                            "active": True,
-                                            "message": "正在接收规划结构…",
-                                        }
-                            else:
-                                if len(_todo_buf) > _todo_stream_emitted:
-                                    yield {"event": "todos_stream", "delta": _todo_buf[_todo_stream_emitted:]}
-                                    _todo_stream_emitted = len(_todo_buf)
-                            _partial_parse_tick += len(delta)
-                            _should_try = (
-                                _partial_parse_tick >= 96
-                                or "</todo" in _todo_buf.lower()
-                                or "</item>" in _todo_buf.lower()
-                            )
-                            if _should_try:
-                                _partial_parse_tick = 0
-                                try:
-                                    _pt = robust_parse_todos(_todo_buf)
-                                    if _pt and len(_pt) > _last_partial_n:
-                                        _last_partial_n = len(_pt)
-                                        yield {"event": "todos_partial", "data": _pt}
-                                except Exception:
-                                    pass
-                if _todo_wait_active:
-                    yield {
-                        "event": "phase_wait",
-                        "kind": "todo_xml",
-                        "active": False,
-                        "message": "规划结构接收完成",
-                    }
-
-                # 仅产出 reasoning、无正文时补一条 timing（少见）
-                if not _reasoning_timing_sent and reasoning_buffer.strip():
-                    try:
-                        bms = brief_ms
-                    except Exception:
-                        bms = 800
-                    if _t_first_reasoning is not None:
-                        duration_ms = int((time.time() - _t_first_reasoning) * 1000)
-                    else:
-                        duration_ms = int((time.time() - _t_stream_start) * 1000)
-                    yield {
-                        "event": "reasoning_timing",
-                        "segment": "think",
-                        "duration_ms": duration_ms,
-                        "kind": "brief" if duration_ms < bms else "normal",
-                        "had_reasoning": True,
-                        "brief_threshold_ms": bms,
-                    }
-
-                # 用流式汇总的 content 作为 response
-                response = "".join(content_parts).strip() if content_parts else None
-                stream_ok = True
-            except Exception as e:
-                print(f"[REACT-thought] 统一流式迭代失败，将尝试 chat_with_reasoning / _stream_llm_prompt_collect 回退: {e}")
-                import traceback
-                traceback.print_exc()
-            # 无流式方法、或流式抛错、或（极少数）未实现 stream 时：整段接口回退，仍走与前端一致的 reasoning / todos_stream 事件
-            if (
-                response is None
-                and hasattr(self.llm, 'chat_with_reasoning')
-                and (not stream_attempted or not stream_ok)
-            ):
-                try:
-                    try:
-                        _fb_brief_ms = max(0, int(os.getenv("REACT_THOUGHT_BRIEF_MS", "800")))
-                    except Exception:
-                        _fb_brief_ms = 800
-                    _t_fb = time.time()
-                    raw = await self.llm.chat_with_reasoning(prompt)
-                    _dur_fb = int((time.time() - _t_fb) * 1000)
-                    _had_r_fb = bool((raw.get('reasoning_content') or '').strip())
-                    yield {
-                        'event': 'reasoning_timing',
-                        'segment': 'think',
-                        'duration_ms': _dur_fb,
-                        'kind': 'brief' if _dur_fb < _fb_brief_ms else 'normal',
-                        'had_reasoning': _had_r_fb,
-                        'brief_threshold_ms': _fb_brief_ms,
-                    }
-                    response = raw.get('content') or raw.get('result') or ''
-                    reasoning = raw.get('reasoning_content')
-                    if reasoning and isinstance(reasoning, str) and reasoning.strip():
-                        yield {'event': 'reasoning', 'content': reasoning.strip()}
-                    if response:
-                        _m_todo_fb = re.search(r"<\s*todo_list\b", response, re.IGNORECASE)
-                        if _m_todo_fb:
-                            _narr_fb = response[: _m_todo_fb.start()]
-                            if _narr_fb:
-                                yield {'event': 'todos_stream', 'delta': _narr_fb}
-                            yield {'event': 'phase_wait', 'kind': 'todo_xml', 'active': True, 'message': '正在接收规划结构…'}
-                            yield {'event': 'phase_wait', 'kind': 'todo_xml', 'active': False, 'message': '规划结构接收完成'}
-                        else:
-                            yield {'event': 'todos_stream', 'delta': response}
-                        try:
-                            _pt_fb = robust_parse_todos(response)
-                            if _pt_fb:
-                                yield {'event': 'todos_partial', 'data': _pt_fb}
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print(f"[REACT-thought] chat_with_reasoning 失败，回退流式拉取: {e}")
-            if response is None:
-                _sink = []
-                _ag = self._stream_llm_prompt_collect(prompt, stream_kind="think", full_text_sink=_sink)
-                _ait = _ag.__aiter__()
-                while True:
-                    try:
-                        _ev = await _ait.__anext__()
-                        yield _ev
-                    except StopAsyncIteration:
-                        break
-                response = _sink[0] if _sink else ""
-            # 解析 todo_xml 也下发等待态，便于前端在「接收完」到「解析完」之间维持状态
-            yield {'event': 'phase_wait', 'kind': 'todo_xml_parse', 'active': True, 'message': '正在解析规划结构…'}
-            # 使用健壮版解析，优先 XML，其次 JSON/文本兜底
-            todos = robust_parse_todos(response)
-            yield {'event': 'phase_wait', 'kind': 'todo_xml_parse', 'active': False, 'message': '规划结构解析完成'}
-            thinking_time = time.time() - thinking_start_time  # 思考阶段耗时（不是总过程）
-            
-            print(f"[REACT-planing] 生成的Todos: {todos}")
-            
-            if not todos:
-                yield {'event': 'error', 'message': '无法生成任务列表'}
-                return
-            
-            if perf:
-                print(f"[PERF][react] todos_ready_ms={(time.perf_counter()-t0)*1000:.1f} count={len(todos)}")
-            yield {'event': 'todos', 'data': todos}
-            if len(todos) >= 1:
-                yield {
-                    'event': 'plan',
-                    'steps': react_plan_steps_payload(todos),
-                    'overview_only': len(todos) >= 3,
-                }
-            
-            # 提前拦截：用户要求修改「类型」时直接提示不可修改，不执行 grep/modify，避免长时间无意义执行
-            if self._user_requested_type_modification(user_input) and any('modify' in (t or '').lower() or '修改' in (t or '') for t in todos):
-                msg = '「类型」(type) 为系统固定字段，不可修改。可修改的字段包括：状态、期望结果、标题、优先级、复现步骤、负责人等。'
-                yield {'event': 'immutable_field_rejection', 'message': msg}
-                yield {'event': 'done', 'findings': [msg], 'steps_count': 0, 'duration': time.time() - start_time, 'thinking_time': thinking_time, 'summary': msg}
-                return
+                print("[PERF][react] preloop_parallel=skill_match")
+            # 不再预先生成 todos，每次只决策一步，观察结果后再决定下一步
+            todos, json_plan_meta = [], None
+            thinking_time = 0.0
             
             # ===== SKILL 匹配：检查是否有匹配的技能工作流 =====
             skill_guided = False
             skill_matched_ref = None
-            _prefer_modify_skill = False
             fallback_workflow_tools: List[str] = []
-            matched_skill, skill_score = get_skill_integration().match_skill(user_input, result_context)
-            # 仲裁/启发式：更倾向改已有时否决 create_* 技能（与 skill_loader 软降权配合）
-            if matched_skill and (matched_skill.name or "").lower().startswith("create_"):
-                if await self._prefer_modify_over_create(user_input):
-                    print(f"[INTENT-GATE] 否决 create 类技能，改走主循环: {matched_skill.name}")
-                    matched_skill, skill_score = None, 0.0
+            matched_skill, skill_score = None, 0.0
+            if preloop_skill_task is not None:
+                try:
+                    matched_skill, skill_score = await preloop_skill_task
+                except asyncio.CancelledError:
+                    matched_skill, skill_score = get_skill_integration().match_skill(
+                        user_input, result_context
+                    )
+                except Exception as _se:
+                    print(f"[REACT] preloop skill_match task failed: {_se}")
+                    matched_skill, skill_score = get_skill_integration().match_skill(
+                        user_input, result_context
+                    )
+            else:
+                matched_skill, skill_score = get_skill_integration().match_skill(
+                    user_input, result_context
+                )
+            preloop_skill_task = None
             
             if matched_skill and skill_score >= 0.3:
-                _prefer_modify_skill = await self._prefer_modify_over_create(user_input)
-                print(f"[REACT-planing] 🎯 匹配到技能: {matched_skill.name} (分数: {skill_score:.2f})")
                 fallback_workflow_tools = []
                 try:
                     wf = sorted(getattr(matched_skill, 'workflow', []) or [], key=lambda s: getattr(s, 'step', 0))
                     fallback_workflow_tools = [((getattr(s, 'tool', '') or '').strip()) for s in wf if (getattr(s, 'tool', '') or '').strip()]
                 except Exception as e:
                     print(f"[REACT-planing] ⚠️ 读取技能 workflow 失败: {e}")
-
-                # 技能捆绑了多步（如 grep + modify）时：步数不足、或仅 1 条泛化 Todo 时，用工作流补全
-                _need_workflow_fill = (
-                    len(fallback_workflow_tools) >= 2
-                    and (
-                        len(todos) < len(fallback_workflow_tools)
-                        or (len(todos) == 1 and is_vague_generic_todo(todos[0]))
-                    )
+                # 合并模式：技能仅作上下文提示，由主循环 submit_react_think 定稿
+                result_context["opening_skill_name"] = matched_skill.name
+                if fallback_workflow_tools:
+                    result_context["opening_skill_workflow"] = ", ".join(fallback_workflow_tools)
+                print(
+                    f"[REACT-planing] 合并首轮：技能 {matched_skill.name} 仅作上下文提示，由主循环 submit_react_think 定稿"
                 )
-                if _need_workflow_fill:
-                    workflow_todos = self._generate_todos_from_skill_workflow(matched_skill, user_input)
-                    if len(workflow_todos) >= len(fallback_workflow_tools):
-                        todos = workflow_todos
-                        yield {'event': 'todos', 'data': todos}
-                        if len(todos) >= 1:
-                            yield {
-                                'event': 'plan',
-                                'steps': react_plan_steps_payload(todos),
-                                'overview_only': len(todos) >= 3,
-                            }
-                        yield {
-                            'event': 'plan_update',
-                            'steps': react_plan_steps_payload(todos),
-                            'reason': 'skill_workflow_fill',
-                        }
-                        print(f"[REACT-planing] 📋 已按技能工作流补全 todos，共 {len(todos)} 个任务: {todos}")
-
-                print(f"[REACT-planing] 📋 将按 todos 逐个执行，共 {len(todos)} 个任务")
-                yield {'event': 'skill_matched', 'skill': matched_skill.name, 'score': skill_score}
-                
-                skill_guided = True
-                skill_matched_ref = matched_skill
+                skill_guided = False
+                skill_matched_ref = None
             else:
                 skill_guided = False
                 skill_matched_ref = None
-                _prefer_modify_skill = False
 
-            
+            # 合并模式下不需要从技能工作流生成 Todo，由主循环 FC 返回
+
             # ===== MAIN LOOP: ACT（技能匹配时亦走同循环：思考流 + todo 解析 → 执行 → 观察）=====
-            # 无技能分支：单条泛化 Todo + 仲裁倾向改已有 → 注入 grep→modify
-            if (
-                await self._prefer_modify_over_create(user_input)
-                and len(todos) == 1
-                and is_vague_generic_todo(todos[0])
-            ):
-                _tgt = infer_modify_target_from_user(user_input)
-                _kw = (self._extract_title_keywords_for_grep(user_input, todos[0]) or "").strip()
-                if not _kw:
-                    _kw = (user_input or "").strip()[:120]
-                todos = [
-                    f"使用 grep 工具定位相关记录，keywords={_kw}, target={_tgt}, mode=locate",
-                    "使用 modify 工具按用户要求修改目标记录的字段（如状态、负责人、标题等）",
-                ]
-                print(
-                    f"[INTENT-GATE] 主循环前注入 grep→modify: target={_tgt}, keywords={_kw[:80]!r}"
-                )
-                yield {"event": "todos", "data": todos}
-                if len(todos) >= 1:
-                    yield {
-                        'event': 'plan',
-                        'steps': react_plan_steps_payload(todos),
-                        'overview_only': len(todos) >= 3,
-                    }
 
             task_state = new_task_state("skill_guided" if skill_guided else "normal")
             if skill_guided:
@@ -1918,14 +3594,18 @@ class SimplifiedReActEngine:
                     skill_guided=True,
                     skill_ref=skill_matched_ref,
                     fallback_workflow_tools=fallback_workflow_tools,
-                    prefer_modify_skill=_prefer_modify_skill,
                 )
             else:
-                task_state["plan"] = [
-                    {"id": i + 1, "name": str(t), "tool": None, "params": {}, "status": "pending", "result": None}
-                    for i, t in enumerate(todos)
-                ]
-            yield {"event": "plan_init", "mode": task_state["mode"], "steps": task_state["plan"]}
+                task_state["plan"] = _plan_rows_from_json_or_todos(todos, json_plan_meta)
+            _suppress_plan_init_ui = _should_suppress_plan_ui(len(todos), None)
+            if _plan_memo_defer_until_after_think():
+                _suppress_plan_init_ui = True
+            yield {
+                "event": "plan_init",
+                "mode": task_state["mode"],
+                "steps": task_state["plan"],
+                **({"suppress_plan_ui": True} if _suppress_plan_init_ui else {}),
+            }
 
             try:
                 _max_rounds = int(os.getenv("REACT_MAX_ROUNDS", "20"))
@@ -1935,26 +3615,89 @@ class SimplifiedReActEngine:
             last_observation: Optional[Dict[str, Any]] = None
             last_analysis: Optional[Dict[str, Any]] = None
             round_idx = 0
+            _prev_round_prepare_wait_idx: Optional[int] = None
+            pending_next_decision: Optional[Dict[str, Any]] = None
+            _incr_sum_state: Dict[str, Any] = {"text": "", "version": 0}
+            if use_react_incremental_running_summary() and (
+                not use_react_incremental_running_summary_block_loop()
+            ):
+                # 中途运行总览一律后台静默合并，避免卡在「正在准备下一步」等整段 LLM
+                _incr_merge_q = asyncio.Queue()
+
+                async def _incr_sum_bg_worker():
+                    assert _incr_merge_q is not None
+                    while True:
+                        job = await _incr_merge_q.get()
+                        try:
+                            if job is None:
+                                break
+                            _st, _si, _tl, _td, _nl = job
+                            await self._merge_running_summary_incremental_silent(
+                                _st,
+                                int(_si),
+                                str(_tl),
+                                str(_td),
+                                str(_nl),
+                            )
+                        finally:
+                            _incr_merge_q.task_done()
+
+                _incr_worker_task = asyncio.create_task(_incr_sum_bg_worker())
 
             # modify 的 target_id / modifications 以服务端 _enrich_modify_decision_for_main_loop 补全为准，不依赖模型 XML 完整性。
             # 主循环：动态 ReAct（每轮根据观察再决策）；初始 todos 仅作 plan 概览，不强制逐步绑定。
             while not task_state["finished"] and round_idx < _max_rounds:
                 i = round_idx
+                _step_failed = False
+                _t_round_bridge: Optional[float] = None
+                _t_todo_start_wall: Optional[float] = None
                 task_state["current_step"] = round_idx
-                if round_idx < len(task_state["plan"]):
+                # 上一轮已进入“准备下一步”等待态：在本轮开始即关闭，避免一直转圈
+                if _prev_round_prepare_wait_idx is not None:
+                    yield {
+                        "event": "phase_wait",
+                        "kind": "next_round_prepare",
+                        "active": False,
+                        "index": _prev_round_prepare_wait_idx,
+                    }
+                    _prev_round_prepare_wait_idx = None
+                if (not skill_guided) and task_state.get("plan"):
+                    _sync_plan_single_in_progress(task_state["plan"], i)
+                    if (os.getenv("REACT_PLAN_SSE_LIVE_STEPS", "1") or "1").strip().lower() not in (
+                        "0",
+                        "false",
+                        "no",
+                        "off",
+                    ):
+                        yield {
+                            "event": "plan_update",
+                            "steps": _normalize_plan_rows_for_sse(task_state["plan"]),
+                            "reason": "in_progress_sync",
+                            "index": i,
+                        }
+                elif round_idx < len(task_state["plan"]):
                     task_state["plan"][round_idx]["status"] = "running"
-                todo = (
-                    todos[i]
-                    if i < len(todos)
-                    else f"（第 {i + 1} 轮）根据用户目标、当前上下文与上一步观察，决定下一步工具调用。"
-                )
+                # 区分规划任务与额外轮次：i < len(todos) 是规划内的任务，否则是动态决策轮次
+                is_planned_step = i < len(todos)
+                todo = todos[i] if is_planned_step else ""
                 if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
                     print(
-                        f"[REACT-planing] ===== round {i + 1}/{_max_rounds} todo={todo[:200]!r} ====="
+                        f"[REACT-planing] ===== round {i + 1}/{_max_rounds} todo={todo[:200]!r} planned={is_planned_step} ====="
                     )
-                yield {'event': 'todo_start', 'index': i, 'step_id': i + 1, 'todo': todo}
+                # 发送 todo_start：planned=False 表示不在规划备忘中显示
+                yield {'event': 'todo_start', 'index': i, 'step_id': i + 1, 'todo': todo, 'planned': is_planned_step}
                 if len(todos) >= 1:
                     yield {'event': 'step_status', 'index': i, 'step_id': i + 1, 'status': 'running'}
+                # 合并首轮时：不要让 UI 空白等待模型首包，先推一条可见的 agent_thought 占位。
+                # 真实的 agent_thought delta（流式或整包 hint）到来后会自然续写/覆盖用户感知。
+                if i == 0 and (not skill_guided):
+                    yield {
+                        "event": "agent_thought",
+                        "delta": "正在生成执行计划并确定首步工具调用…\n",
+                        "index": i,
+                    }
+                if perf:
+                    _t_todo_start_wall = time.perf_counter()
 
                 if skill_guided and round_idx >= len(todos):
                     break
@@ -1963,6 +3706,11 @@ class SimplifiedReActEngine:
                 if skill_guided:
                     out_sd: Dict[str, Any] = {}
                     assert skill_matched_ref is not None
+                    if perf and _t_todo_start_wall is not None:
+                        print(
+                            f"[PERF][round-bridge] step={i} todo_start→skill_plan_prepare_ms="
+                            f"{(time.perf_counter() - _t_todo_start_wall) * 1000:.1f}"
+                        )
                     async for _se in self._skill_plan_step_stream_prepare(
                         i=i,
                         todo=todo,
@@ -1970,7 +3718,6 @@ class SimplifiedReActEngine:
                         todos=todos,
                         skill_ref=skill_matched_ref,
                         fallback_workflow_tools=fallback_workflow_tools,
-                        _prefer_modify_skill=_prefer_modify_skill,
                         result_context=result_context,
                         project_id=project_id,
                         last_observation=last_observation,
@@ -1980,68 +3727,281 @@ class SimplifiedReActEngine:
                     decision = out_sd.get("decision") or {"execute": False, "tool": "", "params": {}}
                     skip_modify_exec = bool(out_sd.get("skill_skip"))
                 else:
-                    # 决策：正文流式「Agent 行动前说明」+ <decision>（不启用模型 enable_thinking）
-                    decision_prompt = self._wrap_prompt(
-                        ReactPromptTemplates.decide_prompt_react_dynamic(
-                            user_input,
-                            tools_info,
-                            result_context,
-                            round_idx=i,
-                            last_observation=last_observation,
-                            last_analysis=last_analysis,
-                            plan_hints=todos,
+                    _decision_from_merge_pending = False
+                    if pending_next_decision is None:
+                        _sd_dec = await self._maybe_self_drive_decision_from_todo(
+                            todo, user_input, i, len(todos)
                         )
-                    )
-                    _sink_d: List[str] = []
-                    _dg = self._stream_agent_decide_with_narrative(
-                        decision_prompt,
-                        step_index=i,
-                        full_text_sink=_sink_d,
-                    )
-                    _dit = _dg.__aiter__()
-                    while True:
-                        try:
-                            _de = await _dit.__anext__()
-                            yield _de
-                        except StopAsyncIteration:
-                            break
-                    decision_response = _sink_d[0] if _sink_d else ""
-                    print(f"[REACT-planing] LLM决策原始响应: {decision_response}")
-                    # XML 解析也属于等待态的一部分（通常很快，但用于统一前端状态机）
-                    yield {
-                        "event": "phase_wait",
-                        "kind": "decision_xml_parse",
-                        "active": True,
-                        "index": i,
-                        "message": react_phase_wait_message("decision_xml_parse", self._ui_locale),
-                    }
-                    decision = parse_xml_decision(decision_response)
-                    yield {
-                        "event": "phase_wait",
-                        "kind": "decision_xml_parse",
-                        "active": False,
-                        "index": i,
-                    }
-                    # <decision> 前无自然语言或模型只吐 XML 时，流式可能无 agent_thought；用 reason / 合成一行兜底
-                    try:
-                        _dr = (decision_response or "").strip()
-                        _m_pre = re.search(r"<\s*decision\b", _dr, re.IGNORECASE)
-                        _pre_dec = (_dr[: _m_pre.start()].strip() if _m_pre else _dr)
-                        _reason_fb = (decision.get("reason") or "").strip()
-                        if len(_pre_dec) < 4:
-                            _line = _reason_fb or react_fallback_decision_line(
-                                decision.get("tool") or "?",
-                                decision.get("execute"),
-                                self._ui_locale,
+                        if _sd_dec is not None:
+                            pending_next_decision = _sd_dec
+                    if pending_next_decision is None:
+                        # 决策：默认流式叙事 + <decision>；REACT_DECIDE_FUNCTION_CALL=1 且 LLM 支持时走 FC 非流式
+                        _prev_tool_for_decide: Optional[str] = None
+                        if steps:
+                            _tpt = str(
+                                (steps[-1].get("decision") or {}).get("tool") or ""
+                            ).strip().lower()
+                            _prev_tool_for_decide = _tpt if _tpt else None
+                        _ctx_d = shrink_payload_for_decide_prompt(
+                            result_context, prev_tool=_prev_tool_for_decide
+                        )
+                        _lo_d = shrink_payload_for_decide_prompt(
+                            last_observation, prev_tool=_prev_tool_for_decide
+                        )
+                        _la_d = shrink_payload_for_decide_prompt(
+                            last_analysis, prev_tool=_prev_tool_for_decide
+                        )
+                        _decide_mt = resolve_decide_max_tokens_for_prev_tool(
+                            _prev_tool_for_decide
+                        )
+                        _opening_merge_round = bool(
+                            i == 0
+                            and (not skill_guided)
+                            and use_react_decide_function_call()
+                            and hasattr(self.llm, "chat_completion_with_tools")
+                        )
+                        if _opening_merge_round:
+                            decision_prompt = self._wrap_prompt(
+                                ReactPromptTemplates.merged_opening_decide_prompt_fc(
+                                    user_input,
+                                    tools_info,
+                                    _ctx_d,
+                                    ui_locale=self._ui_locale,
+                                )
                             )
-                            if _line.strip():
+                        else:
+                            decision_prompt = self._wrap_prompt(
+                                ReactPromptTemplates.decide_prompt_react_dynamic(
+                                    user_input,
+                                    tools_info,
+                                    _ctx_d,
+                                    round_idx=i,
+                                    last_observation=_lo_d,
+                                    last_analysis=_la_d,
+                                    current_todo=todo,
+                                )
+                            )
+                        use_fc = use_react_decide_function_call() and hasattr(
+                            self.llm, "chat_completion_with_tools"
+                        )
+                        use_fc_stream = (
+                            use_fc
+                            and use_react_decide_fc_stream()
+                            and hasattr(self.llm, "chat_completion_with_tools_stream")
+                        )
+                        if use_fc_stream:
+                            from .react_function_call import build_react_decision_tools_from_registry, build_react_think_fc_tools
+
+                            if _opening_merge_round:
+                                if not build_react_think_fc_tools():
+                                    use_fc_stream = False
+                            elif not build_react_decision_tools_from_registry(self.tools):
+                                use_fc_stream = False
+                        if use_fc:
+                            # 整包 FC：首字取决于 API；流式 FC：首字来自真实 delta。占位可关 REACT_DECIDE_FC_INSTANT_HINT=0
+                            _hint_fc = (os.getenv("REACT_DECIDE_FC_INSTANT_HINT", "1") or "1").strip().lower()
+                            if _hint_fc not in ("0", "false", "no", "off"):
                                 yield {
                                     "event": "agent_thought",
-                                    "delta": _line,
+                                    "delta": react_decide_fc_first_token_hint(self._ui_locale),
                                     "index": i,
                                 }
-                    except Exception:
-                        pass
+                            # 非流式 FC 时并行「行动前说明」辅助流；流式 FC 时由真实 token 替代，默认不再并行第二条流
+                            # 合并首轮 opening_merge 时禁止并行 hint：否则会出现「计划已定稿但 thought 还在续写」的错觉。
+                            _fc_stream_hint = (os.getenv("REACT_DECIDE_FC_STREAM_HINT", "1") or "1").strip().lower()
+                            if _opening_merge_round:
+                                _fc_stream_hint = "0"
+                            _stream_task = None
+                            _stream_q: "asyncio.Queue[object]" = asyncio.Queue()
+                            _STREAM_DONE = object()
+                            if _fc_stream_hint not in ("0", "false", "no", "off") and not use_fc_stream:
+                                _hint_prompt = (
+                                    "用 2～4 句中文，简要说明你接下来要做什么（可能会调用哪个工具、为什么）。"
+                                    "不要输出 XML/JSON/代码块。"
+                                    f"\n\n用户请求：{user_input}\n本轮任务：{todo}\n"
+                                )
+
+                                async def _pump_fc_hint():
+                                    try:
+                                        async for _e in self._stream_react_ui_text(
+                                            self._wrap_prompt(_hint_prompt),
+                                            step_index=i,
+                                            channel="__fc_decide_hint__",
+                                        ):
+                                            d = _e.get("delta") if isinstance(_e, dict) else ""
+                                            if isinstance(d, str) and d:
+                                                await _stream_q.put(
+                                                    {"event": "agent_thought", "delta": d, "index": i}
+                                                )
+                                    except Exception:
+                                        pass
+                                    finally:
+                                        await _stream_q.put(_STREAM_DONE)
+
+                                _stream_task = asyncio.create_task(_pump_fc_hint())
+                            yield {
+                                "event": "phase_wait",
+                                "kind": "decision_function_call",
+                                "active": True,
+                                "index": i,
+                                "message": react_phase_wait_message(
+                                    "decision_function_call", self._ui_locale
+                                ),
+                            }
+                            if perf and _t_todo_start_wall is not None:
+                                print(
+                                    f"[PERF][round-bridge] step={i} todo_start→fc_invoke_ms="
+                                    f"{(time.perf_counter() - _t_todo_start_wall) * 1000:.1f}"
+                                )
+                            _t_fc0 = time.perf_counter()
+                            _result_fc: List[Tuple[Dict[str, Any], str]] = []
+                            if use_fc_stream:
+                                try:
+                                    async for _ev in self._iter_fc_decide_stream(
+                                        decision_prompt,
+                                        step_index=i,
+                                        prev_tool=_prev_tool_for_decide,
+                                        result_out=_result_fc,
+                                        opening_merge=_opening_merge_round,
+                                    ):
+                                        yield _ev
+                                    decision, decision_response = _result_fc[0]
+                                except Exception as _e_fc_s:
+                                    print(
+                                        f"[REACT-FC-STREAM] step={i} 失败，回退整包 FC: {_e_fc_s!r}"
+                                    )
+                                    decision, decision_response = await self._react_decide_function_call(
+                                        decision_prompt,
+                                        step_index=i,
+                                        prev_tool=_prev_tool_for_decide,
+                                        opening_merge=_opening_merge_round,
+                                    )
+                            else:
+                                _fc_task = asyncio.create_task(
+                                    self._react_decide_function_call(
+                                        decision_prompt,
+                                        step_index=i,
+                                        prev_tool=_prev_tool_for_decide,
+                                        opening_merge=_opening_merge_round,
+                                    )
+                                )
+                                while True:
+                                    done, _pending = await asyncio.wait(
+                                        [t for t in (_fc_task, _stream_task) if t is not None],
+                                        timeout=0.25,
+                                        return_when=asyncio.FIRST_COMPLETED,
+                                    )
+                                    while True:
+                                        try:
+                                            item = _stream_q.get_nowait()
+                                        except Exception:
+                                            break
+                                        if item is _STREAM_DONE:
+                                            _stream_task = None
+                                            break
+                                        if isinstance(item, dict):
+                                            yield item
+                                    if _fc_task in done:
+                                        break
+                                decision, decision_response = await _fc_task
+                                if _stream_task is not None and not _stream_task.done():
+                                    _stream_task.cancel()
+                                    try:
+                                        await _stream_task
+                                    except Exception:
+                                        pass
+                            if perf:
+                                print(
+                                    f"[PERF][react] fc_decide_roundtrip_ms="
+                                    f"{(time.perf_counter() - _t_fc0) * 1000:.1f} step={i} stream={int(use_fc_stream)}"
+                                )
+                            yield {
+                                "event": "phase_wait",
+                                "kind": "decision_function_call",
+                                "active": False,
+                                "index": i,
+                            }
+                            print(f"[REACT-planing] LLM决策(FC): {decision_response}")
+                        else:
+                            if perf and _t_todo_start_wall is not None:
+                                print(
+                                    f"[PERF][round-bridge] step={i} todo_start→stream_decide_start_ms="
+                                    f"{(time.perf_counter() - _t_todo_start_wall) * 1000:.1f}"
+                                )
+                            _sink_d: List[str] = []
+                            _dg = self._stream_agent_decide_with_narrative(
+                                decision_prompt,
+                                step_index=i,
+                                full_text_sink=_sink_d,
+                                max_tokens=_decide_mt,
+                            )
+                            _dit = _dg.__aiter__()
+                            while True:
+                                try:
+                                    _de = await _dit.__anext__()
+                                    yield _de
+                                except StopAsyncIteration:
+                                    break
+                            decision_response = _sink_d[0] if _sink_d else ""
+                            print(f"[REACT-planing] LLM决策原始响应: {decision_response}")
+                            yield {
+                                "event": "phase_wait",
+                                "kind": "decision_xml_parse",
+                                "active": True,
+                                "index": i,
+                                "message": react_phase_wait_message(
+                                    "decision_xml_parse", self._ui_locale
+                                ),
+                            }
+                            decision = parse_xml_decision(decision_response)
+                            yield {
+                                "event": "phase_wait",
+                                "kind": "decision_xml_parse",
+                                "active": False,
+                                "index": i,
+                            }
+                        # <decision> 前无自然语言或模型只吐 XML 时，流式可能无 agent_thought；用 reason / 合成一行兜底
+                        try:
+                            _dr = (decision_response or "").strip()
+                            _m_pre = re.search(r"<\s*decision\b", _dr, re.IGNORECASE)
+                            _pre_dec = (_dr[: _m_pre.start()].strip() if _m_pre else _dr)
+                            _reason_fb = (decision.get("reason") or "").strip()
+                            if len(_pre_dec) < 4:
+                                _line = _reason_fb or react_fallback_decision_line(
+                                    decision.get("tool") or "?",
+                                    decision.get("execute"),
+                                    self._ui_locale,
+                                )
+                                if _line.strip():
+                                    yield {
+                                        "event": "agent_thought",
+                                        "delta": _line,
+                                        "index": i,
+                                    }
+                        except Exception:
+                            pass
+                    else:
+                        _decision_from_merge_pending = True
+                        decision = pending_next_decision
+                        pending_next_decision = None
+                        try:
+                            decision_response = json.dumps(
+                                decision, ensure_ascii=False, default=str
+                            )[:4000]
+                        except Exception:
+                            decision_response = ""
+                        _r_m = (decision.get("reason") or "").strip()
+                        if _r_m:
+                            yield {
+                                "event": "agent_thought",
+                                "delta": _r_m + "\n\n",
+                                "index": i,
+                            }
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                f"[REACT-merge] step={i} pending_next_decision "
+                                f"tool={decision.get('tool')!r} execute={decision.get('execute')!r}"
+                            )
                     _llm = getattr(self, "llm", None)
                     print(
                         f"[REACT-planing] step={i} llm_class={type(_llm).__name__} "
@@ -2080,6 +4040,91 @@ class SimplifiedReActEngine:
                             f"[REACT-planing] step={i} decide_done raw_len={len(decision_response)} "
                             f"tool={decision.get('tool')!r} execute={decision.get('execute')!r}"
                         )
+
+                    # 合并首轮：解析 LLM 输出的三种格式（闲聊/单步/多步计划）
+                    if i == 0 and (not skill_guided):
+                        _parsed = parse_opening_decision(decision_response)
+                        _parsed_type = _parsed.get("type")
+                        print(f"[REACT-merge-opening] 解析类型={_parsed_type} parsed={_parsed}")
+                        
+                        # 类型 1: 闲聊
+                        if _parsed_type == "chat":
+                            _cancel_preloop_tasks()
+                            msg = _parsed.get("message", "你好！有什么可以帮你的？")
+                            yield {"event": "intent_clarification", "message": msg, "kind": "llm_chat_only"}
+                            _chat_sum_gap = _summary_stream_yield_gap_s()
+                            for _chunk in _iter_direct_chat_reply_stream_chunks(msg):
+                                yield {"event": "summary_stream", "delta": _chunk}
+                                if _chat_sum_gap > 0:
+                                    await asyncio.sleep(_chat_sum_gap)
+                            yield {
+                                "event": "done",
+                                "findings": [],
+                                "steps_count": 0,
+                                "duration": time.time() - start_time,
+                                "summary": msg,
+                                "direct_reply": True,
+                            }
+                            return
+                        
+                        # 类型 2: 单步任务（简单任务，不生成规划备忘）
+                        elif _parsed_type == "single":
+                            _tool_name = _parsed.get("tool", "")
+                            _tool_params = _parsed.get("params", {})
+                            if _tool_name:
+                                decision = {
+                                    "execute": True,
+                                    "tool": _tool_name,
+                                    "params": _tool_params,
+                                    "reason": "opening_single_step",
+                                }
+                                if _tool_name == "modify" and "confirm" not in decision["params"]:
+                                    decision["params"]["confirm"] = False
+                                if _tool_name == "create" and "confirm" not in decision["params"]:
+                                    decision["params"]["confirm"] = False
+                                # 单步任务：不生成规划备忘，清空计划
+                                task_state["plan"] = []
+                                print(f"[REACT-merge-opening] 单步任务 tool={_tool_name} params={_tool_params}，不生成规划备忘")
+                        
+                        # 类型 3: 多步任务（复杂任务，显示规划备忘）
+                        elif _parsed_type == "multi":
+                            _plan_list = _parsed.get("plan", [])
+                            _first_tool = _parsed.get("first_tool", "")
+                            _first_params = _parsed.get("first_params", {})
+                            if _plan_list and len(_plan_list) >= 2:
+                                # 更新 todos 和 task_state["plan"]（原地修改避免 nonlocal）
+                                new_todos = [str(p) for p in _plan_list if p]
+                                todos.clear()
+                                todos.extend(new_todos)
+                                task_state["plan"] = _plan_rows_from_json_or_todos(todos, None)
+                                # 发送不带 suppress 的 plan_update 以显示规划备忘
+                                yield {
+                                    "event": "plan_update",
+                                    "steps": task_state["plan"],
+                                    "reason": "multi_step_plan",
+                                    "suppress_plan_ui": False,
+                                }
+                                # 设置首轮工具调用
+                                if _first_tool:
+                                    decision = {
+                                        "execute": True,
+                                        "tool": _first_tool,
+                                        "params": _first_params or {},
+                                        "reason": "opening_multi_step_first",
+                                    }
+                                    if _first_tool == "modify" and "confirm" not in decision["params"]:
+                                        decision["params"]["confirm"] = False
+                                print(f"[REACT-merge-opening] 多步任务 plan={todos} first_tool={_first_tool}")
+                            else:
+                                # plan 不足2步，降级为单步
+                                print(f"[REACT-merge-opening] plan 不足2步，降级为单步: {_plan_list}")
+                        
+                        # 类型 unknown: 检查是否已通过 FC 获得工具
+                        elif _parsed_type == "unknown":
+                            if decision.get("tool") and decision.get("execute"):
+                                print(f"[REACT-merge-opening] unknown 类型但有 tool={decision.get('tool')}")
+                            else:
+                                print(f"[REACT-merge-opening] unknown 类型，无工具调用")
                 
                     # 兜底逻辑：当 LLM 返回空响应但 Todo包含 modify 关键词时
                     if not decision['execute'] and 'modify' in todo.lower():
@@ -2092,7 +4137,7 @@ class SimplifiedReActEngine:
                         decision = await self._optimize_with_skill_tool(decision, user_input, result_context, project_id)
 
                     # 面向用户：流式说明入参与决策（不展示原始 XML/JSON）；注入完整待办列表供「对照」
-                    if decision['execute']:
+                    if decision['execute'] and not _decision_from_merge_pending:
                         try:
                             _todos_ov = (
                                 "\n".join(f"{j + 1}. {t}" for j, t in enumerate(todos))
@@ -2177,6 +4222,9 @@ class SimplifiedReActEngine:
                         dp = decision.setdefault('params', {})
                         dp.setdefault('natural_query', user_input)
 
+                if (not skill_guided) and decision.get('execute') and decision.get('tool') == 'grep':
+                    self._coerce_grep_target_for_user_intent(decision, user_input, todo)
+
                 if not skill_guided:
                     skip_modify_exec = False
                 # 主循环 modify：补全 target_id / modifications（与技能分支一致），并可选下发补救 grep 事件
@@ -2230,62 +4278,47 @@ class SimplifiedReActEngine:
                     if _pub:
                         executing_payload['params'] = _pub
                     if decision['tool'] == 'grep':
-                        _kw = _pp.get('keywords')
-                        _target = _pp.get('target')
-                        _mode = _pp.get('mode')
-                        _parts = []
-                        if _kw:
-                            _parts.append(f"关键词：{_kw}")
-                        if _target:
-                            _parts.append(f"目标：{_target}")
-                        if _mode:
-                            _parts.append(f"模式：{_mode}")
-                        _detail = "；".join(_parts)
-                        executing_payload['message'] = (
-                            f"即将执行 grep（{_detail}）…" if _detail else "即将执行 grep…"
+                        executing_payload['message'] = react_executing_grep_about_to(
+                            _pp.get("keywords"),
+                            _pp.get("target"),
+                            _pp.get("mode"),
+                            self._ui_locale,
                         )
                     elif decision['tool'] == 'create':
-                        _target = _pp.get('target')
-                        _nq = _pp.get('natural_query')
-                        _parts = []
-                        if _target:
-                            _parts.append(f"目标：{_target}")
-                        if _nq:
-                            _parts.append(f"描述：{str(_nq)[:80]}")
-                        _detail = "；".join(_parts)
-                        executing_payload['message'] = (
-                            f"即将执行 create（{_detail}）…" if _detail else "即将执行 create…"
+                        executing_payload['message'] = react_executing_create_about_to(
+                            _pp.get("target"),
+                            _pp.get("natural_query"),
+                            self._ui_locale,
                         )
                     elif decision['tool'] == 'database_query':
-                        _nq = _pp.get('natural_query')
-                        _query = _pp.get('query')
-                        _sql = _pp.get('sql')
-                        _parts = []
-                        if _nq:
-                            _parts.append(f"自然语言：{str(_nq)[:80]}")
-                        elif _query:
-                            _parts.append(f"查询：{str(_query)[:80]}")
-                        elif _sql:
-                            _parts.append(f"SQL：{str(_sql)[:80]}")
-                        _detail = "；".join(_parts)
-                        executing_payload['message'] = (
-                            f"即将执行 database_query（{_detail}）…" if _detail else "即将执行 database_query…"
+                        executing_payload['message'] = react_executing_database_query_about_to(
+                            _pp.get("natural_query"),
+                            _pp.get("query"),
+                            _pp.get("sql"),
+                            self._ui_locale,
                         )
                     elif decision['tool'] == 'modify':
                         mods = _pp.get('modifications') or {}
                         _target = _pp.get('target')
                         _target_id = _pp.get('target_id')
-                        _parts = []
-                        if _target:
-                            _parts.append(f"目标：{_target}")
-                        if _target_id not in (None, ''):
-                            _parts.append(f"ID：{_target_id}")
                         if isinstance(mods, dict) and mods:
                             executing_payload['fields'] = list(mods.keys())
-                            _parts.append(f"字段：{'、'.join(list(mods.keys())[:6])}")
-                        _detail = "；".join(_parts)
-                        executing_payload['message'] = (
-                            f"即将执行 modify（{_detail}）…" if _detail else "即将执行 modify…"
+                        _keys_zh = (
+                            "、".join(list(mods.keys())[:6])
+                            if isinstance(mods, dict) and mods
+                            else ""
+                        )
+                        _mods_en = (
+                            modify_modifications_kv_summary(mods, self._ui_locale)
+                            if isinstance(mods, dict) and mods
+                            else ""
+                        )
+                        executing_payload['message'] = react_executing_modify_about_to(
+                            _target,
+                            _target_id,
+                            _mods_en,
+                            _keys_zh,
+                            self._ui_locale,
                         )
 
                     yield executing_payload
@@ -2296,19 +4329,54 @@ class SimplifiedReActEngine:
                         badcase_list = result_context.get('badcase_list', [])
                         bug_list = result_context.get('bug_list', [])
                         testcase_list = result_context.get('testcase_list', [])
-                        mod_target = (decision.get('params') or {}).get('target') or self._infer_modify_target(user_input, (decision.get('reason') or ''))
+                        explicit = self._infer_modify_target_explicit(user_input, todo)
+                        user_infer = self._infer_modify_target(user_input, todo)
+                        if explicit:
+                            mod_target = explicit
+                        else:
+                            mod_target = (decision.get('params') or {}).get('target') or user_infer
+                        # 模型常把 target 写成默认 badcase；用户明说「测试用例」且上下文有 testcase 时不得误用 badcase 列表
+                        if user_infer == 'testcase' and testcase_list:
+                            mod_target = 'testcase'
+                        elif user_infer == 'bug' and bug_list:
+                            mod_target = 'bug'
+                        elif user_infer == 'badcase' and badcase_list:
+                            mod_target = 'badcase'
+                        # 本轮定位仅命中一类记录时，直接与列表对齐（避免 todo 里写错 badcase 等）
+                        if (
+                            testcase_list
+                            and not badcase_list
+                            and not bug_list
+                        ):
+                            mod_target = 'testcase'
+                        elif badcase_list and not testcase_list and not bug_list:
+                            mod_target = 'badcase'
+                        elif bug_list and not testcase_list and not badcase_list:
+                            mod_target = 'bug'
+                        _lgt = str(result_context.get('_last_grep_target') or '').lower()
+                        if _lgt == 'testcase' and testcase_list:
+                            mod_target = 'testcase'
+                        elif _lgt == 'badcase' and badcase_list:
+                            mod_target = 'badcase'
+                        elif _lgt == 'bug' and bug_list:
+                            mod_target = 'bug'
                         if mod_target == 'bug' and bug_list:
                             target_list, target_type = bug_list, 'bug'
                         elif mod_target == 'testcase' and testcase_list:
                             target_list, target_type = testcase_list, 'testcase'
-                        elif badcase_list:
+                        elif badcase_list and explicit != 'testcase':
                             target_list, target_type = badcase_list, 'badcase'
                         elif bug_list:
                             target_list, target_type = bug_list, 'bug'
                         elif testcase_list:
                             target_list, target_type = testcase_list, 'testcase'
                         else:
-                            target_list, target_type = [], 'badcase'
+                            _fallback_t = (
+                                mod_target
+                                if mod_target in ('badcase', 'bug', 'testcase')
+                                else 'badcase'
+                            )
+                            target_list, target_type = [], _fallback_t
 
                         _tl_ids = [x.get("id") for x in target_list if isinstance(x, dict)]
                         _dec_tid = (decision.get("params") or {}).get("target_id")
@@ -2318,7 +4386,17 @@ class SimplifiedReActEngine:
                             f"target_list_ids={_tl_ids}, decision.params.target_id={_dec_tid}, "
                             f"context lens bug/bc/tc={len(bug_list)}/{len(badcase_list)}/{len(testcase_list)}"
                         )
-    
+
+                        # grep 的 bug_location 可能比「可跳转 navigation」多（如无 plan_id 被导航丢弃）；
+                        # 批量 modify 必须与导航候选一致，避免「界面定位 2 条、批量改 3 条」。
+                        if target_list and len(target_list) > 1:
+                            target_list = self._constrain_modify_target_list_by_grep_navigation(
+                                target_list,
+                                target_type,
+                                result_context,
+                                trace_phase="main_loop",
+                            )
+
                         # 仅一条候选时与 enrich 对齐：直接从列表写 target_id（grep_result.first_* 可能为空）
                         if (
                             decision.get('tool') == 'modify'
@@ -2337,53 +4415,72 @@ class SimplifiedReActEngine:
                             print(
                                 f"[MODIFY-TRACE] 主循环 → 批量 modify: 共 {len(target_list)} 条 {target_type}"
                             )
-                            # 批量修改所有记录
-                            all_results = []
-                            for item in target_list:
-                                item_id = item.get('id')
-                                item_plan_id = item.get('plan_id')  # 获取 plan_id
-                                if item_id:
-                                    modify_decision = decision.copy()
-                                    modify_decision['params']['target_id'] = item_id
-                                    modify_decision['params']['target'] = target_type
-                                    print(f"[REACT-execution] 批量修改 {target_type} ID={item_id}, plan_id={item_plan_id}")
-                                    observation = await self._execute_tool(modify_decision)
-                                    all_results.append({
-                                        'id': item_id,
-                                        'plan_id': item_plan_id,  # 添加 plan_id
-                                        'result': observation
-                                    })
-                            
-                            # 合并结果（batch_results 格式与技能分支一致，供前端 modifyGroups 解析）
-                            target_name = 'Bug' if target_type == 'bug' else ('测试用例' if target_type == 'testcase' else 'BadCase')
-                            modifications = decision.get('params', {}).get('modifications', {})
-                            mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
-                            batch_results_flat = []
-                            for r in all_results:
-                                obs = r.get('result', {})
-                                batch_results_flat.append({
-                                    'target_id': r.get('id'),
-                                    'plan_id': r.get('plan_id'),
-                                    'target': target_type,
-                                    'diff': obs.get('diff', []),
-                                    'modifications': modifications,
-                                    'before': obs.get('before', {}),
-                                    'after': obs.get('after', {}),
-                                    'confirmation_required': obs.get('confirmation_required', True),
-                                    'success': obs.get('success', False),
-                                    'record_title': (obs.get('before') or {}).get('title'),
-                                    'result': obs
-                                })
-                            observation = {
-                                'success': all(r['result'].get('success') for r in all_results),
-                                'message': f'变更修改预览 {len(all_results)} 条，请在下方确认',
-                                'summary': f'批量修改{len(all_results)}条{target_name}：{mod_summary}',
-                                'results': all_results,
-                                'batch_results': batch_results_flat,
-                                'batch_modify': True,
-                                'batch_count': len(all_results),
-                                'target': target_type
-                            }
+                            batch_ids = [
+                                item.get("id")
+                                for item in target_list
+                                if item.get("id") is not None
+                            ]
+                            if not batch_ids:
+                                observation = {
+                                    "success": False,
+                                    "error": "批量修改缺少有效 id",
+                                    "batch_modify": True,
+                                }
+                            else:
+                                modify_decision = decision.copy()
+                                mp = dict(modify_decision.get("params") or {})
+                                modify_decision["params"] = mp
+                                mp["target_ids"] = batch_ids
+                                mp["target"] = target_type
+                                mp["batch_items"] = [
+                                    {"id": x.get("id"), "plan_id": x.get("plan_id")}
+                                    for x in target_list
+                                    if x.get("id") is not None
+                                ]
+                                mp.pop("target_id", None)
+                                print(
+                                    f"[REACT-execution] 批量 modify 单次工具调用: {len(batch_ids)} 条 {target_type} ids={batch_ids}"
+                                )
+                                started = time.time()
+                                task = asyncio.create_task(self._execute_tool(modify_decision))
+                                await asyncio.sleep(0.1)
+                                _mbr = react_modify_executing_fallback_reason(self._ui_locale)
+                                _mod_hb_bucket: Optional[int] = None
+                                while not task.done():
+                                    waited = time.time() - started
+                                    got_any = False
+                                    try:
+                                        pq = (modify_decision.get("params") or {}).get("progress_queue")
+                                        if pq:
+                                            while True:
+                                                msg = pq.get_nowait()
+                                                got_any = True
+                                                yield _modify_progress_to_stream_event(msg, i, _mbr)
+                                                print(
+                                                    f"[REACT-execution] modify 批量进度: {str(msg)[:240]}",
+                                                    flush=True,
+                                                )
+                                    except Exception:
+                                        pass
+                                    if not got_any:
+                                        _emit_hb, _hb_sec = _modify_wait_heartbeat_should_emit(
+                                            _mod_hb_bucket, waited
+                                        )
+                                        if _emit_hb:
+                                            _mod_hb_bucket = _hb_sec
+                                            yield {
+                                                "event": "executing",
+                                                "tool": "modify",
+                                                "reason": _mbr,
+                                                "index": i,
+                                                "message": react_modify_progress_wait(
+                                                    float(_hb_sec), self._ui_locale
+                                                ),
+                                            }
+                                    await asyncio.sleep(0.12 if got_any else 0.28)
+                                observation = await task
+                                for _tte in self._drain_tool_task_sse_buffer_list():
+                                    yield _tte
                         else:
                             # 单个修改：modify 可能执行较久，持续下发分步进度/心跳
                             if decision.get('tool') == 'modify':
@@ -2394,6 +4491,7 @@ class SimplifiedReActEngine:
                                 started = time.time()
                                 task = asyncio.create_task(self._execute_tool(decision))
                                 await asyncio.sleep(0.1)
+                                _mod_hb_bucket_sr: Optional[int] = None
                                 while not task.done():
                                     waited = time.time() - started
                                     got_any = False
@@ -2403,21 +4501,45 @@ class SimplifiedReActEngine:
                                             while True:
                                                 msg = pq.get_nowait()
                                                 got_any = True
-                                                yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'index': i, 'message': str(msg)}
+                                                yield _modify_progress_to_stream_event(
+                                                    msg,
+                                                    i,
+                                                    react_modify_single_record_reason(self._ui_locale),
+                                                )
                                                 print(f"[REACT-execution] modify 进度: {msg}", flush=True)
                                     except Exception:
                                         pass
                                     if not got_any:
-                                        yield {'event': 'executing', 'tool': 'modify', 'reason': '单个修改', 'index': i, 'message': f'修改中…已等待 {waited:.0f}s'}
-                                    await asyncio.sleep(0.2 if got_any else 0.4)
+                                        _emit_hb, _hb_sec = _modify_wait_heartbeat_should_emit(
+                                            _mod_hb_bucket_sr, waited
+                                        )
+                                        if _emit_hb:
+                                            _mod_hb_bucket_sr = _hb_sec
+                                            yield {
+                                                'event': 'executing',
+                                                'tool': 'modify',
+                                                'reason': react_modify_single_record_reason(
+                                                    self._ui_locale
+                                                ),
+                                                'index': i,
+                                                'message': react_modify_progress_wait(
+                                                    float(_hb_sec), self._ui_locale
+                                                ),
+                                            }
+                                    await asyncio.sleep(0.12 if got_any else 0.28)
                                 observation = await task
+                                for _tte in self._drain_tool_task_sse_buffer_list():
+                                    yield _tte
                             else:
                                 observation = await self._execute_tool(decision)
+                                for _tte in self._drain_tool_task_sse_buffer_list():
+                                    yield _tte
                     else:
                         if decision.get('tool') == 'modify':
                             started = time.time()
                             task = asyncio.create_task(self._execute_tool(decision))
                             await asyncio.sleep(0.1)
+                            _mod_hb_bucket_else: Optional[int] = None
                             while not task.done():
                                 waited = time.time() - started
                                 got_any = False
@@ -2427,16 +4549,39 @@ class SimplifiedReActEngine:
                                         while True:
                                             msg = pq.get_nowait()
                                             got_any = True
-                                            yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'index': i, 'message': str(msg)}
+                                            yield _modify_progress_to_stream_event(
+                                                msg,
+                                                i,
+                                                decision.get("reason")
+                                                or react_modify_executing_fallback_reason(self._ui_locale),
+                                            )
                                             print(f"[REACT-execution] modify 进度: {msg}", flush=True)
                                 except Exception:
                                     pass
                                 if not got_any:
-                                    yield {'event': 'executing', 'tool': 'modify', 'reason': decision.get('reason') or '执行中', 'index': i, 'message': f'修改中…已等待 {waited:.0f}s'}
-                                await asyncio.sleep(0.2 if got_any else 0.4)
+                                    _emit_hb, _hb_sec = _modify_wait_heartbeat_should_emit(
+                                        _mod_hb_bucket_else, waited
+                                    )
+                                    if _emit_hb:
+                                        _mod_hb_bucket_else = _hb_sec
+                                        yield {
+                                            'event': 'executing',
+                                            'tool': 'modify',
+                                            'reason': decision.get('reason')
+                                            or react_modify_executing_fallback_reason(self._ui_locale),
+                                            'index': i,
+                                            'message': react_modify_progress_wait(
+                                                float(_hb_sec), self._ui_locale
+                                            ),
+                                        }
+                                await asyncio.sleep(0.12 if got_any else 0.28)
                             observation = await task
+                            for _tte in self._drain_tool_task_sse_buffer_list():
+                                yield _tte
                         else:
                             observation = await self._execute_tool(decision)
+                            for _tte in self._drain_tool_task_sse_buffer_list():
+                                yield _tte
                 
                 print(f"[REACT-execution] 工具执行结果:")
                 print(f"[REACT-execution]   成功: {observation.get('success', False)}")
@@ -2468,7 +4613,10 @@ class SimplifiedReActEngine:
                     and observation.get('need_grep_first')
                 ):
                     print(f"[REACT-execution] modify 缺少 target_id，自动执行 grep 查询...")
-                    yield {'event': 'retry', 'message': '正在执行 grep 工具定位目标记录...'}
+                    yield {
+                        'event': 'retry',
+                        'message': react_retry_grep_for_modify(self._ui_locale),
+                    }
                     
                     suggested_params = observation.get('suggested_params', {})
                     # 从用户输入/ todo 中提取要查找的标题作为 keywords（拆分模糊匹配由 grep 内部处理）
@@ -2489,37 +4637,54 @@ class SimplifiedReActEngine:
                         'params': grep_params
                     }
                     grep_observation = await self._execute_tool(grep_decision)
+                    for _tte in self._drain_tool_task_sse_buffer_list():
+                        yield _tte
                     print(f"[REACT-execution] grep 结果: success={grep_observation.get('success')}")
                     
                     # 从 grep 结果中提取 target_id（rerank 分高的选一条；支持 badcase/bug/testcase）
                     if grep_observation.get('success'):
-                        grep_data = grep_observation.get('data', {})
-                        badcase_list = grep_data.get('badcase_analysis', [])
-                        bug_list = grep_data.get('bug_location', [])
-                        testcase_list = grep_data.get('testcase_location', [])
-                        
-                        if badcase_list:
-                            result_context['badcase_list'] = badcase_list
-                            best = self._pick_best_match_from_list(badcase_list, keywords, key_title='title')
-                            result_context['first_badcase_id'] = best.get('id')
-                            print(f"[REACT-execution] BadCase rerank 选中 id={best.get('id')}")
-                        if bug_list:
-                            result_context['bug_list'] = bug_list
-                            best = self._pick_best_match_from_list(bug_list, keywords, key_title='title')
-                            result_context['first_bug_id'] = best.get('id')
-                            print(f"[REACT-execution] Bug rerank 选中 id={best.get('id')}")
-                        if testcase_list:
-                            result_context['testcase_list'] = testcase_list
-                            best = self._pick_best_match_from_list(testcase_list, keywords, key_title='title')
-                            result_context['first_testcase_id'] = best.get('id')
-                            print(f"[REACT-execution] 测试用例 rerank 选中 id={best.get('id')}")
+                        # 复用统一合并逻辑：优先以 grep_tool 的 navigation 作为唯一候选集，避免「grep 2 条、modify 批量 3 条」
+                        try:
+                            self._merge_grep_observation_into_context(grep_observation, grep_params, result_context)
+                        except Exception as _e:
+                            print(f"[REACT-execution] 合并 grep 结果失败（将回退旧逻辑）: {_e}")
+                            grep_data = grep_observation.get('data', {})
+                            result_context['badcase_list'] = grep_data.get('badcase_analysis', []) or []
+                            result_context['bug_list'] = grep_data.get('bug_location', []) or []
+                            result_context['testcase_list'] = grep_data.get('testcase_location', []) or []
+                            # 用 rerank 选中一个 id 作为兜底
+                            if result_context['badcase_list']:
+                                best = self._pick_best_match_from_list(result_context['badcase_list'], keywords, key_title='title')
+                                result_context['first_badcase_id'] = best.get('id') if best else None
+                            if result_context['bug_list']:
+                                best = self._pick_best_match_from_list(result_context['bug_list'], keywords, key_title='title')
+                                result_context['first_bug_id'] = best.get('id') if best else None
+                            if result_context['testcase_list']:
+                                best = self._pick_best_match_from_list(result_context['testcase_list'], keywords, key_title='title')
+                                result_context['first_testcase_id'] = best.get('id') if best else None
+
+                        # 兼容下游：仍写入旧字段 first_*_id（优先使用 merge 后的 grep_result）
+                        _gr = result_context.get('grep_result') or {}
+                        if _gr.get('first_badcase_id') is not None:
+                            result_context['first_badcase_id'] = _gr.get('first_badcase_id')
+                        if _gr.get('first_bug_id') is not None:
+                            result_context['first_bug_id'] = _gr.get('first_bug_id')
+                        if _gr.get('first_testcase_id') is not None:
+                            result_context['first_testcase_id'] = _gr.get('first_testcase_id')
                         
                         yield {'event': 'observation', 'data': grep_observation, 'index': i, 'step_id': i + 1}
                         
-                        # 按用户意图选类型：说「修改bug」用 bug_list
+                        # 按用户意图选类型：说「修改bug」用 bug_list；勿信模型单写 badcase
                         suggested = (decision.get('params') or {}).get('target') or suggested_params.get('target')
                         if not suggested:
                             suggested = self._infer_modify_target(user_input, '')
+                        user_infer = self._infer_modify_target(user_input, '')
+                        if user_infer == 'testcase' and result_context.get('testcase_list'):
+                            suggested = 'testcase'
+                        elif user_infer == 'bug' and result_context.get('bug_list'):
+                            suggested = 'bug'
+                        elif user_infer == 'badcase' and result_context.get('badcase_list'):
+                            suggested = 'badcase'
                         if suggested == 'bug' and result_context.get('bug_list'):
                             target_list, target_type = result_context['bug_list'], 'bug'
                         elif suggested == 'testcase' and result_context.get('testcase_list'):
@@ -2534,55 +4699,45 @@ class SimplifiedReActEngine:
                             target_list = []
                             target_type = 'badcase'
                         if target_list:
+                            if len(target_list) > 1:
+                                target_list = self._constrain_modify_target_list_by_grep_navigation(
+                                    target_list,
+                                    target_type,
+                                    result_context,
+                                    trace_phase="retry",
+                                )
                             best_match = self._pick_best_match_from_list(target_list, keywords, key_title='title')
                             result_context['first_badcase_id' if target_type == 'badcase' else ('first_bug_id' if target_type == 'bug' else 'first_testcase_id')] = best_match.get('id') if best_match else None
                             # 使用完整 target_list 批量修改，不缩减为单条
-                            if len(target_list) >= 1:
-                                print(f"[REACT-execution] 重试批量修改 {len(target_list)} 条 {target_type}")
-                                all_results = []
-                                for item in target_list:
-                                    item_id = item.get('id')
-                                    if item_id:
-                                        retry_decision = decision.copy()
-                                        retry_decision['params']['target_id'] = item_id
-                                        retry_decision['params']['target'] = target_type
-                                        if not retry_decision['params'].get('modifications'):
-                                            retry_decision['params']['modifications'] = self._extract_modifications_with_regex(user_input)
-                                        if not retry_decision['params'].get('modifications'):
-                                            with self._llm_no_thinking():
-                                                retry_decision['params']['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
-                                        retry_obs = await self._execute_tool(retry_decision)
-                                        all_results.append({'id': item_id, 'plan_id': item.get('plan_id'), 'result': retry_obs})
-                                
-                                target_name = 'Bug' if target_type == 'bug' else ('测试用例' if target_type == 'testcase' else 'BadCase')
-                                modifications = (retry_decision.get('params') or {}).get('modifications', {})
-                                mod_summary = '、'.join([f'{k}:{v}' for k, v in modifications.items()])
-                                batch_results_flat = []
-                                for r in all_results:
-                                    obs = r.get('result', {})
-                                    batch_results_flat.append({
-                                        'target_id': r.get('id'),
-                                        'plan_id': r.get('plan_id'),
-                                        'target': target_type,
-                                        'diff': obs.get('diff', []),
-                                        'modifications': modifications,
-                                        'before': obs.get('before', {}),
-                                        'after': obs.get('after', {}),
-                                        'confirmation_required': obs.get('confirmation_required', True),
-                                        'success': obs.get('success', False),
-                                        'record_title': (obs.get('before') or {}).get('title'),
-                                        'result': obs
-                                    })
-                                observation = {
-                                    'success': all(r['result'].get('success') for r in all_results),
-                                    'message': f'变更修改预览 {len(all_results)} 条，请在下方确认',
-                                    'summary': f'批量修改{len(all_results)}条{target_name}：{mod_summary}',
-                                    'results': all_results,
-                                    'batch_results': batch_results_flat,
-                                    'batch_modify': True,
-                                    'batch_count': len(all_results),
-                                    'target': target_type
-                                }
+                            if len(target_list) > 1:
+                                print(
+                                    f"[REACT-execution] 重试批量修改（单次工具）{len(target_list)} 条 {target_type}"
+                                )
+                                retry_decision = decision.copy()
+                                rparams = dict(retry_decision.get("params") or {})
+                                retry_decision["params"] = rparams
+                                if not rparams.get("modifications"):
+                                    rparams["modifications"] = self._extract_modifications_with_regex(
+                                        user_input
+                                    )
+                                if not rparams.get("modifications"):
+                                    with self._llm_no_thinking():
+                                        rparams["modifications"] = await self._extract_modifications_with_llm(
+                                            todo, user_input
+                                        )
+                                rparams["target_ids"] = [
+                                    x.get("id") for x in target_list if x.get("id") is not None
+                                ]
+                                rparams["target"] = target_type
+                                rparams["batch_items"] = [
+                                    {"id": x.get("id"), "plan_id": x.get("plan_id")}
+                                    for x in target_list
+                                    if x.get("id") is not None
+                                ]
+                                rparams.pop("target_id", None)
+                                observation = await self._execute_tool(retry_decision)
+                                for _tte in self._drain_tool_task_sse_buffer_list():
+                                    yield _tte
                             else:
                                 # 单个修改
                                 retry_decision = decision.copy()
@@ -2595,6 +4750,8 @@ class SimplifiedReActEngine:
                                         retry_decision['params']['modifications'] = await self._extract_modifications_with_llm(todo, user_input)
                                 print(f"[REACT-execution] 重试单个修改: target_id={retry_decision['params']['target_id']}")
                                 observation = await self._execute_tool(retry_decision)
+                                for _tte in self._drain_tool_task_sse_buffer_list():
+                                    yield _tte
 
                 # 结构化纠错：modify 失败后 grep+补参并重试（早于 LLM correct_and_retry）
                 if (
@@ -2628,6 +4785,8 @@ class SimplifiedReActEngine:
                         available_tools=tools_info,
                         execute_fn=self._execute_tool
                     )
+                    for _tte in self._drain_tool_task_sse_buffer_list():
+                        yield _tte
 
                 # Diff Review 闭环：基于“未采纳 pending + 当前 delta”统一推导新的 diff（以后端合并结果为准）
                 if decision.get("tool") == "modify" and isinstance(observation, dict):
@@ -2668,12 +4827,43 @@ class SimplifiedReActEngine:
                             observation["diff"] = merged_diff
                             observation["modifications"] = merged_mods
                 
+                _strict_fail = (os.getenv("REACT_STRICT_PLAN_FAIL", "1") or "1").strip().lower() not in (
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                )
+                _step_failed = bool(observation.get("skipped")) or (
+                    observation.get("success") is False
+                )
+                if (
+                    _strict_fail
+                    and not _step_failed
+                    and str(decision.get("tool") or "").lower() == "grep"
+                    and isinstance(observation, dict)
+                    and observation.get("success")
+                    and _grep_observation_empty_lists(observation)
+                ):
+                    _step_failed = True
+                    observation = dict(observation)
+                    observation["success"] = False
+                    observation.setdefault("error", "grep_empty_hits")
                 _nl_obs = self._summarize_observation_nl(decision.get("tool"), observation)
                 task_state["observations"].append({"step": i + 1, "tool": decision.get("tool"), "text": _nl_obs})
                 if i < len(task_state["plan"]):
-                    task_state["plan"][i]["status"] = "done"
+                    task_state["plan"][i]["status"] = "failed" if _step_failed else "complete"
                     task_state["plan"][i]["result"] = {
-                        "success": observation.get("success") if isinstance(observation, dict) else None
+                        "success": (False if _step_failed else observation.get("success"))
+                        if isinstance(observation, dict)
+                        else None
+                    }
+                if (not skill_guided) and task_state.get("plan"):
+                    yield {
+                        "event": "plan_update",
+                        "steps": _normalize_plan_rows_for_sse(task_state["plan"]),
+                        "reason": "step_outcome",
+                        "index": i,
+                        "failed": _step_failed,
                     }
                 yield {
                     "event": "observation",
@@ -2698,26 +4888,151 @@ class SimplifiedReActEngine:
                 evidence_findings = EvidenceExtractor.format_as_findings(evidence)
                 findings.extend(evidence_findings)
                 
-                # 分析
-                analyze_prompt = self._wrap_prompt(
-                    ReactPromptTemplates.observe_prompt(
-                        todo, decision, observation, result_context
+                # 分析：流式 observe_prompt（或合并下一轮 <decision>）
+                _perf_observe = os.getenv("PERF_LOG") == "1"
+                _t_observe_pipe0 = time.perf_counter()
+                _stream_observe_ms = 0.0
+                _xml_parse_ms = 0.0
+                _ui_summary_ms = 0.0
+                _merged_observe_ui = False
+                _merge_observe_stream_used = False
+
+                _obs_pr = shrink_payload_for_observe_prompt(observation)
+                _ctx_pr = shrink_payload_for_observe_prompt(result_context)
+
+                analyze_response = ""
+                _obs_fc_holder: List[Optional[Dict[str, Any]]] = []
+
+                if not (analyze_response or "").strip():
+                    _t_so = time.perf_counter()
+                    _sink_o: List[str] = []
+                    _use_merge_observe = (
+                        use_react_merge_observe_decide() and not skill_guided
                     )
-                )
-                _sink_o = []
-                _og = self._stream_agent_observe_with_narrative(
-                    analyze_prompt,
-                    step_index=i,
-                    full_text_sink=_sink_o,
-                )
-                _oit = _og.__aiter__()
-                while True:
-                    try:
-                        _oe = await _oit.__anext__()
-                        yield _oe
-                    except StopAsyncIteration:
-                        break
-                analyze_response = _sink_o[0] if _sink_o else ""
+                    if _use_merge_observe:
+                        _merge_observe_stream_used = True
+                        analyze_prompt = self._wrap_prompt(
+                            ReactPromptTemplates.observe_prompt_merge_next_decide(
+                                todo,
+                                decision,
+                                _obs_pr,
+                                _ctx_pr,
+                                user_input,
+                                todos,
+                                i,
+                            )
+                        )
+                        _og = self._stream_observe_merge_next_decide(
+                            analyze_prompt,
+                            step_index=i,
+                            full_text_sink=_sink_o,
+                        )
+                    else:
+                        analyze_prompt = self._wrap_prompt(
+                            ReactPromptTemplates.observe_prompt(
+                                todo, decision, _obs_pr, _ctx_pr
+                            )
+                        )
+                        if prefer_fast_observe_stub(decision.get("tool"), observation):
+                            _stub_xml = stub_observe_result_xml(_nl_obs)
+                            _og = self._stream_observe_stub_quick(
+                                _stub_xml,
+                                step_index=i,
+                                full_text_sink=_sink_o,
+                            )
+                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                print(
+                                    f"[REACT-observe] step={i} tool=modify "
+                                    f"REACT_OBSERVE_FAST_STUB=1 skip observe_prompt LLM"
+                                )
+                        elif prefer_fast_observe_stub_grep(decision.get("tool"), observation):
+                            _stub_xml = stub_observe_result_xml(_nl_obs)
+                            _og = self._stream_observe_stub_quick(
+                                _stub_xml,
+                                step_index=i,
+                                full_text_sink=_sink_o,
+                            )
+                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                print(
+                                    f"[REACT-observe] step={i} tool=grep "
+                                    f"REACT_GREP_OBSERVE_FAST_STUB=1 skip observe_prompt LLM"
+                                )
+                        else:
+                            if (
+                                use_react_observe_fc()
+                                and getattr(self.llm, "chat_completion_with_tools_stream", None)
+                            ):
+                                _og = self._iter_observe_fc_stream(
+                                    analyze_prompt,
+                                    step_index=i,
+                                    full_text_sink=_sink_o,
+                                    analysis_out=_obs_fc_holder,
+                                )
+                            else:
+                                _og = self._stream_agent_observe_with_narrative(
+                                    analyze_prompt,
+                                    step_index=i,
+                                    full_text_sink=_sink_o,
+                                )
+                    _parallel_ui = os.getenv("REACT_OBSERVE_UI_PARALLEL", "1") != "0"
+                    if _parallel_ui:
+                        _todos_ov_o = (
+                            "\n".join(f"{j + 1}. {t}" for j, t in enumerate(todos))
+                            if len(todos) >= 1
+                            else ""
+                        )
+                        _use_ui_llm = use_react_observe_ui_llm() and not prefer_nl_observe_summary(
+                            decision.get("tool"), observation
+                        )
+                        if _use_ui_llm:
+                            _op_sum = self._wrap_prompt(
+                                ReactPromptTemplates.ui_observe_summary_prompt(
+                                    todo,
+                                    str(decision.get('tool') or ''),
+                                    _obs_pr,
+                                    todos_overview=_todos_ov_o,
+                                )
+                            )
+                            _ui_gen = self._stream_react_ui_text(
+                                _op_sum, step_index=i, channel='decision_observe'
+                            )
+                        else:
+                            _ui_gen = self._stream_decision_observe_from_nl(
+                                _nl_obs, step_index=i
+                            )
+                        _timings_par: Dict[str, float] = {}
+                        _header_ev = [
+                            {
+                                'event': 'react_ui_stream',
+                                'channel': 'decision_observe',
+                                'delta': react_observe_section_header(self._ui_locale),
+                                'index': i,
+                            }
+                        ]
+                        async for _oe in merge_observe_parallel_ui_first(
+                            _og,
+                            _ui_gen,
+                            ui_lead=_header_ev,
+                            timings_ms=_timings_par,
+                        ):
+                            yield _oe
+                        analyze_response = _sink_o[0] if _sink_o else ""
+                        _stream_observe_ms = float(_timings_par.get("observe_stream", 0.0))
+                        _ui_summary_ms = float(_timings_par.get("ui_summary", 0.0))
+                        _merged_observe_ui = True
+                    else:
+                        _oit = _og.__aiter__()
+                        while True:
+                            try:
+                                _oe = await _oit.__anext__()
+                                yield _oe
+                            except StopAsyncIteration:
+                                break
+                        analyze_response = _sink_o[0] if _sink_o else ""
+                        _stream_observe_ms = (time.perf_counter() - _t_so) * 1000.0
+
+                if perf:
+                    _t_round_bridge = time.perf_counter()
                 yield {
                     "event": "phase_wait",
                     "kind": "result_xml_parse",
@@ -2725,7 +5040,12 @@ class SimplifiedReActEngine:
                     "index": i,
                     "message": react_phase_wait_message("result_xml_parse", self._ui_locale),
                 }
-                analysis = parse_xml_findings(analyze_response)
+                _t_xml = time.perf_counter()
+                if _obs_fc_holder and _obs_fc_holder[0] is not None:
+                    analysis = _obs_fc_holder[0]
+                else:
+                    analysis = parse_xml_findings(analyze_response)
+                _xml_parse_ms = (time.perf_counter() - _t_xml) * 1000.0
                 yield {
                     "event": "phase_wait",
                     "kind": "result_xml_parse",
@@ -2739,92 +5059,180 @@ class SimplifiedReActEngine:
                         f"context_keys={list((analysis.get('context_update') or {}).keys())}"
                     )
 
-                # 面向用户：观察阶段说明（不展示原始 XML）
+                if _merge_observe_stream_used and re.search(
+                    r"<\s*decision\b", analyze_response or "", re.IGNORECASE
+                ):
+                    pending_next_decision = parse_xml_decision(analyze_response)
+                    if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                        print(
+                            f"[REACT-merge] step={i} pending_next_decision queued "
+                            f"tool={pending_next_decision.get('tool')!r} "
+                            f"execute={pending_next_decision.get('execute')!r}"
+                        )
+
+                # 面向用户：观察阶段说明（不展示原始 XML）；已与流式 observe 并发时跳过
+                if not _merged_observe_ui:
+                    try:
+                        yield {
+                            'event': 'react_ui_stream',
+                            'channel': 'decision_observe',
+                            'delta': react_observe_section_header(self._ui_locale),
+                            'index': i,
+                        }
+                        _t_ui = time.perf_counter()
+                        _use_ui_llm = use_react_observe_ui_llm() and not prefer_nl_observe_summary(
+                            decision.get("tool"), observation
+                        )
+                        if _use_ui_llm:
+                            _todos_ov_o = (
+                                "\n".join(f"{j + 1}. {t}" for j, t in enumerate(todos))
+                                if len(todos) >= 1
+                                else ""
+                            )
+                            _op = self._wrap_prompt(
+                                ReactPromptTemplates.ui_observe_summary_prompt(
+                                    todo,
+                                    str(decision.get('tool') or ''),
+                                    _obs_pr,
+                                    todos_overview=_todos_ov_o,
+                                )
+                            )
+                            async for _ue in self._stream_react_ui_text(_op, step_index=i, channel='decision_observe'):
+                                yield _ue
+                        else:
+                            async for _ue in self._stream_decision_observe_from_nl(
+                                _nl_obs, step_index=i
+                            ):
+                                yield _ue
+                        _ui_summary_ms = (time.perf_counter() - _t_ui) * 1000.0
+                    except Exception as _uo_e:
+                        print(f"[REACT-thought] observe summary stream failed: {_uo_e}")
+
+                if perf and _t_round_bridge is not None:
+                    print(
+                        f"[PERF][round-bridge] step={i} observe_ui_collected→post_observe_block_ms="
+                        f"{(time.perf_counter() - _t_round_bridge) * 1000:.1f}"
+                    )
+
+                if _perf_observe:
+                    _tot = (time.perf_counter() - _t_observe_pipe0) * 1000.0
+                    _tool_nm = str(decision.get("tool") or "")
+                    print(
+                        f"[PERF][observe] step={i} tool={_tool_nm!r} "
+                        f"total_ms={_tot:.1f} "
+                        f"stream_observe_ms={_stream_observe_ms:.1f} "
+                        f"xml_parse_ms={_xml_parse_ms:.1f} "
+                        f"ui_observe_summary_ms={_ui_summary_ms:.1f} "
+                        f"analyze_chars={len(analyze_response or '')}"
+                    )
+
+                # 体验优化：observe 已结束但下一轮 decide 可能要等待（构造 prompt / FC 往返 / skill 优化等）。
+                # 先进入“准备下一步”等待态，确保 2s 内前端必有可见状态而非沉默。
                 try:
                     yield {
-                        'event': 'react_ui_stream',
-                        'channel': 'decision_observe',
-                        'delta': react_observe_section_header(self._ui_locale),
-                        'index': i,
+                        "event": "phase_wait",
+                        "kind": "next_round_prepare",
+                        "active": True,
+                        "index": i,
+                        "message": "正在准备下一步…" if not is_english_locale(self._ui_locale) else "Preparing next step…",
                     }
-                    _todos_ov_o = (
-                        "\n".join(f"{j + 1}. {t}" for j, t in enumerate(todos))
-                        if len(todos) >= 1
-                        else ""
-                    )
-                    _op = self._wrap_prompt(
-                        ReactPromptTemplates.ui_observe_summary_prompt(
-                            todo,
-                            str(decision.get('tool') or ''),
-                            observation,
-                            todos_overview=_todos_ov_o,
-                        )
-                    )
-                    async for _ue in self._stream_react_ui_text(_op, step_index=i, channel='decision_observe'):
-                        yield _ue
-                except Exception as _uo_e:
-                    print(f"[REACT-thought] observe summary stream failed: {_uo_e}")
-                
+                    _prev_round_prepare_wait_idx = i
+                except Exception:
+                    pass
+
                 # 更新状态
-                result_context.update(analysis.get('context_update', {}))
-                
-                # 兜底逻辑：如果 context 中没有 bug_list/badcase_list 但 observation 中有，自动添加
+                if perf:
+                    _t_ctx_slice = time.perf_counter()
+                result_context.update(_scrub_grep_grounded_keys_from_context_update(analysis.get("context_update")))
+                # 模型在 <context_update> 里可能臆造 badcase_list；必须以本轮 grep 工具返回为准覆盖
+                if (
+                    decision.get('tool') == 'grep'
+                    and isinstance(observation, dict)
+                    and observation.get('success')
+                ):
+                    try:
+                        self._merge_grep_observation_into_context(
+                            observation,
+                            decision.get('params') or {},
+                            result_context,
+                        )
+                    except Exception as _mg_e:
+                        print(f"[REACT-execution] observe 后 merge_grep 覆盖 context 失败: {_mg_e}")
+
+                # 兜底逻辑：如果 context 中没有 bug_list/badcase_list 但 observation 中有，自动添加。
+                # grep 已成功且已写入 grep_result 时，列表已按 navigation 收敛，禁止再用全量 bug_location 覆盖，
+                # 否则会出现「界面/导航 2 条、批量 modify 仍吃 3 条」。
                 if decision['tool'] == 'grep' and isinstance(observation, dict):
-                    # 多种可能的数据位置
-                    obs_data = observation.get('data', observation)
-                    if not isinstance(obs_data, dict):
-                        obs_data = {}
-                    
-                    # Bug 列表 - 从多个可能的位置提取
-                    if 'bug_list' not in result_context:
-                        bug_location = obs_data.get('bug_location', []) or observation.get('bug_location', [])
-                        if bug_location and isinstance(bug_location, list) and len(bug_location) > 0:
-                            result_context['bug_list'] = bug_location
-                            kw = result_context.get('_last_grep_keywords', '')
-                            best = self._pick_best_match_from_list(bug_location, kw, 'title') if kw else (bug_location[0] if isinstance(bug_location[0], dict) else None)
-                            result_context['first_bug_id'] = best.get('id') if isinstance(best, dict) else (bug_location[0].get('id') if isinstance(bug_location[0], dict) else None)
-                            print(f"[REACT-execution] 自动将 bug_location 添加到 context: {len(bug_location)} 条")
-                    
-                    # BadCase 列表 - 从多个可能的位置提取
-                    if 'badcase_list' not in result_context:
-                        badcase_analysis = obs_data.get('badcase_analysis', []) or observation.get('badcase_analysis', [])
-                        if badcase_analysis and isinstance(badcase_analysis, list) and len(badcase_analysis) > 0:
-                            # 提取为简化列表格式
-                            badcase_list = []
-                            for bc in badcase_analysis:
-                                if not isinstance(bc, dict):
-                                    continue
-                                bc_id = bc.get('id')
-                                if bc_id is None:
-                                    continue
-                                badcase_list.append({
-                                    'id': bc_id,
-                                    'title': bc.get('title', ''),
-                                    'status': bc.get('status'),
-                                    'plan_id': bc.get('plan_id')
-                                })
-                            
-                            if badcase_list:
-                                result_context['badcase_list'] = badcase_list
-                                result_context['badcase_analysis'] = badcase_analysis
+                    _grep_merged_ok = bool(
+                        observation.get('success')
+                        and isinstance(result_context.get('grep_result'), dict)
+                    )
+                    if not _grep_merged_ok:
+                        # 多种可能的数据位置
+                        obs_data = observation.get('data', observation)
+                        if not isinstance(obs_data, dict):
+                            obs_data = {}
+
+                        # Bug 列表 - 从多个可能的位置提取
+                        if 'bug_list' not in result_context:
+                            bug_location = obs_data.get('bug_location', []) or observation.get('bug_location', [])
+                            if bug_location and isinstance(bug_location, list) and len(bug_location) > 0:
+                                result_context['bug_list'] = bug_location
                                 kw = result_context.get('_last_grep_keywords', '')
-                                best = self._pick_best_match_from_list(badcase_list, kw, 'title') if kw else badcase_list[0]
-                                result_context['first_badcase_id'] = best.get('id')
-                                print(f"[REACT-execution] 自动将 badcase_list 添加到 context: {len(badcase_list)} 条")
-                    
-                    if 'testcase_list' not in result_context:
-                        testcase_location = obs_data.get('testcase_location', []) or observation.get('testcase_location', [])
-                        if testcase_location and isinstance(testcase_location, list) and len(testcase_location) > 0:
-                            testcase_list = [{'id': tc.get('id'), 'title': tc.get('title'), 'plan_id': tc.get('current_plan_id')} for tc in testcase_location if isinstance(tc, dict) and tc.get('id') is not None]
-                            if testcase_list:
-                                result_context['testcase_list'] = testcase_list
-                                kw = result_context.get('_last_grep_keywords', '')
-                                best = self._pick_best_match_from_list(testcase_list, kw, 'title') if kw else testcase_list[0]
-                                result_context['first_testcase_id'] = best.get('id')
-                                print(f"[REACT-execution] 自动将 testcase_list 添加到 context: {len(testcase_list)} 条")
-                    
-                    print(f"[REACT-execution] Context 更新后: bug_list={len(result_context.get('bug_list', []))}条, badcase_list={len(result_context.get('badcase_list', []))}条, testcase_list={len(result_context.get('testcase_list', []))}条")
+                                best = self._pick_best_match_from_list(bug_location, kw, 'title') if kw else (bug_location[0] if isinstance(bug_location[0], dict) else None)
+                                result_context['first_bug_id'] = best.get('id') if isinstance(best, dict) else (bug_location[0].get('id') if isinstance(bug_location[0], dict) else None)
+                                print(f"[REACT-execution] 自动将 bug_location 添加到 context: {len(bug_location)} 条")
+
+                        # BadCase 列表 - 从多个可能的位置提取
+                        if 'badcase_list' not in result_context:
+                            badcase_analysis = obs_data.get('badcase_analysis', []) or observation.get('badcase_analysis', [])
+                            if badcase_analysis and isinstance(badcase_analysis, list) and len(badcase_analysis) > 0:
+                                # 提取为简化列表格式
+                                badcase_list = []
+                                for bc in badcase_analysis:
+                                    if not isinstance(bc, dict):
+                                        continue
+                                    bc_id = bc.get('id')
+                                    if bc_id is None:
+                                        continue
+                                    badcase_list.append({
+                                        'id': bc_id,
+                                        'title': bc.get('title', ''),
+                                        'status': bc.get('status'),
+                                        'plan_id': bc.get('plan_id')
+                                    })
+
+                                if badcase_list:
+                                    result_context['badcase_list'] = badcase_list
+                                    result_context['badcase_analysis'] = badcase_analysis
+                                    kw = result_context.get('_last_grep_keywords', '')
+                                    best = self._pick_best_match_from_list(badcase_list, kw, 'title') if kw else badcase_list[0]
+                                    result_context['first_badcase_id'] = best.get('id')
+                                    print(f"[REACT-execution] 自动将 badcase_list 添加到 context: {len(badcase_list)} 条")
+
+                        if 'testcase_list' not in result_context:
+                            testcase_location = obs_data.get('testcase_location', []) or observation.get('testcase_location', [])
+                            if testcase_location and isinstance(testcase_location, list) and len(testcase_location) > 0:
+                                testcase_list = [{'id': tc.get('id'), 'title': tc.get('title'), 'plan_id': tc.get('current_plan_id')} for tc in testcase_location if isinstance(tc, dict) and tc.get('id') is not None]
+                                if testcase_list:
+                                    result_context['testcase_list'] = testcase_list
+                                    kw = result_context.get('_last_grep_keywords', '')
+                                    best = self._pick_best_match_from_list(testcase_list, kw, 'title') if kw else testcase_list[0]
+                                    result_context['first_testcase_id'] = best.get('id')
+                                    print(f"[REACT-execution] 自动将 testcase_list 添加到 context: {len(testcase_list)} 条")
+
+                    print(
+                        f"[REACT-execution] Context 更新后: bug_list={len(result_context.get('bug_list', []))}条, "
+                        f"badcase_list={len(result_context.get('badcase_list', []))}条, "
+                        f"testcase_list={len(result_context.get('testcase_list', []))}条"
+                    )
                 
+                if perf:
+                    print(
+                        f"[PERF][round-bridge] step={i} context_update_and_grep_merge_ms="
+                        f"{(time.perf_counter() - _t_ctx_slice) * 1000:.1f}"
+                    )
+
                 if analysis.get('findings'):
                     findings.extend(analysis['findings'])
                     for f in analysis['findings']:
@@ -2837,13 +5245,68 @@ class SimplifiedReActEngine:
                     'observation': observation,
                     'analysis': analysis
                 })
+
+                if use_react_incremental_running_summary():
+                    try:
+                        if _incr_merge_q is not None:
+                            await _incr_merge_q.put(
+                                (
+                                    _incr_sum_state,
+                                    i,
+                                    str(decision.get("tool") or ""),
+                                    # 动态轮次时生成有意义的描述
+                                    str(todo or f"执行 {decision.get('tool', '工具')} 操作"),
+                                    _nl_obs,
+                                )
+                            )
+                            if perf:
+                                print(
+                                    f"[PERF][incr-sum] enqueue_async step={i} "
+                                    f"qsize≈{_incr_merge_q.qsize()}"
+                                )
+                        else:
+                            await self._merge_running_summary_incremental_silent(
+                                _incr_sum_state,
+                                step_index=i,
+                                tool=str(decision.get("tool") or ""),
+                                # 动态轮次时生成有意义的描述
+                                todo=str(todo or f"执行 {decision.get('tool', '工具')} 操作"),
+                                nl_obs=_nl_obs,
+                            )
+                    except Exception as _irs_ex:
+                        print(f"[REACT] incremental running summary: {_irs_ex}")
                 
                 # 动态添加批量修改任务（仅当没有已有的modify任务时）
                 if (not skill_guided) and decision['tool'] == 'grep':
-                    # 支持 BadCase 和 Bug 批量修改
-                    target_list = result_context.get('badcase_list', []) or result_context.get('bug_list', [])
-                    target_type = 'badcase' if result_context.get('badcase_list') else 'bug'
-                    
+                    # 批量修改待办：与 modify 主循环一致，按用户意图选表，避免 badcase 恒优先于测试用例
+                    _ui_td = self._infer_modify_target(user_input, '')
+                    if _ui_td == 'testcase' and result_context.get('testcase_list'):
+                        target_list = result_context['testcase_list']
+                        target_type = 'testcase'
+                    elif _ui_td == 'bug' and result_context.get('bug_list'):
+                        target_list = result_context['bug_list']
+                        target_type = 'bug'
+                    elif result_context.get('badcase_list'):
+                        target_list = result_context['badcase_list']
+                        target_type = 'badcase'
+                    elif result_context.get('bug_list'):
+                        target_list = result_context['bug_list']
+                        target_type = 'bug'
+                    elif result_context.get('testcase_list'):
+                        target_list = result_context['testcase_list']
+                        target_type = 'testcase'
+                    else:
+                        target_list = []
+                        target_type = 'badcase'
+
+                    if target_list and len(target_list) > 1:
+                        target_list = self._constrain_modify_target_list_by_grep_navigation(
+                            target_list,
+                            target_type,
+                            result_context,
+                            trace_phase="planning",
+                        )
+
                     # 检测用户是否有批量修改意图
                     modify_keywords = ['修改', '改成', '更新', '设为', '状态', '关闭', 'closed', 'resolved']
                     has_modify_intent = any(kw in user_input for kw in modify_keywords)
@@ -2872,7 +5335,7 @@ class SimplifiedReActEngine:
                         
                         # 通知前端任务列表已更新
                         yield {'event': 'todos', 'data': todos}
-                        if len(todos) >= 1:
+                        if len(todos) >= 1 and not _should_suppress_plan_ui(len(todos), None):
                             yield {
                                 'event': 'plan',
                                 'steps': react_plan_steps_payload(todos),
@@ -2882,6 +5345,11 @@ class SimplifiedReActEngine:
                             'event': 'plan_update',
                             'steps': react_plan_steps_payload(todos),
                             'reason': 'grep_batch_modify',
+                            **(
+                                {'suppress_plan_ui': True}
+                                if _should_suppress_plan_ui(len(todos), None)
+                                else {}
+                            ),
                         }
                 
                 if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
@@ -2892,8 +5360,18 @@ class SimplifiedReActEngine:
                 last_observation = observation
                 last_analysis = analysis
                 if len(todos) >= 1:
-                    yield {'event': 'step_status', 'index': i, 'step_id': i + 1, 'status': 'done'}
+                    yield {
+                        'event': 'step_status',
+                        'index': i,
+                        'step_id': i + 1,
+                        'status': 'failed' if _step_failed else 'done',
+                    }
                 yield {'event': 'todo_end', 'index': i, 'step_id': i + 1}
+                if perf and _t_round_bridge is not None:
+                    print(
+                        f"[PERF][round-bridge] step={i} observe_ui_collected→todo_end_ms="
+                        f"{(time.perf_counter() - _t_round_bridge) * 1000:.1f}"
+                    )
                 if skill_guided:
                     dn = self._decide_next_step(task_state, observation, i, decision.get("tool"), len(todos))
                     if dn == "finish":
@@ -2916,13 +5394,52 @@ class SimplifiedReActEngine:
                                 skill_guided=True,
                                 skill_ref=skill_matched_ref,
                                 fallback_workflow_tools=fallback_workflow_tools,
-                                prefer_modify_skill=_prefer_modify_skill,
                             )
-                            yield {"event": "plan_update", "steps": task_state["plan"], "reason": "skill_adjust"}
+                            yield {
+                                "event": "plan_update",
+                                "steps": task_state["plan"],
+                                "reason": "skill_adjust",
+                                **(
+                                    {"suppress_plan_ui": True}
+                                    if _should_suppress_plan_ui(len(todos), None)
+                                    else {}
+                                ),
+                            }
                             _max_rounds = max(_max_rounds, len(todos))
                         else:
                             print("[REACT-planing] adjust 占位：未生成新计划，继续下一步。")
+                if _step_failed and (os.getenv("REACT_STOP_AFTER_STEP_FAIL", "1") or "1").strip().lower() not in (
+                    "0",
+                    "false",
+                    "no",
+                    "off",
+                ):
+                    _fail_hint = (
+                        "该步骤执行失败或结果为空，已暂停自动推进。你可回复「重试」重试本步，或说明如何跳过/调整后续计划。"
+                        if not is_english_locale(self._ui_locale)
+                        else "This step failed or returned empty results; auto-advance is paused. Reply retry to retry, or describe how to skip or adjust."
+                    )
+                    yield {"event": "intent_clarification", "message": _fail_hint, "kind": "step_failed"}
+                    task_state["finished"] = True
+                    break
+                
+                # 非 skill_guided 模式：检查所有规划任务是否已完成
+                if (not skill_guided) and len(todos) > 0:
+                    _all_planned_done = all(
+                        task_state["plan"][j].get("status") in ("complete", "done", "failed")
+                        for j in range(min(len(todos), len(task_state["plan"])))
+                    )
+                    if _all_planned_done:
+                        print(f"[REACT-planing] 所有 {len(todos)} 个规划任务已完成，退出主循环")
+                        task_state["finished"] = True
+                        break
+                
                 round_idx += 1
+
+            # 主循环已结束：先收口后台静默运行总览，保证终局流式与 REPLACE_FINAL 读到最新 text
+            await self._shutdown_incr_sum_background_worker(
+                _incr_merge_q, _incr_worker_task
+            )
 
             # 主循环已结束：立即发 finished，便于前端结束「处理中」占位；后续仍有 LLM 总结流式，勿与 done 混淆
             _duration_after_loop = time.time() - start_time
@@ -2945,18 +5462,67 @@ class SimplifiedReActEngine:
                 ],
             }
 
-            # 在结束前，让LLM总结关键发现（人类可读）
-            summarized_findings = []
-            if findings:
-                print(f"[REACT] 开始总结 {len(findings)} 条原始发现...")
+            if (
+                use_react_incremental_running_summary()
+                and (_incr_sum_state.get("text") or "").strip()
+                and not use_react_incremental_running_summary_stream_sse()
+            ):
+                yield {"event": "unified_summary_loading", "active": True}
+                _last_si = len(steps) - 1 if steps else 0
                 try:
+                    async for _rf in self._stream_running_summary_final_wire(
+                        _incr_sum_state,
+                        last_step_index=max(0, _last_si),
+                    ):
+                        yield _rf
+                except Exception as _rf_e:
+                    print(f"[REACT] running_summary final wire: {_rf_e}")
+            elif (
+                use_react_incremental_running_summary_stream_sse()
+                and use_react_incremental_running_summary()
+                and (_incr_sum_state.get("text") or "").strip()
+            ):
+                try:
+                    _v = int(_incr_sum_state.get("version") or 0)
+                except Exception:
+                    _v = 0
+                _last_si2 = len(steps) - 1 if steps else 0
+                yield {
+                    "event": "running_summary_done",
+                    "full_text": str(_incr_sum_state["text"]).strip(),
+                    "version": _v,
+                    "index": max(0, _last_si2),
+                }
+
+            # 在结束前：可选「条目标注」LLM（额外一轮，较慢）；默认跳过，直接进入一段话统一总结
+            summarized_findings = []
+            _skip_bullets = os.getenv(
+                "REACT_UNIFIED_SUMMARY_SKIP_BULLETS", "1"
+            ).strip().lower() in ("1", "true", "yes", "on")
+            if findings and not _skip_bullets:
+                print(f"[REACT] 开始总结 {len(findings)} 条原始发现（条目标注 LLM）…")
+                try:
+                    _bullet_max = None
+                    try:
+                        _bm = int(
+                            (os.getenv("REACT_FINDINGS_BULLET_MAX_TOKENS") or "384").strip()
+                        )
+                        if _bm > 0:
+                            _bullet_max = _bm
+                    except Exception:
+                        pass
                     summary_prompt = react_findings_bulleted_summary_prompt(
                         self._ui_locale,
                         chr(10).join(f"{i + 1}. {f}" for i, f in enumerate(findings)),
                     )
-                    
+
                     _sink_s = []
-                    _sg = self._stream_llm_prompt_collect(summary_prompt, stream_kind="summary", full_text_sink=_sink_s)
+                    _sg = self._stream_llm_prompt_collect(
+                        summary_prompt,
+                        stream_kind="summary",
+                        full_text_sink=_sink_s,
+                        content_only_max_tokens=_bullet_max,
+                    )
                     _sit = _sg.__aiter__()
                     while True:
                         try:
@@ -2965,15 +5531,22 @@ class SimplifiedReActEngine:
                         except StopAsyncIteration:
                             break
                     summary_response = _sink_s[0] if _sink_s else ""
-                    # 按行分割，过滤空行
-                    summarized_findings = [line.strip() for line in summary_response.strip().split('\n') if line.strip()]
-                    print(f"[REACT] LLM总结完成: {len(summarized_findings)} 条")
-                    # 与下一段「统一总结」流式区分，避免前端同一段草稿串联两段模型输出
-                    yield {'event': 'summary_stream_reset'}
+                    summarized_findings = [
+                        line.strip()
+                        for line in summary_response.strip().split("\n")
+                        if line.strip()
+                    ]
+                    print(f"[REACT] 条目标注完成: {len(summarized_findings)} 条")
+                    yield {"event": "summary_stream_reset"}
                 except Exception as e:
-                    print(f"[REACT] LLM总结失败: {e}，使用原始数据")
-                    summarized_findings = findings[:5]  # 降级：只显示前5条
-            
+                    print(f"[REACT] 条目标注失败: {e}，回退原始发现")
+                    summarized_findings = findings[:5]
+            elif findings and _skip_bullets:
+                print(
+                    f"[REACT] 跳过条目标注（REACT_UNIFIED_SUMMARY_SKIP_BULLETS），"
+                    f"原始发现 {len(findings)} 条 → 统一总结"
+                )
+
             # 使用总结后的findings
             final_findings = summarized_findings if summarized_findings else findings
             # 兜底：若关键发现仍为空，从各步的 observation 中提取 summary，避免前端「关键发现」无内容
@@ -2993,26 +5566,57 @@ class SimplifiedReActEngine:
             duration = time.time() - start_time
             # 大模型统一总结：一段话概括关键发现+执行统计（Cursor 式，供前端「耗时 Xs」下打字机展示）
             summary_text = ""
-            try:
-                _none = "None" if is_english_locale(self._ui_locale) else "无"
-                _flines = chr(10).join(f"- {f}" for f in (final_findings[:8] or [_none]))
-                summary_prompt = react_unified_final_summary_prompt(
-                    self._ui_locale, _flines, len(steps), duration
-                )
-                _sink_u = []
-                _ug = self._stream_llm_prompt_collect(summary_prompt, stream_kind="summary", full_text_sink=_sink_u)
-                _uit = _ug.__aiter__()
-                while True:
+            _replace_final = (os.getenv("REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL", "1") or "1").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            _use_running_as_final = (
+                _replace_final
+                and use_react_incremental_running_summary()
+                and (_incr_sum_state.get("text") or "").strip()
+            )
+            if _use_running_as_final:
+                summary_text = str(_incr_sum_state["text"]).strip()
+                print("[REACT] 终局总结：沿用增量运行总览（已跳过统一总结 LLM）")
+            else:
+                try:
+                    yield {"event": "unified_summary_loading", "active": True}
+                    _none = "None" if is_english_locale(self._ui_locale) else "无"
+                    _flines = chr(10).join(f"- {f}" for f in (final_findings[:8] or [_none]))
+                    summary_prompt = react_unified_final_summary_prompt(
+                        self._ui_locale, _flines, len(steps), duration
+                    )
+                    _sum_max = None
                     try:
-                        _ue = await _uit.__anext__()
-                        yield _ue
-                    except StopAsyncIteration:
-                        break
-                summary_text = (_sink_u[0] if _sink_u else "").strip()
-                if summary_text:
-                    print(f"[REACT] 统一总结: {summary_text[:80]}...")
-            except Exception as e:
-                print(f"[REACT] 统一总结失败: {e}")
+                        _sm = int(
+                            (os.getenv("REACT_UNIFIED_SUMMARY_MAX_TOKENS") or "512").strip()
+                        )
+                        if _sm > 0:
+                            _sum_max = _sm
+                    except Exception:
+                        _sum_max = 512
+                    _sink_u = []
+                    _ug = self._stream_llm_prompt_collect(
+                        summary_prompt,
+                        stream_kind="summary",
+                        full_text_sink=_sink_u,
+                        content_only_max_tokens=_sum_max,
+                    )
+                    _uit = _ug.__aiter__()
+                    while True:
+                        try:
+                            _ue = await _uit.__anext__()
+                            yield _ue
+                        except StopAsyncIteration:
+                            break
+                    summary_text = (_sink_u[0] if _sink_u else "").strip()
+                    if summary_text:
+                        print(f"[REACT] 统一总结: {summary_text[:80]}...")
+                except Exception as e:
+                    print(f"[REACT] 统一总结失败: {e}")
+                    yield {"event": "unified_summary_loading", "active": False}
             
             yield {
                 'event': 'done',
@@ -3024,14 +5628,476 @@ class SimplifiedReActEngine:
             }
 
         except Exception as e:
+            _cancel_preloop_tasks()
+            try:
+                await self._shutdown_incr_sum_background_worker(
+                    _incr_merge_q, _incr_worker_task
+                )
+            except Exception:
+                pass
             yield {'event': 'error', 'message': str(e)}
 
+    async def run_stream(
+        self,
+        user_input: str,
+        project_id: int = None,
+        plan_id: int = None,
+        locale: Optional[str] = None,
+        pending_diff_context: Optional[List[Dict[str, Any]]] = None,
+        agent_session_id: Optional[str] = None,
+        long_memory_prefetch: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        流式执行 ReAct（Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下记录。
+        内部仍用 ``event`` 字典；本方法在出口统一转为 SSE v1（``type`` + ``payload``），上层无需再映射。
+        """
+        # 三段式 XML 模式：委托给专用流式方法
+        if _use_react_unified_xml():
+            async for pkt in self._run_unified_xml_stream(
+                user_input,
+                project_id=project_id,
+                plan_id=plan_id,
+                locale=locale,
+                pending_diff_context=pending_diff_context,
+                agent_session_id=agent_session_id,
+                long_memory_prefetch=long_memory_prefetch,
+            ):
+                yield pkt
+            return
+        
+        _last_wire_phase: Optional[str] = None
+        async for raw in self._run_stream_raw(
+            user_input,
+            project_id=project_id,
+            plan_id=plan_id,
+            locale=locale,
+            pending_diff_context=pending_diff_context,
+            agent_session_id=agent_session_id,
+            long_memory_prefetch=long_memory_prefetch,
+        ):
+            if not isinstance(raw, dict):
+                continue
+            if is_wire_v1_packet(raw):
+                pkts: List[Dict[str, Any]] = [raw]
+            else:
+                pkts = list(engine_dict_to_wire_packets(raw))
+            for pkt in pkts:
+                if sse_v1_emit_phase_packets_enabled():
+                    pl = pkt.get("payload")
+                    if isinstance(pl, dict):
+                        rp = pl.get("react_phase")
+                        if isinstance(rp, str) and rp and rp != _last_wire_phase:
+                            yield {
+                                "type": ClientWireType.PHASE.value,
+                                "payload": react_phase_wire_payload(rp),
+                            }
+                            _last_wire_phase = rp
+                yield pkt
+
+    async def _inject_long_memory_into_context(
+        self,
+        *,
+        user_input: str,
+        result_context: Dict[str, Any],
+        project_id: int = None,
+        plan_id: int = None,
+        agent_session_id: Optional[str] = None,
+    ) -> None:
+        """
+        在 ReAct context 注入长期记忆（ES 向量检索）。
+        设计原则：
+        - 不影响主流程：失败则静默降级为空
+        - 体积可控：只注入短文本（long_memory_text）与少量条目摘要（long_memory_items）
+        """
+        try:
+            from config import Config
+            if not getattr(Config, "LONG_MEMORY_ENABLED", False):
+                return
+            # user_id 从上层 tool params 传入时才可靠；这里优先读取引擎字段
+            user_id = getattr(self, "user_id", None) or getattr(self, "_user_id", None)
+            if not user_id:
+                return
+            from memory.long_memory_manager import LongMemoryManager
+
+            mgr = LongMemoryManager()
+            ctx = mgr.retrieve_context(
+                user_id=str(user_id),
+                query=str(user_input or ""),
+                project_id=str(project_id) if project_id is not None else None,
+                plan_id=str(plan_id) if plan_id is not None else None,
+                types=None,
+            )
+            items = ctx.get("long_memory_items") or []
+            text = (ctx.get("long_memory_text") or "").strip()
+            if items:
+                result_context["long_memory_items"] = items
+            if text:
+                # 供提示词直接引用的短块
+                result_context["long_memory_text"] = text
+        except Exception:
+            # 降级：不让记忆影响主链路
+            return
+
+    async def _run_unified_xml_stream(
+        self,
+        user_input: str,
+        project_id: int = None,
+        plan_id: int = None,
+        locale: Optional[str] = None,
+        pending_diff_context: Optional[List[Dict[str, Any]]] = None,
+        agent_session_id: Optional[str] = None,
+        long_memory_prefetch: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        三段式 XML 流式主循环：yield SSE 事件
+        """
+        print(f"\n[REACT-UNIFIED] ReAct Loop Start (三段式XML Stream)")
+        print(f"[REACT-UNIFIED] Input: {user_input[:60]}...\n")
+        self._ui_locale = normalize_locale(locale)
+        self.project_id = project_id
+        start_time = time.time()
+        
+        result = {
+            'status': 'success',
+            'steps': [],
+            'context': {},
+            'findings': [],
+            'duration': 0,
+            'error': None
+        }
+        
+        try:
+            # 注入长记忆
+            if isinstance(long_memory_prefetch, dict) and long_memory_prefetch:
+                _lmt = str(long_memory_prefetch.get("long_memory_text") or "").strip()
+                if _lmt:
+                    result["context"]["long_memory_text"] = _lmt
+            
+            # ===== STEP 1: THINK（生成 todos）=====
+            print(f"[REACT-UNIFIED] STEP 1: THINK")
+            tools_info = format_tools_for_prompt(self.tools)
+            
+            # 发送思考开始事件
+            yield {"event": "agent_thought", "delta": "正在规划任务...", "index": 0}
+            
+            prompt = self._wrap_prompt(
+                ReactPromptTemplates.think_prompt(
+                    user_input,
+                    tools_info,
+                    result['context'],
+                    [],
+                )
+            )
+            
+            # 流式收集 THINK 响应
+            think_parts = []
+            async for chunk in self._stream_llm_text(prompt):
+                think_parts.append(chunk)
+                yield {"event": "agent_thought", "delta": chunk, "index": 0}
+            response = "".join(think_parts)
+            todos = _cap_todos_for_speed(robust_parse_todos(response))
+            
+            if not todos:
+                # 闲聊模式
+                print(f"[REACT-UNIFIED] No todos, chat mode")
+                yield {"event": "agent_thought", "delta": response, "index": 0}
+                yield {"event": "done", "status": "success"}
+                return
+            
+            print(f"[REACT-UNIFIED] Generated {len(todos)} Todos: {todos}\n")
+            
+            # 发送计划事件
+            plan_steps = [{"id": i+1, "description": t, "status": "pending"} for i, t in enumerate(todos)]
+            yield {"event": "plan", "steps": plan_steps}
+            
+            # ===== MAIN LOOP: 三段式决策 =====
+            prev_observation = None
+            prev_action = None
+            max_rounds = 20
+            
+            for round_idx in range(max_rounds):
+                print(f"[REACT-UNIFIED] ===== round {round_idx + 1}/{max_rounds} =====")
+                
+                # 发送步骤开始事件
+                yield {"event": "todo_start", "index": round_idx, "todo": todos[0] if round_idx < len(todos) else ""}
+                yield {"event": "agent_thought", "delta": "\n正在分析...", "index": round_idx}
+                
+                # 构建三段式 prompt
+                unified_prompt = self._wrap_prompt(
+                    ReactPromptTemplates.react_unified_prompt(
+                        user_input=user_input,
+                        available_tools=tools_info,
+                        context=result['context'],
+                        round_idx=round_idx,
+                        prev_observation=prev_observation,
+                        prev_action=prev_action,
+                        todo=todos[0] if round_idx < len(todos) else "",
+                    )
+                )
+                
+                # 调用 LLM（流式）
+                llm_parts = []
+                async for chunk in self._stream_llm_text(unified_prompt):
+                    llm_parts.append(chunk)
+                    yield {"event": "agent_thought", "delta": chunk, "index": round_idx}
+                llm_response = "".join(llm_parts)
+                print(f"[REACT-UNIFIED] LLM response length: {len(llm_response)}")
+                
+                # 解析三段式响应
+                parsed = parse_unified_response(llm_response)
+                observation_text = parsed.get("observation", "")
+                thinking_text = parsed.get("thinking", "")
+                decision = parsed.get("decision", {})
+                
+                print(f"[REACT-UNIFIED] Decision: execute={decision.get('execute')}, tool={decision.get('tool')}")
+                
+                # 检查是否终止
+                if not decision.get('execute') or not decision.get('tool'):
+                    print(f"[REACT-UNIFIED] Task completed")
+                    yield {"event": "agent_thought", "delta": "\n任务完成。", "index": round_idx}
+                    break
+                
+                # 执行工具
+                tool_name = decision.get('tool', '')
+                tool_params = decision.get('params', {})
+                
+                # 确保 modify/create 的 confirm 默认为 False
+                if tool_name in ('modify', 'create') and 'confirm' not in tool_params:
+                    tool_params['confirm'] = False
+                
+                if tool_name == 'modify':
+                    if not tool_params.get('target_id') and not tool_params.get('natural_query'):
+                        tool_params['natural_query'] = user_input[:500]
+                    if not tool_params.get('project_id'):
+                        tool_params['project_id'] = project_id
+                
+                # 发送工具执行事件
+                yield {"event": "tool_call", "tool": tool_name, "params": tool_params}
+                print(f"[REACT-UNIFIED] Executing tool: {tool_name}")
+                
+                try:
+                    observation = await self._execute_tool({
+                        'tool': tool_name,
+                        'params': tool_params
+                    })
+                except Exception as e:
+                    print(f"[REACT-UNIFIED] Tool execution failed: {e}")
+                    observation = {'success': False, 'error': str(e)}
+                
+                
+                print(f"[REACT-UNIFIED] Observation result: success={observation.get('success')}")
+                
+                # 发送观察结果事件
+                obs_summary = observation.get('summary', '') or observation.get('message', '') or ('成功' if observation.get('success') else '失败')
+                yield {"event": "observation", "summary": obs_summary, "success": observation.get('success', False)}
+                
+                # 如果是 modify 预览，发送 diff 事件
+                if tool_name == 'modify' and observation.get('success') and observation.get('batch_results'):
+                    yield {
+                        "event": "modify_preview",
+                        "results": observation.get('batch_results', []),
+                        "confirmation_required": observation.get('confirmation_required', False)
+                    }
+                
+                
+                # 保存观察结果供下一轮使用
+                prev_observation = observation
+                prev_action = {'tool': tool_name, 'params': tool_params}
+                
+                # 更新上下文
+                if observation.get('success'):
+                    for key in ['bug_list', 'badcase_list', 'testcase_list', 'grep_result']:
+                        if key in observation:
+                            result['context'][key] = observation[key]
+                
+                
+                # modify 成功后终止
+                if tool_name == 'modify' and observation.get('success'):
+                    print(f"[REACT-UNIFIED] Modify completed successfully")
+                    break
+            
+            
+            # 发送完成事件
+            yield {"event": "done", "status": "success"}
+            
+        except Exception as e:
+            print(f"[REACT-UNIFIED] Error: {e}")
+            yield {"event": "error", "message": str(e)}
+
+    async def _run_unified_xml(
+        self,
+        user_input: str,
+        project_id: int = None,
+        locale: Optional[str] = None,
+        long_memory_prefetch: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        三段式 XML 主循环：一次 LLM 输出 observation + thinking + decision
+        适用于千帆等 FC 不稳定的模型。
+        """
+        print(f"\n[REACT-UNIFIED] ReAct Loop Start (三段式XML)")
+        print(f"[REACT-UNIFIED] Input: {user_input[:60]}...\n")
+        self._ui_locale = normalize_locale(locale)
+        self.project_id = project_id
+        start_time = time.time()
+        
+        result = {
+            'status': 'success',
+            'steps': [],
+            'context': {},
+            'findings': [],
+            'duration': 0,
+            'error': None
+        }
+        
+        try:
+            # 注入长记忆
+            if isinstance(long_memory_prefetch, dict) and long_memory_prefetch:
+                _lmt = str(long_memory_prefetch.get("long_memory_text") or "").strip()
+                if _lmt:
+                    result["context"]["long_memory_text"] = _lmt
+            
+            # ===== STEP 1: THINK（生成 todos）=====
+            print(f"[REACT-UNIFIED] STEP 1: THINK")
+            tools_info = format_tools_for_prompt(self.tools)
+            prompt = self._wrap_prompt(
+                ReactPromptTemplates.think_prompt(
+                    user_input,
+                    tools_info,
+                    result['context'],
+                    [],
+                )
+            )
+            response = await self._collect_llm_text(prompt)
+            todos = _cap_todos_for_speed(robust_parse_todos(response))
+            
+            if not todos:
+                # 没有 todos 可能是闲聊
+                print(f"[REACT-UNIFIED] No todos generated, treating as chat")
+                result['status'] = 'success'
+                result['chat_reply'] = response
+                result['duration'] = time.time() - start_time
+                return result
+            
+            print(f"[REACT-UNIFIED] Generated {len(todos)} Todos: {todos}\n")
+            
+            # ===== MAIN LOOP: 三段式决策 =====
+            prev_observation = None
+            prev_action = None
+            max_rounds = 20
+            
+            for round_idx in range(max_rounds):
+                print(f"[REACT-UNIFIED] ===== round {round_idx + 1}/{max_rounds} =====")
+                
+                # 构建三段式 prompt
+                unified_prompt = self._wrap_prompt(
+                    ReactPromptTemplates.react_unified_prompt(
+                        user_input=user_input,
+                        available_tools=tools_info,
+                        context=result['context'],
+                        round_idx=round_idx,
+                        prev_observation=prev_observation,
+                        prev_action=prev_action,
+                        todo=todos[0] if round_idx < len(todos) else "",
+                    )
+                )
+                
+                # 调用 LLM
+                llm_response = await self._collect_llm_text(unified_prompt)
+                print(f"[REACT-UNIFIED] LLM response length: {len(llm_response)}")
+                
+                # 解析三段式响应
+                parsed = parse_unified_response(llm_response)
+                observation_text = parsed.get("observation", "")
+                thinking_text = parsed.get("thinking", "")
+                decision = parsed.get("decision", {})
+                
+                print(f"[REACT-UNIFIED] Observation: {observation_text[:100]}..." if observation_text else "[REACT-UNIFIED] No observation")
+                print(f"[REACT-UNIFIED] Thinking: {thinking_text[:100]}..." if thinking_text else "[REACT-UNIFIED] No thinking")
+                print(f"[REACT-UNIFIED] Decision: execute={decision.get('execute')}, tool={decision.get('tool')}")
+                
+                # 检查是否终止
+                if not decision.get('execute') or not decision.get('tool'):
+                    print(f"[REACT-UNIFIED] Task completed or chat reply")
+                    result['chat_reply'] = thinking_text or llm_response
+                    break
+                
+                # 执行工具
+                tool_name = decision.get('tool', '')
+                tool_params = decision.get('params', {})
+                
+                # 确保 modify/create 的 confirm 默认为 False
+                if tool_name in ('modify', 'create') and 'confirm' not in tool_params:
+                    tool_params['confirm'] = False
+                
+                
+                if tool_name == 'modify':
+                    # modify 参数补全逻辑
+                    if not tool_params.get('target_id') and not tool_params.get('natural_query'):
+                        tool_params['natural_query'] = user_input[:500]
+                    if not tool_params.get('project_id'):
+                        tool_params['project_id'] = project_id
+                
+                
+                print(f"[REACT-UNIFIED] Executing tool: {tool_name}")
+                
+                try:
+                    observation = await self._execute_tool({
+                        'tool': tool_name,
+                        'params': tool_params
+                    })
+                except Exception as e:
+                    print(f"[REACT-UNIFIED] Tool execution failed: {e}")
+                    observation = {'success': False, 'error': str(e)}
+                
+                
+                print(f"[REACT-UNIFIED] Observation result: success={observation.get('success')}")
+                
+                # 保存观察结果供下一轮使用
+                prev_observation = observation
+                prev_action = {'tool': tool_name, 'params': tool_params}
+                
+                # 更新上下文
+                if observation.get('success'):
+                    # 提取关键信息到 context
+                    for key in ['bug_list', 'badcase_list', 'testcase_list', 'grep_result']:
+                        if key in observation:
+                            result['context'][key] = observation[key]
+                
+                
+                # 检查是否需要继续（任务是否完成）
+                # 简单策略：modify 成功后终止
+                if tool_name == 'modify' and observation.get('success'):
+                    print(f"[REACT-UNIFIED] Modify completed successfully")
+                    break
+                
+            
+            result['duration'] = time.time() - start_time
+            return result
+            
+        except Exception as e:
+            print(f"[REACT-UNIFIED] Error: {e}")
+            result['status'] = 'error'
+            result['error'] = str(e)
+            result['duration'] = time.time() - start_time
+            return result
+
     async def run(
-        self, user_input: str, project_id: int = None, locale: Optional[str] = None
+        self,
+        user_input: str,
+        project_id: int = None,
+        locale: Optional[str] = None,
+        long_memory_prefetch: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         极简主循环 - 三步：THINK / ACT-LOOP / RESULT
         """
+        # 三段式 XML 模式：委托给专用方法
+        if _use_react_unified_xml():
+            return await self._run_unified_xml(
+                user_input, project_id, locale, long_memory_prefetch
+            )
+        
         print(f"\n[REACT] ReAct Loop Start")
         print(f"[REACT] Input: {user_input[:60]}...\n")
         self._ui_locale = normalize_locale(locale)
@@ -3048,6 +6114,32 @@ class SimplifiedReActEngine:
         }
         
         try:
+            _lm_each_msg = (os.getenv("REACT_LONG_MEMORY_QUERY_EACH_MESSAGE", "0") or "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if isinstance(long_memory_prefetch, dict) and long_memory_prefetch:
+                _lmt = str(
+                    long_memory_prefetch.get("long_memory_text")
+                    or long_memory_prefetch.get("merged")
+                    or ""
+                ).strip()
+                _lmi = long_memory_prefetch.get("long_memory_items") or long_memory_prefetch.get("memories")
+                if _lmt:
+                    result["context"]["long_memory_text"] = _lmt
+                if isinstance(_lmi, list) and _lmi:
+                    result["context"]["long_memory_items"] = _lmi
+            elif _lm_each_msg:
+                await self._inject_long_memory_into_context(
+                    user_input=user_input,
+                    result_context=result["context"],
+                    project_id=project_id,
+                    plan_id=None,
+                    agent_session_id=None,
+                )
+
             # ===== STEP 1: THINK =====
             print(f"[REACT] STEP 1: THINK - Claude Prompt")
             
@@ -3063,7 +6155,7 @@ class SimplifiedReActEngine:
             
             response = await self._collect_llm_text(prompt)
             # 统一使用健壮版解析
-            todos = robust_parse_todos(response)
+            todos = _cap_todos_for_speed(robust_parse_todos(response))
             
             if not todos:
                 result['error'] = 'LLM 无法生成 Todo'
@@ -3072,6 +6164,10 @@ class SimplifiedReActEngine:
             
             print(f"[REACT]   Generated {len(todos)} Todos\n")
             
+            # STREAM_V1 对齐：observe 合并 <decision> 时缓存，下一轮省一次 decide LLM
+            pending_next_decision: Optional[Dict[str, Any]] = None
+            _prev_tool_sync: Optional[str] = None
+
             # ===== MAIN LOOP: ACT =====
             print(f"[REACT] MAIN LOOP: Executing Todos\n")
             
@@ -3079,17 +6175,50 @@ class SimplifiedReActEngine:
                 print(f"[REACT] Todo {i+1}/{len(todos)}: {todo}")
                 
                 # 决策（ACT）
-                decision_prompt = self._wrap_prompt(
-                    ReactPromptTemplates.decide_prompt(
-                        todo,
-                        user_input,
-                        tools_info,
-                        result['context'],
+                decision_response = ""
+                if pending_next_decision is None:
+                    _ctx_run_d = shrink_payload_for_decide_prompt(
+                        result["context"], prev_tool=_prev_tool_sync
                     )
-                )
-                
-                decision_response = await self._collect_llm_text(decision_prompt)
-                decision = parse_xml_decision(decision_response)
+                    decision_prompt = self._wrap_prompt(
+                        ReactPromptTemplates.decide_prompt(
+                            todo,
+                            user_input,
+                            tools_info,
+                            _ctx_run_d,
+                        )
+                    )
+                    use_fc = use_react_decide_function_call() and hasattr(
+                        self.llm, "chat_completion_with_tools"
+                    )
+                    if use_fc:
+                        decision, decision_response = await self._react_decide_function_call(
+                            decision_prompt,
+                            step_index=i,
+                            prev_tool=_prev_tool_sync,
+                        )
+                    else:
+                        _mxdec = resolve_decide_max_tokens_for_prev_tool(
+                            _prev_tool_sync
+                        )
+                        decision_response = await self._collect_llm_text_content_only(
+                            decision_prompt, _mxdec
+                        )
+                        decision = parse_xml_decision(decision_response)
+                else:
+                    decision = pending_next_decision
+                    pending_next_decision = None
+                    try:
+                        decision_response = json.dumps(
+                            decision, ensure_ascii=False, default=str
+                        )[:4000]
+                    except Exception:
+                        decision_response = ""
+                    if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                        print(
+                            f"[REACT-merge] (sync) step={i} pending_next_decision "
+                            f"tool={decision.get('tool')!r} execute={decision.get('execute')!r}"
+                        )
                 _llm = getattr(self, "llm", None)
                 print(
                     f"[REACT-planing] (sync) step={i} llm_class={type(_llm).__name__} "
@@ -3130,6 +6259,7 @@ class SimplifiedReActEngine:
                     }
                 else:
                     observation = await self._execute_tool(decision)
+                    _ = self._drain_tool_task_sse_buffer_list()
 
                 if (
                     decision.get('tool') == 'modify'
@@ -3144,6 +6274,7 @@ class SimplifiedReActEngine:
                         result['context'],
                         project_id,
                     )
+                    _ = self._drain_tool_task_sse_buffer_list()
 
                 # 自我修正：如果执行失败，尝试自动修正
                 if not observation.get('success') and not observation.get('skipped'):
@@ -3158,19 +6289,70 @@ class SimplifiedReActEngine:
                         available_tools=tools_info,
                         execute_fn=self._execute_tool
                     )
+                    _ = self._drain_tool_task_sse_buffer_list()
                 
-                # 分析结果（OBSERVE） + 自我修正反馈
-                analyze_prompt = self._wrap_prompt(
-                    ReactPromptTemplates.observe_prompt(
-                        todo,
-                        decision,
-                        observation,
-                        result['context'],
-                    )
-                )
-                
-                analyze_response = await self._collect_llm_text(analyze_prompt)
-                analysis = parse_xml_findings(analyze_response)
+                # 分析结果（OBSERVE）：单轮 observe_prompt（可合并下一轮 <decision>）
+                analyze_response = ""
+                _merge_observe_used_run = False
+
+                if not (analyze_response or "").strip():
+                    _obs_sync = shrink_payload_for_observe_prompt(observation)
+                    _ctx_sync2 = shrink_payload_for_observe_prompt(result["context"])
+                    if use_react_merge_observe_decide():
+                        _merge_observe_used_run = True
+                        analyze_prompt = self._wrap_prompt(
+                            ReactPromptTemplates.observe_prompt_merge_next_decide(
+                                todo,
+                                decision,
+                                _obs_sync,
+                                _ctx_sync2,
+                                user_input,
+                                todos,
+                                i,
+                            )
+                        )
+                        _mt_o = (
+                            os.getenv("REACT_MERGE_OBSERVE_MAX_TOKENS")
+                            or os.getenv("REACT_OBSERVE_MAX_TOKENS")
+                            or ""
+                        ).strip()
+                    else:
+                        analyze_prompt = self._wrap_prompt(
+                            ReactPromptTemplates.observe_prompt(
+                                todo,
+                                decision,
+                                _obs_sync,
+                                _ctx_sync2,
+                            )
+                        )
+                        _mt_o = (os.getenv("REACT_OBSERVE_MAX_TOKENS") or "").strip()
+                    _max_ob = int(_mt_o) if _mt_o.isdigit() else None
+                    if _max_ob is not None and _max_ob <= 0:
+                        _max_ob = None
+                    if (
+                        use_react_observe_fc()
+                        and not _merge_observe_used_run
+                        and getattr(self.llm, "chat_completion_with_tools", None)
+                    ):
+                        analysis = await self._react_observe_fc_sync(analyze_prompt, _max_ob)
+                        analyze_response = json.dumps(analysis, ensure_ascii=False)
+                    else:
+                        analyze_response = await self._collect_llm_text_content_only(
+                            analyze_prompt, _max_ob
+                        )
+                        analysis = parse_xml_findings(analyze_response)
+                else:
+                    analysis = parse_xml_findings(analyze_response)
+                if _merge_observe_used_run and re.search(
+                    r"<\s*decision\b", analyze_response or "", re.IGNORECASE
+                ):
+                    pending_next_decision = parse_xml_decision(analyze_response)
+                    if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                        print(
+                            f"[REACT-merge] (sync) step={i} pending_next_decision queued "
+                            f"tool={pending_next_decision.get('tool')!r} "
+                            f"execute={pending_next_decision.get('execute')!r}"
+                        )
                 
                 # 记录
                 result['steps'].append({
@@ -3179,9 +6361,13 @@ class SimplifiedReActEngine:
                     'observation': observation,
                     'analysis': analysis
                 })
-                
-                # 更新上下文
-                result['context'].update(analysis.get('context_update', {}))
+                _tps = str(decision.get("tool") or "").strip().lower()
+                _prev_tool_sync = _tps if _tps else None
+
+                # 更新上下文（与流式主循环一致：勿让 observe 覆盖 grep 写入的定位列表）
+                result["context"].update(
+                    _scrub_grep_grounded_keys_from_context_update(analysis.get("context_update"))
+                )
                 
                 # 提取发现
                 if analysis.get('findings'):
@@ -3268,8 +6454,10 @@ class SimplifiedReActEngine:
                 print(f"[REACT] Text2SQL执行: {natural_query}")
                 return self.text2sql_tool.query(natural_query, params)
         
-        #回到传统工具执行
-        return await self._execute_tool(tool_name, params)
+        # 回到传统工具执行
+        return await self._execute_tool(
+            {"execute": True, "tool": tool_name, "params": params}
+        )
     
     def _extract_natural_query(self, todo: str, user_input: str) -> str:
         """从 Todo中提取自然语言查询"""
@@ -3341,6 +6529,66 @@ class SimplifiedReActEngine:
         testcase_list = grep_data.get('testcase_location', [])
         kw = (params.get('keywords') or result_context.get('_last_grep_keywords') or '')
         result_context['_last_grep_keywords'] = kw or params.get('keywords') or ''
+        _gtt = str(params.get('target') or '').strip().lower()
+        if _gtt:
+            result_context['_last_grep_target'] = _gtt
+
+        # 优先使用 grep_tool 生成的 navigation（它已按计划/权限/可跳转过滤），避免后续 modify 误选到列表里“碰巧更像”的其它记录
+        nav_ids: Dict[str, List[int]] = {"bug": [], "badcase": [], "testcase": []}
+        nav_items: List[Dict[str, Any]] = []
+        _nav = grep_data.get("navigation")
+        has_nav = _nav is not None
+        if isinstance(_nav, dict):
+            if _nav.get("type") == "multiple" and isinstance(_nav.get("items"), list):
+                nav_items = [x for x in (_nav.get("items") or []) if isinstance(x, dict)]
+            elif _nav.get("type") == "expand_and_locate":
+                nav_items = [_nav]
+        for it in nav_items:
+            t = (it.get("target") or "").strip().lower()
+            rid = it.get("record_id") or it.get("bug_id") or it.get("id")
+            try:
+                rid_int = int(rid)
+            except Exception:
+                continue
+            if t in nav_ids:
+                nav_ids[t].append(rid_int)
+        # 去重保序
+        for k in nav_ids:
+            seen = set()
+            uniq = []
+            for x in nav_ids[k]:
+                if x in seen:
+                    continue
+                seen.add(x)
+                uniq.append(x)
+            nav_ids[k] = uniq
+
+        _total_nav = sum(len(nav_ids[k]) for k in nav_ids)
+        print(
+            f"[GREP-NAV] navigation_ids: bug={nav_ids['bug']} (n={len(nav_ids['bug'])}), "
+            f"badcase={nav_ids['badcase']} (n={len(nav_ids['badcase'])}), "
+            f"testcase={nav_ids['testcase']} (n={len(nav_ids['testcase'])}); "
+            f"raw_location_counts: badcase_analysis={len(badcase_list)}, bug_location={len(bug_list)}, "
+            f"testcase_location={len(testcase_list)}; has_navigation={has_nav}"
+        )
+        if has_nav and _total_nav == 0:
+            print(
+                "[GREP-NAV] WARNING: navigation present but parsed navigation_ids are all empty; "
+                "restricted lists may be empty — check navigation payload shape vs parser "
+                "(e.g. type/items vs expand_and_locate)."
+            )
+        for _label, _raw, _key in (
+            ("bug", bug_list, "bug"),
+            ("badcase", badcase_list, "badcase"),
+            ("testcase", testcase_list, "testcase"),
+        ):
+            _nav_n = len(nav_ids[_key])
+            _raw_n = len(_raw or [])
+            if has_nav and _raw_n > _nav_n and _raw_n > 0:
+                print(
+                    f"[GREP-NAV] WARNING: {_label} raw_location={_raw_n} > navigable ids={_nav_n}; "
+                    f"extra rows likely lack plan_id or were filtered from navigation."
+                )
 
         def first_id(lst, kws):
             if not lst:
@@ -3348,23 +6596,38 @@ class SimplifiedReActEngine:
             picked = self._rerank_and_pick(lst, kws, 'title', 1)
             return picked[0].get('id') if picked else lst[0].get('id')
 
+        def _restrict_by_nav(lst: List[Dict[str, Any]], ids: List[int]) -> List[Dict[str, Any]]:
+            # grep_tool 的 navigation 是前端可见/可跳转的“官方候选集”。
+            # 如果 grep 返回了 navigation，但解析不到对应 ids，则宁可返回空，也不要退回全量列表导致误选/多选。
+            if not ids:
+                return [] if has_nav else (lst or [])
+            idset = set(ids)
+            return [x for x in (lst or []) if isinstance(x, dict) and x.get("id") in idset]
+
+        badcase_list_nav = _restrict_by_nav(badcase_list, nav_ids.get("badcase") or [])
+        bug_list_nav = _restrict_by_nav(bug_list, nav_ids.get("bug") or [])
+        testcase_list_nav = _restrict_by_nav(testcase_list, nav_ids.get("testcase") or [])
+
         result_context['grep_result'] = {
-            'first_badcase_id': first_id(badcase_list, kw),
-            'first_bug_id': first_id(bug_list, kw),
-            'first_testcase_id': first_id(testcase_list, kw),
-            'badcase_list': badcase_list,
-            'bug_list': bug_list,
-            'testcase_list': testcase_list,
+            'first_badcase_id': first_id(badcase_list_nav, kw),
+            'first_bug_id': first_id(bug_list_nav, kw),
+            'first_testcase_id': first_id(testcase_list_nav, kw),
+            'badcase_list': badcase_list_nav,
+            'bug_list': bug_list_nav,
+            'testcase_list': testcase_list_nav,
+            'navigation_ids': nav_ids,
         }
-        result_context['badcase_list'] = badcase_list
-        result_context['bug_list'] = bug_list
-        result_context['testcase_list'] = testcase_list
+        result_context['badcase_list'] = badcase_list_nav
+        result_context['bug_list'] = bug_list_nav
+        result_context['testcase_list'] = testcase_list_nav
         print(
             f"[REACT-execution] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, {len(testcase_list)} testcase"
         )
-        # 定位用：grep 写入 context 后的列表长度与 id，便于对照「导航 N 条」与后续 modify 是否批量
+        # merge 后候选（写入 context）与 [GREP-NAV] 对照
         try:
-            _bug_ids = [b.get("id") for b in bug_list if isinstance(b, dict)]
+            _bug_ids = [b.get("id") for b in bug_list_nav if isinstance(b, dict)]
+            _bc_ids = [b.get("id") for b in badcase_list_nav if isinstance(b, dict)]
+            _tc_ids = [b.get("id") for b in testcase_list_nav if isinstance(b, dict)]
             _nav = grep_data.get("navigation")
             if not _nav:
                 _nav_n = 0
@@ -3373,10 +6636,27 @@ class SimplifiedReActEngine:
             else:
                 _nav_n = 1
             print(
-                f"[MODIFY-TRACE] merge_grep → context: bug_list_len={len(bug_list)}, "
-                f"bug_ids={_bug_ids}, first_bug_id={result_context['grep_result'].get('first_bug_id')}, "
+                f"[MODIFY-TRACE] merge_grep → context merge_after_ids: "
+                f"bug={_bug_ids}, badcase={_bc_ids}, testcase={_tc_ids}; "
+                f"bug_list_len={len(bug_list_nav)}, first_bug_id={result_context['grep_result'].get('first_bug_id')}, "
                 f"navigation_items≈{_nav_n}, keywords_kw={kw!r}"
             )
+            for _kind, _merged, _auth in (
+                ("bug", _bug_ids, nav_ids.get("bug") or []),
+                ("badcase", _bc_ids, nav_ids.get("badcase") or []),
+                ("testcase", _tc_ids, nav_ids.get("testcase") or []),
+            ):
+                if not _auth:
+                    continue
+                try:
+                    _ms, _as = set(_merged), set(_auth)
+                except Exception:
+                    continue
+                if _ms != _as:
+                    print(
+                        f"[MODIFY-TRACE] WARNING: merge_grep merge_after_ids({_kind})={sorted(_ms)} "
+                        f"!= navigation_ids={sorted(_as)}"
+                    )
         except Exception as _e:
             print(f"[MODIFY-TRACE] merge_grep 附加日志失败: {_e}")
 
@@ -3410,8 +6690,31 @@ class SimplifiedReActEngine:
         params.setdefault('confirm', False)
 
         grep_result = result_context.get('grep_result', {})
-        target_type = params.get('target') or self._infer_modify_target(user_input, todo)
+        tc_l = result_context.get('testcase_list') or []
+        bc_l = result_context.get('badcase_list') or []
+        bg_l = result_context.get('bug_list') or []
+        explicit = self._infer_modify_target_explicit(user_input, todo)
+        user_infer = self._infer_modify_target(user_input, todo)
+        if explicit:
+            target_type = explicit
+        else:
+            target_type = str(params.get('target') or '').strip().lower() or user_infer
+        if tc_l and not bc_l and not bg_l:
+            target_type = 'testcase'
+        elif bc_l and not tc_l and not bg_l:
+            target_type = 'badcase'
+        elif bg_l and not tc_l and not bc_l:
+            target_type = 'bug'
+        _lgt = str(result_context.get('_last_grep_target') or '').lower()
+        if _lgt == 'testcase' and tc_l:
+            target_type = 'testcase'
+        elif _lgt == 'badcase' and bc_l:
+            target_type = 'badcase'
+        elif _lgt == 'bug' and bg_l:
+            target_type = 'bug'
         params['target'] = target_type
+        # modify_tool 会优先使用 target_ids 做批量；模型常臆造 badcase id 列表，必须清掉由下方/grep 重填
+        params.pop('target_ids', None)
 
         target_id = params.get('target_id')
         if target_id is not None:
@@ -3419,6 +6722,25 @@ class SimplifiedReActEngine:
                 target_id = int(target_id)
                 params['target_id'] = target_id
             except (TypeError, ValueError):
+                params.pop('target_id', None)
+                target_id = None
+
+        _ctx_rows = bg_l if target_type == 'bug' else tc_l if target_type == 'testcase' else bc_l
+        if target_id is not None and _ctx_rows:
+            _ok = False
+            for x in _ctx_rows:
+                if not isinstance(x, dict) or x.get('id') is None:
+                    continue
+                try:
+                    if int(x.get('id')) == int(target_id):
+                        _ok = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if not _ok:
+                print(
+                    f"[REACT-planing] enrich 丢弃与 {target_type} 候选列表不一致的 target_id={target_id}（避免串表）"
+                )
                 params.pop('target_id', None)
                 target_id = None
 
@@ -3470,6 +6792,7 @@ class SimplifiedReActEngine:
                 }
             )
             grep_obs = await self._execute_tool({'execute': True, 'tool': 'grep', 'params': gparams})
+            events.extend(self._drain_tool_task_sse_buffer_list())
             if grep_obs.get('success'):
                 self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
                 grep_result = result_context.get('grep_result', {})
@@ -3506,7 +6829,9 @@ class SimplifiedReActEngine:
                     exploration = await asyncio.wait_for(
                         loop.run_in_executor(
                             self._tool_executor,
-                            lambda: modify_tool.explore_record(target_type, _eid, _epid),
+                            lambda: modify_tool.explore_record(
+                                target_type, _eid, _epid, getattr(self, "_ui_locale", None)
+                            ),
                         ),
                         timeout=15,
                     )
@@ -3603,6 +6928,7 @@ class SimplifiedReActEngine:
             }
         )
         grep_obs = await self._execute_tool({'execute': True, 'tool': 'grep', 'params': gparams})
+        events.extend(self._drain_tool_task_sse_buffer_list())
         if grep_obs.get('success'):
             self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
             for tt in ('bug', 'testcase', 'badcase'):
@@ -3675,6 +7001,7 @@ class SimplifiedReActEngine:
             if not self._modify_params_ready(decision2.get('params')):
                 return observation, ev
             retry_obs = await self._execute_tool(decision2)
+            ev.extend(self._drain_tool_task_sse_buffer_list())
             if retry_obs.get('success'):
                 retry_obs['recovered'] = True
                 retry_obs['recovery'] = 'structured_grep_after_failure'
@@ -3719,10 +7046,119 @@ class SimplifiedReActEngine:
         picked = self._rerank_and_pick(items, keywords, key_title, top_k=1)
         return picked[0] if picked else {}
 
+    def _constrain_modify_target_list_by_grep_navigation(
+        self,
+        target_list: List[Dict],
+        target_type: str,
+        result_context: Dict[str, Any],
+        *,
+        trace_phase: str = "batch",
+    ) -> List[Dict]:
+        """当 grep 已写入 navigation_ids 时，批量 modify 仅保留这些 id，与列表可跳转条数一致。"""
+        if not target_list or len(target_list) <= 1:
+            return target_list
+        merge_after_ids = [
+            x.get("id")
+            for x in target_list
+            if isinstance(x, dict) and x.get("id") is not None
+        ]
+        _gr_nav = result_context.get("grep_result") or {}
+        _nav_map = _gr_nav.get("navigation_ids") or {}
+        _nk = (
+            "bug"
+            if target_type == "bug"
+            else ("badcase" if target_type == "badcase" else "testcase")
+        )
+        nav_authoritative_ids = list(_nav_map.get(_nk) or [])
+        _allowed_ids = nav_authoritative_ids
+        if not _allowed_ids:
+            print(
+                f"[MODIFY-TRACE] WARNING phase={trace_phase} target_type={_nk} "
+                f"grep navigation_ids[{_nk}] empty; merge_after_ids={merge_after_ids} "
+                f"final_target_ids={merge_after_ids} (no nav constrain, fallback)"
+            )
+            return target_list
+        _aset = set()
+        for _aid in _allowed_ids:
+            try:
+                _aset.add(int(_aid))
+            except (TypeError, ValueError):
+                if _aid is not None:
+                    _aset.add(_aid)
+        _fil: List[Dict] = []
+        for x in target_list:
+            if not isinstance(x, dict):
+                continue
+            rid = x.get("id")
+            if rid is None:
+                continue
+            try:
+                match = int(rid) in _aset
+            except (TypeError, ValueError):
+                match = rid in _aset
+            if match:
+                _fil.append(x)
+        if not _fil:
+            print(
+                f"[MODIFY-TRACE] ERROR phase={trace_phase} target_type={_nk} "
+                f"merge_after_ids={merge_after_ids} nav_authoritative_ids={nav_authoritative_ids} "
+                f"intersection empty; keeping target_list unchanged (check mod_target vs grep context)"
+            )
+            return target_list
+        final_target_ids = [
+            x.get("id")
+            for x in _fil
+            if isinstance(x, dict) and x.get("id") is not None
+        ]
+        try:
+            _ma = set(merge_after_ids)
+            _fi = set(final_target_ids)
+            if _ma != _fi:
+                print(
+                    f"[MODIFY-TRACE] WARNING phase={trace_phase} target_type={_nk} "
+                    f"narrowed merge_after_ids={merge_after_ids} -> final_target_ids={final_target_ids} "
+                    f"nav_authoritative_ids={nav_authoritative_ids}"
+                )
+            else:
+                print(
+                    f"[MODIFY-TRACE] phase={trace_phase} target_type={_nk} "
+                    f"merge_after_ids={merge_after_ids} final_target_ids={final_target_ids} "
+                    f"nav_authoritative_ids={nav_authoritative_ids} (aligned)"
+                )
+        except Exception as _ex:
+            print(f"[MODIFY-TRACE] trace log failed: {_ex}")
+        return _fil
+
+    def _infer_modify_target_explicit(self, user_input: str, todo: str) -> Optional[str]:
+        """
+        用户话术里能否**明确**到实体类型；若能则优先于模型给的 params.target（常见误填 badcase）。
+        无法从字面判断时返回 None，交由模型参数 + 默认推断。
+        """
+        text_raw = f"{user_input or ''} {todo or ''}".strip()
+        if not text_raw:
+            return None
+        text = text_raw.lower()
+        if (
+            '测试用例' in text_raw
+            or '测例' in text_raw
+            or 'testcase' in text
+            or 'test case' in text
+            or 'test_case' in text
+        ):
+            return 'testcase'
+        if ('bug' in text or '缺陷' in text_raw) and 'badcase' not in text and 'bad case' not in text:
+            return 'bug'
+        if 'badcase' in text or 'bad case' in text:
+            return 'badcase'
+        return None
+
     def _infer_modify_target(self, user_input: str, todo: str) -> str:
         """
         从用户输入/todo 推断 modify 的 target：用户说「修改bug」则用 bug，避免误改 BadCase。
         """
+        exp = self._infer_modify_target_explicit(user_input, todo)
+        if exp:
+            return exp
         text = ((user_input or '') + ' ' + (todo or '')).lower()
         if not text.strip():
             return 'badcase'
@@ -3734,6 +7170,31 @@ class SimplifiedReActEngine:
             return 'badcase'
         return 'badcase'
 
+    def _coerce_grep_target_for_user_intent(
+        self, decision: Dict[str, Any], user_input: str, todo: str
+    ) -> None:
+        """grep 阶段：用户已明说测例/Bug/BadCase 时，纠正模型窄化的 target，避免只查 badcase 导致 testcase_list 为空。"""
+        if not decision.get('execute') or decision.get('tool') != 'grep':
+            return
+        exp = self._infer_modify_target_explicit(user_input, todo)
+        if not exp:
+            return
+        params = decision.setdefault('params', {})
+        if not isinstance(params, dict):
+            return
+        t = str(params.get('target') or '').strip().lower()
+        if t in ('all', exp):
+            return
+        if exp == 'testcase' and t not in ('testcase', 'all'):
+            print(f"[REACT-execution] grep.params.target 按用户测例意图纠正: {t!r} -> testcase")
+            params['target'] = 'testcase'
+        elif exp == 'bug' and t not in ('bug', 'all'):
+            print(f"[REACT-execution] grep.params.target 按用户缺陷意图纠正: {t!r} -> bug")
+            params['target'] = 'bug'
+        elif exp == 'badcase' and t not in ('badcase', 'all'):
+            print(f"[REACT-execution] grep.params.target 按用户 BadCase 意图纠正: {t!r} -> badcase")
+            params['target'] = 'badcase'
+
     def _extract_title_keywords_for_grep(self, user_input: str, todo: str) -> str:
         """
         从用户输入或 todo 中提取要修改的 BadCase/Bug 标题，用于 grep 的 keywords 参数。
@@ -3743,6 +7204,16 @@ class SimplifiedReActEngine:
         text = (user_input or '') + ' ' + (todo or '')
         if not text.strip():
             return ''
+        # 优先识别显式关键词参数（用户常用：keywords=登录 / 关键词：登录 / 关键字=登录）
+        for pattern in [
+            r'keywords\s*[=:：]\s*([^\s,，。;；\n]+)',
+            r'(?:关键词|关键字)\s*[=:：]\s*([^\s,，。;；\n]+)',
+        ]:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if m:
+                kw = (m.group(1) or '').strip().strip('"“”\'‘’')
+                if kw and len(kw) <= 50:
+                    return kw
         # 修改/把/将 XXX 的 … -> XXX（非贪婪，取到第一个「的」为止）
         for pattern in [
             r'修改\s*(.+?)\s*的',
@@ -3755,6 +7226,14 @@ class SimplifiedReActEngine:
                 kw = m.group(1).strip()
                 if kw and len(kw) <= 50:  # 避免整句当关键词
                     return kw
+        # grep/定位/查找 场景的兜底：提取最可能的短关键词（优先中文，其次英文数字串）
+        if any(k in text for k in ('grep', '定位', '查找', '搜索')):
+            m = re.search(r'[\u4e00-\u9fff]{1,8}', text)
+            if m:
+                return m.group(0)
+            m = re.search(r'[A-Za-z_]{2,20}', text)
+            if m:
+                return m.group(0)
         return ''
 
     def _infer_create_target(self, user_input: str, todo: str) -> str:
@@ -3907,8 +7386,21 @@ class SimplifiedReActEngine:
                 badcase_list = badcase_analysis
         if not testcase_list and 'testcase_location' in context:
             testcase_list = context.get('testcase_location', [])
-        target_list = bug_list or badcase_list or testcase_list
-        target_type = 'bug' if bug_list else ('badcase' if badcase_list else ('testcase' if testcase_list else None))
+        _inf_t = self._infer_modify_target('', todo)
+        if _inf_t == 'testcase' and testcase_list:
+            target_list, target_type = testcase_list, 'testcase'
+        elif _inf_t == 'bug' and bug_list:
+            target_list, target_type = bug_list, 'bug'
+        elif _inf_t == 'badcase' and badcase_list:
+            target_list, target_type = badcase_list, 'badcase'
+        elif bug_list:
+            target_list, target_type = bug_list, 'bug'
+        elif badcase_list:
+            target_list, target_type = badcase_list, 'badcase'
+        elif testcase_list:
+            target_list, target_type = testcase_list, 'testcase'
+        else:
+            target_list, target_type = [], None
         
         if not target_list or not isinstance(target_list, list) or len(target_list) == 0:
             print(f"[REACT-thought] 无法从 context 中获取有效的 bug_list 或 badcase_list")
@@ -4412,6 +7904,37 @@ class SimplifiedReActEngine:
                 print(f"[REACT-REGEX] 兜底（负责人句式）：assignee = {modifications['assignee']}")
         return modifications
     
+    async def _maybe_self_drive_decision_from_todo(
+        self,
+        todo: str,
+        user_input: str,
+        step_index: int,
+        todos_len: int,
+    ) -> Optional[Dict[str, Any]]:
+        """REACT_SELF_DRIVE_TOOL_LOOP=1：由 Todo 文案解析工具，跳过本步 decide LLM。"""
+        if (os.getenv("REACT_SELF_DRIVE_TOOL_LOOP", "0") or "0").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return None
+        if step_index >= todos_len:
+            return None
+        try:
+            tp = await self._extract_todo_params(todo, user_input)
+        except Exception:
+            return None
+        tname = (tp.get("tool") or "").strip()
+        if not tname or tname == "unknown":
+            return None
+        return {
+            "execute": True,
+            "tool": tname,
+            "params": dict(tp.get("params") or {}),
+            "reason": "self_drive_todo_extract",
+        }
+
     async def _extract_todo_params(self, todo: str, user_input: str) -> Dict[str, Any]:
         """
         从 todo 中提取工具名称和参数
@@ -4484,8 +8007,8 @@ class SimplifiedReActEngine:
                 # 兜底：用户提到测试用例但 todo 未写 target=testcase 时，按测试用例查
                 target = 'testcase'
             elif user_input and ('bug' in user_input or '缺陷' in user_input or 'Bug' in user_input):
-                # 兜底：用户提到 bug/缺陷但 todo 未写类型时，在所有迭代计划、不分类型查一遍（target=all，不限定 plan_id）
-                target = 'all'
+                # 兜底：用户提到 bug/缺陷但 todo 未写类型时，按 bug 查（避免默认 badcase 导致定位错表）
+                target = 'bug'
             else:
                 target = 'badcase'  # 默认
             
@@ -4494,9 +8017,6 @@ class SimplifiedReActEngine:
                 'mode': 'locate',
                 'keywords': keywords or None,
             }
-            # 兜底时查全部计划：target=all 时不传 plan_id，由 grep 查全项目
-            if target == 'all':
-                result['params'].pop('plan_id', None)
             print(f"[REACT] 从 todo 提取 grep 参数: keywords='{keywords}', target={target}")
 
         elif 'create' in todo.lower() or '创建' in todo or '新增' in todo or '新建' in todo:
@@ -4519,11 +8039,46 @@ class SimplifiedReActEngine:
             result['tool'] = 'unknown'
         
         return result
+
+    def _drain_tool_task_sse_buffer_list(self) -> List[Dict[str, Any]]:
+        """REACT_AGENT_TASK_DAG：冲刷 ``run_persisted_single`` 写入的 ``tool_task_*`` 引擎事件。"""
+        buf = getattr(self, "_tool_task_event_buffer", None)
+        if not buf:
+            return []
+        out = list(buf)
+        buf.clear()
+        return out
     
     async def _execute_tool(self, decision: Dict[str, Any]) -> Dict[str, Any]:
-        """执行工具"""
+        """执行工具（可选经 agent_tasks 持久化，见 REACT_AGENT_TASK_DAG）。"""
+        try:
+            from agents.agent_task_dag import use_react_agent_task_dag, run_persisted_single
+
+            if use_react_agent_task_dag():
+                return await run_persisted_single(
+                    self,
+                    decision,
+                    getattr(self, "_agent_session_id", None),
+                )
+        except Exception as e:
+            print(f"[REACT] agent_task_dag 包装失败，回退直连执行: {e}")
+        try:
+            from agents.agent_task_dag import execute_tool_implementation_with_retry
+
+            return await execute_tool_implementation_with_retry(self, decision)
+        except Exception:
+            return await self._execute_tool_implementation(decision)
+
+    async def _execute_tool_implementation(self, decision: Dict[str, Any]) -> Dict[str, Any]:
+        """执行工具（核心实现，供 DAG 层与直连路径复用）。"""
         tool_name = decision['tool']
         original_tool_name = tool_name
+        # FC/XML 可能返回 Grep、Modify 等与注册名大小写不一致
+        if isinstance(tool_name, str) and tool_name.strip():
+            _tn_low = tool_name.strip().lower()
+            if self.tools.get(tool_name) is None and self.tools.get(_tn_low) is not None:
+                tool_name = _tn_low
+                decision["tool"] = _tn_low
         
         # 增加模糊匹配映射
         if 'bug' in tool_name.lower() and 'management' in tool_name.lower():
@@ -4539,25 +8094,56 @@ class SimplifiedReActEngine:
         
         if not tool:
             print(f"[REACT] ❌ 工具不存在: {tool_name}")
-            return {'success': False, 'error': f"工具不存在：{tool_name}"}
+            return {
+                "success": False,
+                "error": react_tool_missing_error(
+                    tool_name, getattr(self, "_ui_locale", None)
+                ),
+            }
         
+        params = decision.get('params') or {}
         try:
             # 确保传入 userId 和 project_id；并保证 params 与 decision['params'] 同引用，便于 run_stream 轮询 progress_queue
-            params = decision.get('params') or {}
             if 'params' not in decision:
                 decision['params'] = params
             if 'userId' not in params:
                 params['userId'] = 'system_agent'
             if self.project_id and 'project_id' not in params:
                 params['project_id'] = self.project_id
+            params["ui_locale"] = normalize_locale(getattr(self, "_ui_locale", None))
             
             print(f"[REACT] 工具参数: {params}")
             print(f"[REACT] 正在执行工具: {tool_name}")
 
+            grep_cache_ttl = 0.0
+            grep_ck: Optional[str] = None
+            if tool_name == "grep":
+                try:
+                    grep_cache_ttl = float(
+                        (os.getenv("REACT_GREP_RESULT_CACHE_TTL") or "0").strip()
+                    )
+                except Exception:
+                    grep_cache_ttl = 0.0
+                if grep_cache_ttl > 0:
+                    grep_ck = self._grep_cache_key(params)
+                    now_g = time.time()
+                    hit = self._grep_result_cache.get(grep_ck)
+                    if hit and hit[0] > now_g:
+                        if os.getenv("PERF_LOG") == "1":
+                            print(
+                                f"[PERF][grep_cache] hit ttl_left≈{hit[0]-now_g:.1f}s "
+                                f"key={grep_ck[:120]}…"
+                            )
+                        return copy.deepcopy(hit[1])
+                    self._grep_result_cache.pop(grep_ck, None)
+
             # modify 工具内部使用 Flask/SQLAlchemy 同步 DB，会阻塞 asyncio 事件循环，导致流式一直“修改中...”
             # 放到线程池中执行，在独立线程里跑新事件循环，避免阻塞主循环，并增加超时保护
             if tool_name == 'modify':
-                print(f"[REACT] modify 进入线程池执行（target_id={params.get('target_id')}, target={params.get('target')}）…")
+                print(
+                    f"[REACT] modify 进入线程池执行（target_id={params.get('target_id')}, "
+                    f"target_ids={params.get('target_ids')}, target={params.get('target')}）…"
+                )
                 loop = asyncio.get_event_loop()
                 import queue as _queue
                 progress_q: "_queue.Queue[str]" = _queue.Queue()
@@ -4576,6 +8162,9 @@ class SimplifiedReActEngine:
                     try:
                         # 把进度回调传给 modify_tool（工具内分步上报）
                         params['progress_callback'] = _progress_cb
+                        # Agent 调用 modify 默认先预览（confirm=False），用户在列表确认后再落库
+                        if 'confirm' not in params:
+                            params['confirm'] = False
                         return thread_loop.run_until_complete(tool.execute(**params))
                     finally:
                         thread_loop.close()
@@ -4591,7 +8180,9 @@ class SimplifiedReActEngine:
                     print(f"[REACT] ❌ modify 工具执行超时（>{tool_timeout}s）")
                     return {
                         "success": False,
-                        "error": f"modify 工具执行超时（>{tool_timeout}s），请检查后端数据库或网络状态后重试。",
+                        "error": react_modify_timeout(
+                            tool_timeout, getattr(self, "_ui_locale", None)
+                        ),
                     }
             else:
                 res = await tool.execute(**params)
@@ -4604,7 +8195,32 @@ class SimplifiedReActEngine:
                 res = {'success': False, 'error': '工具返回空结果'}
             elif 'success' not in res:
                 res['success'] = True # 默认成功
+            if (
+                tool_name == "grep"
+                and grep_cache_ttl > 0
+                and grep_ck
+                and isinstance(res, dict)
+                and res.get("success")
+            ):
+                self._grep_result_cache[grep_ck] = (
+                    time.time() + grep_cache_ttl,
+                    copy.deepcopy(res),
+                )
+            if (
+                tool_name in ("modify", "create")
+                and isinstance(res, dict)
+                and res.get("success")
+                and self._grep_result_cache
+            ):
+                self._grep_result_cache.clear()
+                if os.getenv("PERF_LOG") == "1":
+                    print("[PERF][grep_cache] cleared after modify/create success")
             return res
         except Exception as e:
             print(f"[REACT] ❌ 工具执行异常: {str(e)}")
             return {'success': False, 'error': str(e)}
+        finally:
+            # 临时执行字段仅用于运行期心跳；必须清理，避免后续 JSON 序列化（observe_prompt/UI）报错
+            if isinstance(params, dict):
+                params.pop('progress_queue', None)
+                params.pop('progress_callback', None)

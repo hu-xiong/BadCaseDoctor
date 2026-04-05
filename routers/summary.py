@@ -1,8 +1,9 @@
 import asyncio
+import inspect
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from llm.factory import get_llm
 
@@ -27,26 +28,105 @@ def _format_turns(turns: List[Dict[str, Any]]) -> str:
     return "\n".join(out).strip()
 
 
+def _coerce_bool(v: Any, default: bool = True) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("0", "false", "no", "off"):
+        return False
+    if s in ("1", "true", "yes", "on"):
+        return True
+    return default
+
+
+def _iter_llm_text_chunks(llm, prompt: str) -> Iterator[str]:
+    """
+    统一从各 LLM 拉流式正文增量；总结场景不向前端透出 reasoning_delta。
+    """
+    if hasattr(llm, "chat_stream_with_reasoning"):
+        for item in llm.chat_stream_with_reasoning(prompt, history=None):
+            if not isinstance(item, dict):
+                continue
+            typ = item.get("type")
+            if typ == "reasoning_delta":
+                continue
+            if typ == "content_delta":
+                d = item.get("delta") or ""
+                if isinstance(d, str) and d:
+                    yield d
+            elif typ == "done":
+                break
+        return
+    if hasattr(llm, "chat_stream"):
+        stream_fn = getattr(llm, "chat_stream")
+        try:
+            sig = inspect.signature(stream_fn)
+            if "locale" in sig.parameters:
+                it = stream_fn(prompt, history=None, locale=None)
+            else:
+                it = stream_fn(prompt, history=None)
+        except Exception:
+            it = stream_fn(prompt, history=None)
+        for piece in it:
+            if isinstance(piece, str) and piece:
+                yield piece
+        return
+
+    chat_fn = getattr(llm, "chat", None)
+    if not callable(chat_fn):
+        return
+    if inspect.iscoroutinefunction(chat_fn):
+        text = asyncio.run(chat_fn(prompt, history=None))
+    else:
+        text = chat_fn(prompt, history=None)
+    if isinstance(text, str) and text.strip():
+        yield text
+
+
+def _call_sync_full(model_to_use: str, prompt: str) -> tuple[str, str | None]:
+    llm = get_llm(model=model_to_use)
+    if hasattr(llm, "force_disable_thinking"):
+        setattr(llm, "force_disable_thinking", True)
+    chat_fn = getattr(llm, "chat", None)
+    if not callable(chat_fn):
+        return "", getattr(llm, "model", None)
+    if inspect.iscoroutinefunction(chat_fn):
+        text = asyncio.run(chat_fn(prompt, history=None))
+    else:
+        text = chat_fn(prompt, history=None)
+    return (text or "").strip(), getattr(llm, "model", None)
+
+
 @summary_bp.route("/generate", methods=["POST"])
 def generate_summary():
     """
-    生成“单次 query 对话切片”的总结（不带思考过程）。
+    生成「单次 query 对话切片」的总结（不带思考过程）。
 
     请求 JSON：
     {
-      "model": "qwen3.5-plus",
+      "model": "ernie-4.5-turbo-128k",
+      "stream": true,
       "turns": [{"role":"user","content":"..."},{"role":"assistant","content":"..."}],
       "meta": {"status":"success","steps_count":2,"execution_time":1.23}
     }
+
+    - stream 默认 true：返回 text/event-stream，每行 data: JSON
+      {"type":"delta","delta":"..."}，最后 {"type":"done","summary":"...","model_used":"..."}
+    - stream false：一次性 JSON（兼容旧客户端）
     """
     data = request.get_json(silent=True) or {}
-    model_name = data.get("model")
+    model_name = (data.get("model") or "").strip()
     turns = data.get("turns") or []
     meta: Dict[str, Any] = data.get("meta") or {}
+    use_stream = _coerce_bool(data.get("stream"), default=True)
 
     dialogue = _format_turns(turns)
     if not dialogue:
         return jsonify({"success": False, "error": "turns 不能为空"}), 400
+    if not model_name:
+        return jsonify({"success": False, "error": "model 不能为空（请传对话面板下拉框当前模型）"}), 400
 
     status = meta.get("status")
     steps_count = meta.get("steps_count")
@@ -66,37 +146,72 @@ def generate_summary():
         f"{dialogue}\n"
     )
 
-    def _call(model_to_use: str) -> str:
-        llm = get_llm(model=model_to_use)
-        # 强制不带思考
+    if not use_stream:
+        try:
+            text, resolved_model = _call_sync_full(model_name, prompt)
+            if text.lower().startswith("error:"):
+                return jsonify({"success": False, "error": text}), 500
+            if text.startswith("```"):
+                text = text.strip("`").strip()
+            model_used = resolved_model or model_name
+            return jsonify({"success": True, "summary": text, "model_used": model_used})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    def generate_sse():
+        yield ":" + " " * 2048 + "\n\n"
+        llm = get_llm(model=model_name)
         if hasattr(llm, "force_disable_thinking"):
             setattr(llm, "force_disable_thinking", True)
-        text = asyncio.run(llm.chat(prompt, history=None))
-        return (text or "").strip()
-
-    try:
-        # 优先用前端传入的模型；若该 provider 配置缺失/报错，则兜底到一个“稳定的不思考模型”
-        tried = []
-        models_to_try = [model_name, "ernie-4.5-turbo-128k"]
-        last_err = None
-        for m in models_to_try:
-            if not m or m in tried:
-                continue
-            tried.append(m)
-            try:
-                text = _call(m)
-                # 某些实现会把错误直接作为字符串返回（例如 "Error: ..."），这里按失败处理并尝试兜底模型
-                if text.lower().startswith("error:"):
-                    last_err = text
+        resolved = getattr(llm, "model", None) or model_name
+        parts: List[str] = []
+        try:
+            for chunk in _iter_llm_text_chunks(llm, prompt):
+                if not chunk:
                     continue
-                if text.startswith("```"):
-                    text = text.strip("`").strip()
-                return jsonify({"success": True, "summary": text, "model_used": m})
-            except Exception as e:
-                last_err = str(e)
-                continue
+                parts.append(chunk)
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {"type": "delta", "delta": chunk},
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+            full = "".join(parts).strip()
+            if full.lower().startswith("error:"):
+                yield (
+                    "data: "
+                    + json.dumps({"type": "error", "message": full}, ensure_ascii=False)
+                    + "\n\n"
+                )
+                return
+            if full.startswith("```"):
+                full = full.strip("`").strip()
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "done",
+                        "summary": full,
+                        "model_used": resolved,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+        except Exception as e:
+            yield (
+                "data: "
+                + json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
+                + "\n\n"
+            )
 
-        return jsonify({"success": False, "error": last_err or "summary generation failed"}), 500
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
+    resp = Response(
+        stream_with_context(generate_sse()),
+        mimetype="text/event-stream",
+    )
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp

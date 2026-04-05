@@ -182,8 +182,8 @@
             </button>
             <template v-if="isLastInConsecutiveGroup(badcase.id)">
               <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(badcase.id) }) }}</span>
-              <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmConsecutiveGroup(badcase.id)">✓</button>
-              <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelConsecutiveGroup(badcase.id)">✗</button>
+              <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmModify(badcase.id)">✓</button>
+              <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelModify(badcase.id)">✗</button>
             </template>
           </div>
         </div>
@@ -230,8 +230,8 @@ export default {
     toggleDetailExpand: { type: Function, required: true },
     isLastInConsecutiveGroup: { type: Function, required: true },
     getConsecutiveGroupSize: { type: Function, required: true },
-    confirmConsecutiveGroup: { type: Function, required: true },
-    cancelConsecutiveGroup: { type: Function, required: true },
+    confirmModify: { type: Function, required: true },
+    cancelModify: { type: Function, required: true },
     getBadcaseStatusText: { type: Function, required: true },
     getAssigneeDisplayText: { type: Function, required: true },
 
@@ -519,7 +519,7 @@ export default {
   padding: 12px 24px;
   background: #f8f9fa;
   border-bottom: 1px solid #e9ecef;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #666;
 }
@@ -538,6 +538,7 @@ export default {
   align-items: center;
   cursor: default;
   transition: background-color 0.2s;
+  font-size: 12px;
 }
 
 /* 列内空白处为箭头；仅文字节点为 I 形光标，便于划选复制 */
@@ -627,10 +628,11 @@ export default {
 }
 
 .type-badge {
-  padding: 2px 8px;
-  border-radius: 12px;
+  padding: 2px 6px;
+  border-radius: 10px;
   font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .type-badge.bug {
@@ -649,12 +651,13 @@ export default {
 }
 
 .status-badge {
-  padding: 2px 8px;
-  border-radius: 12px;
+  padding: 2px 6px;
+  border-radius: 10px;
   font-size: 12px;
   font-weight: 500;
   background: #d4edda;
   color: #155724;
+  white-space: nowrap;
 }
 
 .status-badge.not_badcase {
@@ -774,7 +777,7 @@ export default {
 .empty-row {
   padding: 24px;
   color: #666;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /* 空状态：在表格可视区域居中显示 */

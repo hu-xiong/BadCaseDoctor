@@ -12,7 +12,6 @@ import queue
 import threading
 import os
 import uuid
-from datetime import datetime
 from llm.factory import get_llm
 from agents.browser_use_agent import BrowserUseAgent
 from agents.test_agent import TestAgent
@@ -26,6 +25,27 @@ from utils.metrics import (
     record_intent_detection,
     record_bugs_saved
 )
+from agents.evidence_extractor import deep_sse_json_safe as _sse_sanitize_for_json
+from agents.sse_react_v1 import engine_dict_to_wire_packets, is_wire_v1_packet
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _sse_json_dumps(obj, **kwargs) -> str:
+    """对队列出队的 dict 做清洗后再 dumps；最后兜底避免整条 SSE 失败。"""
+    try:
+        clean = _sse_sanitize_for_json(obj)
+        return json.dumps(clean, ensure_ascii=False, **kwargs)
+    except Exception as ex:
+        return json.dumps(
+            {
+                "type": "err",
+                "payload": {"message": f"SSE JSON 序列化失败（已降级）: {ex}"},
+            },
+            ensure_ascii=False,
+        )
+
 
 agent_bp = Blueprint('agent', __name__, url_prefix='/api/agent')
 
@@ -490,14 +510,18 @@ def react_agent():
         perf = (os.getenv("PERF_LOG") == "1")
         t_req0 = time.perf_counter()
         req_id = str(uuid.uuid4())[:8]
-        print(f"\n{'='*60}")
-        print(f"[REACT] ReAct Agent Request (Stream) - START")
-        print(f"{'='*60}")
-        print(f"[REACT] 请求时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("%s", "\n" + ("=" * 60))
+        logger.info("[REACT] ReAct Agent Request (Stream) - START")
+        logger.info("%s", "=" * 60)
+        logger.info("[REACT] 请求时间：%s", time.strftime('%Y-%m-%d %H:%M:%S'))
         
         data = request.get_json() or {}
         if perf:
-            print(f"[PERF][react_api][{req_id}] parse_json_ms={(time.perf_counter()-t_req0)*1000:.1f}")
+            logger.info(
+                "[PERF][react_api][%s] parse_json_ms=%.1f",
+                req_id,
+                (time.perf_counter() - t_req0) * 1000,
+            )
         user_input = data.get('user_input', '')
         images = data.get('images') or []
         stream_mode = data.get('stream', True)
@@ -506,61 +530,57 @@ def react_agent():
         plan_id = data.get('plan_id')
         ui_locale = data.get('locale') or data.get('ui_locale')
         pending_diff_context = data.get('pending_diff_context') or []
+        long_memory_context = data.get('long_memory_context') or data.get('longMemoryContext')
+        if not isinstance(long_memory_context, dict):
+            long_memory_context = None
 
-        if images:
-            try:
-                from agents.locale_prompts import vision_image_block_labels
-                from agents.vision_describe import VisionDescribeService
-
-                vision_svc = VisionDescribeService()
-                descriptions = []
-                for img in images[:5]:
-                    data_field = img.get('data') or img.get('url', '')
-                    if not data_field:
-                        continue
-                    desc = vision_svc.describe_prototype_for_testcase(
-                        data_field, user_input or '', locale=ui_locale
-                    )
-                    if desc:
-                        descriptions.append(desc)
-                if descriptions:
-                    _ip, _ul, _def = vision_image_block_labels(ui_locale)
-                    user_input = (
-                        _ip
-                        + "\n"
-                        + "\n\n".join(descriptions)
-                        + f"\n\n{_ul} "
-                        + (user_input or _def)
-                    )
-                    print(f"[REACT] 已注入 {len(descriptions)} 条图片描述，丰富后的 user_input 长度: {len(user_input)}")
-            except Exception as ve:
-                print(f"[REACT] 视觉描述失败，将使用原始输入: {ve}")
-                import traceback
-                traceback.print_exc()
-
-        print(f"[REACT] 请求参数:")
-        print(f"  - user_input 长度: {len(user_input)}")
-        print(f"  - model: {model_name}")
-        print(f"  - stream: {stream_mode}")
-        print(f"  - project_id: {project_id}")
-        print(f"  - plan_id: {plan_id}")
+        logger.info("[REACT] 请求参数:")
+        logger.info("  - user_input 长度: %s", len(user_input))
+        logger.info("  - model: %s", model_name)
+        logger.info("  - stream: %s", stream_mode)
+        logger.info("  - project_id: %s", project_id)
+        logger.info("  - plan_id: %s", plan_id)
         try:
-            print(f"  - pending_diff_context: {len(pending_diff_context) if isinstance(pending_diff_context, list) else 0}")
+            logger.info(
+                "  - pending_diff_context: %s",
+                len(pending_diff_context) if isinstance(pending_diff_context, list) else 0,
+            )
         except Exception:
             pass
 
         if not user_input.strip():
             return jsonify({'code': 400, 'message': '输入不能为空'}), 400
-        
+
         t_llm0 = time.perf_counter()
         llm = _get_cached_llm(model_name)
         if perf:
-            print(f"[PERF][react_api][{req_id}] get_llm_ms={(time.perf_counter()-t_llm0)*1000:.1f} model={model_name}")
+            logger.info(
+                "[PERF][react_api][%s] get_llm_ms=%.1f model=%s",
+                req_id,
+                (time.perf_counter() - t_llm0) * 1000,
+                model_name,
+            )
         from app import db
         t_agent0 = time.perf_counter()
-        agent = _get_cached_react_agent(model_name, db.session)
+        _fresh = (os.getenv("BADCASE_REACT_AGENT_PER_REQUEST", "").strip().lower() in ("1", "true", "yes"))
+        if _fresh:
+            agent = IntelligentDevOpsAgent(llm=llm, db_session=db.session)
+        else:
+            agent = _get_cached_react_agent(model_name, db.session)
         if perf:
-            print(f"[PERF][react_api][{req_id}] agent_init_ms={(time.perf_counter()-t_agent0)*1000:.1f}")
+            logger.info(
+                "[PERF][react_api][%s] agent_init_ms=%.1f fresh_agent=%s",
+                req_id,
+                (time.perf_counter() - t_agent0) * 1000,
+                "1" if _fresh else "0",
+            )
+
+        # 长期记忆：把 user_id 注入到 ReAct 引擎实例（供 ES 向量检索 scope 过滤）
+        try:
+            if hasattr(agent, "react_engine"):
+                setattr(agent.react_engine, "user_id", str(getattr(current_user, "id", "") or ""))
+        except Exception:
+            pass
         
         if not stream_mode:
             # 非流式模式
@@ -571,47 +591,232 @@ def react_agent():
 
         # 流式模式 - 使用 Queue 桥接异步生成器到同步生成器
         from flask import stream_with_context
+
+        # §6.1.2 信封：整次 SSE 连接唯一 request_id（与 seq 配套，便于日志与前端 reducer）
+        react_request_id = str(uuid.uuid4())
+        t_sse0 = time.perf_counter()
+
+        def _ms_since(t0: float) -> float:
+            try:
+                return (time.perf_counter() - t0) * 1000.0
+            except Exception:
+                return -1.0
         
+        def _with_protocol_version(payload: dict) -> dict:
+            """Agent SSE 协议版本（与 docs/需求文档_agent执行流程现状与优化需求_20260324.md 对齐，便于前端灰度）。"""
+            if not isinstance(payload, dict):
+                return payload
+            out = dict(payload)
+            out.setdefault('protocol_version', 1)
+            out.setdefault('request_id', react_request_id)
+            return out
+
         def generate():
             t_first_yield0 = time.perf_counter()
             # 发送初始字节以“破解”代理缓冲 (2KB 空白)
             yield ":" + " " * 2048 + "\n\n"
-            yield f"data: {json.dumps({'type': 'status', 'message': '连接已建立，准备执行...'})}\n\n"
+            # 首包 hello 由 Agent 流内发出（协议 v1），此处不再发送旧 type=status
             if perf:
-                print(f"[PERF][react_api][{req_id}] first_yield_ms={(time.perf_counter()-t_first_yield0)*1000:.1f}")
+                logger.info(
+                    "[PERF][react_api][%s] first_yield_ms=%.1f",
+                    req_id,
+                    (time.perf_counter() - t_first_yield0) * 1000,
+                )
             
             q = queue.Queue()
             done = object()
+            # 关键：立刻推一个可见 JSON 首包，避免“只有注释首字节但 UI 无变化”造成的卡顿错觉
+            # 前端 consumeAgentSseV1Chunk 会消费 hello 并确保 understanding 有值
+            q.put({"type": "hello"})
+            # 可选：在 Agent 真正产出 phase 之前先告知进入 think，避免首包阶段空白
+            q.put({"type": "phase", "payload": {"name": "think", "n": 1}})
+            if perf:
+                logger.info(
+                    "[PERF][react_api][%s] queued_hello_phase_ms=%.1f react_request_id=%s",
+                    req_id,
+                    _ms_since(t_sse0),
+                    react_request_id,
+                )
 
             def run_async_loop():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 async def task():
                     try:
-                        print(f"[REACT-planing] 开始异步任务循环")
+                        if perf:
+                            logger.info(
+                                "[PERF][react_api][%s] async_loop_start_ms=%.1f",
+                                req_id,
+                                _ms_since(t_req0),
+                            )
+                        logger.info("[REACT] 开始异步任务循环")
+                        # 图片理解放到异步线程里执行，避免阻塞 SSE 连接建立（否则前端会“卡住”）
+                        _effective_input = user_input
+                        # 图片意图路由：
+                        # - ocr: 读字/图片说了什么 → 只做视觉，不进 ReAct（避免触发 grep/modify 等工具链）
+                        # - prototype: 原型图/测试用例 → 先视觉结构化描述，再注入 ReAct（允许工具链）
+                        # - react: 其他 → 走原 ReAct
+                        def _classify_image_intent(_text: str) -> str:
+                            t = (_text or '').strip()
+                            if not t:
+                                return 'ocr'
+                            # 原型图 / 测试用例优先（避免被“图片”关键词误判成 ocr）
+                            prototype_keys = (
+                                '原型', '原型图', '界面原型', 'ui', '页面', '交互', '按钮', '输入框',
+                                '生成测试', '测试用例', '用例', '用例生成', '测试点', '测试步骤'
+                            )
+                            if any(k in t for k in prototype_keys):
+                                return 'prototype'
+                            # OCR/读字
+                            ocr_keys = (
+                                '图片说了什么', '图上写了什么', '图里写了什么', '图片写了什么',
+                                '识别文字', '提取文字', '读字', 'ocr', '识别一下', '这张图是什么'
+                            )
+                            if any(k in t for k in ocr_keys):
+                                return 'ocr'
+                            # 泛化：仅仅包含“图片/图上/这张图”但未提测试/原型时，也更像“解释图片”
+                            if any(k in t for k in ('图片', '图上', '这张图', '图里')):
+                                return 'ocr'
+                            return 'react'
+
+                        _image_intent = _classify_image_intent(user_input) if images else 'react'
+                        if images:
+                            # 走 think/content 轨，让前端立刻出现可见文本（否则仅 heartbeat 也会“看起来卡住”）
+                            q.put({
+                                'type': 'stream',
+                                'payload': {
+                                    'lane': 'think',
+                                    'delta': '正在解析图片内容…\n',
+                                    'react_phase': 'think',
+                                    'stream_channel': 'content',
+                                }
+                            })
+                            try:
+                                from agents.locale_prompts import vision_image_block_labels
+                                from agents.vision_describe import VisionDescribeService
+
+                                def _describe_sync():
+                                    vision_svc = VisionDescribeService()
+                                    descriptions = []
+                                    for img in images[:5]:
+                                        data_field = img.get('data') or img.get('url', '')
+                                        if not data_field:
+                                            continue
+                                        if _image_intent == 'ocr':
+                                            desc = vision_svc.describe_image(
+                                                data_field, user_intent=user_input or '', context=''
+                                            )
+                                        else:
+                                            desc = vision_svc.describe_prototype_for_testcase(
+                                                data_field, user_input or '', locale=ui_locale
+                                            )
+                                        if desc:
+                                            descriptions.append(desc)
+                                    return descriptions
+
+                                # 放到线程池，避免卡住事件循环；同时让 SSE 心跳/状态可以先发出去
+                                descriptions = await loop.run_in_executor(None, _describe_sync)
+                                if descriptions:
+                                    if _image_intent == 'ocr':
+                                        # OCR 结果也走流式：边到边出，避免一次性渲染“看起来卡住/突变”
+                                        for i, d in enumerate(descriptions):
+                                            piece = (str(d).strip() + "\n\n") if str(d).strip() else ""
+                                            if piece:
+                                                q.put({
+                                                    'type': 'stream',
+                                                    'payload': {
+                                                        'lane': 'think',
+                                                        'delta': piece,
+                                                        'react_phase': 'think',
+                                                        'stream_channel': 'content',
+                                                    }
+                                                })
+                                                # 让出事件循环，促使前端及时刷新（避免短时间内堆积成一次性 DOM 更新）
+                                                await asyncio.sleep(0)
+                                        # 直接返回视觉结论，不进入 ReAct 主循环
+                                        q.put({
+                                            'type': 'bye',
+                                            'payload': {
+                                                'findings': descriptions,
+                                                'steps_count': 0,
+                                                'duration': 0,
+                                                'thinking_time': 0,
+                                                'react_phase': 'think',
+                                            }
+                                        })
+                                        return
+                                    else:
+                                        _ip, _ul, _def = vision_image_block_labels(ui_locale)
+                                        _effective_input = (
+                                            _ip
+                                            + "\n"
+                                            + "\n\n".join(descriptions)
+                                            + f"\n\n{_ul} "
+                                            + (user_input or _def)
+                                        )
+                                        logger.info(
+                                            "[REACT] 已注入 %s 条图片描述，丰富后的 user_input 长度: %s",
+                                            len(descriptions),
+                                            len(_effective_input),
+                                        )
+                            except Exception as ve:
+                                logger.exception("[REACT] 视觉描述失败，将使用原始输入: %s", ve)
+                            finally:
+                                q.put({
+                                    'type': 'stream',
+                                    'payload': {
+                                        'lane': 'think',
+                                        'delta': '图片解析完成，开始推理…\n',
+                                        'react_phase': 'think',
+                                        'stream_channel': 'content',
+                                    }
+                                })
                         async for chunk in agent.handle_user_request_stream(
-                            user_input,
+                            _effective_input,
                             project_id=project_id,
                             plan_id=plan_id,
                             locale=ui_locale,
                             pending_diff_context=pending_diff_context,
+                            agent_session_id=react_request_id,
+                            long_memory_context=long_memory_context,
                         ):
-                            print(f"[REACT-thought] 产出 chunk: {chunk.get('type')}")
-                            q.put(chunk)
+                            if perf and not getattr(task, "_first_chunk_logged", False):
+                                setattr(task, "_first_chunk_logged", True)
+                                try:
+                                    _t = chunk.get("type") if isinstance(chunk, dict) else type(chunk).__name__
+                                except Exception:
+                                    _t = "unknown"
+                                logger.info(
+                                    "[PERF][react_api][%s] agent_first_chunk_ms=%.1f type=%s",
+                                    req_id,
+                                    _ms_since(t_req0),
+                                    _t,
+                                )
+                            try:
+                                logger.info("[REACT] 产出 chunk type=%s", chunk.get("type"))
+                            except Exception:
+                                logger.info("[REACT] 产出 chunk type=unknown")
+                            # 防御：先做一次深度 JSON 安全清洗，避免 Queue/callback 混入后续 SSE 序列化
+                            # 转换引擎内部格式为 v1 协议格式
+                            try:
+                                if isinstance(chunk, dict) and not is_wire_v1_packet(chunk):
+                                    # 引擎内部格式 {event: ...} 转换为 v1 格式 {type: ..., payload: ...}
+                                    for wire_packet in engine_dict_to_wire_packets(chunk):
+                                        q.put(_sse_sanitize_for_json(wire_packet))
+                                else:
+                                    q.put(_sse_sanitize_for_json(chunk))
+                            except Exception:
+                                q.put(chunk)
                     except Exception as e:
-                        print(f"[REACT-execution] 异常: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-                        q.put({'type': 'error', 'message': str(e)})
+                        logger.exception("[REACT-execution] 异常: %s", str(e))
+                        q.put({'type': 'err', 'payload': {'message': str(e)}})
                     finally:
-                        print(f"[REACT-planing] 任务结束")
+                        logger.info("[REACT] 任务结束")
                         q.put(done)
                 try:
                     loop.run_until_complete(task())
                 except Exception as e:
-                    print(f"[REACT-execution] 事件循环异常: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("[REACT-execution] 事件循环异常: %s", str(e))
                 finally:
                     loop.close()
 
@@ -619,18 +824,60 @@ def react_agent():
             t.daemon = True
             t.start()
 
+            _sse_seq = [0]
+
+            def _with_seq(d):
+                if not isinstance(d, dict):
+                    return d
+                o = _with_protocol_version(d)
+                _sse_seq[0] += 1
+                o['seq'] = _sse_seq[0]
+                return o
+
+            # 心跳间隔：默认 1 秒，避免“无 chunk 时前端 10 秒无感知”
+            try:
+                heartbeat_timeout = float(os.getenv("REACT_SSE_HEARTBEAT_TIMEOUT", "1"))
+            except Exception:
+                heartbeat_timeout = 1.0
+            if heartbeat_timeout <= 0:
+                heartbeat_timeout = 1.0
+
             while True:
                 try:
-                    item = q.get(timeout=10)  # 缩短超时，更频繁地发送心跳
+                    item = q.get(timeout=heartbeat_timeout)
                     if item is done:
                         break
+                    # 防御：任何非 dict 的异常入队都不应炸掉 SSE 线程
+                    if not isinstance(item, dict):
+                        try:
+                            bad_t = type(item).__name__
+                        except Exception:
+                            bad_t = "unknown"
+                        item = {
+                            "type": "err",
+                            "payload": {
+                                "message": f"SSE internal error: non-JSON item in queue ({bad_t})"
+                            },
+                        }
                     # 每条 data 后带一个注释，促使部分 WSGI 服务器尽快刷新，避免“修改中”长时间不更新
-                    payload = json.dumps(item, ensure_ascii=False)
+                    payload = _sse_json_dumps(_with_seq(item))
+                    if perf and not getattr(generate, "_first_data_logged", False):
+                        setattr(generate, "_first_data_logged", True)
+                        try:
+                            _t = item.get("type") if isinstance(item, dict) else type(item).__name__
+                        except Exception:
+                            _t = "unknown"
+                        logger.info(
+                            "[PERF][react_api][%s] sse_first_data_ms=%.1f type=%s",
+                            req_id,
+                            _ms_since(t_req0),
+                            _t,
+                        )
                     yield f"data: {payload}\n\n: \n\n"
                 except queue.Empty:
                     # 只有当线程还在运行时才发送心跳
                     if t.is_alive():
-                        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                        yield f"data: {_sse_json_dumps(_with_seq({'type': 'heartbeat'}))}\n\n"
                     else:
                         break
 
@@ -644,8 +891,7 @@ def react_agent():
         
     except Exception as e:
         import traceback
-        print(f"[REACT] ❌ 错误: {str(e)}")
-        traceback.print_exc()
+        logger.exception("[REACT] ❌ 错误: %s", str(e))
         return jsonify({'code': 500, 'message': str(e)}), 500
 
 
@@ -714,7 +960,47 @@ def modify_confirm():
     
     except Exception as e:
         db.session.rollback()
-        print(f"[MODIFY_CONFIRM] 修改失败: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("[MODIFY_CONFIRM] 修改失败: %s", e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/tasks', methods=['GET'])
+@login_required
+def api_list_agent_tasks():
+    """按 session_id（通常即单次 ReAct 的 react_request_id）查询持久化工具任务。"""
+    try:
+        session_id = (request.args.get('session_id') or '').strip()
+        if not session_id:
+            return jsonify({'success': False, 'error': '缺少 session_id'}), 400
+        limit = min(int(request.args.get('limit', 100)), 500)
+        from app import AgentTask
+
+        rows = (
+            AgentTask.query.filter(AgentTask.session_id == session_id[:64])
+            .order_by(AgentTask.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+        return jsonify(
+            {
+                'success': True,
+                'tasks': [
+                    {
+                        'id': r.id,
+                        'name': r.name,
+                        'status': r.status,
+                        'params': r.params,
+                        'result': r.result,
+                        'error': r.error,
+                        'dependencies': r.dependencies or [],
+                        'session_id': r.session_id,
+                        'created_at': r.created_at.isoformat() if r.created_at else None,
+                        'started_at': r.started_at.isoformat() if r.started_at else None,
+                        'finished_at': r.finished_at.isoformat() if r.finished_at else None,
+                    }
+                    for r in rows
+                ],
+            }
+        )
+    except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

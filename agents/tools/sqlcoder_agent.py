@@ -9,9 +9,11 @@ Text2SQL智能代理 - 使用LangChain + SQLDatabaseToolkit + GLM实现
 import os
 import re
 import sqlite3
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from enum import Enum
 import threading
+import time
+from collections import OrderedDict
 
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit, create_sql_agent
@@ -52,6 +54,16 @@ class Text2SQLAgent:
         self.llm_backend = llm_backend
         self.debug = debug
         self.execution_mode = execution_mode
+        self._sql_cache_lock = threading.Lock()
+        self._sql_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        try:
+            self._sql_cache_ttl_s = max(0, int((os.getenv("TEXT2SQL_SQL_CACHE_TTL", "30") or "30").strip()))
+        except Exception:
+            self._sql_cache_ttl_s = 30
+        try:
+            self._sql_cache_max = max(8, int((os.getenv("TEXT2SQL_SQL_CACHE_MAX", "128") or "128").strip()))
+        except Exception:
+            self._sql_cache_max = 128
         
         # 获取API Key
         self.api_key = api_key or os.getenv('ZHIPU_API_KEY') or self._get_api_key_from_config()
@@ -67,6 +79,9 @@ class Text2SQLAgent:
         
         # 加载schema信息
         self.schema_info = self._load_schema_info()
+        self._schema_prompt_ver: Optional[Tuple] = None
+        self._schema_prompt_cache_key: Optional[Tuple] = None
+        self._schema_prompt_cached: Optional[str] = None
         
         # 初始化沙箱执行器（如果需要）
         self._sandbox_executor = None
@@ -252,6 +267,35 @@ class Text2SQLAgent:
         except Exception as e:
             print(f"[Text2SQLAgent] 加载schema失败: {str(e)}，使用空schema")
             return schema_info
+
+    def _schema_cache_identity(self) -> tuple:
+        """SQLite 文件用 mtime 区分；避免重复解析整库 schema（generate_sql 热路径）。"""
+        path = self.database_path
+        if path.startswith("sqlite:///"):
+            path = path.replace("sqlite:///", "", 1)
+        try:
+            if path and os.path.isfile(path):
+                ap = os.path.abspath(path)
+                return ("file", ap, os.path.getmtime(ap))
+        except OSError:
+            pass
+        return ("path", path, 0.0)
+
+    def _get_schema_prompt_for_generate(self) -> str:
+        """带缓存的 schema 文本；DB 文件变更时重载 self.schema_info 再格式化。"""
+        ident = self._schema_cache_identity()
+        if self._schema_prompt_cache_key == ident and self._schema_prompt_cached:
+            return self._schema_prompt_cached
+        if getattr(self, "_schema_prompt_ver", None) != ident:
+            try:
+                self.schema_info = self._load_schema_info()
+            except Exception:
+                pass
+            self._schema_prompt_ver = ident
+        text = self._format_schema_for_prompt()
+        self._schema_prompt_cached = text
+        self._schema_prompt_cache_key = ident
+        return text
     
     def generate_sql(self, question: str, context: str = "", **kwargs) -> Dict[str, Any]:
         """
@@ -269,8 +313,15 @@ class Text2SQLAgent:
             print(f"[Text2SQLAgent] 生成SQL: {question}")
         
         try:
-            # 构建提示词
-            schema_info = self._format_schema_for_prompt()
+            cache_key = f"{self.llm_backend.value}|{question.strip()}|{context.strip()}"
+            cached = self._sql_cache_get(cache_key)
+            if cached is not None:
+                if self.debug:
+                    print("[Text2SQLAgent] 命中SQL生成缓存")
+                return cached
+
+            # 构建提示词（schema 按库文件 mtime 缓存，减少重复 get_table_info 开销）
+            schema_info = self._get_schema_prompt_for_generate()
             
             prompt = f"""你是一个SQL专家。请根据以下数据库结构和用户问题，生成正确的SQLite SQL查询语句。
 
@@ -287,6 +338,7 @@ class Text2SQLAgent:
 3. 使用SQLite语法
 4. 表名和字段名要准确匹配上面的数据库结构
 5. 如果需要排序，请使用合适的字段排序
+6. 优先性能：仅查询必要列，避免 SELECT *；可加 LIMIT 时必须加 LIMIT
 
 SQL查询语句:"""
 
@@ -301,7 +353,7 @@ SQL查询语句:"""
             if sql:
                 is_safe, safety_info = self._validate_sql_safety(sql)
                 
-                return {
+                result = {
                     'success': is_safe,
                     'sql': sql,
                     'backend': self.llm_backend.value,
@@ -310,6 +362,9 @@ SQL查询语句:"""
                     'error': None if is_safe else '生成的SQL包含潜在安全风险',
                     'raw_output': output[:500] if self.debug else None
                 }
+                if result.get("success"):
+                    self._sql_cache_put(cache_key, result)
+                return result
             else:
                 return {
                     'success': False,
@@ -547,9 +602,6 @@ SQL查询语句:"""
             is_update = sql_upper.startswith('UPDATE')
             is_delete = sql_upper.startswith('DELETE')
             
-            # 使用LangChain的SQLDatabase执行
-            result = self.db.run(sql)
-            
             # 解析结果
             # 如果是SQLite，直接连接执行
             if not self.database_path.startswith(('mysql', 'postgres')):
@@ -603,7 +655,8 @@ SQL查询语句:"""
                         'execution_mode': 'direct'
                     }
             else:
-                # MySQL/PostgreSQL使用LangChain的结果
+                # MySQL/PostgreSQL 使用 LangChain 的结果
+                result = self.db.run(sql)
                 return {
                     'success': True,
                     'data': result,
@@ -618,6 +671,29 @@ SQL查询语句:"""
                 'error': f'执行SQL失败: {str(e)}',
                 'sql': sql
             }
+
+    def _sql_cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+        if self._sql_cache_ttl_s <= 0:
+            return None
+        now = time.time()
+        with self._sql_cache_lock:
+            item = self._sql_cache.get(key)
+            if not item:
+                return None
+            if now - float(item.get("ts", 0.0)) > self._sql_cache_ttl_s:
+                self._sql_cache.pop(key, None)
+                return None
+            self._sql_cache.move_to_end(key)
+            return dict(item.get("value") or {})
+
+    def _sql_cache_put(self, key: str, value: Dict[str, Any]) -> None:
+        if self._sql_cache_ttl_s <= 0:
+            return
+        with self._sql_cache_lock:
+            self._sql_cache[key] = {"ts": time.time(), "value": dict(value or {})}
+            self._sql_cache.move_to_end(key)
+            while len(self._sql_cache) > self._sql_cache_max:
+                self._sql_cache.popitem(last=False)
     
     def _add_limit_to_sql(self, sql: str, limit: int) -> str:
         """为SQL添加LIMIT子句"""

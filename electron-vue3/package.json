@@ -5,7 +5,9 @@
   "type": "module",
   "main": "src/electron/main.js",
   "scripts": {
+    "predev": "node scripts/check-terminal-deps.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/check-terminal-deps.mjs",
     "build": "vite build",
     "electron:dev": "vite & electron ."
   },
@@ -17,6 +19,7 @@
     "esbuild": "^0.27.4",
     "marked": "^17.0.4",
     "monaco-editor": "^0.54.0",
+    "socket.io-client": "^4.8.3",
     "vue": "^3.4.0",
     "vue-advanced-chat": "^2.1.0",
     "vue-i18n": "^9.14.4",
