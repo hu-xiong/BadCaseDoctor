@@ -112,7 +112,19 @@ class IntelligentDevOpsAgent:
         # 注册grep工具
         from agents.tools.grep_tool import GrepTool
         self.tool_registry.register(GrepTool())
-            
+
+        from agents.tools.chitchat_tool import ChitchatTool
+
+        self.tool_registry.register(ChitchatTool(self.llm))
+
+        from agents.tools.client_local_bridge_tool import ClientLocalBridgeTool
+
+        self.tool_registry.register(ClientLocalBridgeTool())
+
+        from agents.tools.terminal_tool import TerminalTool
+
+        self.tool_registry.register(TerminalTool())
+
         # 注册modify工具
         from agents.tools.modify_tool import ModifyTool
         self.tool_registry.register(ModifyTool(self.db))
@@ -168,6 +180,9 @@ class IntelligentDevOpsAgent:
         pending_diff_context: list = None,
         agent_session_id: str = None,
         long_memory_context: dict = None,
+        hint_project_name: str = None,
+        hint_plan_name: str = None,
+        client_shell: dict = None,
     ):
         """流式处理用户请求。plan_id 为当前迭代计划ID时，grep 会只检索该计划下的记录（人类式先看本迭代）。"""
         _llm = self.llm
@@ -198,6 +213,9 @@ class IntelligentDevOpsAgent:
             pending_diff_context=pending_diff_context,
             agent_session_id=agent_session_id,
             long_memory_prefetch=long_memory_context,
+            hint_project_name=hint_project_name,
+            hint_plan_name=hint_plan_name,
+            client_shell=client_shell if isinstance(client_shell, dict) else None,
         ):
             yield pkt
 

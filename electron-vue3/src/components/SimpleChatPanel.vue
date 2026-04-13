@@ -1,5 +1,16 @@
 <template>
   <div class="simple-chat-panel">
+    <div v-if="agentLocalProxyHint" class="agent-local-proxy-hint" role="status">
+      <span class="agent-local-proxy-hint-text">{{ agentLocalProxyHint }}</span>
+      <button
+        type="button"
+        class="agent-local-proxy-hint-dismiss"
+        :title="t('chat.closePreview')"
+        @click="agentLocalProxyHint = ''"
+      >
+        ×
+      </button>
+    </div>
     <!-- 图片大图预览弹层 -->
     <Teleport to="body">
       <div v-if="imagePreviewSrc" class="image-preview-overlay" @click.self="closeImagePreview">
@@ -16,8 +27,8 @@
       </div>
       
       <div 
-        v-for="message in messages" 
-        :key="message.id"
+        v-for="(message, messageIdx) in messages" 
+        :key="messageListRowKey(message, messageIdx)"
         class="message-block"
         :data-message-id="message.id"
       >
@@ -27,17 +38,26 @@
             <span class="message-author">{{ t('chat.me') }}</span>
             <span class="message-time">{{ message.time }}</span>
           </div>
-          <div v-if="editingUserMessageId !== message.id" class="user-message-bubble" tabindex="0" @click="beginEditUserMessage(message)">
-            <template v-if="message.images && message.images.length > 0">
-              <div class="user-message-images">
-                <img v-for="(img, i) in message.images" :key="i" :src="img.data" class="user-msg-thumb" :alt="t('chat.uploadImageAlt')" @click.stop="openImagePreview(img.data)" />
-              </div>
-            </template>
-            <template v-if="message.content">{{ message.content }}</template>
-          </div>
-
-          <!-- 点击用户消息后：变成与底部一致的可编辑输入框 + 控件 -->
-          <div v-else class="inline-composer">
+          <div class="user-message-toggle-wrap">
+            <div
+              v-if="!isUserMessageEditingInline(message)"
+              class="user-message-bubble"
+              tabindex="0"
+              role="button"
+              @pointerdown="onUserBubblePointerDown($event, message)"
+              @keydown.enter.prevent="scheduleBeginEditUserMessage(message)"
+            >
+              <template v-if="message.images && message.images.length > 0">
+                <div class="user-message-images">
+                  <img v-for="(img, i) in message.images" :key="i" :src="img.data" class="user-msg-thumb" :alt="t('chat.uploadImageAlt')" @click.stop="openImagePreview(img.data)" />
+                </div>
+              </template>
+              <template v-if="message.content">{{ message.content }}</template>
+            </div>
+            <div
+              v-else
+              class="inline-composer"
+            >
             <div class="input-box-wrapper">
               <textarea
                 ref="inlineTextareaRef"
@@ -101,7 +121,8 @@
                   </button>
                   <button
                     v-else
-                    @click="handleStop"
+                    type="button"
+                    @click.stop="handleStop"
                     class="stop-icon-button"
                     :title="t('chat.stop')"
                   >
@@ -112,6 +133,7 @@
                 </div>
               </div>
             </div>
+          </div>
           </div>
         </div>
         
@@ -131,7 +153,7 @@
               (
                 !message.steps ||
                 message.steps.length === 0 ||
-                message._placeholderSteps
+                (message._placeholderSteps && !substantiveThinkPhase(message))
               )
             "
           >
@@ -149,9 +171,9 @@
                     
 
                     
-          <!-- ReAct think：待办步骤出现前，在此展示流式推理（文字 + 并入 todo XML），SHOW_FIRST_ROUND_THOUGHT_UI -->
+          <!-- ReAct think：占位阶段 AgentTaskRun 隐藏时在此展示流式推理；揭壳后改由 AgentTaskRun 内展示，避免双栏 -->
           <div
-            v-if="false && showFirstThinkBlock(message) && (!message.steps || message.steps.length === 0)"
+            v-if="showFirstThinkBlock(message) && !!message._placeholderSteps"
             class="cursor-reasoning-wrap"
           >
             <div class="cursor-reasoning-block">
@@ -171,21 +193,23 @@
               </button>
               <div v-show="!message.thoughtCollapsed" class="cursor-reason-feed">
                 <div class="cursor-reason-feed-stack">
-                  <!-- 流式中：双轨 pre；未分轨时旧版打字机 -->
+                  <!-- 流式中：content 轨与 reasoning 轨同时存在时用双 pre；仅 reasoning 时用打字机缓冲（避免多包同帧合并后 thinkReasoningDraft 整段闪现） -->
                   <template
-                    v-if="message._reasoningPhaseLive && (thinkDraftReasoningVisible(message) || thinkDraftContentVisible(message))"
+                    v-if="message._reasoningPhaseLive && thinkDraftContentVisible(message)"
                   >
                     <pre
                       v-if="thinkDraftReasoningVisible(message)"
                       class="react-sse-stream react-sse-stream--reasoning"
                     >{{ message.thinkReasoningDraft }}</pre>
                     <pre
-                      v-if="thinkDraftContentVisible(message)"
                       class="react-sse-stream react-sse-stream--content"
                     >{{ message.thinkContentDraft }}</pre>
                   </template>
                   <div
-                    v-else-if="message._reasoningPhaseLive && reasoningPlainVisible(message)"
+                    v-else-if="
+                      message._reasoningPhaseLive &&
+                      (thinkDraftReasoningVisible(message) || reasoningPlainVisible(message))
+                    "
                     class="cursor-reason-plain"
                   >{{ reasoningPlainForDisplay(message) }}</div>
                   <!-- 流式结束：双栏 Markdown 或旧版单栏 -->
@@ -214,16 +238,113 @@
             </div>
           </div>
 
-          <!-- Cursor 式：顶部计划 + 分步流式执行日志（沙箱预览在下方独立区域） -->
+          <!-- 单根包裹，避免大块 fragment 与 Teleport 交错 patch -->
+          <div class="ai-agent-run-stack">
+          <!-- Cursor 式：顶部计划 + 分步流式执行日志；修改类沙箱在「最后一个 modify 步之后」内嵌，避免后续 create 等插在 modify 与沙箱之间 -->
           <AgentTaskRun
-            v-if="message.steps && message.steps.length > 0 && !message._placeholderSteps"
-            :steps="message.steps"
+            v-if="getAgentTaskRunViewForAi(message).showSteps"
+            :steps="getAgentTaskRunViewForAi(message).steps"
+            :plan-memo-rows="planMemoRowsForMessage(message)"
             :instantPlan="!!message.isHistorical"
-            :suppress-plan-overview="message._planMemoRevealReady === false || message.reactPlanPanelSuppressed === true"
+            :suppress-plan-overview="suppressPlanOverviewForMessage(message)"
             :hide-preface-placeholder="!!message._placeholderSteps && !substantiveThinkPhase(message)"
             :modify-sandbox-pending="messageHasPendingSandboxConfirm(message)"
+            :sandbox-after-modify-step-index="getAgentTaskRunViewForAi(message).embedIdx"
             @grep-bug-click="handleNavigation"
-          />
+          >
+            <template #modifySandbox>
+              <div :id="'sandbox-mod-embed-' + message.id" class="agent-modify-sandbox-anchor" />
+            </template>
+          </AgentTaskRun>
+
+          <div
+            v-if="message.clientLocalRunCards && message.clientLocalRunCards.length"
+            class="client-local-run-section"
+          >
+            <div
+              v-for="(lc, lcIdx) in message.clientLocalRunCards"
+              :key="'lcr-' + message.id + '-' + lcIdx"
+              class="client-local-run-card findings-card"
+            >
+              <div class="client-local-run-head">
+                <span class="card-icon">⬇</span>
+                <span class="card-title">{{ lc.title || t('chat.localRunDownload') }}</span>
+              </div>
+              <p class="client-local-run-body text-muted small">{{ lc.body || t('chat.localRunIntro') }}</p>
+
+              <template v-if="lc.artifacts && lc.artifacts.length">
+                <p class="client-local-run-os small text-muted">
+                  {{ t('chat.localRunDetectedOs', { os: localRunOsLabel(detectClientOS()) }) }}
+                </p>
+                <div
+                  v-for="art in lc.artifacts"
+                  :key="(art.os || '') + '-' + (art.filename || '')"
+                  class="client-local-run-platform"
+                >
+                  <div class="client-local-run-platform-title">
+                    <strong>{{ art.label || art.os }}</strong>
+                    <span v-if="art.available === false" class="badge bg-warning text-dark ms-2">{{ t('chat.localRunBinaryMissing') }}</span>
+                  </div>
+                  <div class="client-local-run-actions">
+                    <a
+                      class="btn btn-sm btn-primary"
+                      :href="localRunArtifactUrl(art)"
+                      :download="art.filename"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >{{ t('chat.localRunDownload') }}</a>
+                    <template v-if="art.os === 'win'">
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunWinPowerShellDownload(art))">
+                        {{ t('chat.localRunCopyPs') }}
+                      </button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunWinCurlDownload(art))">
+                        {{ t('chat.localRunCopyCurlExe') }}
+                      </button>
+                      <button type="button" class="btn btn-sm btn-success" @click="copyLocalRunLine(localRunWinRunLine(art))">
+                        {{ t('chat.localRunCopyRun') }}
+                      </button>
+                    </template>
+                    <template v-else>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunUnixWget(art))">
+                        {{ t('chat.localRunCopyWget') }}
+                      </button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunUnixCurl(art))">
+                        {{ t('chat.localRunCopyCurl') }}
+                      </button>
+                      <button type="button" class="btn btn-sm btn-success" @click="copyLocalRunLine(localRunUnixChmodRun(art))">
+                        {{ t('chat.localRunCopyRun') }}
+                      </button>
+                    </template>
+                  </div>
+                  <pre v-if="art.os === 'win'" class="client-local-run-pre">{{ localRunWinPowerShellDownload(art) }}</pre>
+                  <pre v-else class="client-local-run-pre">{{ localRunUnixWget(art) + '\n' + localRunUnixChmodRun(art) }}</pre>
+                </div>
+              </template>
+              <template v-else>
+                <div class="client-local-run-actions">
+                  <a
+                    class="btn btn-sm btn-primary"
+                    :href="localRunAbsoluteUrl(lc)"
+                    :download="localRunFilename(lc)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >{{ t('chat.localRunDownload') }}</a>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunLegacyWgetLine(lc))">
+                    {{ t('chat.localRunCopyWget') }}
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunLegacyCurlLine(lc))">
+                    {{ t('chat.localRunCopyCurl') }}
+                  </button>
+                  <button type="button" class="btn btn-sm btn-success" @click="copyLocalRunLine(localRunLegacyRunLine(lc))">
+                    {{ t('chat.localRunCopyRun') }}
+                  </button>
+                </div>
+                <pre class="client-local-run-pre" aria-label="wget">{{ localRunLegacyWgetLine(lc) }}</pre>
+                <pre class="client-local-run-pre" aria-label="run">{{ localRunLegacyRunLine(lc) }}</pre>
+              </template>
+              <p v-if="localRunCopyTip" class="client-local-run-tip small text-success">{{ localRunCopyTip }}</p>
+            </div>
+          </div>
           
           <!-- 工具执行卡片 - 隐藏，已整合到TodoTimeline中 -->
           <!-- <ExecutionResult 
@@ -259,6 +380,11 @@
             </div>
           </div>
           
+          <div :id="'sandbox-mod-below-' + message.id" class="agent-modify-sandbox-anchor" />
+          <Teleport
+            v-if="sandboxTeleportTargetExists(message) && (message.modifyGroups?.length || message.modifyNavigation)"
+            :to="sandboxModifyTeleportTargetForMessage(message)"
+          >
           <!-- 修改预览导航区域 - 沙箱预览：整行点击跳转，下三角=展开/收起，无单独跳转按钮 -->
           <div v-if="message.modifyGroups && message.modifyGroups.length > 0" class="modify-navigation-section">
             <template v-for="(group, groupIdx) in message.modifyGroups" :key="groupIdx">
@@ -455,6 +581,8 @@
           >
             {{ t('chat.alreadyAdoptedLocate') }}
           </div>
+          </Teleport>
+          </div>
           
           <!-- Bug 导航：grep 多结果；已挂到对应 grep 步骤「执行结果」下时不重复显示 -->
           <div
@@ -632,7 +760,8 @@
             </button>
             <button 
               v-else
-              @click="handleStop" 
+              type="button"
+              @click.stop="handleStop" 
               class="stop-icon-button"
               :title="t('chat.stop')"
             >
@@ -676,6 +805,12 @@ import {
   DETAIL_FIELDS,
   extractToolName
 } from '../composables/useAgentStream.js'
+import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
+import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
+import {
+  localGoProxyOk as sharedLocalGoProxyRef,
+  pingLocalGoProxy as sharedPingLocalGoProxy
+} from '../composables/useLocalGoProxyStatus'
 
 // Props
 const props = defineProps({
@@ -688,6 +823,12 @@ const props = defineProps({
     type: Number,
     required: false,
     default: null
+  },
+  /** 已由项目页拉取时传入，后端 gather 可跳过 Redis/MySQL 查项目名（压低首包延迟） */
+  projectDisplayName: {
+    type: String,
+    required: false,
+    default: ''
   }
 })
 
@@ -697,6 +838,11 @@ const { t } = useI18n()
 
 /** 由 ProjectDetail 在打开项目时拉取（mode=recent），避免每条对话在后端做向量检索 */
 const projectLongMemoryContext = inject('projectLongMemoryContext', null)
+
+const localGoProxyOk = inject('localGoProxyOk', sharedLocalGoProxyRef)
+const pingLocalGoProxy = inject('pingLocalGoProxy', sharedPingLocalGoProxy)
+/** 浏览器 + Agent：本地代理未运行时顶部提示 */
+const agentLocalProxyHint = ref('')
 const longMemoryContextForReact = () => {
   try {
     const r = projectLongMemoryContext
@@ -894,10 +1040,144 @@ function isPlaceholderSessionTitle(title) {
     return '📍'
   }
 
+  const detectClientOS = () => {
+    if (typeof navigator === 'undefined') return 'unknown'
+    const ua = navigator.userAgent || ''
+    if (/Windows NT/i.test(ua)) return 'win'
+    if (/Mac OS X|Macintosh/i.test(ua)) return 'darwin'
+    if (/Linux/i.test(ua)) return 'linux'
+    return 'unknown'
+  }
+
+  const localRunOsLabel = (os) => {
+    if (os === 'win') return t('chat.localRunOsWin')
+    if (os === 'linux') return t('chat.localRunOsLinux')
+    if (os === 'darwin') return t('chat.localRunOsDarwin')
+    return t('chat.localRunOsUnknown')
+  }
+
+  const localRunArtifactUrl = (art) => {
+    const path = art?.download_path || ''
+    if (!path) return ''
+    try {
+      if (typeof window === 'undefined') return path
+      return new URL(path, window.location.origin).href
+    } catch {
+      return path
+    }
+  }
+
+  const localRunWinPowerShellDownload = (art) => {
+    const url = localRunArtifactUrl(art)
+    const fn = art?.filename || 'badcase-local-proxy.exe'
+    if (!url) return ''
+    return `Invoke-WebRequest -Uri ${JSON.stringify(url)} -OutFile ${JSON.stringify(fn)}`
+  }
+  const localRunWinCurlDownload = (art) => {
+    const url = localRunArtifactUrl(art)
+    const fn = art?.filename || 'badcase-local-proxy.exe'
+    if (!url) return ''
+    return `curl.exe -fsSL ${JSON.stringify(url)} -o ${JSON.stringify(fn)}`
+  }
+  const localRunWinRunLine = (art) => {
+    const fn = art?.filename || 'badcase-local-proxy.exe'
+    return `.\\${fn}`
+  }
+
+  const localRunUnixWget = (art) => {
+    const url = localRunArtifactUrl(art)
+    const fn = art?.filename || 'badcase-local-proxy'
+    if (!url) return ''
+    return `wget -O ${JSON.stringify(fn)} ${JSON.stringify(url)}`
+  }
+  const localRunUnixCurl = (art) => {
+    const url = localRunArtifactUrl(art)
+    const fn = art?.filename || 'badcase-local-proxy'
+    if (!url) return ''
+    return `curl -fsSL ${JSON.stringify(url)} -o ${JSON.stringify(fn)}`
+  }
+  const localRunUnixChmodRun = (art) => {
+    const fn = art?.filename || 'badcase-local-proxy'
+    const q = JSON.stringify(fn)
+    const bare = q.slice(1, -1)
+    return `chmod +x ${q} && ./${bare}`
+  }
+
+  const localRunAbsoluteUrl = (card) => {
+    const path = card?.download_path || ''
+    if (!path) return ''
+    try {
+      if (typeof window === 'undefined') return path
+      return new URL(path, window.location.origin).href
+    } catch {
+      return path
+    }
+  }
+  const localRunFilename = (card) => {
+    const fn = (card?.filename || 'script.sh').trim()
+    return fn || 'script.sh'
+  }
+  const localRunLegacyWgetLine = (card) => {
+    const url = localRunAbsoluteUrl(card)
+    const fn = localRunFilename(card)
+    if (!url) return ''
+    return `wget -O ${JSON.stringify(fn)} ${JSON.stringify(url)}`
+  }
+  const localRunLegacyCurlLine = (card) => {
+    const url = localRunAbsoluteUrl(card)
+    const fn = localRunFilename(card)
+    if (!url) return ''
+    return `curl -fsSL ${JSON.stringify(url)} -o ${JSON.stringify(fn)}`
+  }
+  const localRunLegacyRunLine = (card) => {
+    const fn = localRunFilename(card)
+    const q = JSON.stringify(fn)
+    const bare = q.slice(1, -1)
+    return `chmod +x ${q} && ./${bare}`
+  }
+  const localRunCopyTip = ref('')
+  let localRunCopyTimer = null
+  const copyLocalRunLine = async (text) => {
+    const line = String(text || '').trim()
+    if (!line) return
+    try {
+      await navigator.clipboard.writeText(line)
+      localRunCopyTip.value = t('chat.localRunCopied')
+      if (localRunCopyTimer) clearTimeout(localRunCopyTimer)
+      localRunCopyTimer = setTimeout(() => {
+        localRunCopyTip.value = ''
+      }, 2200)
+    } catch (e) {
+      console.error('[localRun] clipboard', e)
+    }
+  }
+
 const inputMessage = ref('')
 const editingUserMessageId = ref(null)
+/** 与 message.id 比较时用字符串，避免历史 id 为 string、本地为 number 时误判为「正在编辑」导致气泡不渲染、点击无门 */
+const isUserMessageEditingInline = (msg) => {
+  if (editingUserMessageId.value == null || !msg) return false
+  return String(editingUserMessageId.value) === String(msg.id)
+}
+
+/** 列表项 key：role + id + index（勿在编辑态改 key：整行 remount 易与 Teleport 拆卸顺序冲突 → parentNode null） */
+const messageListRowKey = (m, idx) => {
+  const role = m?.isUser ? 'u' : 'a'
+  const id = m?.id != null ? String(m.id) : 'na'
+  return `${role}-${id}-${idx}`
+}
+
 const inlineInputMessage = ref('')
 const inlineTextareaRef = ref(null)
+/** v-for 内 ref 可能为数组；需在调用处取真实 DOM */
+const unwrapTextareaEl = (raw) => {
+  if (raw == null) return null
+  if (Array.isArray(raw)) {
+    const el = raw.find((x) => x && x.nodeType === 1)
+    return el || null
+  }
+  return raw && raw.nodeType === 1 ? raw : null
+}
 const imageFileInputRef = ref(null)
 const pendingImages = ref([])
 const isDragOver = ref(false)
@@ -970,6 +1250,8 @@ const handleDocumentPointerDown = (e) => {
   if (!target) return
   // 点击在内联编辑器内部则不处理
   if (target.closest && target.closest('.inline-composer')) return
+  // 点到另一条用户气泡时不要在这里 cancel：同步卸载/重排会导致随后的 click 丢失，表现为“点了没反应”
+  if (target.closest && target.closest('.user-message-bubble')) return
   cancelEditUserMessage()
 }
 const selectedAgent = ref('agent')
@@ -984,6 +1266,10 @@ const textareaRef = ref(null)
 const isSending = ref(false)
 const isComposing = ref(false)  // 输入法组合状态
 const abortController = ref(null)  // 用于终止请求
+/** 当前 ReAct/聊天 SSE 的 body reader；与 AbortController 配合，避免仅 abort 时 read 仍挂起（Electron 长连接） */
+const reactSseReaderRef = ref(null)
+/** 与 SSE 信封 request_id 一致，停止时 POST /api/agent/react/cancel 让后端主循环合作退出 */
+const reactStreamRequestIdRef = ref(null)
 const currentProjectId = ref(null)
 // 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`，点击下三角切换
 const sandboxExpanded = ref({})
@@ -994,6 +1280,62 @@ const toggleSandboxExpand = (messageId, groupIdx) => {
   sandboxExpanded.value = { ...sandboxExpanded.value, [key]: sandboxExpanded.value[key] === false }
 }
 
+/** 最后一个标题含 modify 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
+const lastModifyToolStepIndex = (steps) => {
+  if (!Array.isArray(steps)) return -1
+  let last = -1
+  for (let i = 0; i < steps.length; i++) {
+    const title = String(steps[i]?.title || '').toLowerCase()
+    if (title.includes('modify')) last = i
+  }
+  return last
+}
+
+/**
+ * 已 prune 的 steps 上计算沙箱嵌入下标（与 AgentTaskRun 共用同一数组，避免模板重复剪枝）。
+ */
+const sandboxEmbedAfterModifyStepIndexFromSteps = (message, steps) => {
+  if (!message || message.isUser) return -1
+  if (message._placeholderSteps) return -1
+  const hasModifyUi =
+    (message.modifyGroups && message.modifyGroups.length > 0) ||
+    (message.modifyNavigation && !message.modifyNavigation.is_create)
+  if (!hasModifyUi) return -1
+  if (!Array.isArray(steps) || steps.length < 2) return -1
+  const lastMod = lastModifyToolStepIndex(steps)
+  if (lastMod < 0 || lastMod >= steps.length - 1) return -1
+  return lastMod
+}
+
+/** 剪枝步骤 + 嵌入下标（同一 tick 内可能对同一 message 读多次） */
+const getAgentTaskRunViewForAi = (message) => {
+  const steps = pruneTrailingPhantomAgentSteps(message?.steps || [])
+  return {
+    showSteps: steps.length > 0 && !message._placeholderSteps,
+    steps,
+    embedIdx: sandboxEmbedAfterModifyStepIndexFromSteps(message, steps)
+  }
+}
+
+/**
+ * 沙箱 Teleport 固定落到 below 锚点：embed 在 AgentTaskRun 子树内，与 Teleport 同条消息一起拆时易出现
+ *「目标先被卸掉、Teleport 子节点再 remove」→ parentNode === null。below 与本组件内 Teleport 兄弟、先于内容挂载，更稳。
+ */
+const sandboxModifyTeleportTargetForMessage = (message) => {
+  const idPart = message?.id != null ? String(message.id) : 'na'
+  return `#sandbox-mod-below-${idPart}`
+}
+
+/** 检查 Teleport 目标元素是否存在，避免卸载时 patch 崩溃 */
+const sandboxTeleportTargetExists = (message) => {
+  try {
+    const selector = sandboxModifyTeleportTargetForMessage(message)
+    if (!selector) return false
+    return !!document.querySelector(selector)
+  } catch {
+    return false
+  }
+}
 
 // 将运行中状态收敛（停止/异常时用）
 const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
@@ -1013,9 +1355,10 @@ const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
     })
   }
 
-  if (aiMessage.agentResult) {
-    aiMessage.agentResult.status = reason === 'stopped' ? 'cancelled' : 'failed'
+  if (!aiMessage.agentResult || typeof aiMessage.agentResult !== 'object') {
+    aiMessage.agentResult = { findings: [], recommendations: [] }
   }
+  aiMessage.agentResult.status = reason === 'stopped' ? 'cancelled' : 'failed'
 
   // 顶部提示同步更新，避免还停留在“修改中/执行中”
   if (typeof aiMessage.understanding === 'string') {
@@ -1064,12 +1407,29 @@ const reasoningMarkdownStreamVisible = (m) => {
 }
 
 const _thinkDraftStrip = (s) => String(s || '').replace(INVISIBLE_REASONING_CHARS, '').trim()
-const thinkDraftReasoningVisible = (m) => _thinkDraftStrip(m?.thinkReasoningDraft).length >= 2
-const thinkDraftContentVisible = (m) => _thinkDraftStrip(m?.thinkContentDraft).length >= 2
+const _thinkDraftMeaningful = (s) => {
+  const t = _thinkDraftStrip(s)
+  return t.length >= 1 && /[\u4e00-\u9fa5A-Za-z0-9]/.test(t)
+}
+/** 流式 live：1 个有效字即可上屏；与 AgentTaskRun plain 流一致，避免等满 2 字 */
+const thinkDraftReasoningVisible = (m) => {
+  const t = _thinkDraftStrip(m?.thinkReasoningDraft)
+  if (m?._reasoningPhaseLive && t.length >= 1) return _thinkDraftMeaningful(m?.thinkReasoningDraft)
+  return t.length >= 2
+}
+const thinkDraftContentVisible = (m) => {
+  const t = _thinkDraftStrip(m?.thinkContentDraft)
+  if (m?._reasoningPhaseLive && t.length >= 1) return _thinkDraftMeaningful(m?.thinkContentDraft)
+  return t.length >= 2
+}
 
-/** SSE 上的 react_phase 是否为 ReAct「思考」阶段（think）；未带字段时按旧协议视为 think */
+/** SSE 上的 react_phase 是否为统一流 Thought 轨（含子过程 observe / decide）；未带字段时按旧协议视为 think */
 const sseIsReactThinkPhase = (reactPhase) =>
-  reactPhase == null || reactPhase === '' || reactPhase === 'think'
+  reactPhase == null ||
+  reactPhase === '' ||
+  reactPhase === 'think' ||
+  reactPhase === 'observe' ||
+  reactPhase === 'decide'
 
 /**
  * 是否展示消息顶部「首轮 Thought」区（think 阶段、待办步骤出现前）
@@ -1295,7 +1655,10 @@ const flushReasoningTypewriter = (msg) => {
 
 /**
  * 深度思考：reasoningContent 为后端原文；历史回放可打字机追赶
- * SSE live（_reasoningPhaseLive）时与原文同步，保证与 delta 同一节奏显示
+ * SSE live（_reasoningPhaseLive）时也必须逐帧追赶展示：若把 reasoningDisplayContent 一次性对齐全文，
+ * 同一事件循环内多条 SSE 会先合并进 reasoningContent，再只触发一次本函数，导致观察段等出现「整段一次性出现」。
+ *
+ * 优化：当 token 到达太快时（积压大且间隔短），走 _runFastTypewriter 微延迟追赶。
  */
 const scheduleReasoningTypewriter = (msg) => {
   if (!msg) return
@@ -1305,9 +1668,48 @@ const scheduleReasoningTypewriter = (msg) => {
   }
   if (msg._reasoningPhaseLive) {
     cancelReasoningTypewriter(msg)
-    msg.reasoningDisplayContent = msg.reasoningContent || ''
+    const full = msg.reasoningContent || ''
+    const vis = msg.reasoningDisplayContent || ''
+    const backlog = full.length - vis.length
+    const now = Date.now()
+    if (!msg._typewriterLastUpdate) msg._typewriterLastUpdate = now
+    const timeSinceLastUpdate = now - msg._typewriterLastUpdate
+
+    if (backlog > 50 && timeSinceLastUpdate < 50 && !msg._typewriterFastMode) {
+      msg._typewriterFastMode = true
+      msg._typewriterTargetContent = full
+      msg.reasoningStreamActive = true
+      _runFastTypewriter(msg)
+      return
+    }
+
+    msg._typewriterLastUpdate = now
     msg.reasoningStreamActive = true
     scrollChatDuringReasoningStream()
+
+    const loopLive = () => {
+      msg._reasoningTypewriterRaf = null
+      const f = msg.reasoningContent || ''
+      let v = msg.reasoningDisplayContent || ''
+      if (v.length > f.length) {
+        msg.reasoningDisplayContent = f
+        v = f
+      }
+      if (v.length >= f.length) {
+        scrollChatDuringReasoningStream()
+        return
+      }
+      const b = f.length - v.length
+      const n = Math.min(b, Math.max(1, Math.ceil(b / 14)))
+      msg.reasoningDisplayContent = f.slice(0, v.length + n)
+      scrollChatDuringReasoningStream()
+      if ((msg.reasoningDisplayContent || '').length < (msg.reasoningContent || '').length) {
+        msg._reasoningTypewriterRaf = requestAnimationFrame(loopLive)
+      }
+    }
+    if (!msg._typewriterFastMode && backlog > 0 && msg._reasoningTypewriterRaf == null) {
+      msg._reasoningTypewriterRaf = requestAnimationFrame(loopLive)
+    }
     return
   }
   msg.reasoningStreamActive = true
@@ -1337,6 +1739,58 @@ const scheduleReasoningTypewriter = (msg) => {
   }
   if (msg._reasoningTypewriterRaf != null) return
   msg._reasoningTypewriterRaf = requestAnimationFrame(loop)
+}
+
+/**
+ * 快速输出模式：扩展思维后大量 token 同时到达时使用微延迟模拟打字效果
+ * 注意：始终使用最新的 reasoningContent，而不是快照
+ */
+const _runFastTypewriter = (msg) => {
+  if (!msg || !msg._typewriterFastMode) return
+  
+  const loop = () => {
+    if (!msg._typewriterFastMode) return
+    
+    // 使用最新的 reasoningContent，而不是快照
+    const target = msg.reasoningContent || ''
+    const current = msg.reasoningDisplayContent || ''
+    
+    if (current.length >= target.length && !msg._reasoningPhaseLive) {
+      // 流已结束且已追上，真正结束
+      msg.reasoningDisplayContent = target
+      msg._typewriterFastMode = false
+      msg._typewriterTargetContent = null
+      msg.reasoningStreamActive = false
+      scrollChatDuringReasoningStream()
+      return
+    }
+
+    const backlog = target.length - current.length
+    // live 且已追上：避免 setTimeout 空转，等新 delta 再由 scheduleReasoningTypewriter 拉起
+    if (backlog <= 0) {
+      msg.reasoningStreamActive = true
+      scrollChatDuringReasoningStream()
+      if (msg._reasoningPhaseLive) {
+        msg._typewriterFastMode = false
+      }
+      return
+    }
+    // 快速模式下每帧追加更多字符，但仍有延迟感
+    const charsPerFrame = Math.max(3, Math.min(12, Math.ceil(backlog / 8)))
+    msg.reasoningDisplayContent = target.slice(0, current.length + charsPerFrame)
+    msg.reasoningStreamActive = true
+    scrollChatDuringReasoningStream()
+    
+    // 使用 setTimeout 创建微延迟（16-32ms），模拟打字机节奏
+    const delay = Math.max(16, Math.min(32, 24 - Math.floor(charsPerFrame / 2)))
+    setTimeout(() => {
+      if (msg._typewriterFastMode) {
+        requestAnimationFrame(loop)
+      }
+    }, delay)
+  }
+  
+  requestAnimationFrame(loop)
 }
 
 /** 流式阶段展示用纯文本（Vue 插值自动转义，不做 marked）*/
@@ -1483,16 +1937,22 @@ const formatTodosForTimeline = (steps, message) => {
           try {
             const data = typeof output === 'string' ? JSON.parse(output) : output
             const inner = data.data || data
-            const hasCreatePreview = inner.preview?.title || (inner.diff && inner.diff.length)
-            if (inner.success !== false && !inner.created_id && hasCreatePreview) {
-              const t = inner.preview?.title || inner.target || '待确认'
-              resultSummary = inner.message ? String(inner.message).slice(0, 120) : `新建预览就绪: ${t}`
-            } else if (inner.created_id) {
-              resultSummary = `已创建，ID=${inner.created_id}`
-            } else if (inner.error) {
-              resultSummary = `创建失败: ${inner.error}`
+            if (inner.success === false || data.success === false) {
+              resultSummary = `创建失败: ${inner.error || data.error || t('chat.stepUnknownErr')}`
             } else {
-              resultSummary = '执行完成'
+              const hasCreatePreview = inner.preview?.title || (inner.diff && inner.diff.length)
+              if (inner.success !== false && !inner.created_id && hasCreatePreview) {
+                const previewTitle = inner.preview?.title || inner.target || '待确认'
+                resultSummary = inner.message
+                  ? String(inner.message).slice(0, 120)
+                  : `新建预览就绪: ${previewTitle}`
+              } else if (inner.created_id) {
+                resultSummary = `已创建，ID=${inner.created_id}`
+              } else if (inner.error) {
+                resultSummary = `创建失败: ${inner.error}`
+              } else {
+                resultSummary = '执行完成'
+              }
             }
           } catch {
             resultSummary = '执行完成'
@@ -1547,6 +2007,20 @@ const resolveStreamStepIndex = (raw, steps) => {
   if (!Number.isFinite(n) || n < 0) return null
   if (!Array.isArray(steps) || !steps[n]) return null
   return n
+}
+
+/** 仅当后端下发过计划（plan / todos）时才有行；无则规划备忘整块不渲染 */
+const planMemoRowsForMessage = (msg) => {
+  if (!msg || !Array.isArray(msg.reactPlanSteps) || msg.reactPlanSteps.length === 0) return undefined
+  return msg.reactPlanSteps
+}
+
+/** 仅有计划数据时才用「等 THINK 再揭示」；无计划时不挡其它 UI */
+const suppressPlanOverviewForMessage = (msg) => {
+  if (!msg) return false
+  const hasPlan = Array.isArray(msg.reactPlanSteps) && msg.reactPlanSteps.length > 0
+  if (!hasPlan) return false
+  return msg._planMemoRevealReady === false || msg.reactPlanPanelSuppressed === true
 }
 
 /** 步骤执行日志：流式追加，去重连续相同行（心跳「已等待 x.xs」不去重，避免界面像卡住）*/
@@ -1622,10 +2096,11 @@ const hasUnifiedSummary = (message) => {
 const getUnifiedSummaryBody = (message) => {
   const r = message.agentResult
   const _afterLoop = message.reactMainLoopFinished === true
+  const _rsDraft = String(message.runningSummaryDraft || '').trim()
   if (
     message.unifiedSummaryLoading &&
     !(String(message.summaryStreamDraft || '').trim()) &&
-    !(_afterLoop && String(message.runningSummaryDraft || '').trim()) &&
+    !_rsDraft &&
     !(r?.summaryText && String(r.summaryText).trim())
   ) {
     return ''
@@ -1633,8 +2108,9 @@ const getUnifiedSummaryBody = (message) => {
   if (_afterLoop && message.summaryStreamDraft && String(message.summaryStreamDraft).trim()) {
     return String(message.summaryStreamDraft).trim()
   }
-  if (_afterLoop && message.runningSummaryDraft && String(message.runningSummaryDraft).trim()) {
-    return String(message.runningSummaryDraft).trim()
+  // 增量运行总览：勿要求 _afterLoop，避免 tail 与 running_summary 包顺序导致草稿被忽略、只剩执行统计兜底
+  if (_rsDraft) {
+    return _rsDraft
   }
   if (r?.summaryText && typeof r.summaryText === 'string' && r.summaryText.trim()) {
     return r.summaryText.trim()
@@ -1643,14 +2119,7 @@ const getUnifiedSummaryBody = (message) => {
   if (r?.findings && r.findings.length > 0) {
     r.findings.forEach(f => lines.push('- ' + (typeof f === 'string' ? f : String(f))))
   }
-  const stepsCount = r?.steps_count ?? message.steps?.length ?? 0
-  const duration = Number(r?.execution_time ?? 0)
-  if (stepsCount > 0 || duration > 0) {
-    if (lines.length) lines.push('')
-    lines.push(`完成步骤: ${stepsCount} 个`)
-    lines.push(`耗时: ${duration.toFixed(2)}s`)
-    lines.push('任务执行成功')
-  }
+  // 耗时与步数已在总结标题「总结 X.XXs」与步骤区展示，此处不再拼「执行统计/完成步骤/任务成功」
   const body = lines.join('\n')
   // 有思考耗时但无思考内容时提示（qwen-max 等模型可能不返回 reasoning_content）
   const thinkingTime = (r?.thinking_time ?? r?.execution_time ?? 0)
@@ -1746,17 +2215,19 @@ function getMergedPendingForTarget(msgs, target, targetId) {
         const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
         if (isNaN(tid) || tid !== targetId) continue
         if (item.target && item.target !== target) continue
-        if (item.confirmation_required === false) continue
+        if (item.cancelled === true) continue
         const itTarget = item.target || group.target || target
         const pk = makePersistDiffKey(itTarget, tid)
-        if (
-          msg.isHistorical &&
-          persistedPendingLoaded.value &&
-          pk &&
-          !persistedPendingDiffKeys.value.has(pk)
-        ) {
-          continue
+        let includeItem = true
+        if (persistedPendingLoaded.value && pk) {
+          if (persistedPendingDiffKeys.value.has(pk)) includeItem = true
+          else {
+            includeItem = !msg.isHistorical && item.confirmation_required !== false
+          }
+        } else if (item.confirmation_required === false) {
+          includeItem = false
         }
+        if (!includeItem) continue
         items.push({
           ...item,
           plan_id: group.plan_id,
@@ -1770,18 +2241,20 @@ function getMergedPendingForTarget(msgs, target, targetId) {
       for (const r of nav.batch_results) {
         const tid = parseInt(r.target_id, 10)
         if (isNaN(tid) || tid !== targetId) continue
-        if (r.confirmation_required === false) continue
+        if (r.cancelled === true) continue
         if (r.target && r.target !== target) continue
         const itTarget = r.target || nav.target || target
         const pk = makePersistDiffKey(itTarget, tid)
-        if (
-          msg.isHistorical &&
-          persistedPendingLoaded.value &&
-          pk &&
-          !persistedPendingDiffKeys.value.has(pk)
-        ) {
-          continue
+        let includeR = true
+        if (persistedPendingLoaded.value && pk) {
+          if (persistedPendingDiffKeys.value.has(pk)) includeR = true
+          else {
+            includeR = !msg.isHistorical && r.confirmation_required !== false
+          }
+        } else if (r.confirmation_required === false) {
+          includeR = false
         }
+        if (!includeR) continue
         items.push({
           ...r,
           plan_id: r.plan_id ?? nav.plan_id,
@@ -1789,9 +2262,20 @@ function getMergedPendingForTarget(msgs, target, targetId) {
           _msgIdx: msgIdx
         })
       }
-    } else if (nav && !nav.batch_modify && !nav.is_create && nav.cancelled !== true && nav.confirmation_required !== false) {
+    } else if (nav && !nav.batch_modify && !nav.is_create && nav.cancelled !== true) {
       const tid = parseInt(nav.target_id ?? nav.targetId, 10)
-      if (!isNaN(tid) && tid === targetId && (nav.target || 'badcase') === target) {
+      if (isNaN(tid) || tid !== targetId || (nav.target || 'badcase') !== target) {
+        continue
+      }
+      const pk = makePersistDiffKey(target, tid)
+      let include = false
+      if (persistedPendingLoaded.value && pk) {
+        if (persistedPendingDiffKeys.value.has(pk)) include = true
+        else include = !msg.isHistorical && nav.confirmation_required !== false
+      } else {
+        include = nav.confirmation_required !== false
+      }
+      if (include) {
         items.push({
           target_id: tid,
           target: nav.target || 'badcase',
@@ -1870,6 +2354,12 @@ const persistedPendingDiffKeys = ref(new Set())
 const persistedPendingLoaded = ref(false)
 let _persistedPendingLoadedAt = 0
 
+/**
+ * 是否仍应对列表派发「待确认」：
+ * - pending 表里有该 key → 仍待确认（返回 false = 未采纳）
+ * - 历史消息且表里没有 → 视为已处理（返回 true）
+ * - 实时流且表里没有 → 仍以工具 JSON 的 initialProcessed 为准（避免预览刚写出、GET pending 尚未含该行时误判「一出来就采纳」）
+ */
 const resolveAlreadyProcessedByPersisted = (
   initialProcessed,
   target,
@@ -1879,14 +2369,17 @@ const resolveAlreadyProcessedByPersisted = (
   if (!persistedPendingLoaded.value) return !!initialProcessed
   const key = makePersistDiffKey(target, targetId)
   if (!key) return !!initialProcessed
-  // 后端仍有 pending/rejected（本会话可见）→ 强制走待确认链路
   if (persistedPendingDiffKeys.value.has(key)) return false
-  // 历史消息：DB 已无 pending 行，但 chat_message JSON 可能仍带 confirmation_required（未清空）→ 视为已处理
   if (messageIsHistorical) return true
   return !!initialProcessed
 }
 
-const refreshPersistedPendingDiffKeys = async (force = false) => {
+/**
+ * @param {boolean} force
+ * @param {{ emitListSync?: boolean }} opts emitListSync：是否派发 diff-review-sync。从沙箱/聊天侧即将 show-modify-in-list 时应为 false，否则左侧会再 restore 一次，diff 连闪且可能与合并后的 payload 不一致。
+ */
+const refreshPersistedPendingDiffKeys = async (force = false, opts = {}) => {
+  const emitListSync = opts.emitListSync !== false
   try {
     if (!props.projectId) return
     const now = Date.now()
@@ -1906,6 +2399,9 @@ const refreshPersistedPendingDiffKeys = async (force = false) => {
     persistedPendingDiffKeys.value = next
     persistedPendingLoaded.value = true
     _persistedPendingLoadedAt = now
+    if (emitListSync) {
+      window.dispatchEvent(new CustomEvent('diff-review-sync', { bubbles: true }))
+    }
   } catch (e) {
     persistedPendingLoaded.value = false
     console.warn('[DIFF] 刷新持久化 pending keys 失败:', e)
@@ -1926,7 +2422,7 @@ const hasDetailFieldInPreview = (diffRows, mods) => {
 
 // 在列表中显示修改（并跳转到对应详情页）
 // 处理分组跳转到列表
-const handleShowGroupInList = async (group, messageId) => {
+const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
   console.log('[MODIFY] 分组跳转到列表', group, 'messageId:', messageId)
 
   // 防御性检查
@@ -1938,8 +2434,10 @@ const handleShowGroupInList = async (group, messageId) => {
     console.warn('[MODIFY] group.items 为空或无效')
     return
   }
-  
-  await refreshPersistedPendingDiffKeys(true)
+
+  if (!navOpts.skipPersistedRefresh) {
+    await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+  }
 
   const msgObj = messages.value.find((m) => m.id === messageId)
   const messageIsHistorical = !!(msgObj && msgObj.isHistorical)
@@ -2029,7 +2527,7 @@ const handleShowGroupInList = async (group, messageId) => {
 
 const handleShowModifyInList = async (modifyData, messageId) => {
   console.log('[MODIFY] 在列表中显示修改(来自后端结果):', modifyData, 'messageId:', messageId)
-  await refreshPersistedPendingDiffKeys(true)
+  await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
 
   const msgObj = messages.value.find((m) => m.id === messageId)
   const messageIsHistorical = !!(msgObj && msgObj.isHistorical)
@@ -2507,36 +3005,6 @@ const computeHistoricalReactPlanPanelSuppressed = (steps, agent) => {
   return minSteps > 0 && n < minSteps
 }
 
-/** 是否存在仍可能需要后续 GET 核对的沙箱待确认项（无则跳过 checkModifyNavigationStatus，避免大量请求） */
-function needsModifyRecordProbe(msgs) {
-  if (!Array.isArray(msgs) || msgs.length === 0) return false
-  for (const msg of msgs) {
-    if (!msg || msg.isUser) continue
-    if (msg.modifyGroups?.length) {
-      for (const group of msg.modifyGroups) {
-        for (const item of group.items || []) {
-          if (item.confirmation_required === false || item.success) continue
-          const target_id = item.target_id ?? item.targetId
-          if (target_id == null) continue
-          return true
-        }
-      }
-    }
-    const nav = msg.modifyNavigation
-    if (nav?.batch_modify && Array.isArray(nav.batch_results)) {
-      for (const br of nav.batch_results) {
-        if (br.confirmation_required === false || br.success) continue
-        const tid = br.target_id ?? br.targetId
-        if (tid != null) return true
-      }
-    } else if (nav && nav.confirmation_required && !nav.success && !nav.navigate_to_existing) {
-      const target_id = nav.target_id ?? nav.targetId
-      if (target_id != null) return true
-    }
-  }
-  return false
-}
-
 function scheduleIdle(fn) {
   if (typeof requestIdleCallback !== 'undefined') {
     requestIdleCallback(() => {
@@ -2584,7 +3052,7 @@ function rawApiMessageToUi(msg) {
     }
   }
 
-  const _histSteps = msg.steps ? JSON.parse(msg.steps) : []
+  let _histSteps = msg.steps ? JSON.parse(msg.steps) : []
   const _histAgent = msg.agent_result ? JSON.parse(msg.agent_result) : { findings: [], recommendations: [], status: 'success' }
   let _histDirectChat = _histAgent.direct_chat_reply === true
   if (_histDirectChat && 'direct_chat_reply' in _histAgent) {
@@ -2596,7 +3064,20 @@ function rawApiMessageToUi(msg) {
   }
   const _histFr = String(msg.final_response || msg.content || '').trim()
   const _histNoFindings = !Array.isArray(_histAgent.findings) || _histAgent.findings.length === 0
-  const _histStepsLen = Array.isArray(_histSteps) ? _histSteps.length : 0
+  let _histStepsLen = Array.isArray(_histSteps) ? _histSteps.length : 0
+  const _histScn =
+    _histAgent.steps_count != null && _histAgent.steps_count !== ''
+      ? Number(_histAgent.steps_count)
+      : null
+  if (
+    _histAgent.status !== 'error' &&
+    _histScn === 0 &&
+    _histNoFindings &&
+    _histStepsLen > 0
+  ) {
+    _histSteps = []
+    _histStepsLen = 0
+  }
   if (
     !_histDirectChat &&
     _histStepsLen === 0 &&
@@ -2610,6 +3091,10 @@ function rawApiMessageToUi(msg) {
     _histAgent.thinking_time = null
     _histAgent.steps_count = 0
   }
+  const _histPlanSteps =
+    Array.isArray(_histAgent.react_plan_steps) && _histAgent.react_plan_steps.length > 0
+      ? _histAgent.react_plan_steps
+      : null
   return {
     id: msg.id,
     isUser: false,
@@ -2620,6 +3105,7 @@ function rawApiMessageToUi(msg) {
     steps: _histSteps,
     thoughtCollapsed: true,
     reactDirectChatReply: _histDirectChat,
+    reactPlanSteps: _histPlanSteps,
     reactPlanPanelSuppressed: computeHistoricalReactPlanPanelSuppressed(_histSteps, _histAgent),
     executionResults: msg.execution_results ? JSON.parse(msg.execution_results) : [],
     agentResult: _histAgent,
@@ -2649,6 +3135,20 @@ const loadSessionMessages = async () => {
       const raw = response.data.session.messages || []
       historyHasMore.value = !!response.data.session?.has_more
       historyBeforeId.value = response.data.session?.next_before_id ?? (raw?.[0]?.id ?? null)
+      if (raw.length === 0) {
+        messages.value = []
+        scrollToBottom()
+        scheduleIdle(async () => {
+          try {
+            await refreshPersistedPendingDiffKeys(true)
+            await nextTick()
+            scrollToBottom()
+          } catch (e) {
+            console.error('[MODIFY] 刷新 diff pending 失败', e)
+          }
+        })
+        return
+      }
       const CHUNK = 28
       const accumulated = []
       for (let i = 0; i < raw.length; i += CHUNK) {
@@ -2662,17 +3162,14 @@ const loadSessionMessages = async () => {
       }
       scrollToBottom()
 
-      // 先拉 pending diff keys（历史消息 isSandboxModifyItemPending 依赖），再按需核对记录；放到空闲时段避免阻塞首屏
+      // 与后端 diff_review pending 对齐（沙箱是否待确认、列表黄条由 GET 结果驱动）
       scheduleIdle(async () => {
         try {
           await refreshPersistedPendingDiffKeys(true)
-          if (needsModifyRecordProbe(messages.value)) {
-            await checkModifyNavigationStatus()
-          }
           await nextTick()
           scrollToBottom()
         } catch (e) {
-          console.error('[MODIFY] 历史沙箱状态核对失败', e)
+          console.error('[MODIFY] 刷新 diff pending 失败', e)
         }
       })
     }
@@ -2734,149 +3231,6 @@ const toggleReasoning = (message) => {
   message.showReasoning = !message.showReasoning
 }
 
-/** 限制并发，避免历史会话一次拉几十个 GET 打满浏览器连接 */
-const CHECK_RECORD_CONCURRENCY = 8
-const runCheckRecordChunks = async (tasks) => {
-  for (let i = 0; i < tasks.length; i += CHECK_RECORD_CONCURRENCY) {
-    const slice = tasks.slice(i, i + CHECK_RECORD_CONCURRENCY)
-    await Promise.all(
-      slice.map(async (t) => {
-        try {
-          t._result = await checkRecordModified(t.target, t.target_id, t.flatMods)
-        } catch (e) {
-          console.error('[MODIFY] checkRecordModified 失败:', e)
-          t._result = false
-        }
-      })
-    )
-  }
-}
-
-// 检查历史 modifyNavigation 的执行状态
-const checkModifyNavigationStatus = async () => {
-  const groupItemTasks = []
-  for (const msg of messages.value) {
-    if (!msg.modifyGroups || !Array.isArray(msg.modifyGroups)) continue
-    for (const group of msg.modifyGroups) {
-      if (!group.items || !Array.isArray(group.items)) continue
-      for (const item of group.items) {
-        if (item.confirmation_required === false || item.success) continue
-        const target_id = item.target_id ?? item.targetId
-        const target = item.target || 'badcase'
-        let rawMods = item.modifications
-        if (!rawMods || typeof rawMods !== 'object' || Object.keys(rawMods).length === 0) {
-          rawMods = modificationsFromPreviewDiff(item.diff)
-        }
-        if (target_id == null || !rawMods || typeof rawMods !== 'object') continue
-        const flatMods = flattenModsForApplyCheck(rawMods)
-        if (Object.keys(flatMods).length === 0) continue
-        groupItemTasks.push({ item, target, target_id, flatMods })
-      }
-    }
-  }
-  if (groupItemTasks.length > 0) {
-    await runCheckRecordChunks(groupItemTasks)
-    for (const t of groupItemTasks) {
-      if (t._result) {
-        t.item.confirmation_required = false
-        t.item.success = true
-        console.log('[MODIFY] 历史消息 modifyGroups 检测到修改已生效', t.target_id)
-      }
-    }
-  }
-
-  for (const msg of messages.value) {
-    // 批量 modifyNavigation（batch_results）
-    if (
-      msg.modifyNavigation &&
-      msg.modifyNavigation.batch_modify === true &&
-      Array.isArray(msg.modifyNavigation.batch_results) &&
-      msg.modifyNavigation.batch_results.length > 0
-    ) {
-      const batch_results = msg.modifyNavigation.batch_results
-      const brTasks = []
-      for (let ri = 0; ri < batch_results.length; ri++) {
-        const br = batch_results[ri]
-        if (!br || typeof br !== 'object') continue
-        if (br.confirmation_required === false || br.success) continue
-        const tid = br.target_id ?? br.targetId
-        const tgt = br.target || 'badcase'
-        const rawMods = br.modifications
-        if (tid == null || !rawMods || typeof rawMods !== 'object') continue
-        const flatMods = flattenModsForApplyCheck(rawMods)
-        if (Object.keys(flatMods).length === 0) continue
-        brTasks.push({ tgt, tid, flatMods, br, ri })
-      }
-
-      let navTouched = false
-      const nextResults = batch_results.map((br) => br)
-      if (brTasks.length > 0) {
-        const flatTasks = brTasks.map((x) => ({
-          target: x.tgt,
-          target_id: x.tid,
-          flatMods: x.flatMods,
-          _meta: x
-        }))
-        await runCheckRecordChunks(flatTasks)
-        for (const ft of flatTasks) {
-          if (ft._result) {
-            const x = ft._meta
-            nextResults[x.ri] = {
-              ...x.br,
-              confirmation_required: false,
-              success: true
-            }
-            navTouched = true
-            console.log('[MODIFY] 历史 batch_result 检测到修改已生成', x.tid, msg.id)
-          }
-        }
-      }
-
-      if (navTouched) {
-        msg.modifyNavigation = {
-          ...msg.modifyNavigation,
-          batch_results: nextResults
-        }
-        const mi = messages.value.findIndex((m) => m.id === msg.id)
-        if (mi !== -1) {
-          messages.value[mi] = { ...msg, modifyNavigation: msg.modifyNavigation }
-        }
-      }
-      if (syncModifyGroupsFromBatchNavigation(msg)) {
-        const mi = messages.value.findIndex((m) => m.id === msg.id)
-        if (mi !== -1) {
-          messages.value[mi] = { ...msg }
-        }
-      }
-    } else if (msg.modifyNavigation && msg.modifyNavigation.confirmation_required && !msg.modifyNavigation.success) {
-      const target_id = msg.modifyNavigation.target_id ?? msg.modifyNavigation.targetId
-      const target = msg.modifyNavigation.target || 'badcase'
-      let rawMods = msg.modifyNavigation.modifications
-      if (!rawMods || typeof rawMods !== 'object' || Object.keys(rawMods).length === 0) {
-        rawMods = modificationsFromPreviewDiff(msg.modifyNavigation.diff)
-      }
-      if (target_id == null || !rawMods || typeof rawMods !== 'object') continue
-      const flatMods = flattenModsForApplyCheck(rawMods)
-      if (Object.keys(flatMods).length === 0) continue
-
-      const singleTasks = [{ target, target_id, flatMods, msg }]
-      await runCheckRecordChunks(singleTasks)
-      if (singleTasks[0]._result) {
-        msg.modifyNavigation = {
-          ...msg.modifyNavigation,
-          success: true,
-          confirmation_required: false
-        }
-        const mi = messages.value.findIndex((m) => m.id === msg.id)
-        if (mi !== -1) {
-          messages.value[mi] = { ...msg, modifyNavigation: msg.modifyNavigation }
-        }
-        console.log('[MODIFY] 历史消息 modifyNavigation 检测到修改已生效', msg.id)
-      }
-    }
-  }
-}
-
 // 与后端/列表约定对齐：统一 check API 使用的 target 名
 const normalizeModifyTarget = (target) => {
   const t = (target == null ? '' : String(target)).toLowerCase().replace(/-/g, '_')
@@ -2884,22 +3238,20 @@ const normalizeModifyTarget = (target) => {
   return t
 }
 
-// 沙箱/列表待确认：已采纳或已标记无需确认（历史消息结合 diff-reviews pending 集合兜底陈旧 JSON）
+// 沙箱是否仍「待列表确认」：pending 表命中则一定待确认；表未命中时历史消息视为已处理，实时消息回退 JSON（与 resolveAlreadyProcessedByPersisted 一致）
 const isSandboxModifyItemPending = (item, message = null) => {
   if (!item || typeof item !== 'object') return false
-  if (item.confirmation_required === false) return false
+  if (item.cancelled === true) return false
   const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
-  if (
-    message?.isHistorical &&
-    persistedPendingLoaded.value &&
-    !Number.isNaN(tid)
-  ) {
-    const tgt = normalizeModifyTarget(item.target || 'badcase')
-    const pk = makePersistDiffKey(tgt, tid)
-    if (pk && !persistedPendingDiffKeys.value.has(pk)) {
-      return false
-    }
+  if (Number.isNaN(tid)) return false
+  const tgt = normalizeModifyTarget(item.target || 'badcase')
+  const pk = makePersistDiffKey(tgt, tid)
+  if (persistedPendingLoaded.value && pk) {
+    if (persistedPendingDiffKeys.value.has(pk)) return true
+    if (message?.isHistorical) return false
+    return item.confirmation_required !== false
   }
+  if (item.confirmation_required === false) return false
   return true
 }
 
@@ -2923,7 +3275,9 @@ const messageHasPendingSandboxConfirm = (message) => {
     return isSandboxModifyItemPending(
       {
         confirmation_required: nav.confirmation_required,
-        success: nav.success
+        success: nav.success,
+        target_id: nav.target_id ?? nav.targetId,
+        target: nav.target
       },
       message
     )
@@ -2940,13 +3294,11 @@ const handleRequestPendingModifyForPlan = async (event) => {
   const suppressAutoOpenDetail = event.detail?.suppressAutoOpenDetail === true
   const pid = Number(planId)
   if (!Number.isFinite(pid)) return
-  await refreshPersistedPendingDiffKeys(true)
-  const shouldSyncByPersistedState = (target, targetId) => {
+  await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+  const hasBackendPendingRow = (target, targetId) => {
     if (!persistedPendingLoaded.value) return false
     const k = makePersistDiffKey(target, targetId)
-    // 仅依赖「后端已写 pending 行」会鸡生蛋：upsert 的 key 不在 Set 内，切计划永远无法同步列表
-    // 本条是否真有未采纳内容由下方 getMergedPendingForTarget 与同轮的 confirmation_required 过滤决定
-    return !!k
+    return !!(k && persistedPendingDiffKeys.value.has(k))
   }
 
   const seen = new Set()
@@ -2964,11 +3316,11 @@ const handleRequestPendingModifyForPlan = async (event) => {
           const rawId = item?.target_id ?? item?.targetId ?? item?.id
           const intTargetId = parseInt(rawId, 10)
           if (isNaN(intTargetId)) continue
-          if (item.confirmation_required === false) continue
           const tgt = item.target || 'badcase'
+          if (item.cancelled === true) continue
+          if (!hasBackendPendingRow(tgt, intTargetId)) continue
           const key = `${tgt}:${intTargetId}`
           if (seen.has(key)) continue
-          if (!shouldSyncByPersistedState(tgt, intTargetId)) continue
           seen.add(key)
           const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
           if (!merged) continue
@@ -2996,15 +3348,15 @@ const handleRequestPendingModifyForPlan = async (event) => {
         .map((r) => parseInt(r.target_id, 10))
         .filter((id) => !isNaN(id))
       for (const result of nav.batch_results) {
-        if (result.confirmation_required === false) continue
         const tplPid = result.plan_id ?? nav.plan_id
         if (Number(tplPid) !== pid) continue
         const intTargetId = parseInt(result.target_id, 10)
         if (isNaN(intTargetId)) continue
         const tgt = result.target || 'badcase'
+        if (result.cancelled === true) continue
+        if (!hasBackendPendingRow(tgt, intTargetId)) continue
         const key = `${tgt}:${intTargetId}`
         if (seen.has(key)) continue
-        if (!shouldSyncByPersistedState(tgt, intTargetId)) continue
         seen.add(key)
         const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
         if (!merged) continue
@@ -3025,15 +3377,15 @@ const handleRequestPendingModifyForPlan = async (event) => {
     }
 
     if (!nav.batch_modify && !nav.is_create) {
-      if (nav.confirmation_required === false || nav.cancelled === true) continue
+      if (nav.cancelled === true) continue
       const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
       if (Number(tplPid) !== pid) continue
       const intTargetId = parseInt(nav.target_id ?? nav.targetId, 10)
       if (isNaN(intTargetId)) continue
       const tgt = nav.target || 'badcase'
+      if (!hasBackendPendingRow(tgt, intTargetId)) continue
       const key = `${tgt}:${intTargetId}`
       if (seen.has(key)) continue
-      if (!shouldSyncByPersistedState(tgt, intTargetId)) continue
       seen.add(key)
       const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
       if (!merged) continue
@@ -3059,130 +3411,6 @@ const handleRequestPendingModifyForPlan = async (event) => {
       })
     )
   }
-}
-
-/** 将 { field: { old, new } } 转为 apply 检查用的 { field: new } */
-const flattenModsForApplyCheck = (mods) => {
-  if (!mods || typeof mods !== 'object') return {}
-  const out = {}
-  for (const [k, v] of Object.entries(mods)) {
-    if (v && typeof v === 'object' && 'new' in v) out[k] = v.new
-    else out[k] = v
-  }
-  return out
-}
-
-/** 历史落库的 modify_groups 可能只有 diff 没有 modifications，与 getMergedPendingForTarget 对齐，供刷新后对库核对 */
-const modificationsFromPreviewDiff = (diffArr) => {
-  const out = {}
-  if (!Array.isArray(diffArr)) return out
-  for (const fd of diffArr) {
-    const fkey = fd.field ?? fd.field_label ?? ''
-    if (!fkey) continue
-    const delLine = fd.lines?.find((l) => l.type === 'delete')
-    const addLine = fd.lines?.find((l) => l.type === 'add')
-    out[fkey] = {
-      old: delLine?.content ?? '',
-      new: addLine?.content ?? ''
-    }
-  }
-  return out
-}
-
-/**
- * 批量沙箱：界面优先渲染 modifyGroups，必须与 batch_results 的状态一致，
- * 否则仅更新 modifyNavigation 刷新后仍显示待确认 diff。 */
-const syncModifyGroupsFromBatchNavigation = (msg) => {
-  const nav = msg?.modifyNavigation
-  if (!msg?.modifyGroups?.length || !nav?.batch_modify || !Array.isArray(nav.batch_results)) return false
-  let touched = false
-  const brByTid = new Map()
-  for (const br of nav.batch_results) {
-    const tid = Number(br?.target_id ?? br?.targetId)
-    if (Number.isFinite(tid)) brByTid.set(tid, br)
-  }
-  for (const group of msg.modifyGroups) {
-    if (!Array.isArray(group.items)) continue
-    for (let i = 0; i < group.items.length; i++) {
-      const it = group.items[i]
-      const tid = Number(it?.target_id ?? it?.targetId)
-      if (!Number.isFinite(tid)) continue
-      const br = brByTid.get(tid)
-      if (!br) continue
-      const brDone =
-        br.confirmation_required === false || br.success === true || br.cancelled === true
-      if (!brDone) continue
-      if (it.confirmation_required === false && it.success === true) continue
-      group.items[i] = {
-        ...it,
-        confirmation_required: false,
-        success: true,
-        cancelled: !!br.cancelled
-      }
-      touched = true
-    }
-  }
-  return touched
-}
-
-// 检查记录是否已被修改
-const checkRecordModified = async (target, target_id, modifications) => {
-  // 新建预览、占位 id 等不应请求 /api/.../new（会误触发 POST 到 /api/testcases 等同前缀路由，返回 405）
-  if (target_id === 'new' || target_id === null || target_id === undefined) return false
-  const _n = Number(target_id)
-  if (!Number.isFinite(_n) || _n <= 0) return false
-
-  const nt = normalizeModifyTarget(target)
-  let detailUrl = ''
-  if (nt === 'badcase') {
-    detailUrl = `/api/badcases/${target_id}`
-  } else if (nt === 'bug') {
-    detailUrl = `/api/bugs/${target_id}`
-  } else if (nt === 'testcase') {
-    detailUrl = `/api/testcases/${target_id}`
-  }
-  
-  if (!detailUrl) return false
-  
-  const response = await fetch(detailUrl, { credentials: 'include' })
-  if (!response.ok) return false
-  
-  const result = await response.json()
-  if (result.error) {
-    console.warn('[MODIFY] API 返回错误:', result.error)
-    return false
-  }
-  
-  const currentData =
-    result[nt] ||
-    result.testcase ||
-    result.test_case ||
-    result.badcase ||
-    result.bug
-  if (!currentData) return false
-  
-  // 检查修改是否已生效
-  for (const [field, newValue] of Object.entries(modifications)) {
-    const currentValue = currentData[field]
-    
-    // 比较 assignee 字段时需要特殊处理
-    if (field === 'assignee' || field === 'assignee_id') {
-      const currentAssigneeId = currentData.assignee_id
-      const currentAssigneeName = currentData.assignee
-      
-      const matchesById = currentAssigneeId != null && currentAssigneeId.toString() === newValue?.toString()
-      const matchesByName =
-        currentAssigneeName != null && currentAssigneeName.toString() === newValue?.toString()
-      
-      if (!matchesById && !matchesByName) {
-        return false
-      }
-    } else if (currentValue?.toString() !== newValue?.toString()) {
-      return false
-    }
-  }
-  
-  return true
 }
 
 /** 落库前 JSON.stringify：Vue reactive / 循环引用不致崩 */
@@ -3284,6 +3512,18 @@ const sendText = async (rawText, imagesToSend = null) => {
 
     scrollToBottom()
 
+    if (selectedAgent.value === 'agent' && !isElectronPtyAvailable()) {
+      try {
+        if (typeof pingLocalGoProxy === 'function') await pingLocalGoProxy()
+      } catch (_) {
+        /* ignore */
+      }
+      const ok = localGoProxyOk && typeof localGoProxyOk === 'object' && 'value' in localGoProxyOk ? localGoProxyOk.value : null
+      agentLocalProxyHint.value = ok === false ? t('chat.agentNeedsLocalProxy') : ''
+    } else {
+      agentLocalProxyHint.value = ''
+    }
+
     // Agent 模式一律走后端 /api/agent/react，由后端统一做意图识别与分流
     if (selectedAgent.value === 'agent') {
       await handleReactAgentMode(messageContent, imagesPayload)
@@ -3296,6 +3536,7 @@ const sendText = async (rawText, imagesToSend = null) => {
     // 避免 ReAct/聊天抛错或中断后 isSending 未复位，导致发送键一直不可用
     isSending.value = false
     abortController.value = null
+    reactSseReaderRef.value = null
   }
 }
 
@@ -3313,9 +3554,23 @@ const beginEditUserMessage = (msg) => {
   inlineInputMessage.value = msg.content || ''
   nextTick(() => {
     try {
-      inlineTextareaRef.value?.focus?.()
+      unwrapTextareaEl(inlineTextareaRef.value)?.focus?.()
     } catch (e) {}
   })
+}
+
+/** 推迟到宏任务：在 pointerdown 里同步切换 v-if 会拆掉当前事件目标，Vue unmount 可能读到 parentNode===null */
+const scheduleBeginEditUserMessage = (msg) => {
+  if (!msg) return
+  setTimeout(() => beginEditUserMessage(msg), 0)
+}
+
+/** pointerdown 触发编辑；缩略图排除；必须异步进入编辑态（见 scheduleBeginEditUserMessage） */
+const onUserBubblePointerDown = (e, msg) => {
+  if (!e || e.button !== 0) return
+  const t = e.target
+  if (t && typeof t.closest === 'function' && t.closest('.user-msg-thumb')) return
+  scheduleBeginEditUserMessage(msg)
 }
 
 const cancelEditUserMessage = () => {
@@ -3328,8 +3583,9 @@ const handleInlineSend = async (e) => {
   if (isComposing.value) return
   const text = inlineInputMessage.value
   inlineInputMessage.value = ''
-  editingUserMessageId.value = null
+  // 先发送消息，再退出编辑态：避免 key 变化与新消息添加同一 tick 导致 Vue patch 冲突
   await sendText(text)
+  editingUserMessageId.value = null
 }
 
 const addNewLineInline = (e) => {
@@ -3343,17 +3599,38 @@ onMounted(() => {
 
 // 停止生成
 const handleStop = () => {
+  const rid = reactStreamRequestIdRef.value
+  if (rid) {
+    void fetch(`${BACKEND_BASE_URL}/api/agent/react/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ request_id: rid })
+    }).catch(() => {})
+    reactStreamRequestIdRef.value = null
+  }
   // 先把 UI 状态收敛（即使网络层 abort 还没抛异常）
   const lastMsg = messages.value[messages.value.length - 1]
   if (lastMsg && !lastMsg.isUser) {
     finalizeRunningMessage(lastMsg, 'stopped')
   }
 
-  if (abortController.value) {
-    abortController.value.abort()
-    abortController.value = null
-    isSending.value = false
+  const rd = reactSseReaderRef.value
+  if (rd) {
+    try {
+      rd.cancel('user_stop')
+    } catch (e) {
+      /* release read lock */
+    }
+    reactSseReaderRef.value = null
   }
+  if (abortController.value) {
+    try {
+      abortController.value.abort()
+    } catch (e) {}
+    abortController.value = null
+  }
+  isSending.value = false
 }
 
 // ReAct Agent 模式 - 调用后端 ReAct 接口 (流式处理)
@@ -3364,6 +3641,10 @@ const handleReactAgentMode = async (userMessage, images = []) => {
   
   messages.value.push(aiMessage)
   scrollToBottom()
+
+  const stopSignal = abortController.value?.signal
+  reactSseReaderRef.value = null
+  reactStreamRequestIdRef.value = null
   
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
@@ -3374,7 +3655,7 @@ const handleReactAgentMode = async (userMessage, images = []) => {
         'Content-Type': 'application/json'
       },
       credentials: 'include',
-      signal: abortController.value?.signal,  // 添加终止信号
+      signal: stopSignal,
       body: JSON.stringify({
         user_input: userMessage,
         model: selectedModel.value,
@@ -3382,6 +3663,9 @@ const handleReactAgentMode = async (userMessage, images = []) => {
         project_id: currentProjectId.value || props.projectId,
         images: images || [],
         locale: localeForApi(),
+        ...(String(props.projectDisplayName || '').trim()
+          ? { project_display_name: String(props.projectDisplayName).trim() }
+          : {}),
         ...longMemoryContextForReact()
       })
     })
@@ -3391,6 +3675,7 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     }
     
     const reader = response.body.getReader()
+    reactSseReaderRef.value = reader
     const decoder = new TextDecoder()
     let buffer = ''
 
@@ -3419,23 +3704,33 @@ const handleReactAgentMode = async (userMessage, images = []) => {
       }
     }
 
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      
-      const chunkText = decoder.decode(value, { stream: true })
-      const folded = foldAgentSseText(buffer, chunkText)
-      buffer = folded.nextBuffer
+    try {
+      while (true) {
+        if (stopSignal?.aborted) break
+        const { value, done } = await reader.read()
+        if (done) break
 
-      for (const chunk of folded.chunks) {
-        try {
-          const r = consumeAgentSseV1Chunk(chunk, aiMessage, sseV1ConsumeCtx)
-          if (r && r.breakChunkLoop) break
-          await yieldAgentSseUiFrame(nextTick)
-        } catch (e) {
-          console.error('[CHAT-STREAM] 解析失败:', e, chunk)
+        const chunkText = decoder.decode(value, { stream: true })
+        const folded = foldAgentSseText(buffer, chunkText)
+        buffer = folded.nextBuffer
+
+        // 每条完整 SSE JSON（fold 后的一行 data:）消费完即让出帧：nextTick 刷 Vue，rAF 给浏览器 paint。一包一渲染。
+        for (const chunk of folded.chunks) {
+          try {
+            if (chunk && chunk.request_id) {
+              reactStreamRequestIdRef.value = String(chunk.request_id)
+            }
+            const r = consumeAgentSseV1Chunk(chunk, aiMessage, sseV1ConsumeCtx)
+            if (r && r.breakChunkLoop) break
+            await yieldAgentSseUiFrame(nextTick)
+          } catch (e) {
+            console.error('[CHAT-STREAM] 解析失败:', e, chunk)
+          }
         }
       }
+    } finally {
+      reactSseReaderRef.value = null
+      reactStreamRequestIdRef.value = null
     }
     flushReasoningTypewriter(aiMessage)
   } catch (error) {
@@ -3447,7 +3742,7 @@ const handleReactAgentMode = async (userMessage, images = []) => {
       const msg = String(error?.message || error || '')
       const msgLower = msg.toLowerCase()
       const aborted =
-        abortController.value?.signal?.aborted ||
+        stopSignal?.aborted ||
         error?.name === 'AbortError' ||
         msgLower.includes('aborted') ||
         msgLower.includes('bodystreambuffer')
@@ -3485,12 +3780,13 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     const rebuilt = rebuildModifyGroupsFromBatchNav(modifyNavForSave, shouldMergeModifyPreviewItems)
     if (rebuilt?.length) {
       aiMessage.modifyGroups = Object.freeze([...rebuilt])
-      nextTick(() => {
-        rebuilt.forEach((grp) => {
+      nextTick(async () => {
+        await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+        for (const grp of rebuilt) {
           if (grp.items && grp.items.length > 0) {
-            handleShowGroupInList(grp, aiMessage.id)
+            await handleShowGroupInList(grp, aiMessage.id, { skipPersistedRefresh: true })
           }
-        })
+        }
       })
     }
   }
@@ -3500,6 +3796,15 @@ const handleReactAgentMode = async (userMessage, images = []) => {
   if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
   else delete _persistAgent.direct_chat_reply
   _persistAgent.react_plan_panel_suppressed = !!aiMessage.reactPlanPanelSuppressed
+  if (Array.isArray(aiMessage.reactPlanSteps) && aiMessage.reactPlanSteps.length > 0) {
+    _persistAgent.react_plan_steps = aiMessage.reactPlanSteps
+  } else {
+    try {
+      delete _persistAgent.react_plan_steps
+    } catch {
+      // ignore
+    }
+  }
 
   // 保存最终结果到数据库（toRaw + 安全 stringify，避免 reactive 循环引用导致整段失败）
   await saveMessageToDb({
@@ -3626,6 +3931,9 @@ const handleChatMode = async (userMessage, images = []) => {
   
   messages.value.push(aiMessage)
   scrollToBottom()
+
+  const chatStopSignal = abortController.value?.signal
+  reactSseReaderRef.value = null
   
   try {
     console.log(`[CHAT] 调用聊天接口 (流式): ${userMessage}`)
@@ -3634,7 +3942,7 @@ const handleChatMode = async (userMessage, images = []) => {
       headers: {
         'Content-Type': 'application/json'
       },
-      signal: abortController.value?.signal,  // 添加终止信号
+      signal: chatStopSignal,
       body: JSON.stringify({
         inputMessage: userMessage,
         model: selectedModel.value,
@@ -3649,63 +3957,75 @@ const handleChatMode = async (userMessage, images = []) => {
     }
     
     const reader = response.body.getReader()
+    reactSseReaderRef.value = reader
     const decoder = new TextDecoder()
     let buffer = ''
 
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n\n')
-      buffer = lines.pop()
+    try {
+      while (true) {
+        if (chatStopSignal?.aborted) break
+        const { value, done } = await reader.read()
+        if (done) break
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        
-        try {
-          const jsonStr = line.replace('data: ', '').trim()
-          if (!jsonStr) continue
-          const chunk = JSON.parse(jsonStr)
-          
-          if (chunk.type === 'start') {
-            // 统一用「...」做占位，不展示具体中文提示
-            aiMessage.understanding = '...'
-          } else if (chunk.type === 'chunk') {
-            if (aiMessage.understanding === '...') {
-              aiMessage.understanding = ''
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop()
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+
+          try {
+            const jsonStr = line.replace('data: ', '').trim()
+            if (!jsonStr) continue
+            const chunk = JSON.parse(jsonStr)
+
+            if (chunk.type === 'start') {
+              aiMessage.understanding = '...'
+            } else if (chunk.type === 'chunk') {
+              if (aiMessage.understanding === '...') {
+                aiMessage.understanding = ''
+              }
+              aiMessage.finalResponse += chunk.content
+            } else if (chunk.type === 'agent_start') {
+              aiMessage.understanding = '...'
+            } else if (chunk.type === 'result') {
+              const result = chunk.data
+              if (result.message) {
+                aiMessage.finalResponse += `\n\n【Agent 结果】 ${result.message}`
+              }
+              if (result.data && typeof result.data === 'object') {
+                aiMessage.steps.push({
+                  title: 'Agent 执行结果',
+                  description: '详细数据已记录',
+                  status: 'completed',
+                  toolCall: { name: 'AgentResult', output: JSON.stringify(result.data, null, 2) }
+                })
+              }
+            } else if (chunk.type === 'error') {
+              aiMessage.finalResponse += `\n\n【错误】 ${chunk.message}`
             }
-            aiMessage.finalResponse += chunk.content
-          } else if (chunk.type === 'agent_start') {
-            // 不再在 UI 展示「正在调用 Agent」，只作为内部事件
-            aiMessage.understanding = '...'
-          } else if (chunk.type === 'result') {
-            // Agent 执行结果处理
-            const result = chunk.data
-            if (result.message) {
-              aiMessage.finalResponse += `\n\n【Agent 结果】 ${result.message}`
-            }
-            if (result.data && typeof result.data === 'object') {
-              aiMessage.steps.push({
-                title: 'Agent 执行结果',
-                description: '详细数据已记录',
-                status: 'completed',
-                toolCall: { name: 'AgentResult', output: JSON.stringify(result.data, null, 2) }
-              })
-            }
-          } else if (chunk.type === 'error') {
-            aiMessage.finalResponse += `\n\n【错误】 ${chunk.message}`
+
+            scrollToBottom()
+          } catch (e) {
+            console.warn('解析聊天流数据失败', e, line)
           }
-          
-          scrollToBottom()
-        } catch (e) {
-          console.warn('解析聊天流数据失败', e, line)
         }
       }
+    } finally {
+      reactSseReaderRef.value = null
     }
   } catch (error) {
     console.error('聊天执行失败:', error)
-    aiMessage.finalResponse = `错误: ${error.message || '未知错误'}`
+    const msg = String(error?.message || error || '')
+    const aborted =
+      chatStopSignal?.aborted ||
+      error?.name === 'AbortError' ||
+      msg.toLowerCase().includes('aborted')
+    if (aborted) {
+      finalizeRunningMessage(aiMessage, 'stopped')
+    } else {
+      aiMessage.finalResponse = `错误: ${error.message || '未知错误'}`
+    }
   }
   
   // 保存到数据库
@@ -3770,8 +4090,8 @@ const addNewLine = (e) => {
 
 // 自动调整 textarea 高度
 const autoResize = () => {
-  const textarea = textareaRef.value
-  if (textarea) {
+  const textarea = unwrapTextareaEl(textareaRef.value)
+  if (textarea?.style) {
     textarea.style.height = 'auto'
     const scrollHeight = textarea.scrollHeight
     // 最小高度 60px（约 3 行），最大高度 300px（约 15 行）
@@ -3784,8 +4104,8 @@ const autoResize = () => {
 
 // 自动调整 inline textarea 高度
 const autoResizeInline = () => {
-  const textarea = inlineTextareaRef.value
-  if (textarea) {
+  const textarea = unwrapTextareaEl(inlineTextareaRef.value)
+  if (textarea?.style) {
     textarea.style.height = 'auto'
     const scrollHeight = textarea.scrollHeight
     // 最小高度 60px（约 3 行），最大高度 300px（约 15 行）
@@ -3890,7 +4210,7 @@ const handleModifyCancelled = (event) => {
       console.log('[MODIFY] 已标记消息为已更新', msg.id, 'targetId:', intTargetId)
     }
   })
-  refreshPersistedPendingDiffKeys(true)
+  void refreshPersistedPendingDiffKeys(true)
 }
 
 // 处理修改确认事件
@@ -3929,7 +4249,9 @@ const handleModifyConfirmed = (event) => {
           console.log('[MODIFY] modifyGroups 中标记项为已执行:', intTargetId)
           
           // 检查组内是否全部确认完成
-          const allGroupConfirmed = group.items.every(i => i.confirmation_required === false || i.success === true)
+          const allGroupConfirmed = group.items.every(
+            (i) => i.confirmation_required === false || i.cancelled === true
+          )
           if (allGroupConfirmed) {
             console.log('[MODIFY] 该分组全部确认完成 plan_id:', group.plan_id)
           }
@@ -3955,7 +4277,9 @@ const handleModifyConfirmed = (event) => {
           console.log('[MODIFY] 批量修改中标记项为已执行:', intTargetId)
           
           // 检查是否所有项都已确认
-          const allConfirmed = msg.modifyNavigation.batch_results.every(r => r.confirmation_required === false || r.success === true)
+          const allConfirmed = msg.modifyNavigation.batch_results.every(
+            (r) => r.confirmation_required === false || r.cancelled === true
+          )
           if (allConfirmed) {
             console.log('[MODIFY] 批量修改全部确认完成')
           }
@@ -3978,7 +4302,7 @@ const handleModifyConfirmed = (event) => {
       messages.value[msgIdx] = { ...messages.value[msgIdx] }
     }
   })
-  refreshPersistedPendingDiffKeys(true)
+  void refreshPersistedPendingDiffKeys(true)
 }
 
 // 大图预览：Escape 关闭（与下方 watch 成对注册/移除）
@@ -3998,6 +4322,12 @@ onUnmounted(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
   document.removeEventListener('keydown', imagePreviewEscapeHandler)
 
+  if (reactSseReaderRef.value) {
+    try {
+      reactSseReaderRef.value.cancel('unmount')
+    } catch (e) {}
+    reactSseReaderRef.value = null
+  }
   if (abortController.value) {
     try {
       abortController.value.abort()
@@ -4027,9 +4357,37 @@ onUnmounted(() => {
 
 // 监听 sessionId 变化，重新加载消息
 watch(() => props.sessionId, (newSessionId) => {
+  const rd = reactSseReaderRef.value
+  if (rd) {
+    try {
+      rd.cancel('session_switch')
+    } catch (e) {
+      /* release read lock */
+    }
+    reactSseReaderRef.value = null
+  }
+  if (abortController.value) {
+    try {
+      abortController.value.abort()
+    } catch (e) {}
+    abortController.value = null
+  }
+  isSending.value = false
+  historyLoading.value = false
+
+  try {
+    messages.value.forEach((msg) => {
+      cancelTodosStreamTypewriter(msg)
+      cancelReasoningTypewriter(msg)
+    })
+  } catch (e) {}
+
   sessionTitleRef.value = ''
   titleGenInFlight.value = false
   if (newSessionId) {
+    messages.value = []
+    historyHasMore.value = false
+    historyBeforeId.value = null
     loadSessionMessages()
   } else {
     messages.value = []
@@ -4050,6 +4408,41 @@ watch(() => props.sessionId, (newSessionId) => {
   overflow: hidden;
   margin: 0;
   padding: 0;
+}
+
+.agent-local-proxy-hint {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ffe0b2;
+  background: rgba(255, 152, 0, 0.12);
+  border-bottom: 1px solid rgba(255, 152, 0, 0.25);
+}
+
+.agent-local-proxy-hint-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-local-proxy-hint-dismiss {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
+.agent-local-proxy-hint-dismiss:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
 }
 
 .messages-container {
@@ -4195,10 +4588,16 @@ watch(() => props.sessionId, (newSessionId) => {
   width: 100%;
 }
 
+.user-message-toggle-wrap {
+  width: 100%;
+  min-width: 0;
+}
+
 .user-message-bubble {
   width: 100%;
   max-width: 100%;
   padding: 12px 16px;
+  cursor: pointer;
   background: rgba(148, 163, 184, 0.10); /* 未选中：更轻的浅灰底 */
   color: #e5e7eb;
   border: 1px solid rgba(148, 163, 184, 0.18); /* 未选中：更淡的细边框 */
@@ -4248,6 +4647,14 @@ watch(() => props.sessionId, (newSessionId) => {
   display: flex;
   flex-direction: column;
   width: 100%;
+}
+
+/* 单根包裹 AgentTaskRun + 沙箱锚点 + Teleport；勿用 display:contents，部分环境下与 Teleport 拆卸交互差 */
+.ai-agent-run-stack {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
 }
 
 /* 深度思考：与 .simple-chat-panel 同色底，无边框；正文为 Cursor 系灰字，区别于普通回复 */
@@ -5032,6 +5439,62 @@ watch(() => props.sessionId, (newSessionId) => {
   overflow: hidden;
 }
 
+.client-local-run-section {
+  margin: 12px 0;
+}
+.client-local-run-card {
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.client-local-run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.client-local-run-body {
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+.client-local-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.client-local-run-pre {
+  font-size: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.client-local-run-tip {
+  margin: 8px 0 0;
+}
+
+.client-local-run-os {
+  margin: 0 0 10px;
+}
+
+.client-local-run-platform {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.client-local-run-platform-title {
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .findings-header {
   display: flex;
   align-items: center;
@@ -5142,6 +5605,11 @@ watch(() => props.sessionId, (newSessionId) => {
 /* 修改导航区域 */
 .modify-navigation-section {
   margin: 12px 0;
+}
+
+/* Teleport 目标：无内容时不占位（内嵌模式下下方锚点为空） */
+.agent-modify-sandbox-anchor:empty {
+  display: none;
 }
 
 .sandbox-confirm-hint {

@@ -28,6 +28,7 @@ _tools_format_cache_key: Optional[Tuple[Any, ...]] = None
 _tools_format_cache_val: Optional[List[Dict[str, str]]] = None
 
 from .locale_prompts import is_english_locale
+from .evidence_extractor import deep_sse_json_safe
 try:
     import xml.etree.ElementTree as ET
 except ImportError:
@@ -42,7 +43,7 @@ REACT_SYSTEM_STATIC = """<system>
 你是 ReAct 任务执行引擎，负责分析用户请求并调用工具完成任务。
 
 **输出格式（两段，顺序固定）：**
-1) 行动前说明：4～12 句，说明目标、路径、风险；**禁止** XML/JSON/思维链标签
+1) 行动前说明：约 3～10 句，说明目标与执行路径；**不要**写泛泛的「风险点/备选方案」（除非可能造成严重误操作）；**禁止** XML/JSON/思维链标签
 2) **仅**一个 <decision>...</decision>，结构如下
 
 **决策规则：**
@@ -55,7 +56,8 @@ REACT_SYSTEM_STATIC = """<system>
 
 **modify 工具参数格式（重要）：**
 - target: "bug" 或 "badcase" 或 "testcase"
-- target_id: 从 grep 结果获取的 ID（整数或数组）
+- target_id: 单条记录的 ID（整数）
+- target_ids: 多条同一修改时传 ID 数组，如 [9,8]，**一次调用**批量预览（与「各调一次 modify」等价但 UI 稳定为一张卡片多条 diff）
 - modifications: {"字段名": "新值"}  # 必须嵌套在 modifications 里！
 - confirm: false  # 预览模式
 </system>
@@ -198,7 +200,16 @@ def parse_opening_decision(text: str) -> Dict[str, Any]:
     
     # 格式 1: 纯文本（闲聊）
     # 如果没有匹配到 JSON，且文本不包含工具调用相关关键词，视为闲聊
-    tool_keywords = ["grep", "modify", "create", "search", "database", "browser_test", "get_tool_description"]
+    tool_keywords = [
+        "grep",
+        "modify",
+        "create",
+        "terminal",
+        "search",
+        "database",
+        "browser_test",
+        "get_tool_description",
+    ]
     if not any(kw in t.lower() for kw in tool_keywords):
         return {"type": "chat", "message": t}
     
@@ -220,22 +231,24 @@ def parse_opening_decision(text: str) -> Dict[str, Any]:
 
 
 def _triple_inference_narrative_zh() -> str:
-    """首轮 THINK / 每轮 decide 正文：三段推断，且多步 Todo 须在（2）中逐项点名。"""
+    """首轮 THINK / 每轮 decide 正文：前两段必写；（3）仅重大问题时可选。"""
     return (
-        "【三段推断（正文必写）】用纯文本按下面三段组织（可加小标题；每段至少一句）：\n"
-        "（1）**目标与约束**：用户要什么、范围与边界。\n"
-        "（2）**路径与步骤**：整体计划与本步关系；若存在多步 Todo（如先 grep 再 modify），"
-        "**逐步**说明每一步的目的与顺序，**禁止只写当前步而忽略后续步骤**；规划备忘中的每一步在此段都必须被点名。\n"
-        "（3）**风险与备选**：歧义、空结果、误改等及应对。\n\n"
+        "【推断结构（正文）】用纯文本组织，**力求简短**（常见任务总篇幅优先控制在约 3～8 句）：\n"
+        "（1）**目标与约束**：用户要什么、范围与边界（1～2 句）。\n"
+        "（2）**路径与步骤**：本步与整体计划；若有多步 Todo（如先 grep 再 modify），"
+        "**逐步**点名每步目的与顺序，**禁止只写当前步而忽略后续步骤**。\n"
+        "（3）**风险与备选（默认省略）**：**不要**写套路化的「若未找到/若命中过多/关键词不准」等泛泛风险与备选方案。"
+        "仅当存在**重大**不确定性（例如可能误改大批量数据、权限不明、用户意图严重歧义无法安全执行）时，才用 **1～2 句**写清风险与应对；否则本段不写。\n\n"
     )
 
 
 def _triple_inference_narrative_en() -> str:
     return (
-        "[Three-part inference (required in prose)] Structure the preamble as: "
-        "(1) **Goals & constraints**; (2) **Path & steps**—if the plan has multiple steps (e.g. grep then modify), "
-        "explain **each** step’s intent in order; do not describe only the first step; "
-        "(3) **Risks & fallbacks**.\n\n"
+        "[Inference (prose)] Keep it **short** (often ~3–8 sentences total). "
+        "(1) **Goals & constraints** (1–2 sentences). "
+        "(2) **Path & steps**—if multi-step (e.g. grep then modify), name **each** step in order; do not only describe the first. "
+        "(3) **Risks & fallbacks (omit by default)**—do **not** write boilerplate about empty results, too many hits, or keyword tuning. "
+        "Only if there is a **major** risk (bulk wrong edits, unclear permission, dangerously ambiguous intent), add **1–2 sentences**; otherwise skip this part.\n\n"
     )
 
 
@@ -351,8 +364,8 @@ class ReactPromptTemplates:
 {context_brief}
 </context>
 <rules>
-1) 查询优先 grep；修改优先 grep 再 modify；创建用 create。
-2) 禁止空泛步骤（如“分析问题”）；每步必须可执行；**规划说明**须按「目标与约束 → 路径与步骤（逐步对应每个 &lt;item&gt;）→ 风险与备选」写，禁止只写 grep 而忽略后续 modify 等步骤。
+1) 查询优先 grep；修改优先 grep 再 modify；创建用 create；**仅在需要用户本机 Shell（git/构建/本地文件）时用 terminal**（command 必填；cwd/timeout 可选；多条本机命令且希望前序失败则不再跑后续时设 stop_on_error=true）。**禁止**用 client_local_bridge 执行或代替 terminal（client_local_bridge 仅用于首次下载安装 go-local-proxy，与「跑一条 Shell」无关）。
+2) 禁止空泛步骤（如“分析问题”）；每步必须可执行；**规划说明**须写清「目标与约束 → 路径与步骤（逐步对应每个 &lt;item&gt;）」；**不要**写常规风险与备选；禁止只写 grep 而忽略后续 modify 等步骤。
 3) 只输出：
 <todo_list><item>...</item></todo_list>
 </rules>
@@ -371,10 +384,10 @@ class ReactPromptTemplates:
         return f"""{_gate_block}任务规划：据用户请求生成 Todo（≤3 条），每项对应一个工具。
 
 <system>
-两段（顺序固定）1) 规划说明 2～10 句中文（须含三段推断：目标与约束；路径与步骤——**逐步对应每个 item，含后续 modify 等**；风险与备选），无 XML。2) 仅 <todo_list>…</todo_list>，每步 <item>。
+两段（顺序固定）1) 规划说明 **简短** 中文（目标与约束 + 路径与步骤，**逐步对应每个 item，含后续 modify 等**；**不写**泛泛风险与备选，除非重大不确定性），无 XML。2) 仅 <todo_list>…</todo_list>，每步 <item>。
 
 规则：有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。技能匹配则跟技能流（阈值约 0.3）。
-查询→一步 grep。修改→两步 grep 再 modify（禁止只 modify）。创建→一步 create。browser_test→一步。
+查询→一步 grep。修改→两步 grep 再 modify（禁止只 modify）。创建→一步 create。browser_test→一步。本机命令→一步 terminal（command 必填）。
 grep：keywords=记录**标题原文**；勿把「期望结果/步骤」等**字段名**当 keywords；target∈bug/badcase/testcase/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
 modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
 </system>
@@ -506,7 +519,7 @@ modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。�
 {context_brief}
 </context>
 <rules>
-1) 查询优先 grep；修改优先 grep 再 modify；创建用 create。
+1) 查询优先 grep；修改优先 grep 再 modify；创建用 create；本机 Shell 用 terminal（command 必填）。
 2) need_todo_list=true 时 todo_items 中禁止空泛步骤；每步必须可执行；上文「路径与步骤」须**逐项**覆盖 todo_items，禁止只写第一步。
 3) need_todo_list=false 时 todo_items 必须为空；禁止闲聊却 need_tools=true。
 4) 有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。
@@ -523,8 +536,8 @@ modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。�
 <system>
 单步直驱：need_todo_list=false 且 todo_items=[]。多步计划：need_todo_list=true 且 todo_items 逐项列出。
 need_tools=false 时不要 todo_items（闲聊分支）。
-规则：查询→grep。修改→grep 再 modify。创建→create。browser_test→一步。
-多步时：上文三段推断的「路径与步骤」必须与 todo_items **逐步一一对应**（含后续 modify），不得只描述 grep。
+规则：查询→grep。修改→grep 再 modify。创建→create。browser_test→一步。本机命令→terminal（command）。
+多步时：上文「路径与步骤」必须与 todo_items **逐步一一对应**（含后续 modify），不得只描述 grep。
 </system>
 
 <user_request>
@@ -574,7 +587,8 @@ need_tools=false 时不要 todo_items（闲聊分支）。
 
 **判断标准**：
 - 仅查询（grep/search）→ 简单单步
-- 仅创建单条记录（create）→ 简单单步  
+- 仅创建单条记录（create）→ 简单单步
+- 仅本机 Shell（git/构建/本地文件）→ 简单单步（工具 terminal，params.command；多步且前序失败要停后续可加 stop_on_error=true）；勿用 client_local_bridge（仅下载安装代理）
 - 先查再改（grep + modify）→ 复杂多步
 - 批量操作或多表关联 → 复杂多步
 
@@ -594,6 +608,7 @@ You MUST give a "decision" directly. Do NOT output any meta-cognitive statements
 **Decision criteria**:
 - Query only (grep/search) → Simple single step
 - Create single record (create) → Simple single step
+- Local shell only (git/build/files) → Simple single step (tool `terminal`, params.command; optional `stop_on_error=true` to skip later queued commands after a failure)
 - Query then modify (grep + modify) → Complex multi-step
 - Batch operations or multi-table → Complex multi-step
 
@@ -619,7 +634,7 @@ You MUST give a "decision" directly. Do NOT output any meta-cognitive statements
 </context>
 
 <rules>
-1. 查询优先 grep；修改优先 grep 再 modify；创建用 create。
+1. 查询优先 grep；修改优先 grep 再 modify；创建用 create；本机 Shell（git/构建等）用 terminal（command）。
 2. 单步任务直接调用工具；多步任务先输出 plan 再调用首个工具。
 3. plan 中的步骤必须具体可执行，不要空泛描述。
 </rules>
@@ -637,8 +652,9 @@ You MUST give a "decision" directly. Do NOT output any meta-cognitive statements
             for k, v in (context or {}).items()
         ]) if context else "无"
 
-        return f"""你是任务执行决策专家。{_triple_inference_narrative_zh()}请先写 5～14 句中文「行动前说明」（纯文本，不要用 XML），
-须完整覆盖上述三段推断；若整体计划含多步（如先 grep 再 modify），在「路径与步骤」中说明本步与后续未执行步骤的关系。
+        return f"""你是任务执行决策专家。{_triple_inference_narrative_zh()}请先写 **简短** 中文「行动前说明」（纯文本，不要用 XML），
+优先 **4～10 句**：须覆盖（1）目标与约束（2）路径与步骤；**（3）风险与备选仅在有重大不确定性时写 1～2 句，否则省略**。
+若整体计划含多步（如先 grep 再 modify），在「路径与步骤」中说明本步与后续未执行步骤的关系。
 然后**必须**通过 **function calling** 调用**一条**工具函数，参数为 JSON 对象（与原先 <decision> 内 params 一致）。
 不要输出 <decision> 标签。
 
@@ -694,7 +710,7 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 
 <system>
 你必须分两段输出（顺序固定）：
-1) **行动前说明**：用 3～12 句中文说明你接下来要怎么做、为什么这样做。可在首行使用「💭」（可选）。这一段**禁止使用 XML 标签**（包含 <decision>/<thinking> 等）。
+1) **行动前说明**：用 **3～10 句**中文说明怎么做、为什么；**不要**堆砌泛泛「风险点/备选方案」（除非可能造成严重误操作）。可在首行使用「💭」（可选）。这一段**禁止使用 XML 标签**（包含 <decision>/<thinking> 等）。
 2) **机器可读决策**：在说明之后，**单独**输出且仅输出一个 <decision>...</decision> 块。
 
 你的角色：根据 Todo 和当前上下文，做出执行决策
@@ -1111,17 +1127,10 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
         prev_action: Optional[dict] = None,
         plan_hints: List[str] = None,
         todo: str = "",
+        scheduled_plan: Optional[List[str]] = None,
+        first_round_task_plan: bool = False,
     ) -> str:
-        """
-        三段式统一 Prompt：一次 LLM 输出 observation + thinking + decision
-        
-        输出格式：
-        <observation>对上一轮结果的观察（首轮为空）</observation>
-        <thinking>当前轮的思考规划</thinking>
-        <decision>执行决策</decision>
-        
-        适用于千帆等 FC 不稳定的模型。
-        """
+        """三段式：一次输出 observation + thinking + decision（供流式主路径使用）。"""
         tools_info = "\n".join([
             f"  <tool id=\"{t['name']}\" description=\"{t['description'][:150]}\"/>"
             for t in available_tools[:20]
@@ -1130,58 +1139,102 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
             f"  - {k}: {str(v)[:300]}"
             for k, v in list((context or {}).items())[:15]
         ]) if context else "无"
-        
-        # 上一轮观察
+
+        if scheduled_plan:
+            n = len(scheduled_plan)
+            if round_idx < n:
+                cur = scheduled_plan[round_idx]
+                tail = [scheduled_plan[i] for i in range(round_idx + 1, n)]
+                tail_join = "；".join(tail[:8])
+                if len(tail) > 8:
+                    tail_join += " …"
+                current_todo_body = f"【第 {round_idx + 1}/{n} 步（本轮须推进）】{cur}"
+                if tail_join:
+                    current_todo_body += f"\n【后续步骤】{tail_join}"
+            else:
+                current_todo_body = (
+                    f"计划内共列出 {n} 步；若所需工具已全部执行完毕则 execute=false；"
+                    "否则继续下一工具 execute=true，直至无遗漏。"
+                )
+        else:
+            current_todo_body = todo or "（无特定待办）"
+
+        first_round_plan_block = ""
+        if first_round_task_plan and round_idx == 0 and not scheduled_plan:
+            first_round_plan_block = """
+**首轮 `<task_plan>`（按任务复杂度二选一，勿画蛇添足）：**
+- **简单任务（不要写 `<task_plan>`）**：单步即可完成、只需一些简单的工具调用、或纯闲聊/无关问答——与原先一致：`<thinking>` 简短分析后**直接**在 `<decision>` 里 `execute=true/false` 选工具即可，**整段回复中不要出现** `<task_plan>` 标签。
+- **复杂多步任务（须写 `<task_plan>`）**：用户一句需求里含**多个须串行完成的操作**（例如先 grep 再 modify、改完再 create 副本、多实体多轮工具链），或步骤之间有**明确先后依赖**——在 `<decision>` 阶段内，先输出任务计划再输出工具决策（标签原样保留）：
+<task_plan>
+<step>…</step>
+<step>…</step>
+</task_plan>
+  - 2～12 条中文短句，每条对应建议的**串行工具顺序**；**第 1 条**须与本回合 `execute=true` 所选工具一致。
+  - 拿不准时：宁可**少写计划**（不写 `<task_plan>`）单步推进，也不要为简单问句硬凑多步计划。
+"""
+
         obs_str = "（这是首轮，还没有上一轮观察）"
         if prev_observation is not None:
+            _obs_for_json = (
+                deep_sse_json_safe(prev_observation)
+                if isinstance(prev_observation, dict)
+                else prev_observation
+            )
             try:
-                raw = json.dumps(prev_observation, ensure_ascii=False, indent=2)
+                raw = json.dumps(_obs_for_json, ensure_ascii=False, indent=2, default=str)
                 obs_str = raw[:8000] + ("…" if len(raw) > 8000 else "")
             except Exception:
                 obs_str = str(prev_observation)[:6000]
-        
-        
-        # 上一轮行动
+
         action_str = "无"
         if prev_action:
-            action_str = f"工具: {prev_action.get('tool')}，参数: {json.dumps(prev_action.get('params', {}), ensure_ascii=False)}"
-        
-        
-        # 计划提示
-        hints_str = ""
-        if plan_hints:
-            hints_str = "\n".join(f"  {i+1}. {h}" for i, h in enumerate(plan_hints[:10]))
-        
-        
+            try:
+                _params_safe = deep_sse_json_safe(prev_action.get("params", {}))
+                if not isinstance(_params_safe, dict):
+                    _params_safe = {}
+                _ap = json.dumps(
+                    _params_safe,
+                    ensure_ascii=False,
+                    default=str,
+                )
+            except Exception:
+                _ap = str(prev_action.get("params", {}))
+            action_str = f"工具: {prev_action.get('tool')}，参数: {_ap}"
+
         return f"""你是 ReAct 任务执行引擎。一次输出三段：观察分析 → 思考规划 → 决策行动。
 
 <system>
+**输出前自检（在心里完成即可）：** 三个根标签是否按顺序写全、每个标签是否都有闭合、`<params>` 是否为合法 JSON；再开始打字。
+
 **三段式输出格式（顺序固定，缺一不可）：**
 
 第一段：<observation>...</observation>
-- 首轮：可简写或留空
-- 后续轮：分析上一轮工具执行结果，提炼关键信息（成功/失败、返回数据、异常原因）
-- 长度：2-6 句话
+- **首轮（round_index=1）必须留空**：写 `<observation></observation>` 即可，不要任何内容
+- 后续轮：1句概括工具结果 + 1句任务完成度（`未覆盖/进行中/已交付预览/已达成/客观阻塞`）
+- 长度：最多2句
 
 第二段：<thinking>...</thinking>
-- 目标与约束：明确本轮要达成什么目标
-- 路径与步骤：说明选择什么工具、为什么、参数如何填写
-- 风险与备选：可能的问题和应对方案
-- 长度：4-10 句话
+- 目标：本轮做什么（1句）
+- 工具：选什么工具、关键参数（1-2句）
+- **首轮 round_index=1**：复杂多步任务在段末输出 `<task_plan>`；简单单步不写
+- 长度：**3句以内**；闲聊直接回复用户（不写元说明）
 
 第三段：<decision>...</decision>
-- 必须严格按下方 <format> 格式输出
-- execute=true 表示执行工具，false 表示任务完成或闲聊
+- 必须严格按下方 <format> 格式输出（含 `<goal_done>`）
+- `<goal_done>`：**结合 user_request、本轮 observation 中的完成度判断**；仅当用户目标已达成（含已给出可展示的结论/沙箱预览且无需再调工具）、或属闲聊已可回复、或客观无法继续时为 true；否则 false。**goal_done=true 时本回合必须 execute=false、tool 留空**（与完成度一致，不得矛盾）
+- execute=true 表示本回合要执行工具；execute=false **仅当**用户所需步骤已全部通过工具跑完、或闲聊/无关问答、或 goal_done=true；**多步任务尚未调用完计划中的工具（如还差 create）时一般不得 false**——但若 observation 已判定「已达成可收尾」或「已交付预览待确认」且无需再调工具，则 goal_done=true 并 execute=false
 - tool 为空表示返回自然语言回复（闲聊场景）
 
 **决策规则：**
 1. 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）
 2. create/modify 预览用 confirm=false，禁止直接落库
-3. 目标已达成则 execute=false，tool 留空
-4. 纯聊天/问候场景：execute=false，不调用工具
-5. 涉及搜索、查询、测试、修改时 execute 必须为 true
-6. 不确定参数时可简写，服务端会补全
-
+3. **多步串行**：按 `task_plan` **一轮一个工具**执行，直到计划中**每一步都至少调用过一次**（各步可为沙箱预览）。**同一条 SSE 内**若仍有未执行步骤，**禁止** `execute=false`。**服务端**在「沙箱/创建待用户确认」或「计划步数已跑完」时会**自动结束本条流**；待确认时用户会在 UI 操作后再发新消息继续，你不必在同一连接里假定已落库。**若流仍在继续**且还有未调用步骤（常见：尚未 `create`），**下一轮必须** `execute=true`。
+4. 用户要求的操作已在工具层面全部执行完毕（无遗漏步骤）、或确属闲聊/与项目无关、或客观无法继续时：`execute=false`，tool 留空
+5. 纯聊天/问候/与项目无关的泛泛问答：优先 execute=false、tool 留空；若需以工具形式收口可 execute=true、tool=chitchat、params 含 message=用户原话或问题摘要
+6. 涉及搜索、查询、测试、修改时 execute 必须为 true（闲聊除外）
+7. 不确定参数时可简写，服务端会补全
+8. **terminal 工具（本机 Shell）**：若 `<current_context>` 含 `client_os: windows`（或用户环境为 Windows），命令须用 **cmd.exe 可用语法**（查看当前目录用 `cd` 或 `echo %CD%`，**禁止**单独使用 Linux 的 `pwd`）；macOS/Linux 可用 `pwd`。若上一轮 terminal 已失败且 stderr 含「not recognized」「不是内部或外部命令」等，须在 observation 中判定为环境/命令不匹配，并在下一轮 **改用语境匹配的命令** 重试，勿只向用户泛泛解释而不继续执行。
+{first_round_plan_block}
 **modify 工具参数格式（重要）：**
 - target: "bug" 或 "badcase" 或 "testcase"
 - target_id: 从 grep 结果获取的 ID（整数或数组）
@@ -1199,7 +1252,7 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 <round_index>{round_idx + 1}</round_index>
 
 <current_todo>
-{todo or '（无特定待办）'}
+{current_todo_body}
 </current_todo>
 
 <current_context>
@@ -1220,27 +1273,11 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 
 <format>
 <decision>
+<goal_done>true 或 false</goal_done>
 <execute>true 或 false</execute>
 <tool>工具名（execute=false 时可为空）</tool>
 <params>{{"key": "value"}}</params>
-<reason>一句决策理由</reason>
-</decision>
-
-**示例：**
-<!-- grep 查询 -->
-<decision>
-<execute>true</execute>
-<tool>grep</tool>
-<params>{{"target": "bug", "keywords": "登录", "project_id": 6}}</params>
-<reason>查询登录相关的 Bug</reason>
-</decision>
-
-<!-- modify 修改 -->
-<decision>
-<execute>true</execute>
-<tool>modify</tool>
-<params>{{"target": "bug", "target_id": 9, "modifications": {{"status": "hold"}}, "confirm": false}}</params>
-<reason>将 Bug 状态改为 hold（预览模式）</reason>
+<reason>一句决策理由（须与 goal_done、execute 一致）</reason>
 </decision>
 </format>
 
@@ -1382,7 +1419,10 @@ Todo：{todo} | 工具：{tool}
 """
 
 
-def format_tools_for_prompt(tool_registry) -> list:
+def format_tools_for_prompt(
+    tool_registry,
+    exclude_tool_names: Optional[Tuple[str, ...]] = None,
+) -> list:
     """格式化工具信息。REACT_TOOL_DESC_MAX_CHARS>0 时截断描述，缩短首轮 THINK prompt（不改模型，仅减 token）。
 
     REACT_TOOLS_PROMPT_INDEX=1：除 get_tool_description 外，各工具描述截断为短索引（REACT_TOOL_INDEX_DESC_CHARS，默认 120），
@@ -1412,11 +1452,15 @@ def format_tools_for_prompt(tool_registry) -> list:
         "off",
     )
     tools = getattr(tool_registry, "tools", None) or {}
+    if exclude_tool_names:
+        _ex = set(exclude_tool_names)
+        tools = {k: v for k, v in tools.items() if str(k) not in _ex}
+    ex_key: Tuple[str, ...] = tuple(sorted(exclude_tool_names)) if exclude_tool_names else ()
     fp: Tuple[Any, ...] = tuple(
         (str(name), str(getattr(t, "description", None) or ""))
         for name, t in sorted(tools.items(), key=lambda kv: str(kv[0]))
     )
-    key = (max_chars, index_mode, index_short, fp)
+    key = (max_chars, index_mode, index_short, fp, ex_key)
     global _tools_format_cache_key, _tools_format_cache_val
     if cache_on:
         with _tools_format_cache_lock:
@@ -1445,6 +1489,45 @@ def extract_xml_field(text: Any, tag: str) -> str:
     import re
     match = re.search(pattern, text, re.DOTALL)
     return match.group(1).strip() if match else ''
+
+
+def _parse_decision_loose_subtags(text: str) -> Optional[Dict[str, Any]]:
+    """
+    无标准 <decision>...</decision> 包裹时，从全文正则抽取 execute / tool / params / reason。
+    供 parse_xml_decision 与统一流兜底共用（定义在 parse_xml_decision 之前以便引用）。
+    """
+    if not text or not isinstance(text, str):
+        return None
+    out: Dict[str, Any] = {
+        "execute": False,
+        "tool": "",
+        "params": {},
+        "reason": "",
+    }
+    exec_match = re.search(
+        r"<execute>\s*(true|false|是|否|1|0)\s*</execute>",
+        text,
+        re.IGNORECASE,
+    )
+    if exec_match:
+        out["execute"] = exec_match.group(1).lower() in ("true", "是", "1")
+    tool_match = re.search(r"<tool>\s*([^<]*)\s*</tool>", text, re.IGNORECASE)
+    if tool_match:
+        out["tool"] = (tool_match.group(1) or "").strip()
+    params_match = re.search(r"<params>\s*([\s\S]*?)\s*</params>", text, re.IGNORECASE)
+    if params_match:
+        ps = (params_match.group(1) or "").strip()
+        try:
+            out["params"] = json.loads(ps) if ps else {}
+        except json.JSONDecodeError:
+            if ps:
+                out["params"] = {"raw": ps}
+    reason_match = re.search(r"<reason>\s*([\s\S]*?)\s*</reason>", text, re.IGNORECASE)
+    if reason_match:
+        out["reason"] = (reason_match.group(1) or "").strip()
+    if out.get("tool") or out.get("execute") or (out.get("reason") or "").strip():
+        return out
+    return None
 
 
 def parse_xml_decision(text: Any) -> dict:
@@ -1621,6 +1704,18 @@ def parse_xml_decision(text: Any) -> dict:
         
         if result['execute'] or result['tool']:
             return result
+
+    # 方案 1b：无完整 <decision> 块或嵌套错误时，从全文松散子标签提取
+    if isinstance(text, str):
+        loose = _parse_decision_loose_subtags(text)
+        if loose:
+            result["execute"] = bool(loose.get("execute"))
+            result["tool"] = loose.get("tool") or ""
+            result["params"] = loose.get("params") if isinstance(loose.get("params"), dict) else {}
+            result["reason"] = loose.get("reason") or ""
+            if result["tool"] == "search":
+                result["params"] = _smart_select_search_engine(result["params"])
+            return result
     
     # 方案 2: 字符串但包含 JSON 格式
     if isinstance(text, str):
@@ -1671,85 +1766,211 @@ def parse_xml_decision(text: Any) -> dict:
     return result
 
 
+def _extract_unified_task_plan_steps(text: str) -> List[str]:
+    """从统一流整段回复中提取 <task_plan><step>…</step></task_plan>（可位于 thinking 或 decision 内）。"""
+    if not text or not isinstance(text, str):
+        return []
+    m = re.search(r"<task_plan>([\s\S]*?)</task_plan>", text, re.IGNORECASE)
+    if not m:
+        return []
+    inner = m.group(1) or ""
+    steps = re.findall(r"<step>([\s\S]*?)</step>", inner, re.IGNORECASE)
+    out: List[str] = []
+    for s in steps:
+        t = re.sub(r"\s+", " ", (s or "").strip())
+        if t:
+            out.append(t)
+    return out
+
+
+def _first_tag_open_end(text: str, tag: str) -> int:
+    """第一个 <tag ...> 的 '>' 下标；无则 -1。"""
+    m = re.search(rf"<{re.escape(tag)}\b[^>]*>", text, re.IGNORECASE)
+    return m.end() - 1 if m else -1
+
+
+def _extract_xml_block_robust(
+    text: str,
+    tag: str,
+    aliases: Tuple[str, ...] = (),
+) -> Tuple[str, List[str]]:
+    """
+    多级提取 <tag>...</tag> 内正文。
+    1) 非贪婪匹配；2) 同名首开到末闭（缓解嵌套/截断导致的错配）；3) 别名标签。
+    """
+    notes: List[str] = []
+    candidates = (tag,) + aliases
+
+    for name in candidates:
+        m = re.search(rf"<{re.escape(name)}>([\s\S]*?)</{re.escape(name)}>", text, re.IGNORECASE)
+        if m:
+            inner = (m.group(1) or "").strip()
+            notes.append(f"{name}:non_greedy")
+            return inner, notes
+
+    for name in candidates:
+        gt = _first_tag_open_end(text, name)
+        if gt < 0:
+            continue
+        closes = list(re.finditer(rf"</{re.escape(name)}\s*>", text, re.IGNORECASE))
+        if not closes:
+            continue
+        last = closes[-1]
+        if last.start() <= gt:
+            continue
+        inner = text[gt + 1 : last.start()].strip()
+        notes.append(f"{name}:first_open_to_last_close")
+        return inner, notes
+
+    return "", notes
+
+
+def _parse_unified_decision_inner(decision_text: str) -> Dict[str, Any]:
+    """从 decision 块内文本解析 execute / tool / params / reason / goal_done。"""
+    loose = _parse_decision_loose_subtags(decision_text)
+    out: Dict[str, Any] = (
+        dict(loose)
+        if loose
+        else {"execute": False, "tool": "", "params": {}, "reason": ""}
+    )
+    goal_done = False
+    gd_match = re.search(
+        r"<goal_done>\s*(true|false|是|否|1|0)\s*</goal_done>",
+        decision_text,
+        re.IGNORECASE,
+    )
+    if gd_match:
+        _gv = gd_match.group(1).lower()
+        goal_done = _gv in ("true", "是", "1")
+
+    return {"decision": out, "goal_done": goal_done}
+
+
+def _fallback_decision_loose_tags(text: str) -> Tuple[Dict[str, Any], bool, List[str]]:
+    """
+    无完整 <decision> 包裹时，在全文用正则抽取 decision 子标签（最后一层容错）。
+    返回 (decision_dict, goal_done, notes)。
+    """
+    notes: List[str] = []
+    parsed = _parse_unified_decision_inner(text)
+    inner = parsed["decision"]
+    gd = parsed["goal_done"]
+    if inner.get("tool") or inner.get("execute") or inner.get("reason"):
+        notes.append("loose_tags:full_scan")
+    return inner, gd, notes
+
+
 def parse_unified_response(text: str) -> Dict[str, Any]:
-    """
-    解析三段式 XML 响应：observation + thinking + decision
-    
-    返回结构：
-    {
-        "observation": "观察内容",
-        "thinking": "思考内容",
-        "decision": {"execute": bool, "tool": str, "params": dict, "reason": str},
-        "raw": "原始文本"
-    }
-    """
+    """解析三段式 XML：observation + thinking + decision；含多级 fallback 与 parse_meta。"""
     if not text or not isinstance(text, str):
         return {
             "observation": "",
             "thinking": "",
             "decision": {"execute": False, "tool": "", "params": {}, "reason": ""},
-            "raw": ""
+            "plan_steps": [],
+            "goal_done": False,
+            "raw": "",
+            "parse_meta": {
+                "fallbacks": [],
+                "decision_envelope_ok": False,
+                "retry_recommended": False,
+            },
         }
-    
-    result = {
+
+    parse_notes: List[str] = []
+    tl = text.lower()
+    decision_envelope_ok = ("</decision>" in tl) or ("</decide>" in tl)
+
+    result: Dict[str, Any] = {
         "observation": "",
         "thinking": "",
         "decision": {"execute": False, "tool": "", "params": {}, "reason": ""},
-        "raw": text
+        "plan_steps": _extract_unified_task_plan_steps(text),
+        "goal_done": False,
+        "raw": text,
+        "parse_meta": {
+            "fallbacks": parse_notes,
+            "decision_envelope_ok": decision_envelope_ok,
+            "retry_recommended": False,
+        },
     }
-    
-    # 提取 <observation>
-    obs_match = re.search(r'<observation>([\\s\\S]*?)</observation>', text, re.IGNORECASE)
-    if obs_match:
-        result["observation"] = obs_match.group(1).strip()
-    
-    # 提取 <thinking>
-    think_match = re.search(r'<thinking>([\\s\\S]*?)</thinking>', text, re.IGNORECASE)
-    if think_match:
-        result["thinking"] = think_match.group(1).strip()
-    
-    # 提取 <decision>
-    decision_match = re.search(r'<decision>([\\s\\S]*?)</decision>', text, re.IGNORECASE)
-    if decision_match:
-        decision_text = decision_match.group(1)
-        
-        # 解析 execute
-        exec_match = re.search(r'<execute>\\s*(true|false|是|否|1|0)\\s*</execute>', decision_text, re.IGNORECASE)
-        if exec_match:
-            exec_val = exec_match.group(1).lower()
-            result["decision"]["execute"] = exec_val in ("true", "是", "1")
-        
-        # 解析 tool
-        tool_match = re.search(r'<tool>\\s*([^<]*)\\s*</tool>', decision_text)
-        if tool_match:
-            result["decision"]["tool"] = tool_match.group(1).strip()
-        
-        # 解析 params (JSON 格式)
-        params_match = re.search(r'<params>\\s*([\\s\\S]*?)\\s*</params>', decision_text)
-        if params_match:
-            params_str = params_match.group(1).strip()
-            try:
-                # 尝试解析 JSON
-                result["decision"]["params"] = json.loads(params_str)
-            except json.JSONDecodeError:
-                # 如果不是有效 JSON，作为字符串处理
-                if params_str:
-                    result["decision"]["params"] = {"raw": params_str}
-        
-        
-        # 解析 reason
-        reason_match = re.search(r'<reason>\\s*([^<]*)\\s*</reason>', decision_text)
-        if reason_match:
-            result["decision"]["reason"] = reason_match.group(1).strip()
-    
-    
-    # 如果 decision 中没有解析到内容，尝试使用 parse_xml_decision 作为 fallback
+
+    obs, on = _extract_xml_block_robust(text, "observation", ("observe",))
+    if obs:
+        result["observation"] = obs
+        parse_notes.extend([f"observation:{x}" for x in on])
+
+    think, tn = _extract_xml_block_robust(text, "thinking", ("think",))
+    if think:
+        result["thinking"] = think
+        parse_notes.extend([f"thinking:{x}" for x in tn])
+
+    decision_text = ""
+    dn: List[str] = []
+    for tag, als in (("decision", ("decide",)), ("decide", ())):
+        decision_text, dn = _extract_xml_block_robust(text, tag, als)
+        if decision_text or dn:
+            parse_notes.extend([f"decision_block:{x}" for x in dn])
+            break
+
+    if decision_text:
+        inner = _parse_unified_decision_inner(decision_text)
+        result["decision"] = inner["decision"]
+        result["goal_done"] = inner["goal_done"]
+        if not (
+            (result["decision"].get("tool") or "").strip()
+            or result["decision"].get("execute")
+            or (result["decision"].get("reason") or "").strip()
+        ):
+            fb = parse_xml_decision(text)
+            if fb.get("tool") or fb.get("execute"):
+                result["decision"] = {
+                    "execute": bool(fb.get("execute")),
+                    "tool": fb.get("tool") or "",
+                    "params": fb.get("params") if isinstance(fb.get("params"), dict) else {},
+                    "reason": fb.get("reason") or "",
+                }
+                parse_notes.append("parse_xml_decision:fallback")
+    else:
+        loose, gd_loose, ln = _fallback_decision_loose_tags(text)
+        if loose.get("tool") or loose.get("execute") or loose.get("reason"):
+            result["decision"] = loose
+            result["goal_done"] = gd_loose
+            parse_notes.extend(ln)
+        else:
+            fb = parse_xml_decision(text)
+            if fb.get("tool") or fb.get("execute"):
+                result["decision"] = {
+                    "execute": bool(fb.get("execute")),
+                    "tool": fb.get("tool") or "",
+                    "params": fb.get("params") if isinstance(fb.get("params"), dict) else {},
+                    "reason": fb.get("reason") or "",
+                }
+                parse_notes.append("parse_xml_decision:fallback")
+
     if not result["decision"].get("tool") and not result["decision"].get("execute"):
         fallback = parse_xml_decision(text)
         if fallback.get("tool") or fallback.get("execute"):
-            result["decision"] = fallback
-    
-    
+            result["decision"] = {
+                "execute": bool(fallback.get("execute")),
+                "tool": fallback.get("tool") or "",
+                "params": fallback.get("params") if isinstance(fallback.get("params"), dict) else {},
+                "reason": fallback.get("reason") or "",
+            }
+            if "parse_xml_decision:fallback" not in parse_notes:
+                parse_notes.append("parse_xml_decision:fallback")
+
+    _has_dec = bool(
+        (result["decision"].get("tool") or "").strip()
+        or result["decision"].get("execute")
+        or (result["decision"].get("reason") or "").strip()
+    )
+    result["parse_meta"]["fallbacks"] = parse_notes
+    result["parse_meta"]["decision_envelope_ok"] = decision_envelope_ok
+    result["parse_meta"]["retry_recommended"] = (
+        (not decision_envelope_ok) and len(text.strip()) >= 40 and not _has_dec
+    )
+
     return result
 
 

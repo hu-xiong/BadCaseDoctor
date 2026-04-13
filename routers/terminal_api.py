@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""嵌入式终端：AI 命令建议、审计查询（与 terminal_socket 配合）"""
+"""嵌入式终端：AI 命令建议、审计查询（REST；交互式 PTY 由本机 go-local-proxy / Electron 承担）"""
 from __future__ import annotations
 
 import csv
@@ -205,9 +205,12 @@ def ai_suggest():
 
 
 @terminal_bp.route("/config", methods=["GET"])
-@login_required
 def terminal_config():
-    """前端展示用：AI 白名单是否开启（不返回完整密钥类信息）"""
+    """前端展示用：AI 白名单是否开启（不返回完整密钥类信息）。
+
+    故意不加 @login_required：数据仅来自 Config / 环境变量，不查库；若加上登录，
+    Flask-Login 的 load_user 会连 MySQL，库不可达时本地嵌入式终端页连「白名单 pill」都拉不到。
+    """
     en = _ai_whitelist_enabled()
     tokens = _ai_whitelist_tokens() if en else []
     return jsonify(

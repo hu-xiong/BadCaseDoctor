@@ -1,7 +1,7 @@
 <template>
   <div class="team-management">
-    <div class="header">
-      <h2>团队管理</h2>
+    <div class="header" :class="{ 'header-compact': hideTopHeading }">
+      <h2 v-if="!hideTopHeading">团队管理</h2>
       <button class="create-team-btn" @click="showCreateTeamModal = true">
         <span class="plus-icon">+</span>
         创建团队
@@ -202,6 +202,10 @@ export default {
     projectId: {
       type: [String, Number],
       required: true
+    },
+    hideTopHeading: {
+      type: Boolean,
+      default: false
     }
   },
   
@@ -407,6 +411,11 @@ export default {
 .header h2 {
   margin: 0;
   color: #333;
+}
+
+.header.header-compact {
+  justify-content: flex-end;
+  margin-bottom: 16px;
 }
 
 .create-team-btn {

@@ -1,5 +1,57 @@
 <template>
-  <div class="profile-modal-overlay" @click.self="$emit('close')">
+  <div v-if="embedded" class="profile-embedded" :class="{ 'profile-embedded--light': tone === 'light' }">
+    <div class="modal-body embedded-body">
+        <!-- 用户基本信息 -->
+        <div class="user-info-section">
+          <div class="avatar-large">{{ userInitial }}</div>
+          <div class="user-details">
+            <h3>{{ user?.name || '用户' }}</h3>
+            <p class="email">{{ user?.email || '' }}</p>
+          </div>
+        </div>
+
+        <!-- 订阅信息 -->
+        <div class="subscription-section">
+          <h4>订阅信息</h4>
+          
+          <div v-if="loading" class="loading-state">
+            加载中...
+          </div>
+          
+          <div v-else-if="credits > 0" class="subscription-active">
+            <div class="credits-display">
+              <div class="credits-circle">
+                <span class="credits-number">{{ credits }}</span>
+                <span class="credits-label">剩余次数</span>
+              </div>
+            </div>
+            <div class="subscription-stats">
+              <div class="stat-item">
+                <span class="stat-value">{{ totalPurchased }}</span>
+                <span class="stat-label">累计购买</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-value">{{ totalPurchased - credits }}</span>
+                <span class="stat-label">已使用</span>
+              </div>
+            </div>
+            <button class="buy-more-btn" @click="goToSubscription">
+              购买更多
+            </button>
+          </div>
+          
+          <div v-else class="no-subscription">
+            <div class="empty-icon">💳</div>
+            <p>您还没有订阅</p>
+            <p class="hint">订阅后可使用 AI 智能诊断功能</p>
+            <button class="subscribe-btn" @click="goToSubscription">
+              立即订阅
+            </button>
+          </div>
+        </div>
+      </div>
+  </div>
+  <div v-else class="profile-modal-overlay" @click.self="$emit('close')">
     <div class="profile-modal">
       <div class="modal-header">
         <h2>个人资料</h2>
@@ -66,7 +118,10 @@ import { useRouter } from 'vue-router'
 import axios from 'axios'
 
 const props = defineProps({
-  user: Object
+  user: Object,
+  embedded: { type: Boolean, default: false },
+  /** 嵌入到浅色工作台时用 light */
+  tone: { type: String, default: 'dark', validator: (v) => ['dark', 'light'].includes(v) }
 })
 
 const emit = defineEmits(['close'])
@@ -103,6 +158,56 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.profile-embedded {
+  width: 100%;
+}
+
+.embedded-body {
+  padding: 0;
+  background: transparent;
+}
+
+.profile-embedded--light .modal-body {
+  padding: 20px 22px 22px;
+  background: #fff;
+}
+
+.profile-embedded--light .user-info-section {
+  border-bottom-color: #e9ecef;
+}
+
+.profile-embedded--light .user-details h3 {
+  color: #212529;
+}
+
+.profile-embedded--light .user-details .email {
+  color: #6c757d;
+}
+
+.profile-embedded--light .subscription-section h4 {
+  color: #868e96;
+}
+
+.profile-embedded--light .loading-state {
+  color: #868e96;
+}
+
+.profile-embedded--light .stat-value {
+  color: #212529;
+}
+
+.profile-embedded--light .stat-label {
+  color: #868e96;
+}
+
+.profile-embedded--light .no-subscription p {
+  color: #212529;
+}
+
+.profile-embedded--light .no-subscription .hint {
+  color: #6c757d;
+}
+
 .profile-modal-overlay {
   position: fixed;
   top: 0;

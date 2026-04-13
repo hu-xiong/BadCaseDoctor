@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BadCase Local Proxy (URL handler)
+# 将 __EXE_PATH__ 替换为可执行文件绝对路径；复制到 ~/.local/share/applications/ 后执行：
+# xdg-mime default badcase-local-proxy-handler.desktop x-scheme-handler/badcase-local-proxy
+Exec=__EXE_PATH__ %u
+StartupNotify=false
+Terminal=false
+MimeType=x-scheme-handler/badcase-local-proxy;

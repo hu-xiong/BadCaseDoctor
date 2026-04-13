@@ -1,114 +1,169 @@
 <template>
-  <div class="etw-root">
-    <div class="etw-topbar">
-      <div class="etw-topbar-left">
-        <button
-          type="button"
-          class="etw-top-tab"
-          :class="{ active: mainTab === 'term' }"
-          @click="mainTab = 'term'"
-        >
-          {{ t('embeddedTerminal.tab') }}
-        </button>
-        <button
-          type="button"
-          class="etw-top-tab"
-          :class="{ active: mainTab === 'output' }"
-          @click="mainTab = 'output'"
-        >
-          {{ t('embeddedTerminal.outputTab') }}
-        </button>
+  <div
+    ref="etwRootRef"
+    class="etw-root etw-vscode-terminal monaco-workbench vs-dark"
+    :style="rootWorkbenchStyle"
+  >
+    <!-- pane-body 必须作为 monaco-workbench 的子节点，否则 integratedTerminalPanel.css 里大量选择器不生效（会话列会变成系统默认按钮白底） -->
+    <div class="pane-body integrated-terminal etw-terminal-pane-fill">
+    <!-- VS Code panel title strip + 业务：代理条 / 白名单 -->
+    <div class="etw-panel-title">
+      <div class="etw-panel-title-left">
+        <span class="etw-pane-title-text">{{ t('embeddedTerminal.tab') }}</span>
         <span v-if="terminalCfg?.ai_whitelist_enabled" class="etw-top-pill">
           {{ t('embeddedTerminal.whitelistOn') }}
         </span>
+        <WebLocalGoProxyBar :working-directory="effectiveWorkingDirectory" :project-id="projectId" />
       </div>
-      <div class="etw-topbar-right">
-        <div class="etw-menu-wrap">
-          <button type="button" class="etw-icon-btn" :title="t('embeddedTerminal.newTab')" @click="toggleNewMenu">+</button>
-          <div v-if="showNewMenu" class="etw-menu" @click="showNewMenu = false">
-            <button type="button" class="etw-menu-item" @click.stop="addTab()">{{ t('embeddedTerminal.newTab') }}</button>
-          </div>
-        </div>
-
-        <div class="etw-menu-wrap">
-          <button type="button" class="etw-icon-btn" :title="t('common.more')" @click="toggleMoreMenu">…</button>
-          <div v-if="showMoreMenu" class="etw-menu etw-menu-wide" @click="showMoreMenu = false">
-            <button type="button" class="etw-menu-item" :disabled="!activeTabId" @click.stop="clearActive()">
-              {{ t('embeddedTerminal.clearScreen') }}
-            </button>
-            <button type="button" class="etw-menu-item" :disabled="!activeTabId" @click.stop="closeActiveTab()">
-              {{ t('embeddedTerminal.closeTab') }}
-            </button>
-            <div class="etw-menu-sep" />
-            <button type="button" class="etw-menu-item" @click.stop="openQuickEditor()">
-              {{ t('embeddedTerminal.editQuickCommands') }}
-            </button>
-            <button type="button" class="etw-menu-item" :disabled="auditExporting" @click.stop="exportAuditCsv()">
-              {{ t('embeddedTerminal.exportAudit') }}
-            </button>
-            <button
-              v-if="openAiComposerPrefill"
-              type="button"
-              class="etw-menu-item"
-              @click.stop="onOpenChatForCommands"
-            >
-              {{ t('embeddedTerminal.openChatForCommands') }}
-            </button>
-            <button
-              v-if="openNewBadcaseFromTerminal"
-              type="button"
-              class="etw-menu-item"
-              :disabled="!hasTerminalSelection"
-              @click.stop="createBadcaseFromTerminal"
-            >
-              {{ t('embeddedTerminal.createBadcaseFromTerminal') }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div v-show="mainTab === 'term'" class="etw-term-stack">
-      <div class="etw-split">
-        <div class="etw-term-wrap">
-          <EmbeddedPtyTerminal
-            v-for="t in tabs"
-            v-show="activeTabId === t.id"
-            :key="t.id"
-            :client-session-id="t.id"
-            :mode="t.mode"
-            :ssh-config="t.ssh"
-            :working-directory="workingDirectory"
-            :project-id="projectId"
-          />
-        </div>
-        <aside class="etw-session-rail" aria-label="terminal-sessions">
-          <div class="etw-rail-title">{{ t('embeddedTerminal.sessions') }}</div>
+      <div class="etw-panel-title-right">
+        <div class="monaco-toolbar etw-terminal-tabs-toolbar etw-panel-terminal-toolbar">
           <button
-            v-for="tab in tabs"
-            :key="tab.id"
             type="button"
-            class="etw-rail-item"
-            :class="{ active: activeTabId === tab.id, [`kind-${tab.kind}`]: true }"
-            :title="tab.label"
-            @click="activeTabId = tab.id"
-          >
-            <span class="etw-rail-icon" aria-hidden="true">{{ sessionIcon(tab) }}</span>
-            <span class="etw-rail-label">{{ tab.label }}</span>
-          </button>
-          <p v-if="agentTabActive" class="etw-rail-hint">{{ t('embeddedTerminal.agentReadonlyHint') }}</p>
-        </aside>
+            class="action-item codicon codicon-add"
+            :title="t('embeddedTerminal.newTab')"
+            @click="addTab()"
+          />
+          <div class="etw-terminal-menu-anchor etw-vscode-menu-anchor">
+            <button
+              type="button"
+              class="action-item codicon codicon-ellipsis"
+              :title="t('common.more')"
+              @click="toggleMoreMenu"
+            />
+            <div v-if="showMoreMenu" class="etw-vscode-menu etw-vscode-menu-wide" @click="showMoreMenu = false">
+              <button type="button" class="etw-vscode-menu-item" :disabled="!activeTabId" @click.stop="clearActive()">
+                {{ t('embeddedTerminal.clearScreen') }}
+              </button>
+              <button type="button" class="etw-vscode-menu-item" :disabled="!activeTabId" @click.stop="closeActiveTab()">
+                {{ t('embeddedTerminal.closeTab') }}
+              </button>
+              <div class="etw-vscode-menu-sep" />
+              <button type="button" class="etw-vscode-menu-item" @click.stop="openQuickEditor()">
+                {{ t('embeddedTerminal.editQuickCommands') }}
+              </button>
+              <button type="button" class="etw-vscode-menu-item" :disabled="auditExporting" @click.stop="exportAuditCsv()">
+                {{ t('embeddedTerminal.exportAudit') }}
+              </button>
+              <button
+                v-if="openAiComposerPrefill"
+                type="button"
+                class="etw-vscode-menu-item"
+                @click.stop="onOpenChatForCommands"
+              >
+                {{ t('embeddedTerminal.openChatForCommands') }}
+              </button>
+              <button
+                v-if="openNewBadcaseFromTerminal"
+                type="button"
+                class="etw-vscode-menu-item"
+                :disabled="!hasTerminalSelection"
+                @click.stop="createBadcaseFromTerminal"
+              >
+                {{ t('embeddedTerminal.createBadcaseFromTerminal') }}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div v-show="mainTab === 'output'" class="etw-output-panel">
-      <div class="etw-output-toolbar">
-        <span class="small text-muted">{{ t('embeddedTerminal.outputHint') }}</span>
-        <button type="button" class="btn btn-sm btn-outline-secondary" @click="clearActiveOutputLog">
-          {{ t('embeddedTerminal.clearOutput') }}
-        </button>
+    <!-- 路径由 Shell 在 xterm 内绘制（如 PS C:\...>），与 Cursor 一致；cwd 仅通过 term_start 传入 -->
+    <!-- 对齐 terminalTabbedView：terminal-outer-container = 编辑区 | sash | tabs-container -->
+    <div ref="terminalOuterRef" class="terminal-outer-container etw-terminal-outer-fill">
+      <div class="terminal-groups-container">
+        <div class="terminal-split-pane etw-terminal-main-pane">
+          <div class="terminal-wrapper etw-terminal-editor-wrapper">
+            <EmbeddedPtyTerminal
+              v-for="t in tabs"
+              v-show="activeTabId === t.id"
+              :key="t.id"
+              :client-session-id="t.id"
+              :mode="t.mode"
+              :ssh-config="t.ssh"
+              :working-directory="effectiveWorkingDirectory"
+              :project-id="projectId"
+              :rail-resize-tick="sessionRailResizeTick"
+              :rail-dragging="sessionRailDragging"
+              :pane-active="activeTabId === t.id"
+            />
+          </div>
+        </div>
       </div>
-      <pre class="etw-output-pre">{{ activeOutputLog }}</pre>
+
+      <div
+        class="etw-vscode-sash"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="sessionRailWidthPx"
+        :aria-valuemin="tabsListMinW"
+        :aria-valuemax="tabsListMaxW"
+        :title="t('embeddedTerminal.resizeSessionRail')"
+        @mousedown.prevent="onSessionRailResizeStart"
+      />
+
+      <div class="tabs-container has-text" :style="tabsColumnStyle">
+        <div class="tabs-list-container">
+          <div
+            ref="tabsListRef"
+            class="tabs-list"
+            :class="{ 'etw-tabs-list--scrollable': tabsListScrollable }"
+            role="tablist"
+            :aria-label="t('embeddedTerminal.sessions')"
+          >
+            <div
+              v-for="tab in tabs"
+              :key="tab.id"
+              class="etw-terminal-tab-row"
+              role="presentation"
+              @mouseenter="onRailItemEnter($event, tab)"
+              @mouseleave="onRailItemLeave"
+            >
+              <button
+                type="button"
+                role="tab"
+                class="terminal-tabs-entry monaco-list-row"
+                :class="{ 'is-active': activeTabId === tab.id }"
+                :aria-selected="activeTabId === tab.id"
+                :title="tab.label"
+                @click="selectTerminalTab(tab.id)"
+                @keydown.enter.prevent="selectTerminalTab(tab.id)"
+                @keydown.space.prevent="selectTerminalTab(tab.id)"
+              >
+                <span class="codicon" :class="embeddedTerminalTabCodicon(tab)" aria-hidden="true" />
+                <span class="terminal-tab-label">{{ tab.label }}</span>
+              </button>
+              <div class="etw-terminal-tab-row-actions">
+                <button
+                  type="button"
+                  class="etw-terminal-tab-action codicon codicon-split-horizontal"
+                  :title="t('embeddedTerminal.splitTerminal')"
+                  @click.stop="splitTerminal()"
+                />
+                <button
+                  type="button"
+                  class="etw-terminal-tab-action codicon codicon-trash"
+                  :title="t('embeddedTerminal.killTerminal')"
+                  @click.stop="closeTabById(tab.id)"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <div
+      v-if="railTooltip.visible"
+      class="etw-session-tooltip"
+      :style="{ top: railTooltip.top + 'px', left: railTooltip.left + 'px' }"
+      role="tooltip"
+    >
+      <div class="etw-session-tooltip-title">{{ railTooltip.title }}</div>
+      <div v-if="railTooltip.pid" class="etw-session-tooltip-line">Process ID (PID): {{ railTooltip.pid }}</div>
+      <div v-if="railTooltip.shell" class="etw-session-tooltip-line">Command line: {{ railTooltip.shell }}</div>
+      <div v-if="railTooltip.cwd" class="etw-session-tooltip-line">Cwd: {{ railTooltip.cwd }}</div>
+      <div v-if="railTooltip.clientSessionId" class="etw-session-tooltip-line">Session: {{ railTooltip.clientSessionId }}</div>
     </div>
 
     <div v-if="showQuickEditor" class="etw-modal-overlay" @click.self="showQuickEditor = false">
@@ -122,22 +177,59 @@
         </div>
       </div>
     </div>
+
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount, provide, computed, inject, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, provide, computed, inject, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { io } from 'socket.io-client'
+import '@vscode/codicons/dist/codicon.css'
+/* 必须先于 integratedTerminalPanel：否则子组件里引入的 xterm.css 会后到，盖住面板里对 .xterm-shadow 等的覆盖 */
+import '@xterm/xterm/css/xterm.css'
+import '../vscode-terminal-ui/vscodeIntegratedTerminalPanel.css'
+import {
+  integratedTerminalWorkbenchDarkVars,
+  TerminalTabsListSizes,
+  embeddedTerminalTabCodicon
+} from '../vscode-terminal-ui'
 import { api, BACKEND_BASE_URL } from '../api.js'
 import EmbeddedPtyTerminal from './EmbeddedPtyTerminal.vue'
+import WebLocalGoProxyBar from './WebLocalGoProxyBar.vue'
+import {
+  createElectronLocalPtySocket,
+  isElectronPtyAvailable,
+  isElectronShell
+} from '../utils/electronPtySocketAdapter.js'
+import { createBrowserGoLocalPtySocket } from '../utils/browserGoPtySocketAdapter.js'
+import { localGoProxyOk } from '../composables/useLocalGoProxyStatus'
+
+const { t } = useI18n()
+
+const rootWorkbenchStyle = computed(() => integratedTerminalWorkbenchDarkVars())
+const tabsListMinW = TerminalTabsListSizes.WideViewMinimumWidth
+const tabsListMaxW = TerminalTabsListSizes.MaximumWidth
 
 const props = defineProps({
   workingDirectory: { type: String, default: '' },
   projectId: { type: [Number, String], default: null }
 })
 
-const { t } = useI18n()
+/** Electron：主进程推断的默认 cwd（permissions.workspace_root 或 process.cwd），在 onMounted 里异步填入 */
+const electronDefaultCwd = ref('')
+
+/**
+ * 浏览器：未手动指定目录时不传 cwd → go-local-proxy 起 PTY 时用**代理进程自身的当前目录**
+ *（即你在哪个目录下启动的 badcase-local-proxy，Shell 默认就在那里；不再强行用 exe 所在目录）。
+ * Electron：未传时用主进程默认 cwd。
+ */
+const effectiveWorkingDirectory = computed(() => {
+  void electronDefaultCwd.value
+  const manual = String(props.workingDirectory || '').trim()
+  if (manual) return manual
+  if (isElectronShell()) return String(electronDefaultCwd.value || '').trim()
+  return ''
+})
 
 const terminalCtl = inject('terminalCtl', null)
 const openAiComposerPrefill = inject('openAiComposerPrefill', null)
@@ -146,6 +238,58 @@ const openNewBadcaseFromTerminal = inject('openNewBadcaseFromTerminal', null)
 const socketRef = ref(null)
 const terminalPasteRef = ref({ token: 0, csid: '', text: '' })
 provide('ptySocket', socketRef)
+
+/** 浏览器：/health 已绿但 /pty WebSocket 曾失败或已断开时，延迟重建，避免与首次握手竞态 */
+let browserPtyReconnectTimer = null
+
+function clearBrowserPtyReconnectTimer() {
+  if (browserPtyReconnectTimer != null) {
+    clearTimeout(browserPtyReconnectTimer)
+    browserPtyReconnectTimer = null
+  }
+}
+
+function onBrowserGoLocalWsDisconnect() {
+  if (isElectronShell() || isElectronPtyAvailable()) return
+  if (localGoProxyOk.value !== true) return
+  scheduleBrowserGoLocalPtyReconnect('ws-disconnect')
+}
+
+function scheduleBrowserGoLocalPtyReconnect(reason) {
+  if (isElectronShell() || isElectronPtyAvailable()) return
+  if (localGoProxyOk.value !== true) return
+  const cur = socketRef.value
+  if (!cur || cur.id !== 'browser-go-local' || cur.connected) return
+  clearBrowserPtyReconnectTimer()
+  browserPtyReconnectTimer = window.setTimeout(() => {
+    browserPtyReconnectTimer = null
+    if (localGoProxyOk.value !== true) return
+    const s = socketRef.value
+    if (!s || s.id !== 'browser-go-local' || s.connected) return
+    try {
+      s.off?.('disconnect', onBrowserGoLocalWsDisconnect)
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      s.close()
+    } catch (_) {
+      /* ignore */
+    }
+    socketRef.value = createBrowserGoLocalPtySocket()
+    try {
+      socketRef.value.on?.('disconnect', onBrowserGoLocalWsDisconnect)
+    } catch (_) {
+      /* ignore */
+    }
+    console.log('[EmbeddedTerminalWorkspace] 已自动重连本机 /pty WebSocket（' + String(reason) + '）')
+  }, 450)
+}
+
+watch(localGoProxyOk, (ok, prevOk) => {
+  if (ok !== true || prevOk !== false) return
+  scheduleBrowserGoLocalPtyReconnect('proxy-health-recovered')
+})
 provide('terminalPaste', terminalPasteRef)
 
 const selectionMap = new Map()
@@ -182,58 +326,163 @@ const hasTerminalSelection = computed(() => {
   return !!getActiveSelection().trim()
 })
 
+const SESSION_RAIL_W_KEY = 'embeddedTerminalSessionRailW'
+
 const tabs = ref([])
 const activeTabId = ref(null)
+const ptySessionMeta = ref({})
+const sessionRailResizeTick = ref(0)
+
+provide('onPtySessionMeta', (meta) => {
+  if (!meta || typeof meta !== 'object') return
+  const sid = String(meta.client_session_id || '').trim()
+  if (!sid) return
+  ptySessionMeta.value = {
+    ...ptySessionMeta.value,
+    [sid]: {
+      ...ptySessionMeta.value[sid],
+      ...meta,
+      updatedAt: Date.now()
+    }
+  }
+})
+
+const railTooltip = ref({
+  visible: false,
+  top: 0,
+  left: 0,
+  title: '',
+  pid: '',
+  shell: '',
+  cwd: '',
+  clientSessionId: ''
+})
+
+function onRailItemEnter(e, tab) {
+  const el = e?.currentTarget
+  if (!el || typeof el.getBoundingClientRect !== 'function') return
+  const r = el.getBoundingClientRect()
+  const sid = tab?.id ? String(tab.id) : ''
+  const meta = sid ? ptySessionMeta.value[sid] : null
+  const label = (tab?.label ? String(tab.label) : '').trim() || (sid ? `Session ${sid.slice(0, 6)}` : 'Session')
+  railTooltip.value = {
+    visible: true,
+    top: Math.round(r.top + 2),
+    left: Math.round(r.right + 10),
+    title: label,
+    pid: meta?.pid != null ? String(meta.pid) : '',
+    shell: meta?.shell ? String(meta.shell) : '',
+    cwd: meta?.cwd ? String(meta.cwd) : '',
+    clientSessionId: sid
+  }
+}
+
+function onRailItemLeave() {
+  railTooltip.value = { ...railTooltip.value, visible: false }
+}
+
+/** 右侧标签列宽度（px），对齐 TerminalTabsListSizes，可拖动 sash 调整 */
+const sessionRailWidthPx = ref(TerminalTabsListSizes.DefaultWidth)
+const sessionRailDragging = ref(false)
+const terminalOuterRef = ref(null)
+const tabsListRef = ref(null)
+const tabsListScrollable = ref(false)
+let tabsListResizeObserver = null
+
+function updateTabsListScrollable() {
+  nextTick(() => {
+    const el = tabsListRef.value
+    if (!el) {
+      tabsListScrollable.value = false
+      return
+    }
+    tabsListScrollable.value = el.scrollHeight > Math.ceil(el.clientHeight) + 1
+  })
+}
+const etwRootRef = ref(null)
+
+function focusEmbeddedTerminalArea() {
+  nextTick(() => {
+    const root = etwRootRef.value
+    try {
+      root?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+    } catch (_) {
+      try {
+        root?.scrollIntoView?.(true)
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    const ta =
+      root?.querySelector?.('.xterm-helper-textarea') ||
+      root?.querySelector?.('.xterm textarea') ||
+      root?.querySelector?.('textarea')
+    try {
+      ta?.focus?.({ preventScroll: true })
+    } catch (_) {
+      try {
+        ta?.focus?.()
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  })
+}
+
+const tabsColumnStyle = computed(() => ({
+  width: `${sessionRailWidthPx.value}px`,
+  flex: `0 0 ${sessionRailWidthPx.value}px`,
+  minWidth: `${TerminalTabsListSizes.WideViewMinimumWidth}px`
+}))
+
+function clampSessionRail(n, outerEl) {
+  const minRail = TerminalTabsListSizes.WideViewMinimumWidth
+  const maxRail = TerminalTabsListSizes.MaximumWidth
+  const minTerm = 140
+  if (!outerEl || typeof outerEl.getBoundingClientRect !== 'function') {
+    return Math.max(minRail, Math.min(maxRail, n))
+  }
+  const w = outerEl.getBoundingClientRect().width
+  const maxBySplit = Math.max(minRail, w - minTerm - 8)
+  return Math.max(minRail, Math.min(Math.min(maxRail, maxBySplit), n))
+}
+
+function onSessionRailResizeStart(e) {
+  const outerEl = terminalOuterRef.value
+  if (!outerEl) return
+  const startX = e.clientX
+  const startW = sessionRailWidthPx.value
+  sessionRailDragging.value = true
+
+  function onMove(ev) {
+    const next = Math.round(startW + (startX - ev.clientX))
+    sessionRailWidthPx.value = clampSessionRail(next, outerEl)
+    sessionRailResizeTick.value += 1
+  }
+  function onUp() {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    sessionRailResizeTick.value += 1
+    sessionRailDragging.value = false
+    try {
+      localStorage.setItem(SESSION_RAIL_W_KEY, String(sessionRailWidthPx.value))
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
 
 const auditExporting = ref(false)
-const mainTab = ref('term')
 const terminalCfg = ref(null)
 const showQuickEditor = ref(false)
 const quickEditText = ref('')
 const quickCmdVersion = ref(0)
-
-const outputLogs = reactive({})
-const activeOutputLog = computed(() => {
-  const id = activeTabId.value
-  if (!id) return ''
-  return outputLogs[id] || ''
-})
-
-const agentTabActive = computed(() => {
-  const id = activeTabId.value
-  const tab = tabs.value.find((x) => x.id === id)
-  return tab && tab.kind === 'agent'
-})
-
-function sessionIcon(tab) {
-  if (tab.kind === 'agent') return '∞'
-  return '>'
-}
-
-function appendOutputLog(csid, text) {
-  if (!csid || text == null) return
-  const chunk = String(text)
-  const cur = outputLogs[csid] || ''
-  const next = cur + chunk
-  const max = 256 * 1024
-  outputLogs[csid] = next.length > max ? next.slice(-max) : next
-}
-
-function b64ToUtf8(b64) {
-  try {
-    const bin = atob(b64)
-    const u8 = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i += 1) u8[i] = bin.charCodeAt(i)
-    return new TextDecoder('utf-8', { fatal: false }).decode(u8)
-  } catch (_) {
-    return ''
-  }
-}
-
-function clearActiveOutputLog() {
-  const id = activeTabId.value
-  if (id) delete outputLogs[id]
-}
 
 function openQuickEditor() {
   quickEditText.value = quickCommands.value.join('\n')
@@ -275,6 +524,12 @@ function newTabId() {
   return `t-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
+function selectTerminalTab(id) {
+  if (!id) return
+  if (!tabs.value.some((x) => x.id === id)) return
+  activeTabId.value = id
+}
+
 function addTab() {
   const id = newTabId()
   const mode = 'local'
@@ -298,40 +553,45 @@ function addAgentTab() {
   return id
 }
 
-const showNewMenu = ref(false)
 const showMoreMenu = ref(false)
 
 function closeAllMenus() {
-  showNewMenu.value = false
   showMoreMenu.value = false
-}
-
-function toggleNewMenu() {
-  showMoreMenu.value = false
-  showNewMenu.value = !showNewMenu.value
 }
 
 function toggleMoreMenu() {
-  showNewMenu.value = false
   showMoreMenu.value = !showMoreMenu.value
 }
 
 function onDocPointerDown(e) {
   const el = e?.target
   if (!el) return
-  if (el.closest && el.closest('.etw-menu-wrap')) return
+  if (el.closest && el.closest('.etw-vscode-menu-anchor')) return
   closeAllMenus()
+}
+
+/** 对齐 VS Code「拆分终端」：本嵌入场景为新建会话（非同一组内真分屏）。 */
+function splitTerminal() {
+  addTab()
+}
+
+function closeTabById(id) {
+  if (!id || !tabs.value.some((x) => x.id === id)) return
+  const wasActive = activeTabId.value === id
+  tabs.value = tabs.value.filter((x) => x.id !== id)
+  if (!tabs.value.length) {
+    activeTabId.value = null
+    return
+  }
+  if (wasActive) {
+    activeTabId.value = tabs.value[tabs.value.length - 1].id
+  }
 }
 
 function closeActiveTab() {
   const id = activeTabId.value
   if (!id) return
-  tabs.value = tabs.value.filter((x) => x.id !== id)
-  if (tabs.value.length) {
-    activeTabId.value = tabs.value[tabs.value.length - 1].id
-  } else {
-    activeTabId.value = null
-  }
+  closeTabById(id)
 }
 
 function clearActive() {
@@ -435,56 +695,96 @@ watch(
   { deep: true }
 )
 
-onMounted(() => {
+watch(
+  [tabs, sessionRailWidthPx, sessionRailResizeTick],
+  () => updateTabsListScrollable(),
+  { deep: true, flush: 'post' }
+)
+
+onMounted(async () => {
   if (typeof window !== 'undefined') {
     window.addEventListener('pointerdown', onDocPointerDown, { capture: true })
+    try {
+      const raw = localStorage.getItem(SESSION_RAIL_W_KEY)
+      if (raw != null) {
+        const n = parseInt(raw, 10)
+        if (Number.isFinite(n)) {
+          nextTick(() => {
+            sessionRailWidthPx.value = clampSessionRail(n, terminalOuterRef.value)
+          })
+        }
+      }
+    } catch (_) {
+      /* ignore */
+    }
   }
   loadTerminalConfig()
-  console.log('[EmbeddedTerminalWorkspace] Creating Socket.IO connection...')
-  const s = io(BACKEND_BASE_URL || undefined, {
-    path: '/socket.io/',
-    transports: ['polling'],  // 只用 polling，避免 Vite 代理 WebSocket 升级失败
-    withCredentials: true,
-    timeout: 60000,
-    reconnection: true,
-    reconnectionAttempts: 20,
-    reconnectionDelay: 800
-  })
-  socketRef.value = s
-  s.on('connect', () => {
-    console.log('[EmbeddedTerminalWorkspace] Socket connected, sid:', s.id)
-  })
-  s.on('connect_error', (err) => {
-    console.error('[EmbeddedTerminalWorkspace] Socket connect_error:', err)
-  })
-  s.on('disconnect', (reason) => {
-    console.log('[EmbeddedTerminalWorkspace] Socket disconnected:', reason)
-  })
-  s.on('term_output', (payload) => {
-    if (!payload || !payload.b64 || !payload.client_session_id) return
-    appendOutputLog(payload.client_session_id, b64ToUtf8(payload.b64))
-  })
+  if (isElectronShell() && typeof window !== 'undefined' && window.electronTerminalAgent?.getEmbeddedTerminalDefaultCwd) {
+    try {
+      const r = await window.electronTerminalAgent.getEmbeddedTerminalDefaultCwd()
+      const c = r && r.cwd != null ? String(r.cwd).trim() : ''
+      if (c) electronDefaultCwd.value = c
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (isElectronPtyAvailable()) {
+    console.log('[EmbeddedTerminalWorkspace] Electron 本地 PTY（不经 Python 终端服务）')
+    socketRef.value = createElectronLocalPtySocket()
+  } else {
+    console.log('[EmbeddedTerminalWorkspace] 浏览器本机终端 → go-local-proxy /pty')
+    socketRef.value = createBrowserGoLocalPtySocket()
+    try {
+      socketRef.value.on?.('disconnect', onBrowserGoLocalWsDisconnect)
+    } catch (_) {
+      /* ignore */
+    }
+  }
   if (!tabs.value.length) {
     addTab()
   }
 
+  nextTick(() => {
+    updateTabsListScrollable()
+    const el = tabsListRef.value
+    if (el && typeof ResizeObserver !== 'undefined') {
+      tabsListResizeObserver = new ResizeObserver(() => updateTabsListScrollable())
+      tabsListResizeObserver.observe(el)
+    }
+  })
+
   if (terminalCtl) {
     terminalCtl.value = {
       injectCommand,
-      focusTerminal: () => {
-        mainTab.value = 'term'
-      }
+      focusTerminal: focusEmbeddedTerminalArea
     }
   }
 })
 
 onBeforeUnmount(() => {
+  clearBrowserPtyReconnectTimer()
+  try {
+    socketRef.value?.off?.('disconnect', onBrowserGoLocalWsDisconnect)
+  } catch (_) {
+    /* ignore */
+  }
+  if (tabsListResizeObserver) {
+    try {
+      tabsListResizeObserver.disconnect()
+    } catch (_) {
+      /* ignore */
+    }
+    tabsListResizeObserver = null
+  }
   if (typeof window !== 'undefined') {
     window.removeEventListener('pointerdown', onDocPointerDown, { capture: true })
   }
   if (socketRef.value) {
-    socketRef.value.off('term_output')
-    socketRef.value.close()
+    try {
+      socketRef.value.close()
+    } catch (_) {
+      /* ignore */
+    }
     socketRef.value = null
   }
   if (terminalCtl) {
@@ -497,254 +797,37 @@ onBeforeUnmount(() => {
 .etw-root {
   display: flex;
   flex-direction: column;
+  /* 嵌入 ProjectDetail 底栏等小高度区域时，min-height:280px 会撑破父级 flex，xterm 宿主高度可变成 0 → write 成功但画布不可见 */
+  flex: 1 1 0;
+  min-height: 0;
   height: 100%;
-  min-height: 280px;
-  background: #1e1e1e;
-  color: #cccccc;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
-.etw-topbar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 8px;
-  border-bottom: 1px solid #2d2d2d;
+/* VS Code 风格 hover tooltip（会话条目） */
+.etw-session-tooltip {
+  position: fixed;
+  z-index: 2600;
+  max-width: min(520px, 55vw);
+  padding: 10px 12px;
   background: #252526;
-}
-
-.etw-topbar-left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.etw-topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.etw-top-tab {
-  border: none;
-  background: transparent;
-  color: #bbb;
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.etw-top-tab:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.etw-top-tab.active {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.etw-top-pill {
-  font-size: 10px;
-  color: #ffe082;
-  border: 1px solid rgba(255, 193, 7, 0.35);
-  background: rgba(255, 193, 7, 0.08);
-  padding: 2px 6px;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-
-.etw-menu-wrap {
-  position: relative;
-}
-
-.etw-icon-btn {
-  border: none;
-  background: transparent;
-  color: #cfcfcf;
-  width: 26px;
-  height: 22px;
-  border-radius: 6px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  line-height: 1;
-}
-
-.etw-icon-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.etw-menu {
-  position: absolute;
-  top: 26px;
-  right: 0;
-  min-width: 180px;
-  background: #1f1f1f;
-  border: 1px solid #2d2d2d;
-  border-radius: 10px;
-  padding: 6px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-  z-index: 20;
-}
-
-.etw-menu-wide {
-  min-width: 240px;
-}
-
-.etw-menu-item {
-  width: 100%;
-  text-align: left;
-  border: none;
-  background: transparent;
-  color: #ddd;
-  font-size: 12px;
-  padding: 8px 10px;
+  border: 1px solid #3e3e42;
   border-radius: 8px;
-  cursor: pointer;
-}
-
-.etw-menu-item:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.etw-menu-item:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.etw-menu-sep {
-  height: 1px;
-  margin: 6px 6px;
-  background: #2d2d2d;
-}
-
-.etw-term-stack {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.etw-label {
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+  color: #d4d4d4;
   font-size: 12px;
-  opacity: 0.85;
+  line-height: 1.45;
+  pointer-events: none;
 }
-
-.etw-split {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
+.etw-session-tooltip-title {
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: #e5e7eb;
 }
-
-.etw-term-wrap {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 200px;
-  position: relative;
-  background: #0c0c0c;
-}
-
-.etw-session-rail {
-  flex: 0 0 132px;
-  width: 132px;
-  border-left: 1px solid #2d2d2d;
-  background: #252526;
-  display: flex;
-  flex-direction: column;
-  padding: 6px 4px;
-  gap: 4px;
-  overflow-y: auto;
-}
-
-.etw-rail-title {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #888;
-  padding: 4px 6px;
-}
-
-.etw-rail-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  text-align: left;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: #2d2d2d;
-  color: #ccc;
-  font-size: 11px;
-  padding: 6px 8px;
-  cursor: pointer;
-}
-
-.etw-rail-item:hover {
-  background: #383838;
-}
-
-.etw-rail-item.active {
-  border-color: #007fd4;
-  background: #094771;
-  color: #fff;
-}
-
-.etw-rail-icon {
-  flex: 0 0 auto;
-  opacity: 0.9;
-  font-size: 12px;
-}
-
-.etw-rail-label {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.etw-rail-hint {
-  font-size: 10px;
-  color: #888;
-  padding: 6px;
-  line-height: 1.35;
-  margin: 0;
-}
-
-.etw-output-panel {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: #1e1e1e;
-}
-
-.etw-output-toolbar {
-  flex: 0 0 auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6px 8px;
-  border-bottom: 1px solid #2d2d2d;
-}
-
-.etw-output-pre {
-  flex: 1 1 auto;
-  min-height: 0;
-  margin: 0;
-  padding: 8px;
-  overflow: auto;
-  font-size: 11px;
+.etw-session-tooltip-line {
   white-space: pre-wrap;
   word-break: break-word;
-  color: #ccc;
+  color: #c7c7c7;
 }
 
 .etw-modal-overlay {

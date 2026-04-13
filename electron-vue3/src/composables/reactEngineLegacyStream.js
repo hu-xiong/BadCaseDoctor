@@ -6,7 +6,11 @@ import {
   mergeMessageThinkDraftsIntoReactStepZero,
   maybeRevealPlanMemoAfterThink
 } from './applyReactThinkSSEStepEvent.js'
-import { applyReactObservationLegacyStepEvent } from './reactObservationStream.js'
+import { mergeBuiltStepsPreservingPlaceholderThinkClock } from './agentReactV1Ui.js'
+import {
+  applyReactObservationLegacyStepEvent,
+  ensureReactStepsForStreamIndex
+} from './reactObservationStream.js'
 import { i18n } from '../i18n/index.js'
 import { freezeThoughtSnapshotForStep } from './thoughtSnapshot.js'
 
@@ -82,6 +86,14 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     aiMessage.unifiedSummaryLoading = stepEvent.active === true
     return {}
   }
+  if (stepEvent.event === 'direct_reply_prepare') {
+    if (stepEvent.active === true) {
+      aiMessage.reactDirectChatReply = true
+      aiMessage.finalResponse = ''
+      aiMessage.summaryStreamDraft = ''
+    }
+    return {}
+  }
   if (stepEvent.event === 'summary_stream') {
     const piece = stepEvent.delta
     if (typeof piece === 'string' && piece) {
@@ -148,7 +160,22 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     cancelTodosStreamTypewriter(aiMessage)
     aiMessage.todosStreamDraft = ''
     aiMessage.todosStreamVisible = ''
-    aiMessage.steps = buildReactStepsFromTodoStrings(stepEvent.data || [])
+    const _td = stepEvent.data
+    const hadPh = !!aiMessage._placeholderSteps
+    const prevSteps = aiMessage.steps
+    const built = buildReactStepsFromTodoStrings(stepEvent.data || [])
+    if (aiMessage._terminalMergeContinue && Array.isArray(prevSteps) && prevSteps.length > 0) {
+      aiMessage.reactPlanSteps = [
+        ...(Array.isArray(aiMessage.reactPlanSteps) ? aiMessage.reactPlanSteps : []),
+        ...(Array.isArray(_td) ? _td : [])
+      ]
+      aiMessage.steps = [...prevSteps, ...built]
+      mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps, aiMessage.steps, hadPh)
+    } else {
+      aiMessage.reactPlanSteps = Array.isArray(_td) ? [..._td] : []
+      aiMessage.steps = built
+      mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps, aiMessage.steps, hadPh)
+    }
     mergeMessageThinkDraftsIntoReactStepZero(aiMessage)
     maybeRevealPlanMemoAfterThink(aiMessage)
     if (!aiMessage._planMemoRevealReady && !aiMessage._deferPlanMemoUntilThink) {
@@ -163,7 +190,22 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     cancelTodosStreamTypewriter(aiMessage)
     aiMessage.todosStreamDraft = ''
     aiMessage.todosStreamVisible = ''
-    aiMessage.steps = buildReactStepsFromTodoStrings(stepEvent.data || [])
+    const _td2 = stepEvent.data
+    const hadPh2 = !!aiMessage._placeholderSteps
+    const prevSteps2 = aiMessage.steps
+    const built2 = buildReactStepsFromTodoStrings(stepEvent.data || [])
+    if (aiMessage._terminalMergeContinue && Array.isArray(prevSteps2) && prevSteps2.length > 0) {
+      aiMessage.reactPlanSteps = [
+        ...(Array.isArray(aiMessage.reactPlanSteps) ? aiMessage.reactPlanSteps : []),
+        ...(Array.isArray(_td2) ? _td2 : [])
+      ]
+      aiMessage.steps = [...prevSteps2, ...built2]
+      mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps2, aiMessage.steps, hadPh2)
+    } else {
+      aiMessage.reactPlanSteps = Array.isArray(_td2) ? [..._td2] : []
+      aiMessage.steps = built2
+      mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps2, aiMessage.steps, hadPh2)
+    }
     mergeMessageThinkDraftsIntoReactStepZero(aiMessage)
     maybeRevealPlanMemoAfterThink(aiMessage)
     if (!aiMessage._planMemoRevealReady && !aiMessage._deferPlanMemoUntilThink) {
@@ -191,17 +233,33 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
   }
   if (stepEvent.event === 'todo_start') {
     const _ix = stepEvent.index
-    // 只有 planned=true 时才添加到规划备忘（steps），动态决策轮次不显示
-    const isPlanned = stepEvent.planned !== false
+    const _base = Number(aiMessage._reactStreamStepBase || 0)
+    const _absIx =
+      _ix != null && Number.isFinite(Number(_ix)) ? _base + Number(_ix) : null
+    if (stepEvent.react_phase) {
+      aiMessage.lastReactPhase = stepEvent.react_phase
+    }
+    // 统一流每轮 think 前会发 todo_skip:true，仅为索引对齐；勿揭 AgentTaskRun、勿写「── 开始 ──」，否则无工具也出「步骤 1」
+    const thinkOnlyTodoStart = stepEvent.todo_skip === true
+    if (!thinkOnlyTodoStart) {
+      aiMessage._placeholderSteps = false
+    }
+    ensureReactStepsForStreamIndex(aiMessage, _ix, buildReactStepsFromTodoStrings)
+    // 规划备忘扩行：显式 todo_skip / expand_plan 优先于仅看 planned（与统一流引擎约定对齐）
+    const skipMemo =
+      stepEvent.todo_skip === true ||
+      stepEvent.expand_plan === false ||
+      stepEvent.planned === false
+    const expandMemo = !skipMemo
     if (
       aiMessage.steps &&
-      _ix != null &&
-      Number.isFinite(Number(_ix)) &&
-      Number(_ix) >= aiMessage.steps.length &&
-      isPlanned
+      _absIx != null &&
+      Number.isFinite(_absIx) &&
+      _absIx >= aiMessage.steps.length &&
+      expandMemo
     ) {
       const todoText = (typeof stepEvent.todo === 'string' && stepEvent.todo) || '（动态步骤）'
-      const pad = Number(_ix) + 1 - aiMessage.steps.length
+      const pad = _absIx + 1 - aiMessage.steps.length
       for (let pi = 0; pi < pad; pi++) {
         const row = buildReactStepsFromTodoStrings([todoText])[0]
         aiMessage.steps.push(row)
@@ -211,10 +269,14 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     const st = _tsi != null ? aiMessage.steps[_tsi] : null
     if (st) {
       st.status = 'running'
-      st.stepStartedAt = Date.now()
-      st.thoughtPhaseEndAtMs = null
+      if (st.stepStartedAt == null) {
+        st.stepStartedAt = Date.now()
+      }
+      // 勿清空 thoughtPhaseEndAtMs：THINK/XML 尾已冻结眉标，清空会让秒数在工具阶段继续跟墙钟涨
       st.phaseWait = null
-      appendStepDetailLine(st, `── 开始 ──`)
+      if (!thinkOnlyTodoStart) {
+        appendStepDetailLine(st, `── 开始 ──`)
+      }
     }
     scrollAgentStepLogIntoView(aiMessage.id, _tsi)
     return {}
@@ -230,8 +292,9 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     if (!st) return { breakChunkLoop: true }
     if (stepEvent.type === 'start') {
       st.status = 'running'
-      st.stepStartedAt = Date.now()
-      st.thoughtPhaseEndAtMs = null
+      if (st.stepStartedAt == null) {
+        st.stepStartedAt = Date.now()
+      }
       if (stepEvent.params) st.inputParams = stepEvent.params
       appendStepDetailLine(st, `── 开始：${stepEvent.title || ''} ──`.trim())
     } else if (stepEvent.type === 'output' && stepEvent.content) {
@@ -254,6 +317,8 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     return {}
   }
   if (stepEvent.event === 'batch_preview_row') {
+    aiMessage._placeholderSteps = false
+    ensureReactStepsForStreamIndex(aiMessage, stepEvent.index, buildReactStepsFromTodoStrings)
     const _bpi = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
     let runningStep =
       _bpi != null ? aiMessage.steps[_bpi] : aiMessage.steps.find((s) => s.status === 'running')
@@ -274,7 +339,23 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     }
     return {}
   }
+  if (stepEvent.event === 'tool_error') {
+    ensureReactStepsForStreamIndex(aiMessage, stepEvent.index, buildReactStepsFromTodoStrings)
+    const _ei = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
+    let st =
+      _ei != null ? aiMessage.steps[_ei] : aiMessage.steps.find((s) => s.status === 'running')
+    const msg = (stepEvent.message && String(stepEvent.message).trim()) || '工具执行失败'
+    if (st) {
+      if (st.phaseWait) st.phaseWait = null
+      appendStepDetailLine(st, `❌ ${msg}`)
+      st.status = 'failed'
+      st.description = msg.slice(0, 200)
+    }
+    return {}
+  }
   if (stepEvent.event === 'executing') {
+    aiMessage._placeholderSteps = false
+    ensureReactStepsForStreamIndex(aiMessage, stepEvent.index, buildReactStepsFromTodoStrings)
     const _exi = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
     let runningStep =
       _exi != null ? aiMessage.steps[_exi] : aiMessage.steps.find((s) => s.status === 'running')
@@ -299,6 +380,22 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
         runningStep.progressLog = [...runningStep.progressLog]
         appendStepDetailLine(runningStep, stepEvent.message)
       }
+      if (stepEvent.tool === 'create' && stepEvent.params && typeof stepEvent.params === 'object') {
+        const p = stepEvent.params
+        const pid = p.project_id
+        const fld = p.fields
+        const fldKeys = fld && typeof fld === 'object' && !Array.isArray(fld) ? Object.keys(fld) : []
+        const emptyObj = Boolean(fld && typeof fld === 'object' && !Array.isArray(fld) && fldKeys.length === 0)
+        console.info('[CREATE][executing] 入参诊断（对照后端 [CREATE] 校验失败 日志）', {
+          project_id: pid,
+          project_id_missing: pid == null || pid === '',
+          fields_key_count: fldKeys.length,
+          fields_keys: fldKeys.slice(0, 24),
+          fields_is_empty_object: emptyObj,
+          has_natural_query: !!(p.natural_query && String(p.natural_query).trim()),
+          target: p.target
+        })
+      }
       if (stepEvent.tool === 'modify' && Array.isArray(stepEvent.fields) && stepEvent.fields.length > 0) {
         const fieldText = stepEvent.fields.join('、')
         if (!stepEvent.message) runningStep.description = `正在执行: modify（字段：${fieldText}）`
@@ -312,13 +409,15 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     return {}
   }
   if (stepEvent.event === 'observation') {
+    aiMessage._placeholderSteps = false
     applyReactObservationLegacyStepEvent(aiMessage, stepEvent, {
       resolveStreamStepIndex,
       appendStepDetailLine,
       nextTick,
       handleShowGroupInList,
       projectId,
-      handleNavigation
+      handleNavigation,
+      buildReactStepsFromTodoStrings
     })
     return {}
   }
@@ -457,14 +556,30 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
   flushReasoningTypewriter(aiMessage)
   aiMessage.unifiedSummaryLoading = false
 
-  if (stepEvent.direct_reply === true) {
+  const stepsCountResolved =
+    stepEvent.steps_count != null && stepEvent.steps_count !== ''
+      ? Number(stepEvent.steps_count)
+      : null
+  const findingsFromEvent = Array.isArray(stepEvent.findings) ? stepEvent.findings : []
+  const noFindingsOnDone = findingsFromEvent.length === 0
+  /** 统一流 todo_start 会留「步骤 1 + ──开始──」，但无真实工具步：与 direct_reply 同样拆掉步骤壳 */
+  const collapseNoToolShell =
+    stepEvent.status !== 'error' &&
+    (stepEvent.direct_reply === true ||
+      (stepsCountResolved === 0 && noFindingsOnDone))
+
+  if (collapseNoToolShell) {
     aiMessage.reactDirectChatReply = true
     aiMessage.runningSummaryDraft = ''
     aiMessage.agentResult.status = 'success'
     // 勿写 execution_time：否则 hasUnifiedSummary 为真，刷新前也会进「总结」壳；耗时对纯对话无意义
     aiMessage.agentResult.execution_time = null
     aiMessage.agentResult.steps_count = 0
-    aiMessage.agentResult.thinking_time = null
+    if (stepEvent.thinking_time != null && stepEvent.thinking_time >= 0) {
+      aiMessage.agentResult.thinking_time = stepEvent.thinking_time
+    } else {
+      aiMessage.agentResult.thinking_time = null
+    }
     aiMessage.agentResult.findings = []
     aiMessage.agentResult.summaryText = ''
     const streamed = String(aiMessage.finalResponse || '').trim()
@@ -479,7 +594,15 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
     return
   }
 
-  aiMessage.agentResult.status = 'success'
+  const _doneSt = stepEvent.status
+  aiMessage.agentResult.status =
+    _doneSt === 'error'
+      ? 'error'
+      : _doneSt === 'cancelled'
+        ? 'cancelled'
+        : _doneSt === 'partial'
+          ? 'partial'
+          : 'success'
   aiMessage.agentResult.execution_time = stepEvent.duration
   aiMessage.agentResult.steps_count = stepEvent.steps_count || 0
   if (stepEvent.thinking_time != null && stepEvent.thinking_time >= 0) {
@@ -501,8 +624,6 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
       step.description = '已完成'
     }
   })
-
-  let finalResp = ''
 
   const allFindings =
     stepEvent.findings && stepEvent.findings.length > 0
@@ -576,10 +697,12 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
   if ((stepEvent.steps_count === 0 || !stepEvent.steps_count) && displayFindings.length > 0) {
     aiMessage.finalResponse = '⚠️ ' + displayFindings[0]
   } else {
-    finalResp += `执行统计:\n`
-    finalResp += `  • 完成步骤: ${stepEvent.steps_count || aiMessage.steps.length} 个\n`
-    finalResp += `  • 耗时: ${Number(stepEvent.duration || 0).toFixed(2)}s\n`
-    finalResp += `\n任务执行成功`
-    aiMessage.finalResponse = finalResp
+    // 有统一总结块时正文走 runningSummaryDraft / summaryText / findings，勿再塞「执行统计」到 finalResponse
+    aiMessage.finalResponse = ''
+  }
+
+  if (stepsCountResolved === 0) {
+    aiMessage.steps = []
+    aiMessage._placeholderSteps = false
   }
 }

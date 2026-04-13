@@ -87,13 +87,21 @@ from routers.sql_preview import sql_preview_bp
 from routers.summary import summary_bp
 from routers.memory import memory_bp
 from routers.terminal_api import terminal_bp
-from flask_socketio import SocketIO
-from routers.terminal_socket import register_terminal_socket_handlers
+from routers.client_scripts import client_scripts_bp
+
+# 导入终端日志记录器
+from agents.tools.terminal_logger import terminal_logger
 
 # 导入 Prometheus
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 load_dotenv()
+
+from workflow_notify import (
+    schedule_workflow_notification,
+    build_email_body_cn,
+    build_email_subject_cn,
+)
 
 # 定义状态枚举
 class BugStatus(enum.Enum):
@@ -141,7 +149,7 @@ app.config.from_object(Config)
 
 # Flask应用配置
 app.config['SECRET_KEY'] = 'hxReligi12.-badcase-doctor-secret-key-2025'  # 添加SECRET_KEY配置
-# Session Cookie 配置：确保 Socket.IO 连接能携带 Cookie
+# Session Cookie 配置：浏览器 /api 请求携带登录态
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # 允许同站请求携带 Cookie
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SECURE'] = False  # 开发环境使用 HTTP
@@ -159,6 +167,23 @@ except Exception:
 _sql_pool_size = max(1, min(_sql_pool_size, 2000))
 _sql_max_overflow = max(0, min(_sql_max_overflow, 500))
 
+# PyMySQL 默认不设 connect_timeout 时，远端不可达可能拖到系统级 TCP 超时（Windows 上常见 ~20s 量级）
+try:
+    _mysql_connect_timeout = int((os.getenv("MYSQL_CONNECT_TIMEOUT") or "10").strip())
+except Exception:
+    _mysql_connect_timeout = 10
+_mysql_connect_timeout = max(1, min(_mysql_connect_timeout, 120))
+try:
+    _mysql_read_timeout = int((os.getenv("MYSQL_READ_TIMEOUT") or "0").strip())
+except Exception:
+    _mysql_read_timeout = 0
+_mysql_read_timeout = max(0, min(_mysql_read_timeout, 600))
+
+_mysql_connect_args = {"connect_timeout": _mysql_connect_timeout}
+if _mysql_read_timeout > 0:
+    _mysql_connect_args["read_timeout"] = _mysql_read_timeout
+    _mysql_connect_args["write_timeout"] = _mysql_read_timeout
+
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_size': _sql_pool_size,
     'pool_timeout': 300,
@@ -166,6 +191,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'max_overflow': _sql_max_overflow,
     'pool_pre_ping': True,
     'echo': False,
+    'connect_args': _mysql_connect_args,
 }
 
 # 主应用 ORM 仅允许 MySQL（与 config.py 中 DATABASE_URL 一致）；勿使用 sqlite 作为主库
@@ -211,31 +237,17 @@ app.register_blueprint(sql_preview_bp)
 app.register_blueprint(summary_bp)
 app.register_blueprint(memory_bp)
 app.register_blueprint(terminal_bp)
+app.register_blueprint(client_scripts_bp)
 
-# 嵌入式终端（Socket.IO + PTY），与前端 xterm 通过 /socket.io 通信
-socketio = SocketIO(
-    app,
-    cors_allowed_origins=[
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        "http://127.0.0.1:8080",
-        "http://localhost:8080",
-    ],
-    async_mode="threading",
-    logger=False,
-    engineio_logger=False,
-)
-register_terminal_socket_handlers(socketio, app)
-
-# MinIO配置
+# MinIO 配置：与 config.Config 及环境变量一致（见 config.py）
 MINIO_CONFIG = {
-    'endpoint': 'http://117.72.33.38:9901',
-    'access_key': 'admin',
-    'secret_key': 'hxReligi12.',
-    'bucket_name': 'apaas-root',  # 使用rootQABucketName
-    'saas_file_path': 'saas_qa_file/',
-    'max_file_size': 524288000,  # 500MB
-    'max_sum_file_size': 524288000  # 500MB
+    'endpoint': Config.MINIO_ENDPOINT,
+    'access_key': Config.MINIO_ACCESS_KEY,
+    'secret_key': Config.MINIO_SECRET_KEY,
+    'bucket_name': Config.MINIO_BUCKET_NAME,
+    'saas_file_path': Config.MINIO_SAAS_FILE_PATH,
+    'max_file_size': Config.MINIO_MAX_FILE_SIZE,
+    'max_sum_file_size': Config.MINIO_MAX_SUM_FILE_SIZE,
 }
 
 # Redis配置
@@ -306,9 +318,6 @@ def get_redis_client():
             _redis_client = None
     return _redis_client
 
-# 全局进程管理
-active_processes = {}
-
 # ==================== Prometheus 指标端点 ====================
 
 @app.route('/metrics', methods=['GET'])
@@ -318,121 +327,6 @@ def metrics():
     使用 curl http://localhost:5000/metrics 查看
     """
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
-
-# ==================== 终端接口 ====================
-@app.route('/api/terminal/exec', methods=['POST'])
-@login_required
-def terminal_exec():
-    try:
-        data = request.get_json(force=True) or {}
-        cmd = data.get('command', '').strip()
-        cwd = data.get('cwd') or os.getcwd()
-        timeout = int(data.get('timeout', 30))
-        session_id = data.get('session_id', 'default')
-
-        if not cmd:
-            return jsonify({ 'success': False, 'error': '命令不能为空' }), 400
-
-        # 安全防护（黑名单示例，可按需扩展）
-        forbidden = ['rm -rf /', 'shutdown', 'reboot', 'sudo rm -rf']
-        for f in forbidden:
-            if f in cmd:
-                return jsonify({ 'success': False, 'error': '危险命令已被阻止' }), 400
-
-        # 使用 subprocess 执行命令，更简单可靠
-        try:
-            # 执行命令
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
-            
-            stdout = result.stdout
-            stderr = result.stderr
-            exit_code = result.returncode
-            
-        except subprocess.TimeoutExpired:
-            stdout = ""
-            stderr = "命令执行超时"
-            exit_code = -1
-        except Exception as e:
-            stdout = ""
-            stderr = f"执行错误: {str(e)}"
-            exit_code = -1
-        
-        # subprocess 不会包含命令回显，直接清理首尾空白
-        if stdout:
-            stdout = stdout.strip()
-        if stderr:
-            stderr = stderr.strip()
-
-        return jsonify({
-            'success': True,
-            'code': exit_code,
-            'stdout': stdout,
-            'stderr': stderr,
-            'cwd': cwd
-        })
-        
-    except Exception as e:
-        return jsonify({ 'success': False, 'error': str(e) }), 500
-
-# 终止终端会话
-@app.route('/api/terminal/kill', methods=['POST'])
-@login_required
-def terminal_kill():
-    try:
-        data = request.get_json(force=True) or {}
-        session_id = data.get('session_id', 'default')
-        
-        if session_id in active_processes:
-            process_info = active_processes[session_id]
-            process = process_info['process']
-            
-            if process.isalive():
-                process.terminate()
-                time.sleep(0.5)
-                if process.isalive():
-                    process.kill()
-            
-            del active_processes[session_id]
-            
-        return jsonify({ 'success': True, 'message': '会话已终止' })
-        
-    except Exception as e:
-        return jsonify({ 'success': False, 'error': str(e) }), 500
-
-# 获取终端会话状态
-@app.route('/api/terminal/status', methods=['GET'])
-@login_required
-def terminal_status():
-    try:
-        session_id = request.args.get('session_id', 'default')
-        
-        if session_id in active_processes:
-            process_info = active_processes[session_id]
-            process = process_info['process']
-            
-            return jsonify({
-                'success': True,
-                'alive': process.isalive(),
-                'cwd': process_info['cwd'],
-                'created_at': process_info['created_at']
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'alive': False,
-                'cwd': os.getcwd(),
-                'created_at': None
-            })
-            
-    except Exception as e:
-        return jsonify({ 'success': False, 'error': str(e) }), 500
 
 # 检查并创建存储桶
 def ensure_bucket_exists():
@@ -733,6 +627,22 @@ def unauthorized():
     if request.path.startswith('/api/'):
         return jsonify({'error': '未登录'}), 401
     return redirect(url_for('login'))
+
+# 终端日志记录端点
+@app.route('/api/terminal/log', methods=['POST'])
+def log_terminal_output():
+    data = request.json
+    session_id = data.get('sessionId')
+    stdout = data.get('stdout', '')
+    stderr = data.get('stderr', '')
+    
+    if session_id:
+        if stdout:
+            terminal_logger.log_output(session_id, 'stdout', stdout)
+        if stderr:
+            terminal_logger.log_output(session_id, 'stderr', stderr)
+        return jsonify({"success": True, "message": "日志记录成功"})
+    return jsonify({"success": False, "error": "缺少 sessionId"})
 
 # 自定义过滤器
 @app.template_filter('nl2br')
@@ -1240,6 +1150,27 @@ class TerminalAudit(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class WorkflowInAppNotification(db.Model):
+    """站内工作流通知：与邮件/CLI 同源 payload 落库，供用户检索。"""
+    __tablename__ = 'workflow_in_app_notification'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    actor_name = db.Column(db.String(120), nullable=True)
+    event = db.Column(db.String(40), nullable=False)
+    entity_type = db.Column(db.String(20), nullable=False, index=True)
+    entity_id = db.Column(db.Integer, nullable=False, index=True)
+    title = db.Column(db.String(500), nullable=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=True, index=True)
+    project_name = db.Column(db.String(200), nullable=True)
+    status = db.Column(db.String(64), nullable=True)
+    previous_status = db.Column(db.String(64), nullable=True)
+    search_blob = db.Column(db.Text, nullable=True)
+    read_at = db.Column(db.DateTime, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
@@ -1255,6 +1186,202 @@ def send_email(to, subject, body):
         print(f"邮件发送失败: {e}")
         print(f"邮件配置: MAIL_SERVER={app.config.get('MAIL_SERVER')}, MAIL_USERNAME={app.config.get('MAIL_USERNAME')}")
         return False
+
+
+def _badcase_status_str(badcase):
+    s = getattr(badcase, "status", None)
+    if s is None:
+        return ""
+    return s.value if hasattr(s, "value") else str(s)
+
+
+def _try_repair_badcase_plan_id_from_legacy_plan_string(badcase):
+    """plan_id 为空但 plan 列是纯数字计划 id 时写回 plan_id（旧数据或异常 PUT 体）。"""
+    if badcase.plan_id is not None:
+        return False
+    raw = getattr(badcase, "plan", None)
+    if raw is None:
+        return False
+    s = str(raw).strip()
+    if not s.isdigit():
+        return False
+    try:
+        pid = int(s)
+        if pid <= 0:
+            return False
+    except ValueError:
+        return False
+    row = Plan.query.get(pid)
+    if not row or row.project_id != badcase.project_id:
+        return False
+    badcase.plan_id = pid
+    return True
+
+
+def _testcase_status_str(testcase):
+    s = getattr(testcase, "status", None)
+    if s is None:
+        return ""
+    return s.value if hasattr(s, "value") else str(s)
+
+
+def _workflow_recipients_from_user_ids(user_ids):
+    ids = []
+    for x in user_ids or []:
+        if x is None:
+            continue
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    ids = list({i for i in ids if i > 0})
+    if not ids:
+        return []
+    rows = db.session.query(User.id, User.email, User.name).filter(User.id.in_(ids)).all()
+    return [{"user_id": r.id, "email": r.email, "name": r.name} for r in rows]
+
+
+def _workflow_recipients_badcase(badcase):
+    raw = getattr(badcase, "assignee", None)
+    if not raw:
+        return []
+    s = str(raw).strip()
+    if not s:
+        return []
+    ids = []
+    try:
+        if "," in s:
+            for p in s.split(","):
+                p = p.strip()
+                if p:
+                    ids.append(int(p))
+        else:
+            ids.append(int(s))
+    except (ValueError, TypeError):
+        return []
+    return _workflow_recipients_from_user_ids(ids)
+
+
+def _workflow_recipients_bug(bug):
+    if getattr(bug, "assignee_id", None):
+        return _workflow_recipients_from_user_ids([bug.assignee_id])
+    return []
+
+
+def _workflow_recipients_testcase(tc):
+    if getattr(tc, "assignee_id", None):
+        return _workflow_recipients_from_user_ids([tc.assignee_id])
+    return []
+
+
+def _workflow_merge_creator_if_empty(recipients, creator_id):
+    if recipients:
+        return recipients
+    if creator_id:
+        return _workflow_recipients_from_user_ids([creator_id])
+    return []
+
+
+def _workflow_project_name(project_id):
+    p = Project.query.get(project_id)
+    return p.name if p else str(project_id)
+
+
+def _persist_workflow_inapp_rows(payload):
+    """每位收件人一条站内通知；独立 commit，失败不影响邮件/CLI 异步发送。"""
+    recs = payload.get("recipients") or []
+    if not recs:
+        return
+    parts = [
+        payload.get("event"),
+        payload.get("entity_type"),
+        payload.get("entity_id"),
+        payload.get("title"),
+        payload.get("project_name"),
+        payload.get("status"),
+        payload.get("previous_status"),
+        payload.get("actor_name"),
+    ]
+    search_blob = " ".join(str(p) for p in parts if p is not None and str(p) != "")
+    rows = []
+    for r in recs:
+        uid = r.get("user_id")
+        if uid is None:
+            continue
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        if uid <= 0:
+            continue
+        rows.append(
+            WorkflowInAppNotification(
+                user_id=uid,
+                actor_id=payload.get("actor_id"),
+                actor_name=(payload.get("actor_name") or "")[:120] or None,
+                event=str(payload.get("event") or "")[:40],
+                entity_type=str(payload.get("entity_type") or "")[:20],
+                entity_id=int(payload.get("entity_id") or 0),
+                title=(payload.get("title") or "")[:500] or None,
+                project_id=payload.get("project_id"),
+                project_name=(payload.get("project_name") or "")[:200] or None,
+                status=(str(payload.get("status"))[:64] if payload.get("status") is not None else None),
+                previous_status=(
+                    str(payload.get("previous_status"))[:64]
+                    if payload.get("previous_status") is not None
+                    else None
+                ),
+                search_blob=search_blob[:65000] if search_blob else None,
+            )
+        )
+    if not rows:
+        return
+    db.session.add_all(rows)
+    db.session.commit()
+
+
+def _schedule_workflow_notify(
+    event,
+    entity_type,
+    entity_id,
+    title,
+    project_id,
+    project_name,
+    status,
+    previous_status,
+    recipients,
+    *,
+    actor_id,
+    actor_name,
+):
+    """异步：飞书/钉钉 CLI + 邮件；无收件人则跳过。actor / project_name 须在请求线程内传入。"""
+    if not recipients:
+        return
+    payload = {
+        "event": event,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "title": title or "",
+        "status": status,
+        "previous_status": previous_status,
+        "project_id": project_id,
+        "project_name": project_name or str(project_id),
+        "actor_id": actor_id,
+        "actor_name": actor_name,
+        "recipients": recipients,
+    }
+    payload["email_subject"] = build_email_subject_cn(payload)
+    payload["email_body"] = build_email_body_cn(payload)
+    try:
+        _persist_workflow_inapp_rows(payload)
+    except Exception as _pe:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        print(f"[workflow_notify] 站内通知落库失败: {_pe}")
+    schedule_workflow_notification(payload, send_email_fn=send_email)
+
 
 # 生成验证码
 def generate_verification_code():
@@ -2329,8 +2456,8 @@ def api_upsert_diff_review(project_id):
             plan_id=data.get('plan_id'),
             diff=data.get('diff') or [],
             modifications=data.get('modifications') or {},
-            source_message_id=data.get('message_id'),
-            source_session_id=data.get('session_id'),
+            source_message_id=_safe_mysql_int_fk_id(data.get('message_id')),
+            source_session_id=_safe_mysql_int_fk_id(data.get('session_id')),
             operator_id=current_user.id,
         )
         db.session.commit()
@@ -2452,6 +2579,23 @@ def _normalize_chat_message_id(message_id):
         return int(message_id)
     except (TypeError, ValueError):
         return None
+
+
+# chat_message.id / chat_session.id / diff_review_state.source_* 均为 MySQL INT：前端常用 Date.now() 作临时消息 id，会溢出
+_MYSQL_SIGNED_INT_MAX = 2147483647
+
+
+def _safe_mysql_int_fk_id(value):
+    """可写入 INT 列的外键类 id；非法或超范围（含 JS 临时大整数）返回 None，避免 INSERT 1264。"""
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n < 1 or n > _MYSQL_SIGNED_INT_MAX:
+        return None
+    return n
 
 
 def _nullify_chat_message_modify_preview(message_id):
@@ -3976,6 +4120,15 @@ def api_get_project_badcases(project_id):
         pagination = query.order_by(BadCase.created_at.desc())\
             .paginate(page=page, per_page=per_page, error_out=False)
 
+        # 自动修补：plan_id 为空但 plan 列为数字 id 时写回（避免一直落在「未计划」列表）
+        _repaired = False
+        for _bc in pagination.items:
+            if _try_repair_badcase_plan_id_from_legacy_plan_string(_bc):
+                _repaired = True
+        if _repaired:
+            db.session.commit()
+            _cache_invalidate_plans(project_id)
+
         # 批量解析 assignee -> user.name，避免 N+1
         def _parse_assignee_ids(raw):
             if raw is None:
@@ -4120,7 +4273,7 @@ def api_create_badcase():
         project_id = data.get('project_id')
         title = data.get('title')
         case_category = data.get('case_category')
-        base_problem = data.get('base_problem')
+        base_problem = (data.get('base_problem') or '').strip()
         badcase_result = data.get('badcase_result')
         answer = data.get('answer')
         correct_answer = data.get('correct_answer')
@@ -4133,8 +4286,6 @@ def api_create_badcase():
             missing_fields.append('title')
         if not case_category:
             missing_fields.append('case_category')
-        if not base_problem:
-            missing_fields.append('base_problem')
         if not badcase_result:
             missing_fields.append('badcase_result')
         if not answer:
@@ -4161,6 +4312,16 @@ def api_create_badcase():
                 _pid = int(_pid)
             except (TypeError, ValueError):
                 _pid = None
+        # 兼容旧前端：只把所选迭代写在 plan（字符串数字）里、未传 plan_id
+        if _pid is None:
+            _legacy = data.get('plan')
+            if _legacy not in (None, '', 'unplanned'):
+                s = str(_legacy).strip()
+                if s.isdigit():
+                    try:
+                        _pid = int(s)
+                    except ValueError:
+                        _pid = None
 
         badcase = BadCase(
             project_id=project_id,
@@ -4186,8 +4347,28 @@ def api_create_badcase():
         
         db.session.add(badcase)
         db.session.commit()
+        _cache_invalidate_plans(project_id)
         
         print(f"BadCase创建成功，ID: {badcase.id}")
+        try:
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_badcase(badcase), badcase.creator_id
+            )
+            _schedule_workflow_notify(
+                "created",
+                "badcase",
+                badcase.id,
+                badcase.title or "",
+                badcase.project_id,
+                _workflow_project_name(badcase.project_id),
+                _badcase_status_str(badcase),
+                None,
+                _rec,
+                actor_id=current_user.id,
+                actor_name=getattr(current_user, "name", "") or "",
+            )
+        except Exception as _e:
+            print(f"[workflow_notify] BadCase 创建通知调度失败: {_e}")
         
         return jsonify({
             'success': True,
@@ -4202,7 +4383,7 @@ def api_create_badcase():
                 'answer': badcase.answer,
                 'correct_answer': badcase.correct_answer,
                 'priority': badcase.priority,
-                'status': badcase.status,
+                'status': badcase.status.value if hasattr(badcase.status, 'value') else badcase.status,
                 'assignee': badcase.assignee,
                 'plan': badcase.plan,
                 'created_at': badcase.created_at.isoformat()
@@ -4273,12 +4454,17 @@ def api_get_badcase_detail(badcase_id):
             assignee_name = str(badcase.assignee)
     else:
         assignee_name = str(badcase.assignee) if badcase.assignee else ''
-    
+
+    if _try_repair_badcase_plan_id_from_legacy_plan_string(badcase):
+        db.session.commit()
+        _cache_invalidate_plans(badcase.project_id)
+
     return jsonify({
         'success': True,
         'badcase': {
             'id': badcase.id,
             'project_id': badcase.project_id,  # 添加项目ID字段
+            'plan_id': badcase.plan_id,
             'title': badcase.title,
             'case_category': badcase.case_category,
             'base_problem': badcase.base_problem,
@@ -4318,6 +4504,7 @@ def api_update_badcase_status(badcase_id):
     data = request.get_json()
     status = data.get('status')
     assigned_users = data.get('assigned_users')
+    old_status = _badcase_status_str(badcase)
     
     if status:
         badcase.status = status
@@ -4325,6 +4512,32 @@ def api_update_badcase_status(badcase_id):
         badcase.assigned_users = assigned_users
     
     db.session.commit()
+    new_status = _badcase_status_str(badcase)
+    try:
+        _rec = _workflow_merge_creator_if_empty(
+            _workflow_recipients_badcase(badcase), badcase.creator_id
+        )
+        _ev = (
+            "status_changed"
+            if status and old_status != new_status
+            else "updated"
+        )
+        _prev = old_status if (status and old_status != new_status) else None
+        _schedule_workflow_notify(
+            _ev,
+            "badcase",
+            badcase.id,
+            badcase.title or "",
+            badcase.project_id,
+            _workflow_project_name(badcase.project_id),
+            new_status,
+            _prev,
+            _rec,
+            actor_id=current_user.id,
+            actor_name=getattr(current_user, "name", "") or "",
+        )
+    except Exception as _e:
+        print(f"[workflow_notify] BadCase 状态接口通知失败: {_e}")
     
     return jsonify({'success': True})
 
@@ -4374,9 +4587,32 @@ def api_update_badcase(badcase_id):
             if not has_project_permission(current_user.id, badcase.project_id):
                 return jsonify({'success': False, 'error': '无权删除此BadCase'}), 403
             
+            _pid = badcase.project_id
+            _title = badcase.title or ""
+            _st = _badcase_status_str(badcase)
+            _pn = _workflow_project_name(_pid)
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_badcase(badcase), badcase.creator_id
+            )
             db.session.delete(badcase)
             db.session.commit()
-            _cache_invalidate_plans(badcase.project_id)
+            _cache_invalidate_plans(_pid)
+            try:
+                _schedule_workflow_notify(
+                    "deleted",
+                    "badcase",
+                    badcase_id,
+                    _title,
+                    _pid,
+                    _pn,
+                    _st,
+                    None,
+                    _rec,
+                    actor_id=current_user.id,
+                    actor_name=getattr(current_user, "name", "") or "",
+                )
+            except Exception as _e:
+                print(f"[workflow_notify] BadCase 删除通知失败: {_e}")
             
             return jsonify({'success': True, 'message': 'BadCase删除成功'})
         except Exception as e:
@@ -4399,13 +4635,15 @@ def api_update_badcase(badcase_id):
         
         print(f"更新数据: {data}")
         
+        old_status = _badcase_status_str(badcase)
+        
         # 更新BadCase字段
         if 'title' in data:
             badcase.title = data['title']
         if 'case_category' in data:
             badcase.case_category = data['case_category']
         if 'base_problem' in data:
-            badcase.base_problem = data['base_problem']
+            badcase.base_problem = (data['base_problem'] or '').strip()
         if 'badcase_result' in data:
             badcase.badcase_result = data['badcase_result']
         if 'answer' in data:
@@ -4424,8 +4662,32 @@ def api_update_badcase(badcase_id):
             badcase.status = data['status']
         if 'assignee' in data:
             badcase.assignee = data['assignee']
+        if 'plan_id' in data:
+            _pid = data.get('plan_id')
+            if _pid in (None, '', 0, '0'):
+                badcase.plan_id = None
+            else:
+                try:
+                    badcase.plan_id = int(_pid)
+                except (TypeError, ValueError):
+                    pass
         if 'plan' in data:
             badcase.plan = data['plan']
+            # 前端常同时传 plan 与 plan_id；若 plan_id 显式为空，仍应用 plan 里的数字 id
+            _pid_missing = 'plan_id' not in data
+            _pid_empty = (not _pid_missing) and data.get('plan_id') in (None, '', 0, '0')
+            if _pid_missing or _pid_empty:
+                pv = data.get('plan')
+                if pv in (None, '', 'unplanned'):
+                    badcase.plan_id = None
+                else:
+                    s = str(pv).strip()
+                    if s.isdigit():
+                        try:
+                            badcase.plan_id = int(s)
+                        except ValueError:
+                            pass
+        _try_repair_badcase_plan_id_from_legacy_plan_string(badcase)
         if 'document_type' in data:
             badcase.document_type = data['document_type']
         if 'attachments' in data:
@@ -4435,7 +4697,38 @@ def api_update_badcase(badcase_id):
             badcase.assigned_users = data['assigned_users']
         
         db.session.commit()
+        _cache_invalidate_plans(badcase.project_id)
         print("BadCase更新成功")
+        try:
+            new_status = _badcase_status_str(badcase)
+            _ev = (
+                "status_changed"
+                if "status" in data and old_status != new_status
+                else "updated"
+            )
+            _prev = (
+                old_status
+                if ("status" in data and old_status != new_status)
+                else None
+            )
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_badcase(badcase), badcase.creator_id
+            )
+            _schedule_workflow_notify(
+                _ev,
+                "badcase",
+                badcase.id,
+                badcase.title or "",
+                badcase.project_id,
+                _workflow_project_name(badcase.project_id),
+                new_status,
+                _prev,
+                _rec,
+                actor_id=current_user.id,
+                actor_name=getattr(current_user, "name", "") or "",
+            )
+        except Exception as _e:
+            print(f"[workflow_notify] BadCase 更新通知失败: {_e}")
         
         return jsonify({'success': True, 'message': 'BadCase更新成功'})
         
@@ -4452,8 +4745,28 @@ def api_close_badcase(badcase_id):
     if not has_project_permission(current_user.id, badcase.project_id):
         return jsonify({'success': False, 'error': '无权操作此BadCase'}), 403
     
+    old_status = _badcase_status_str(badcase)
     badcase.status = 'close'
     db.session.commit()
+    try:
+        _rec = _workflow_merge_creator_if_empty(
+            _workflow_recipients_badcase(badcase), badcase.creator_id
+        )
+        _schedule_workflow_notify(
+            "closed",
+            "badcase",
+            badcase.id,
+            badcase.title or "",
+            badcase.project_id,
+            _workflow_project_name(badcase.project_id),
+            "close",
+            old_status,
+            _rec,
+            actor_id=current_user.id,
+            actor_name=getattr(current_user, "name", "") or "",
+        )
+    except Exception as _e:
+        print(f"[workflow_notify] BadCase 关闭通知失败: {_e}")
     
     return jsonify({'success': True})
 
@@ -4715,6 +5028,28 @@ def sync_database_schema():
                     'FOREIGN KEY (project_id) REFERENCES project(id)',
                     'FOREIGN KEY (creator_id) REFERENCES user(id)',
                     'FOREIGN KEY (assignee_id) REFERENCES user(id)'
+                ]
+            },
+            'workflow_in_app_notification': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTO_INCREMENT',
+                    'user_id INT NOT NULL',
+                    'actor_id INT',
+                    'actor_name VARCHAR(120)',
+                    'event VARCHAR(40) NOT NULL',
+                    'entity_type VARCHAR(20) NOT NULL',
+                    'entity_id INT NOT NULL',
+                    'title VARCHAR(500)',
+                    'project_id INT',
+                    'project_name VARCHAR(200)',
+                    'status VARCHAR(64)',
+                    'previous_status VARCHAR(64)',
+                    'search_blob TEXT',
+                    'read_at DATETIME',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'FOREIGN KEY (user_id) REFERENCES user(id)',
+                    'FOREIGN KEY (actor_id) REFERENCES user(id)',
+                    'FOREIGN KEY (project_id) REFERENCES project(id)',
                 ]
             },
             'chat_session': {
@@ -5044,6 +5379,10 @@ def create_performance_indexes():
             ("idx_chat_message_session_id_id", "CREATE INDEX idx_chat_message_session_id_id ON chat_message(session_id, id)"),
             # 兼容旧路径（按时间排序/统计）
             ("idx_chat_message_session_created", "CREATE INDEX idx_chat_message_session_created ON chat_message(session_id, created_at)"),
+
+            ("idx_wf_inapp_user_created", "CREATE INDEX idx_wf_inapp_user_created ON workflow_in_app_notification(user_id, created_at)"),
+            ("idx_wf_inapp_project", "CREATE INDEX idx_wf_inapp_project ON workflow_in_app_notification(project_id)"),
+            ("idx_wf_inapp_unread", "CREATE INDEX idx_wf_inapp_unread ON workflow_in_app_notification(user_id, read_at)"),
         ]
         
         # 执行索引创建
@@ -5064,6 +5403,119 @@ def create_performance_indexes():
     except Exception as e:
         print(f"创建索引时发生错误: {e}")
         db.session.rollback()
+
+@app.route("/api/notifications", methods=["GET", "POST", "HEAD"])
+@login_required
+def api_list_workflow_notifications():
+    """当前用户站内通知列表（分页 + 关键词 + 类型 + 项目 + 未读）。
+
+    同时接受 GET 与 POST：部分代理/客户端会把带查询的请求发成 POST，此前仅注册 GET 会导致 405。
+    分页与筛选参数一律从 query string 读取（axios.post(url, null, { params }) 亦走 query）。"""
+    try:
+        page = request.args.get("page", 1, type=int)
+        per_page = min(request.args.get("per_page", 20, type=int), 100)
+        q = (request.args.get("q") or "").strip()
+        entity_type = (request.args.get("entity_type") or "").strip()
+        project_id = request.args.get("project_id", type=int)
+        unread_only = str(request.args.get("unread_only", "")).lower() in ("1", "true", "yes", "on")
+
+        qry = WorkflowInAppNotification.query.filter(
+            WorkflowInAppNotification.user_id == current_user.id
+        )
+        if project_id is not None and project_id > 0:
+            qry = qry.filter(WorkflowInAppNotification.project_id == project_id)
+        if entity_type:
+            qry = qry.filter(WorkflowInAppNotification.entity_type == entity_type)
+        if unread_only:
+            qry = qry.filter(WorkflowInAppNotification.read_at.is_(None))
+        if q:
+            like = f"%{q}%"
+            qry = qry.filter(
+                or_(
+                    WorkflowInAppNotification.title.like(like),
+                    WorkflowInAppNotification.project_name.like(like),
+                    WorkflowInAppNotification.search_blob.like(like),
+                    WorkflowInAppNotification.event.like(like),
+                    WorkflowInAppNotification.entity_type.like(like),
+                )
+            )
+
+        qry = qry.order_by(WorkflowInAppNotification.created_at.desc())
+        pagination = qry.paginate(page=page, per_page=per_page, error_out=False)
+        items = []
+        for row in pagination.items:
+            items.append(
+                {
+                    "id": row.id,
+                    "event": row.event,
+                    "entity_type": row.entity_type,
+                    "entity_id": row.entity_id,
+                    "title": row.title,
+                    "project_id": row.project_id,
+                    "project_name": row.project_name,
+                    "status": row.status,
+                    "previous_status": row.previous_status,
+                    "actor_id": row.actor_id,
+                    "actor_name": row.actor_name,
+                    "read_at": row.read_at.isoformat() if row.read_at else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+            )
+        return jsonify(
+            {
+                "success": True,
+                "items": items,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": pagination.total,
+                    "pages": pagination.pages,
+                    "has_next": pagination.has_next,
+                    "has_prev": pagination.has_prev,
+                },
+            }
+        )
+    except Exception as e:
+        print(f"[notifications] list failed: {e}")
+        return jsonify({"success": False, "error": "获取通知列表失败"}), 500
+
+
+@app.route("/api/notifications/<int:nid>/read", methods=["POST"])
+@login_required
+def api_mark_workflow_notification_read(nid):
+    try:
+        row = WorkflowInAppNotification.query.get(nid)
+        if not row or row.user_id != current_user.id:
+            return jsonify({"success": False, "error": "记录不存在"}), 404
+        row.read_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[notifications] mark read failed: {e}")
+        return jsonify({"success": False, "error": "操作失败"}), 500
+
+
+@app.route("/api/notifications/mark-all-read", methods=["POST"])
+@login_required
+def api_mark_all_workflow_notifications_read():
+    try:
+        project_id = request.args.get("project_id", type=int)
+        qry = WorkflowInAppNotification.query.filter(
+            WorkflowInAppNotification.user_id == current_user.id,
+            WorkflowInAppNotification.read_at.is_(None),
+        )
+        if project_id is not None and project_id > 0:
+            qry = qry.filter(WorkflowInAppNotification.project_id == project_id)
+        now = datetime.utcnow()
+        qry.update({WorkflowInAppNotification.read_at: now}, synchronize_session=False)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[notifications] mark all read failed: {e}")
+        return jsonify({"success": False, "error": "操作失败"}), 500
+
 
 # 计划相关API接口
 @app.route('/api/plans', methods=['POST'])
@@ -5203,7 +5655,7 @@ def api_get_plan_detail(plan_id):
                     'id': badcase.id,
                     'title': badcase.title,
                     'case_category': badcase.case_category,
-                    'status': badcase.status,
+                    'status': badcase.status.value if hasattr(badcase.status, 'value') else badcase.status,
                     'priority': badcase.priority,
                     'assignee': badcase.assignee,
                     'created_at': badcase.created_at.isoformat(),
@@ -5991,6 +6443,25 @@ def api_create_bug():
         
         db.session.add(bug)
         db.session.commit()
+        try:
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_bug(bug), bug.creator_id
+            )
+            _schedule_workflow_notify(
+                "created",
+                "bug",
+                bug.id,
+                bug.title or "",
+                bug.project_id,
+                _workflow_project_name(bug.project_id),
+                bug.status,
+                None,
+                _rec,
+                actor_id=current_user.id,
+                actor_name=getattr(current_user, "name", "") or "",
+            )
+        except Exception as _e:
+            print(f"[workflow_notify] Bug 创建通知失败: {_e}")
         
         return jsonify({
             'success': True,
@@ -6155,6 +6626,7 @@ def api_bug_detail(bug_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
             data = request.json
+            old_bug_status = bug.status
             
             # 更新字段
             if 'title' in data:
@@ -6190,6 +6662,36 @@ def api_bug_detail(bug_id):
             
             bug.updated_at = datetime.now()
             db.session.commit()
+            try:
+                _rec = _workflow_merge_creator_if_empty(
+                    _workflow_recipients_bug(bug), bug.creator_id
+                )
+                _ns = bug.status
+                _ev = (
+                    "status_changed"
+                    if "status" in data and old_bug_status != _ns
+                    else "updated"
+                )
+                _prev = (
+                    old_bug_status
+                    if ("status" in data and old_bug_status != _ns)
+                    else None
+                )
+                _schedule_workflow_notify(
+                    _ev,
+                    "bug",
+                    bug.id,
+                    bug.title or "",
+                    bug.project_id,
+                    _workflow_project_name(bug.project_id),
+                    _ns,
+                    _prev,
+                    _rec,
+                    actor_id=current_user.id,
+                    actor_name=getattr(current_user, "name", "") or "",
+                )
+            except Exception as _e:
+                print(f"[workflow_notify] Bug 更新通知失败: {_e}")
             
             return jsonify({
                 'success': True,
@@ -6213,9 +6715,32 @@ def api_bug_detail(bug_id):
             if not has_project_permission(current_user.id, bug.project_id):
                 return jsonify({'success': False, 'error': '无权删除此Bug'}), 403
 
+            _pid = bug.project_id
+            _title = bug.title or ""
+            _st = bug.status
+            _pn = _workflow_project_name(_pid)
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_bug(bug), bug.creator_id
+            )
             db.session.delete(bug)
             db.session.commit()
-            _cache_invalidate_plans(bug.project_id)
+            _cache_invalidate_plans(_pid)
+            try:
+                _schedule_workflow_notify(
+                    "deleted",
+                    "bug",
+                    bug_id,
+                    _title,
+                    _pid,
+                    _pn,
+                    _st,
+                    None,
+                    _rec,
+                    actor_id=current_user.id,
+                    actor_name=getattr(current_user, "name", "") or "",
+                )
+            except Exception as _e:
+                print(f"[workflow_notify] Bug 删除通知失败: {_e}")
 
             return jsonify({'success': True, 'message': 'Bug删除成功'})
         except Exception as e:
@@ -6319,6 +6844,25 @@ def api_create_testcase():
         db.session.add(testcase)
         db.session.commit()
         _cache_invalidate_plans(data['project_id'])
+        try:
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_testcase(testcase), testcase.creator_id
+            )
+            _schedule_workflow_notify(
+                "created",
+                "testcase",
+                testcase.id,
+                testcase.title or "",
+                testcase.project_id,
+                _workflow_project_name(testcase.project_id),
+                _testcase_status_str(testcase),
+                None,
+                _rec,
+                actor_id=current_user.id,
+                actor_name=getattr(current_user, "name", "") or "",
+            )
+        except Exception as _e:
+            print(f"[workflow_notify] TestCase 创建通知失败: {_e}")
         
         # 确保枚举/日期等可 JSON 序列化
         _s = testcase.status
@@ -6409,6 +6953,7 @@ def api_testcase_detail(testcase_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
             data = request.json
+            old_tc_status = _testcase_status_str(testcase)
             
             # 更新字段
             if 'title' in data:
@@ -6462,6 +7007,36 @@ def api_testcase_detail(testcase_id):
             testcase.updated_at = datetime.now()
             db.session.commit()
             _cache_invalidate_plans(testcase.project_id)
+            try:
+                _rec = _workflow_merge_creator_if_empty(
+                    _workflow_recipients_testcase(testcase), testcase.creator_id
+                )
+                _ns = _testcase_status_str(testcase)
+                _ev = (
+                    "status_changed"
+                    if "status" in data and old_tc_status != _ns
+                    else "updated"
+                )
+                _prev = (
+                    old_tc_status
+                    if ("status" in data and old_tc_status != _ns)
+                    else None
+                )
+                _schedule_workflow_notify(
+                    _ev,
+                    "testcase",
+                    testcase.id,
+                    testcase.title or "",
+                    testcase.project_id,
+                    _workflow_project_name(testcase.project_id),
+                    _ns,
+                    _prev,
+                    _rec,
+                    actor_id=current_user.id,
+                    actor_name=getattr(current_user, "name", "") or "",
+                )
+            except Exception as _e:
+                print(f"[workflow_notify] TestCase 更新通知失败: {_e}")
             
             # 处理 status 枚举值
             status_val = testcase.status
@@ -6496,9 +7071,31 @@ def api_testcase_detail(testcase_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
             pid = testcase.project_id
+            _title = testcase.title or ""
+            _st = _testcase_status_str(testcase)
+            _pn = _workflow_project_name(pid)
+            _rec = _workflow_merge_creator_if_empty(
+                _workflow_recipients_testcase(testcase), testcase.creator_id
+            )
             db.session.delete(testcase)
             db.session.commit()
             _cache_invalidate_plans(pid)
+            try:
+                _schedule_workflow_notify(
+                    "deleted",
+                    "testcase",
+                    testcase_id,
+                    _title,
+                    pid,
+                    _pn,
+                    _st,
+                    None,
+                    _rec,
+                    actor_id=current_user.id,
+                    actor_name=getattr(current_user, "name", "") or "",
+                )
+            except Exception as _e:
+                print(f"[workflow_notify] TestCase 删除通知失败: {_e}")
             
             return jsonify({
                 'success': True,
@@ -7097,12 +7694,9 @@ if __name__ == '__main__':
     else:
         print("ℹ️ 热重载已关闭（FLASK_DEBUG=0 或 FLASK_ENV=production）")
 
-    # Socket.IO 与嵌入式终端：使用 socketio.run（threading 模式）
-    socketio.run(
-        app,
+    app.run(
         debug=_use_reload,
         use_reloader=_use_reload,
         host=_host,
         port=_port,
-        allow_unsafe_werkzeug=True,
     )

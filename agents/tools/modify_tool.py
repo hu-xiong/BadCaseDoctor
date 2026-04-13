@@ -46,6 +46,40 @@ except ImportError:
 MODIFY_BATCH_ROW_PREFIX = "__MODIFY_BATCH_ROW__"
 
 
+def modify_tool_params_log_snapshot(
+    params: Optional[Dict[str, Any]],
+    *,
+    ctx_grep_ids: Any = None,
+) -> Dict[str, Any]:
+    """供主循环 / spawn_executor 打印入参：剔除不可序列化项，长串截断。"""
+    if not isinstance(params, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in params.items():
+        if k in ("progress_queue", "progress_callback"):
+            continue
+        if k == "natural_query" and isinstance(v, str) and len(v) > 200:
+            out[k] = v[:200] + "…"
+            continue
+        if k == "modifications" and isinstance(v, dict):
+            out[k] = {
+                str(ik): (str(iv)[:240] if not isinstance(iv, (dict, list)) else type(iv).__name__)
+                for ik, iv in list(v.items())[:24]
+            }
+            continue
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            out[k] = v
+        elif isinstance(v, dict):
+            out[k] = f"<dict n={len(v)}>"
+        elif isinstance(v, (list, tuple)):
+            out[k] = f"<list n={len(v)}>"
+        else:
+            out[k] = type(v).__name__
+    if ctx_grep_ids is not None:
+        out["_ctx_grep_ids"] = ctx_grep_ids
+    return out
+
+
 class ModifyTool(BaseTool):
     """对话修改Bug/BadCase工具"""
     
@@ -98,6 +132,19 @@ class ModifyTool(BaseTool):
                     execution_mode="direct",
                 )
                 print(f"[MODIFY] Text2SQL 延迟初始化完成")
+                if os.getenv("PERF_LOG", "").strip() == "1" and self.text2sql is not None:
+                    try:
+                        _m = getattr(getattr(self.text2sql, "llm", None), "model_name", None)
+                    except Exception:
+                        _m = None
+                    print(
+                        f"[PERF][modify_text2sql] cache_backend={backend!r} "
+                        f"llm_model_name={_m!r} "
+                        f"TEXT2SQL_MODEL_env={(os.getenv('TEXT2SQL_MODEL') or '').strip()!r} "
+                        f"TEXT2SQL_LLM_BACKEND_env={(os.getenv('TEXT2SQL_LLM_BACKEND') or '').strip()!r} "
+                        f"TEXT2SQL_PROVIDER_env={(os.getenv('TEXT2SQL_PROVIDER') or '').strip()!r}",
+                        flush=True,
+                    )
             except Exception as e:
                 self.text2sql = None
                 print(f"[MODIFY] Text2SQL初始化失败: {e}")
@@ -146,10 +193,35 @@ class ModifyTool(BaseTool):
             flush=True,
         )
 
+    def _modify_preview_uses_orm_pk_only(
+        self, target: str, target_id: Any, project_id: Any
+    ) -> bool:
+        """已明确定位 id+project 时，读行只需 ORM 主键查询，无需 Text2SQL（避免数秒 LLM，且与生产库一致；Text2SQL 常连本地 SQLite）。"""
+        if self._env_flag_enabled("MODIFY_FORCE_TEXT2SQL_ROW_READ", "0"):
+            return False
+        if target not in ("bug", "badcase", "testcase"):
+            return False
+        try:
+            if target_id is None or project_id is None:
+                return False
+            int(target_id)
+            int(project_id)
+        except (TypeError, ValueError):
+            return False
+        return True
+
     def _ensure_text2sql_if_needed_for_preview(
-        self, prefer_orm_read: bool, use_direct_sandbox: bool
+        self,
+        prefer_orm_read: bool,
+        use_direct_sandbox: bool,
+        *,
+        target: str = "",
+        target_id: Any = None,
+        project_id: Any = None,
     ) -> None:
         """沙箱预览：ORM 直读 + 直拼 UPDATE 时无需加载 Text2SQL Agent。"""
+        if self._modify_preview_uses_orm_pk_only(target, target_id, project_id):
+            return
         if not prefer_orm_read or not use_direct_sandbox:
             self._ensure_text2sql()
 
@@ -157,7 +229,14 @@ class ModifyTool(BaseTool):
         """获取 Flask 应用上下文"""
         from app import app
         return app.app_context()
-    
+
+    def _sqlalchemy_orm_session(self):
+        """兼容 ModifyTool(db.session) 与 ModifyTool(db)：统一得到 SQLAlchemy Session / scoped_session。"""
+        try:
+            return self.db.session
+        except AttributeError:
+            return self.db
+
     def _normalize_status(self, status_value: str, target: str) -> str:
         """将中文状态描述映射到数据库定义的英文状态值"""
         status_value = str(status_value).strip().lower()
@@ -418,9 +497,8 @@ class ModifyTool(BaseTool):
             if tid_fb:
                 target_id = tid_fb
                 print(f"[MODIFY] 通过 ORM 模糊匹配找到目标ID: {target_id}")
-        if not target_id and natural_query:
-            self._ensure_text2sql()
-        if not target_id and natural_query and self.text2sql:
+        # 已有多条 target_ids 时 target_id 已在上方补齐；勿因 natural_query 加载 Text2SQL（批量预览与定位无关，冷启动数秒）
+        if not target_id and natural_query and len(batch_target_ids) <= 1:
             _progress(modify_tool_progress("natural_query_lookup", loc))
             target_id = await self._find_target_by_query(target, natural_query, project_id)
             if target_id:
@@ -524,25 +602,81 @@ class ModifyTool(BaseTool):
                         )
                     # confirm=False: 沙箱副本预览（默认 ORM 读行 + 直拼 UPDATE，可按需 Text2SQL）
                     print(f"[MODIFY] 沙箱预览模式，获取原始数据…", flush=True)
+                    _perf_single = os.getenv("PERF_LOG", "").strip() == "1"
+                    _wall_single0 = time.perf_counter()
+
+                    def _cum_single_ms() -> float:
+                        return (time.perf_counter() - _wall_single0) * 1000.0
+
                     _progress(modify_tool_progress("sandbox_enter", loc))
-                    self._ensure_text2sql_if_needed_for_preview(prefer_orm_read, use_direct_sandbox)
+                    if _perf_single:
+                        self._perf_modify_trace_context("single_preview_enter")
+                    _t_gate = time.perf_counter()
+                    self._ensure_text2sql_if_needed_for_preview(
+                        prefer_orm_read,
+                        use_direct_sandbox,
+                        target=target,
+                        target_id=target_id,
+                        project_id=project_id,
+                    )
+                    _gate_ms = (time.perf_counter() - _t_gate) * 1000.0
+                    if _perf_single:
+                        print(
+                            f"[PERF][modify_single_preview] after_text2sql_gate "
+                            f"text2sql_gate_ms={_gate_ms:.1f} "
+                            f"text2sql_loaded={int(self.text2sql is not None)} "
+                            f"prefer_orm_read={int(prefer_orm_read)} direct_sandbox_sql={int(use_direct_sandbox)} "
+                            f"cumulative_ms={_cum_single_ms():.1f}",
+                            flush=True,
+                        )
                     _progress(modify_tool_progress("db_fetch", loc))
+                    _t_fetch = time.perf_counter()
                     original_data = await self._get_original_data(
                         target, target_id, project_id, progress_callback=_progress, ui_locale=loc
                     )
+                    _fetch_wall_ms = (time.perf_counter() - _t_fetch) * 1000.0
+                    if _perf_single:
+                        print(
+                            f"[PERF][modify_single_preview] after_original_fetch "
+                            f"original_fetch_wall_ms={_fetch_wall_ms:.1f} "
+                            f"cumulative_ms={_cum_single_ms():.1f}",
+                            flush=True,
+                        )
                     if not original_data:
                         return {'success': False, 'error': modify_error_row_not_found(target, target_id, loc)}
                     _progress(modify_tool_progress("sandbox_diff", loc))
                     modified_data = original_data.copy()
                     modified_data.update(modifications)
+                    _t_enrich = time.perf_counter()
                     self._enrich_modified_data_for_preview(
                         target, modified_data, modifications, project_id
                     )
+                    _enrich_ms = (time.perf_counter() - _t_enrich) * 1000.0
+                    _t_ld = time.perf_counter()
                     diff_result = self._generate_line_diff(
                         original_data, modified_data, modifications.keys(), ui_locale=loc
                     )
+                    _line_diff_ms = (time.perf_counter() - _t_ld) * 1000.0
+                    if _perf_single:
+                        print(
+                            f"[PERF][modify_single_preview] after_diff "
+                            f"enrich_ms={_enrich_ms:.1f} line_diff_ms={_line_diff_ms:.1f} "
+                            f"cumulative_ms={_cum_single_ms():.1f}",
+                            flush=True,
+                        )
                     _progress(modify_tool_progress("sandbox_sql", loc))
+                    _t_sbx = time.perf_counter()
                     sandbox_result = await self._preview_in_sandbox(target, target_id, modifications, project_id)
+                    _sandbox_ms = (time.perf_counter() - _t_sbx) * 1000.0
+                    if _perf_single:
+                        print(
+                            f"[PERF][modify_single_preview] done "
+                            f"sandbox_preview_ms={_sandbox_ms:.1f} "
+                            f"sandbox_ok={int(bool(sandbox_result.get('success')))} "
+                            f"mode={self._sandbox_preview_mode()} "
+                            f"total_wall_ms={_cum_single_ms():.1f}",
+                            flush=True,
+                        )
                     _progress(modify_tool_progress("sandbox_wait_confirm", loc))
                     mod_summary = modify_modifications_kv_summary(modifications, loc)
                     return {
@@ -640,7 +774,8 @@ class ModifyTool(BaseTool):
             return None
 
     async def _find_target_by_query(self, target: str, natural_query: str, project_id: int) -> Optional[int]:
-        """使用自然语言查询查找目标记录ID"""
+        """使用自然语言查询查找目标记录 ID（仅此路径懒加载 Text2SQL，避免批量/已定位请求误触发）。"""
+        self._ensure_text2sql()
         if not self.text2sql:
             return None
 
@@ -656,8 +791,15 @@ class ModifyTool(BaseTool):
                 "4) 尽量使用 title/status/id 等可索引字段过滤；"
                 "5) 避免函数包裹列与全表扫描写法。"
             )
+            # 关键：明确告诉 Text2SQL 不要把修改目标值当作过滤条件
+            intent_hint = (
+                "注意：这是修改操作前的定位查询，用户说'改为X'表示修改目标值，"
+                "不要把目标值当作过滤条件。例如'状态改为hold'要找的是所有相关记录，"
+                "而不是'状态已经是hold'的记录。只根据标题/名称等关键词定位，"
+                "不要根据状态/优先级等要修改的字段值过滤。"
+            )
             sql_result = self.text2sql.generate_sql(
-                f"查找{table_name}表中{natural_query}的记录ID。{perf_rules}",
+                f"查找{table_name}表中{natural_query}的记录ID。{intent_hint}{perf_rules}",
                 f"项目ID: {project_id}; 仅需返回单条最相关 id"
             )
             
@@ -691,10 +833,20 @@ class ModifyTool(BaseTool):
                     progress_callback(str(msg))
                 except Exception:
                     pass
+
+        perf_fetch = os.getenv("PERF_LOG", "").strip() == "1"
         # 默认先 ORM 读行（与生产一致）；需 Text2SQL 时再初始化（MODIFY_ORIGINAL_DATA_ORM_FIRST=0 可改回先 LLM SQL）
         prefer_orm_read = self._env_flag_enabled("MODIFY_ORIGINAL_DATA_ORM_FIRST", "1")
-        if self.text2sql and not prefer_orm_read:
+        orm_pk_only = self._modify_preview_uses_orm_pk_only(target, target_id, project_id)
+        if perf_fetch and orm_pk_only:
+            print(
+                f"[PERF][modify_original_fetch] path=orm_pk_fast target={target!r} id={target_id} "
+                f"skip_text2sql_row_read=1",
+                flush=True,
+            )
+        if self.text2sql and not prefer_orm_read and not orm_pk_only:
             _prog(modify_tool_progress("text2sql_load", loc))
+            _t_t2s0 = time.perf_counter()
             try:
                 # 注意：不同 target 对应不同表，testcase 为 test_case
                 table_map = {
@@ -703,13 +855,17 @@ class ModifyTool(BaseTool):
                     'testcase': 'test_case',
                 }
                 table_name = table_map.get(target, 'bad_case')
+                _tg = time.perf_counter()
                 sql_result = self.text2sql.generate_sql(
                     modify_text2sql_row_question(table_name, target_id, loc),
                     f"项目ID: {project_id}" if not is_english_locale(loc) else f"project_id: {project_id}",
                 )
-                
+                _gen_ms = (time.perf_counter() - _tg) * 1000.0
+                _exec_ms = 0.0
                 if sql_result.get('success'):
+                    _te = time.perf_counter()
                     exec_result = self.text2sql.execute_sql(sql_result['sql'])
+                    _exec_ms = (time.perf_counter() - _te) * 1000.0
                     if exec_result.get('success') and exec_result.get('data'):
                         data = exec_result['data'][0]
                         # 补充 assignee 用户名字段（Bug/TestCase 使用 assignee_id，BadCase 使用 assignee）
@@ -736,13 +892,51 @@ class ModifyTool(BaseTool):
                         else:
                             data['assignee'] = data.get('assignee', '') or ''
                             data['assignee_display'] = modify_assignee_unassigned(loc)
+                        if perf_fetch:
+                            print(
+                                f"[PERF][modify_original_fetch] path=text2sql_first ok=1 "
+                                f"gen_sql_ms={_gen_ms:.1f} execute_sql_ms={_exec_ms:.1f} "
+                                f"block_wall_ms={(time.perf_counter() - _t_t2s0) * 1000.0:.1f} "
+                                f"target={target!r} id={target_id}",
+                                flush=True,
+                            )
                         return data
+                    if perf_fetch:
+                        if not exec_result.get("success"):
+                            print(
+                                f"[PERF][modify_original_fetch] path=text2sql_first ok=0 "
+                                f"gen_sql_ms={_gen_ms:.1f} execute_sql_ms={_exec_ms:.1f} "
+                                f"reason=execute_failed target={target!r} id={target_id}",
+                                flush=True,
+                            )
+                        else:
+                            _rows = len(exec_result.get("data") or [])
+                            print(
+                                f"[PERF][modify_original_fetch] path=text2sql_first ok=0 "
+                                f"gen_sql_ms={_gen_ms:.1f} execute_sql_ms={_exec_ms:.1f} "
+                                f"reason=no_rows exec_rows={_rows} target={target!r} id={target_id}",
+                                flush=True,
+                            )
+                elif perf_fetch:
+                    print(
+                        f"[PERF][modify_original_fetch] path=text2sql_first ok=0 "
+                        f"gen_sql_ms={_gen_ms:.1f} reason=generate_failed "
+                        f"target={target!r} id={target_id}",
+                        flush=True,
+                    )
             except Exception as e:
                 print(f"[MODIFY] Text2SQL查询失败，回退到ORM: {e}")
+                if perf_fetch:
+                    print(
+                        f"[PERF][modify_original_fetch] path=text2sql_first ok=0 "
+                        f"reason=exception err={e!s}",
+                        flush=True,
+                    )
         
         # ORM 查询（使用 Flask-SQLAlchemy 的 db.session）
         from app import db as flask_db
         _prog(modify_tool_progress("orm_load", loc))
+        _t_orm0 = time.perf_counter()
 
         if target == 'bug':
             _prog(modify_tool_progress("querying_bug", loc))
@@ -753,6 +947,12 @@ class ModifyTool(BaseTool):
             ).first()
             
             if not bug:
+                if perf_fetch:
+                    print(
+                        f"[PERF][modify_original_fetch] path=orm_bug hit=0 "
+                        f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
+                        flush=True,
+                    )
                 return None
             
             # 获取负责人用户名
@@ -762,6 +962,12 @@ class ModifyTool(BaseTool):
                 if user:
                     assignee_name = user.name
             
+            if perf_fetch:
+                print(
+                    f"[PERF][modify_original_fetch] path=orm_bug hit=1 "
+                    f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
+                    flush=True,
+                )
             return {
                 'id': bug.id,
                 'title': bug.title,
@@ -843,8 +1049,9 @@ class ModifyTool(BaseTool):
                 'baseline': testcase.baseline or ''
             }
         
-        if self.text2sql and prefer_orm_read:
+        if self.text2sql and prefer_orm_read and not orm_pk_only:
             _prog(modify_tool_progress("text2sql_load", loc))
+            _t_sup0 = time.perf_counter()
             try:
                 table_map = {
                     'bug': 'bug',
@@ -852,16 +1059,47 @@ class ModifyTool(BaseTool):
                     'testcase': 'test_case',
                 }
                 table_name = table_map.get(target, 'bad_case')
+                _tg2 = time.perf_counter()
                 sql_result = self.text2sql.generate_sql(
                     modify_text2sql_row_question(table_name, target_id, loc),
                     f"项目ID: {project_id}" if not is_english_locale(loc) else f"project_id: {project_id}",
                 )
+                _gen2 = (time.perf_counter() - _tg2) * 1000.0
                 if sql_result.get('success'):
+                    _te2 = time.perf_counter()
                     exec_result = self.text2sql.execute_sql(sql_result['sql'])
+                    _ex2 = (time.perf_counter() - _te2) * 1000.0
                     if exec_result.get('success') and exec_result.get('data'):
+                        if perf_fetch:
+                            print(
+                                f"[PERF][modify_original_fetch] path=text2sql_supplement ok=1 "
+                                f"gen_sql_ms={_gen2:.1f} execute_sql_ms={_ex2:.1f} "
+                                f"block_wall_ms={(time.perf_counter() - _t_sup0) * 1000.0:.1f} "
+                                f"target={target!r} id={target_id}",
+                                flush=True,
+                            )
                         return exec_result['data'][0]
+                    if perf_fetch:
+                        print(
+                            f"[PERF][modify_original_fetch] path=text2sql_supplement ok=0 "
+                            f"gen_sql_ms={_gen2:.1f} execute_sql_ms={_ex2:.1f} "
+                            f"reason=no_rows target={target!r} id={target_id}",
+                            flush=True,
+                        )
+                elif perf_fetch:
+                    print(
+                        f"[PERF][modify_original_fetch] path=text2sql_supplement ok=0 "
+                        f"gen_sql_ms={_gen2:.1f} reason=generate_failed target={target!r} id={target_id}",
+                        flush=True,
+                    )
             except Exception as e:
                 print(f"[MODIFY] Text2SQL兜底查询失败: {e}")
+                if perf_fetch:
+                    print(
+                        f"[PERF][modify_original_fetch] path=text2sql_supplement ok=0 "
+                        f"reason=exception err={e!s}",
+                        flush=True,
+                    )
         return None
     
     def explore_record(
@@ -1023,7 +1261,7 @@ class ModifyTool(BaseTool):
 
     def _is_mysql_bind(self) -> bool:
         try:
-            bind = self.db.get_bind()
+            bind = self._sqlalchemy_orm_session().get_bind()
             name = getattr(bind.dialect, "name", "") or ""
             if name == "mysql":
                 return True
@@ -1090,44 +1328,87 @@ class ModifyTool(BaseTool):
 
         perf = os.getenv("PERF_LOG", "").strip() == "1"
         t_wall0 = time.perf_counter()
+        get_bind_ms = 0.0
+        raw_conn_ms = 0.0
+        create_temp_ms = 0.0
+        count_ms = 0.0
+        update_ms = 0.0
         conn = None
         cur = None
+        own_dbapi_connection = False
+        dbapi_source = "raw_pool"
         try:
-            bind = self.db.get_bind()
+            _tgb = time.perf_counter()
+            bind = self._sqlalchemy_orm_session().get_bind()
+            get_bind_ms = (time.perf_counter() - _tgb) * 1000.0
             if getattr(bind.dialect, "name", "") != "mysql":
                 return {"success": False, "error": "mysql_temp 仅支持 SQLAlchemy MySQL 方言"}
-            conn = bind.raw_connection()
+            _trc = time.perf_counter()
+            if self._env_flag_enabled("MODIFY_MYSQL_TEMP_REUSE_SESSION_DBAPI", "1"):
+                try:
+                    sa_conn = self._sqlalchemy_orm_session().connection()
+                    fairy = sa_conn.connection
+                    _dbapi = getattr(fairy, "driver_connection", None) or getattr(
+                        fairy, "dbapi_connection", None
+                    )
+                    if _dbapi is not None:
+                        conn = _dbapi
+                        own_dbapi_connection = False
+                        dbapi_source = "session"
+                except Exception as e:
+                    if perf:
+                        print(
+                            f"[PERF][modify_sandbox] mysql_temp_session_dbapi_fallback err={e!r}",
+                            flush=True,
+                        )
+                    conn = None
+            if conn is None:
+                conn = bind.raw_connection()
+                own_dbapi_connection = True
+                dbapi_source = "raw_pool"
+            raw_conn_ms = (time.perf_counter() - _trc) * 1000.0
             cur = conn.cursor()
-            t0 = time.perf_counter()
+            _tc = time.perf_counter()
             cur.execute(create_sql, create_params)
-            if perf:
-                print(
-                    f"[PERF][modify_sandbox] mysql_temp_prepare_ms={(time.perf_counter() - t0) * 1000.0:.1f} "
-                    f"table=`{table_phys}` tmp=`{tmp}` n={len(ids)}",
-                    flush=True,
-                )
+            create_temp_ms = (time.perf_counter() - _tc) * 1000.0
+            _tct = time.perf_counter()
             cur.execute(f"SELECT COUNT(*) FROM `{tmp}`")
             row_cnt = cur.fetchone()[0]
+            count_ms = (time.perf_counter() - _tct) * 1000.0
             if int(row_cnt) != len(ids):
+                if perf:
+                    wall = (time.perf_counter() - t_wall0) * 1000.0
+                    print(
+                        f"[PERF][modify_sandbox] mysql_temp_segments "
+                        f"get_bind_ms={get_bind_ms:.1f} dbapi_acquire_ms={raw_conn_ms:.1f} "
+                        f"dbapi_source={dbapi_source} "
+                        f"create_temp_ms={create_temp_ms:.1f} count_ms={count_ms:.1f} "
+                        f"update_ms=0.0 wall_ms={wall:.1f} "
+                        f"table=`{table_phys}` tmp=`{tmp}` n={len(ids)} row_cnt={int(row_cnt)} "
+                        f"status=count_mismatch",
+                        flush=True,
+                    )
                 return {
                     "success": False,
                     "error": f"mysql_temp: 临时表 {row_cnt} 行，期望 {len(ids)} 行（检查 id / project_id）",
                 }
-            t1 = time.perf_counter()
+            _tu = time.perf_counter()
             cur.execute(update_sql, update_params)
-            try:
-                conn.commit()
-            except Exception:
-                pass
+            if own_dbapi_connection:
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
+            update_ms = (time.perf_counter() - _tu) * 1000.0
             if perf:
+                wall = (time.perf_counter() - t_wall0) * 1000.0
                 print(
-                    f"[PERF][modify_sandbox] mysql_temp_exec_ms={(time.perf_counter() - t1) * 1000.0:.1f} "
-                    f"tmp=`{tmp}`",
-                    flush=True,
-                )
-                print(
-                    f"[PERF][modify_sandbox] mysql_temp_wall_ms={(time.perf_counter() - t_wall0) * 1000.0:.1f} "
-                    f"n={len(ids)}",
+                    f"[PERF][modify_sandbox] mysql_temp_segments "
+                    f"get_bind_ms={get_bind_ms:.1f} dbapi_acquire_ms={raw_conn_ms:.1f} "
+                    f"dbapi_source={dbapi_source} "
+                    f"create_temp_ms={create_temp_ms:.1f} count_ms={count_ms:.1f} "
+                    f"update_ms={update_ms:.1f} wall_ms={wall:.1f} "
+                    f"table=`{table_phys}` tmp=`{tmp}` n={len(ids)} status=ok",
                     flush=True,
                 )
             return {
@@ -1154,7 +1435,7 @@ class ModifyTool(BaseTool):
                     cur.close()
                 except Exception:
                     pass
-            if conn is not None:
+            if conn is not None and own_dbapi_connection:
                 try:
                     conn.commit()
                 except Exception:
@@ -1291,17 +1572,24 @@ class ModifyTool(BaseTool):
             flush=True,
         )
         _progress(modify_tool_progress("sandbox_enter", loc))
-        perf = (os.getenv("PERF_LOG") == "1")
+        perf = os.getenv("PERF_LOG", "").strip() == "1"
+        _wall_batch0 = time.perf_counter()
+
+        def _cum_batch_ms() -> float:
+            return (time.perf_counter() - _wall_batch0) * 1000.0
+
         _t_gate0 = time.perf_counter()
-        self._ensure_text2sql_if_needed_for_preview(prefer_orm_read, use_direct_sandbox)
+        # 批量预览只走 _fetch_original_rows_batch_orm，从不调用 _get_original_data / Text2SQL；勿懒加载 LLM（可省数秒）
         _text2sql_gate_only_ms = (time.perf_counter() - _t_gate0) * 1000.0
         if perf:
             self._perf_modify_trace_context("batch_preview_enter")
             print(
                 f"[PERF][modify_batch] text2sql_gate_ms={_text2sql_gate_only_ms:.1f} "
+                f"text2sql_skipped_batch=1 "
                 f"prefer_orm_read={int(prefer_orm_read)} direct_sandbox_sql={int(use_direct_sandbox)} "
                 f"text2sql_loaded={int(self.text2sql is not None)} "
-                f"sandbox_preview_mode={self._sandbox_preview_mode()}",
+                f"sandbox_preview_mode={self._sandbox_preview_mode()} "
+                f"cumulative_since_batch_start_ms={_cum_batch_ms():.1f}",
                 flush=True,
             )
 
@@ -1321,12 +1609,27 @@ class ModifyTool(BaseTool):
         row_maps = self._fetch_original_rows_batch_orm(target, batch_target_ids, project_id)
         timings["orm_fetch_ms"] = (time.perf_counter() - _t_orm0) * 1000.0
         n_total = len(batch_target_ids)
+        if perf:
+            try:
+                _ids_int = [int(x) for x in batch_target_ids if x is not None]
+                _miss = [x for x in _ids_int if x not in row_maps]
+            except Exception:
+                _miss = []
+            print(
+                f"[PERF][modify_batch_step] after_orm_fetch "
+                f"orm_fetch_ms={timings['orm_fetch_ms']:.1f} "
+                f"rows_loaded={len(row_maps)} expected_ids={n_total} "
+                f"missing_count={len(_miss)} stream_rows={int(stream_rows)} "
+                f"cumulative_ms={_cum_batch_ms():.1f}",
+                flush=True,
+            )
         all_results: List[Dict[str, Any]] = []
         mod_summary = modify_modifications_kv_summary(modifications, loc)
         enrich_ms_acc = 0.0
         line_diff_ms_acc = 0.0
         batch_row_max_ms = 0.0
         stream_emit_ms_acc = 0.0
+        _row_perf_rows: List[str] = []
         _t_diff0 = time.perf_counter()
         for idx, tid in enumerate(batch_target_ids):
             _t_row0 = time.perf_counter()
@@ -1343,12 +1646,14 @@ class ModifyTool(BaseTool):
             modified_data.update(modifications)
             _te0 = time.perf_counter()
             self._enrich_modified_data_for_preview(target, modified_data, modifications, project_id)
-            enrich_ms_acc += (time.perf_counter() - _te0) * 1000.0
+            _enrich_one = (time.perf_counter() - _te0) * 1000.0
+            enrich_ms_acc += _enrich_one
             _td0 = time.perf_counter()
             diff_result = self._generate_line_diff(
                 original_data, modified_data, modifications.keys(), ui_locale=loc
             )
-            line_diff_ms_acc += (time.perf_counter() - _td0) * 1000.0
+            _diff_one = (time.perf_counter() - _td0) * 1000.0
+            line_diff_ms_acc += _diff_one
             _resolved_plan_id = plan_by_id.get(tid_i)
             if _resolved_plan_id is None and isinstance(original_data, dict):
                 _rp = original_data.get("plan_id")
@@ -1357,6 +1662,7 @@ class ModifyTool(BaseTool):
                         _resolved_plan_id = int(_rp)
                     except (TypeError, ValueError):
                         _resolved_plan_id = None
+            _stream_one = 0.0
             if stream_rows:
                 _ts0 = time.perf_counter()
                 _progress(
@@ -1373,10 +1679,19 @@ class ModifyTool(BaseTool):
                         "after": modified_data,
                     }
                 )
-                stream_emit_ms_acc += (time.perf_counter() - _ts0) * 1000.0
-            batch_row_max_ms = max(
-                batch_row_max_ms, (time.perf_counter() - _t_row0) * 1000.0
-            )
+                _stream_one = (time.perf_counter() - _ts0) * 1000.0
+                stream_emit_ms_acc += _stream_one
+            _row_wall = (time.perf_counter() - _t_row0) * 1000.0
+            batch_row_max_ms = max(batch_row_max_ms, _row_wall)
+            if perf:
+                try:
+                    _dk = list(modifications.keys()) if isinstance(modifications, dict) else []
+                except Exception:
+                    _dk = []
+                _row_perf_rows.append(
+                    f"id={tid_i} row_ms={_row_wall:.1f} enrich={_enrich_one:.1f} "
+                    f"line_diff={_diff_one:.1f} stream={_stream_one:.1f} mod_fields={_dk[:8]}"
+                )
             row_obs: Dict[str, Any] = {
                 "success": True,
                 "confirmation_required": True,
@@ -1396,6 +1711,35 @@ class ModifyTool(BaseTool):
         timings["batch_row_max_ms"] = batch_row_max_ms
         timings["stream_emit_ms"] = stream_emit_ms_acc
         timings["text2sql_gate_ms"] = _text2sql_gate_only_ms
+
+        if perf and _row_perf_rows:
+            print(
+                f"[PERF][modify_batch_step] diff_loop_done "
+                f"diff_loop_ms={timings['diff_ms']:.1f} n_rows={len(_row_perf_rows)} "
+                f"cumulative_ms={_cum_batch_ms():.1f}",
+                flush=True,
+            )
+            _row_log_cap = 50
+            for _ln in _row_perf_rows[:_row_log_cap]:
+                print(f"[PERF][modify_batch_row] {_ln}", flush=True)
+            if len(_row_perf_rows) > _row_log_cap:
+                print(
+                    f"[PERF][modify_batch_row] ... truncated "
+                    f"shown={_row_log_cap} total={len(_row_perf_rows)}",
+                    flush=True,
+                )
+
+        if perf:
+            try:
+                _sp_keys = list((modifications or {}).keys())[:12]
+            except Exception:
+                _sp_keys = []
+            print(
+                f"[PERF][modify_batch_step] before_sandbox_write_validate "
+                f"cumulative_ms={_cum_batch_ms():.1f} "
+                f"modification_keys={_sp_keys}",
+                flush=True,
+            )
 
         _progress(modify_tool_progress("sandbox_sql", loc))
         _t_sbx0 = time.perf_counter()
@@ -1450,7 +1794,8 @@ class ModifyTool(BaseTool):
                     f"batch_row_max_ms={timings.get('batch_row_max_ms', 0.0):.1f} "
                     f"diff_loop_minus_sub_ms={timings.get('diff_ms', 0.0) - _in_loop:.1f}) "
                     f"sandbox_preview_ms={timings.get('sandbox_preview_ms', 0.0):.1f} "
-                    f"mode={self._sandbox_preview_mode()} n={n}",
+                    f"mode={self._sandbox_preview_mode()} n={n} "
+                    f"batch_total_wall_ms={_cum_batch_ms():.1f}",
                     flush=True,
                 )
             except Exception:
@@ -1478,6 +1823,12 @@ class ModifyTool(BaseTool):
     ) -> Dict[str, Any]:
         """同字段多行：一次副本 + executescript 多条 UPDATE；失败时回退为逐条 _preview_in_sandbox。"""
         use_direct_sql = self._env_flag_enabled("MODIFY_SANDBOX_DIRECT_SQL", "1")
+        if os.getenv("PERF_LOG", "").strip() == "1":
+            print(
+                f"[PERF][modify_sandbox_batch] enter_early "
+                f"use_direct_sql={int(use_direct_sql)} n_ids={len(target_ids)} target={target!r}",
+                flush=True,
+            )
         table_name = self._sandbox_table_name(target)
         if not use_direct_sql:
             last: Optional[Dict[str, Any]] = None
@@ -1498,6 +1849,25 @@ class ModifyTool(BaseTool):
 
         # mode=skip_update：不做写验证（仅给前端展示 diff/preview）
         mode = self._sandbox_preview_mode()
+        if os.getenv("PERF_LOG", "").strip() == "1":
+            _is_my = self._is_mysql_bind()
+            _use_mt = self._resolve_use_mysql_temp(mode)
+            if mode == "skip_update":
+                _branch = "skip_update"
+            elif _use_mt:
+                _branch = "mysql_temp"
+            elif mode == "subset" or (mode == "mysql_temp" and not _is_my):
+                _branch = "subset"
+            else:
+                _branch = "full_copy"
+            print(
+                f"[PERF][modify_sandbox_batch] enter "
+                f"use_direct_sql={int(use_direct_sql)} mode={mode!r} "
+                f"is_mysql_bind={int(_is_my)} mysql_temp_resolved={int(_use_mt)} "
+                f"n_ids={len(target_ids)} n_stmts={len(stmts)} "
+                f"combined_sql_len={len(combined_sql)} branch={_branch}",
+                flush=True,
+            )
         if mode == "skip_update":
             return {
                 "success": True,

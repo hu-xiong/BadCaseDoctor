@@ -143,3 +143,14 @@ class Config:
     )
     # 逗号分隔的可执行名（与首 token 精确匹配，忽略前导 sudo 等）；为空则使用内置默认列表
     TERMINAL_AI_WHITELIST = os.getenv("TERMINAL_AI_WHITELIST", "").strip()
+
+    # ==================== MinIO（通用文件上传：/upload、富文本附件、头像等）====================
+    # 后续若换独立文件服务，可改环境变量或只替换上传逻辑，仍建议保留此处为单一配置源。
+    MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://117.72.33.38:9901").strip().rstrip("/")
+    MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin")
+    MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "hxReligi12.")
+    MINIO_BUCKET_NAME = os.getenv("MINIO_BUCKET_NAME", "apaas-root")
+    _minio_prefix = os.getenv("MINIO_SAAS_FILE_PATH", "saas_qa_file").strip().strip("/")
+    MINIO_SAAS_FILE_PATH = f"{_minio_prefix}/" if _minio_prefix else ""
+    MINIO_MAX_FILE_SIZE = int(os.getenv("MINIO_MAX_FILE_SIZE", str(524288000)))  # 默认 500MB，与历史 app 一致
+    MINIO_MAX_SUM_FILE_SIZE = int(os.getenv("MINIO_MAX_SUM_FILE_SIZE", str(MINIO_MAX_FILE_SIZE)))

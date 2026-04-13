@@ -1,0 +1,656 @@
+/*---------------------------------------------------------------------------------------------
+ *  Integrated terminal panel chrome — structure & tokens aligned with VS Code:
+ *  third_party/vscode-src/workbench/contrib/terminal/browser/media/terminal.css
+ *  Selectors scoped under .etw-vscode-terminal to avoid leaking into the rest of the app.
+ *--------------------------------------------------------------------------------------------*/
+
+.etw-root.etw-vscode-terminal.monaco-workbench {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  /* row-gap / 子块透明时露底，与终端栅格同色避免顶缝发黑 */
+  background-color: var(--vscode-terminal-background, #1e1e1e);
+}
+
+.etw-vscode-terminal .etw-terminal-pane-fill {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  /* 顶栏「终端 / 本地代理」与下方编辑区分隔，避免首行输出贴顶栏（少一行栅格后行高变高时更明显） */
+  row-gap: 8px;
+  /* flex row-gap 区域用终端底色填充，否则透明会透出外层纯黑 */
+  background-color: var(--vscode-terminal-background, #1e1e1e);
+}
+
+.etw-vscode-terminal.monaco-workbench {
+  --vscode-editorPane-background: var(--vscode-terminal-background, #1e1e1e);
+}
+
+/*
+ * 未接入 VS Code IThemeService 时，下面 var(--vscode-*) 全部未定义。
+ * `color: var(--vscode-menu-foreground)` 会整条无效 → 继承 body（Bootstrap Reboot 常见 #212529）。
+ * xterm 6 默认 DOM 渲染（.xterm-rows，无 canvas）大量用继承/currentColor，结果深底 + 深字 = 肉眼「全黑」。
+ */
+.etw-vscode-terminal.monaco-workbench.vs-dark {
+  --vscode-terminal-background: #1e1e1e;
+  --vscode-panel-background: #1e1e1e;
+  --vscode-menu-foreground: #cccccc;
+  --vscode-panel-border: #3c3c3c;
+  --vscode-panelTitle-background: #252526;
+  --vscode-terminal-border: #3c3c3c;
+  --vscode-focusBorder: #007fd4;
+  --vscode-sideBar-background: #252526;
+  --vscode-icon-foreground: #cccccc;
+  --vscode-toolbar-hoverBackground: rgba(90, 93, 94, 0.31);
+  --vscode-terminal-tab-activeBorder: #007fd4;
+  --vscode-list-inactiveSelectionBackground: #37373d;
+  --vscode-list-hoverBackground: #2a2d2e;
+  --vscode-menu-background: #3c3c3c;
+  --vscode-menu-border: #454545;
+  color: var(--vscode-menu-foreground);
+}
+
+/* 底栏等场景：避免 body/Bootstrap 深色 currentColor 传到 xterm DOM，和 #1e1e1e 融成「有字看不见」 */
+.etw-vscode-terminal.monaco-workbench .embedded-pty-root {
+  color: var(--vscode-menu-foreground, #cccccc);
+}
+
+/*
+ * xterm.css 将 .xterm-viewport 设为 #000；栅格少占一行（reserveBottomRows）时视口底部会露出纯黑条。
+ * 统一 xterm 各层背景为终端主题底，与格子背景一致则肉眼「黑带」消失。
+ */
+.etw-vscode-terminal.monaco-workbench .embedded-pty-root,
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap,
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-host {
+  background-color: var(--vscode-terminal-background, #1e1e1e);
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm {
+  background-color: var(--vscode-terminal-background, #1e1e1e) !important;
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm:not(.allow-transparency) .xterm-viewport,
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm .xterm-viewport {
+  background-color: var(--vscode-terminal-background, #1e1e1e) !important;
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm .xterm-screen {
+  background-color: var(--vscode-terminal-background, #1e1e1e) !important;
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm .xterm-scrollable-element {
+  background-color: var(--vscode-terminal-background, #1e1e1e) !important;
+}
+
+/* Panel title row (analogous to part.panel > .composite.title) */
+.etw-vscode-terminal .etw-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 4px;
+  flex: 0 0 auto;
+  min-height: 35px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-panelTitle-background);
+  gap: 8px;
+}
+
+.etw-vscode-terminal .etw-panel-title-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.etw-vscode-terminal .etw-panel-title-right {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+/* 顶栏工具栏：与「本地代理」同一行 */
+.etw-vscode-terminal .etw-panel-title .etw-panel-terminal-toolbar {
+  padding: 0;
+  margin: 0;
+}
+
+.etw-vscode-terminal .etw-pane-title-text {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-menu-foreground);
+  opacity: 0.92;
+  flex-shrink: 0;
+}
+
+.etw-vscode-terminal .etw-top-pill {
+  font-size: 11px;
+  color: #ffe082;
+  border: 1px solid rgba(255, 193, 7, 0.35);
+  background: rgba(255, 193, 7, 0.08);
+  padding: 2px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+.etw-vscode-terminal .etw-top-pill--ok {
+  color: #b9f6ca;
+  border-color: rgba(76, 175, 80, 0.45);
+  background: rgba(76, 175, 80, 0.12);
+}
+
+.etw-vscode-terminal .etw-top-pill--down {
+  color: #ffccbc;
+  border-color: rgba(255, 112, 67, 0.4);
+  background: rgba(255, 112, 67, 0.1);
+}
+
+.etw-vscode-terminal .etw-top-pill-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.etw-vscode-terminal .etw-top-pill-clickable:hover {
+  filter: brightness(1.06);
+}
+
+.etw-vscode-terminal .etw-top-pill--busy {
+  opacity: 0.85;
+  cursor: wait;
+}
+
+/* Outer horizontal split: terminal | tabs (terminalTabbedView) */
+.etw-vscode-terminal .terminal-outer-container.etw-terminal-outer-fill {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  overflow: hidden;
+  background-color: var(--vscode-terminal-background, #1e1e1e);
+}
+
+.etw-vscode-terminal .terminal-groups-container {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background-color: var(--vscode-terminal-background, var(--vscode-panel-background));
+  position: relative;
+  overflow: hidden;
+  z-index: 0;
+  border-right: none !important;
+  box-shadow: none !important;
+}
+
+.etw-vscode-terminal .terminal-split-pane.etw-terminal-main-pane {
+  height: 100%;
+  position: relative;
+}
+
+.etw-vscode-terminal .terminal-wrapper.etw-terminal-editor-wrapper {
+  display: block;
+  height: 100%;
+  box-sizing: border-box;
+  position: relative;
+  background-color: var(--vscode-terminal-background, #1e1e1e);
+}
+
+/* xterm bottom-align：锚在 EmbeddedPty 的 xterm 容器上，避免盖住顶部状态条 */
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap {
+  position: relative;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .xterm,
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm {
+  position: absolute;
+  /* 仅 bottom+left+right 时高度依赖内容，在嵌入式 flex 链里易出现可视区域过矮/画布异常；与 VS Code 侧栏 top 对齐 variant 同理用 top+bottom 拉满 */
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm-viewport {
+  box-sizing: border-box;
+  /* 过高 z-index 在个别嵌套 stacking 下曾导致可视异常；滚动条仍由 xterm 内部处理 */
+  z-index: 0;
+  border-right: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* DOM 滚动条已隐藏且 pointer-events:none：viewport 拉满，避免右侧再留 14px 槽与画布边形成固定「灰线感」接缝 */
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap:not(.fixed-dims) .xterm-viewport {
+  right: 0 !important;
+}
+
+/* xterm 在 viewport 与滚动条槽之间画的 inset 阴影（.xterm-shadow-*），肉眼像一条竖/横线；嵌入式里整段关掉 */
+.etw-vscode-terminal.monaco-workbench
+  .embedded-pty-xterm-wrap
+  .xterm-scrollable-element
+  > .xterm-shadow {
+  display: none !important;
+  box-shadow: none !important;
+}
+
+/* 与 xterm.css 同路径、叠在 pane-body + .xterm 上，确保晚加载的 xterm.css 无法再 display:block 出竖条 */
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .embedded-pty-xterm-wrap
+  .xterm
+  .xterm-scrollable-element
+  > .xterm-shadow.xterm-shadow-left,
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .embedded-pty-xterm-wrap
+  .xterm
+  .xterm-scrollable-element
+  > .xterm-shadow.xterm-shadow-top,
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .embedded-pty-xterm-wrap
+  .xterm
+  .xterm-scrollable-element
+  > .xterm-shadow.xterm-shadow-top-left-corner,
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .embedded-pty-xterm-wrap
+  .xterm
+  .xterm-scrollable-element
+  > .xterm-shadow.xterm-shadow-top.xterm-shadow-left {
+  display: none !important;
+  box-shadow: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* 右侧 overview ruler（装饰/搜索命中条）贴 right:0，易被看成终端旁竖条；嵌入式终端不需要 */
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .embedded-pty-xterm-wrap
+  .xterm-decoration-overview-ruler {
+  display: none !important;
+}
+
+/*
+ * xterm DOM 滚动条（.xterm-scrollbar）：不要用「仅悬停终端区才 opacity:0」——鼠标移到右侧会话列时，
+ * .terminal-outer-container 仍可能处于 hover 链路上，xterm 又会给滚动条加 xterm-visible，与 xterm.css 的 opacity:1
+ * 叠在一起容易在接缝处闪出灰线/拇指。嵌入式里始终隐藏该 DOM 条，纵向只靠 viewport + 滚轮/触控板。
+ */
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .embedded-pty-xterm-wrap
+  .xterm-scrollable-element
+  > .xterm-scrollbar {
+  background-color: var(--vscode-terminal-background, #1e1e1e) !important;
+  border: none !important;
+  box-shadow: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: none !important;
+}
+
+/* 纵向只用 xterm 的 DOM 滚动条；不要 WebKit 再出一条，否则与 14px 槽叠在一起会错位、出竖线 */
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .embedded-pty-xterm-wrap .xterm-viewport {
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .embedded-pty-xterm-wrap .xterm-viewport::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .embedded-pty-xterm-wrap .xterm-viewport::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm {
+  padding-left: 20px;
+}
+
+.etw-vscode-terminal.monaco-workbench .embedded-pty-xterm-wrap .xterm .xterm-scrollable-element {
+  margin-left: -20px;
+  padding-left: 20px;
+}
+
+/*
+ * 终端编辑区与会话列之间的可拖拽分割条。
+ * 竖线来源：原先用 .etw-vscode-sash::after 画 1px；负 margin 还可能让两侧底色漏 1px 像缝。
+ */
+.etw-vscode-terminal .etw-vscode-sash {
+  flex: 0 0 5px;
+  width: 5px;
+  cursor: col-resize;
+  position: relative;
+  z-index: 4;
+  touch-action: none;
+  margin: 0;
+  border: none !important;
+  background-color: var(--vscode-terminal-background, #1e1e1e);
+}
+
+/* 不再用伪元素画竖线；悬停分割条时用整条微亮提示可拖 */
+.etw-vscode-terminal .etw-vscode-sash::after {
+  display: none !important;
+  content: none !important;
+}
+
+.etw-vscode-terminal .etw-vscode-sash:hover {
+  background-color: rgba(0, 127, 212, 0.12);
+}
+
+/* Tabs column */
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-left: none !important;
+  border-right: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background-color: var(--vscode-sideBar-background);
+  flex-shrink: 0;
+  min-height: 0;
+  position: relative;
+  z-index: 6;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-list-container {
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-list-container > .tabs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 细滚动条；默认可滚动时仍不占显眼轨道（由 .etw-tabs-list--scrollable + hover 控制显隐） */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+/* Firefox：仅当列表可滚动且鼠标在会话列（含列表区域）上时显示拇指 */
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .tabs-list-container:hover
+  > .tabs-list.etw-tabs-list--scrollable {
+  scrollbar-color: rgba(121, 121, 121, 0.48) transparent;
+}
+
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .tabs-list-container
+  > .tabs-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .tabs-list-container
+  > .tabs-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .tabs-list-container
+  > .tabs-list::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 3px;
+}
+
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .tabs-list-container:hover
+  > .tabs-list.etw-tabs-list--scrollable::-webkit-scrollbar-thumb {
+  background-color: rgba(121, 121, 121, 0.42);
+}
+
+.etw-vscode-terminal.monaco-workbench
+  .pane-body.integrated-terminal
+  .tabs-list-container:hover
+  > .tabs-list.etw-tabs-list--scrollable::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(121, 121, 121, 0.62);
+}
+
+.etw-vscode-terminal .etw-terminal-tabs-toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+
+.etw-vscode-terminal .etw-terminal-tabs-toolbar .action-item {
+  border: none;
+  background: transparent;
+  color: var(--vscode-icon-foreground);
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.etw-vscode-terminal .etw-terminal-tabs-toolbar .action-item:hover:not(:disabled) {
+  background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.etw-vscode-terminal .etw-terminal-tabs-toolbar .action-item:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.etw-vscode-terminal .etw-terminal-menu-anchor {
+  position: relative;
+}
+
+/* 会话行：主按钮 + 悬停/聚焦时右侧拆分/删除 */
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-list .etw-terminal-tab-row {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-height: 22px;
+  box-sizing: border-box;
+}
+
+/* Tab rows — terminal-tabs-entry（button 重置，避免 Bootstrap/UA 白底盖住暗色主题字） */
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-list .terminal-tabs-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  height: 22px;
+  padding: 0 10px;
+  margin: 0;
+  cursor: pointer;
+  position: relative;
+  text-align: left;
+  font-size: 12px;
+  line-height: 22px;
+  box-sizing: border-box;
+  border: none;
+  width: 100%;
+  background: transparent;
+  color: var(--vscode-menu-foreground);
+  user-select: none;
+  font-family: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-list .etw-terminal-tab-row .terminal-tabs-entry {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  background-color: transparent;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-row-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding-right: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.08s ease;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-row:hover .etw-terminal-tab-row-actions,
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-row:focus-within .etw-terminal-tab-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-action {
+  border: none;
+  background: transparent;
+  color: var(--vscode-icon-foreground);
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-action:hover {
+  background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .terminal-tabs-entry .terminal-tab-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .terminal-tabs-entry::before {
+  display: block;
+  position: absolute;
+  content: '';
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  background-color: var(--vscode-terminal-tab-activeBorder);
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .terminal-tabs-entry.is-active::before {
+  width: 2px;
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-row:has(.terminal-tabs-entry.is-active) {
+  background-color: var(--vscode-list-inactiveSelectionBackground);
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .etw-terminal-tab-row:hover {
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .terminal-tabs-entry.is-active {
+  color: var(--vscode-menu-foreground);
+}
+
+.etw-vscode-terminal.monaco-workbench .pane-body.integrated-terminal .tabs-list .codicon {
+  vertical-align: text-bottom;
+  flex-shrink: 0;
+}
+
+/* 下拉菜单（锚在顶栏或侧栏的 … 上） */
+.etw-vscode-terminal .etw-vscode-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  min-width: 200px;
+  background: var(--vscode-menu-background);
+  border: 1px solid var(--vscode-menu-border);
+  padding: 4px 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  z-index: 500;
+  border-radius: 3px;
+}
+
+.etw-vscode-terminal .etw-vscode-menu-wide {
+  min-width: 260px;
+}
+
+.etw-vscode-terminal .etw-vscode-menu-item {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--vscode-menu-foreground);
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+  display: block;
+}
+
+.etw-vscode-terminal .etw-vscode-menu-item:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.etw-vscode-terminal .etw-vscode-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.etw-vscode-terminal .etw-vscode-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--vscode-menu-border);
+}
+
+/* 终端区域内右键菜单：由脚本用 fixed 定位父层，菜单本身不再用顶栏下拉的几何 */
+.etw-vscode-terminal .etw-vscode-menu.etw-vscode-menu-context {
+  position: relative;
+  top: auto;
+  right: auto;
+  left: auto;
+  z-index: 1;
+}
+
+.etw-terminal-ctx-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10048;
+  background: transparent;
+}
+
+.etw-terminal-ctx-menu-floater {
+  position: fixed;
+  z-index: 10050;
+  pointer-events: auto;
+}

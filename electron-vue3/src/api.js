@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-// 开发环境走 Vite 代理（与页面同源），登录 Cookie 才能可靠带到 /api 与 /socket.io，避免直连 :5000 与 127.0.0.1/localhost 混用导致会话丢失。
+// 开发环境走 Vite 代理（与页面同源），登录 Cookie 才能可靠带到 /api，避免直连 :5000 与 127.0.0.1/localhost 混用导致会话丢失。
 // 生产 / Electron 打包仍指向实际后端（可通过 VITE_BACKEND_URL 覆盖）。
 export const BACKEND_BASE_URL =
   import.meta.env.VITE_BACKEND_URL ||
@@ -197,22 +197,6 @@ export function importDatabase(data) {
   return api.post('/api/import_database', data)
 }
 
-// 执行终端命令
-export function executeTerminalCommand(payload) {
-  // payload: { command: string, cwd?: string, timeout?: number, session_id?: string }
-  return api.post('/api/terminal/exec', payload)
-}
-
-// 终止终端会话
-export function killTerminalSession(sessionId = 'default') {
-  return api.post('/api/terminal/kill', { session_id: sessionId })
-}
-
-// 获取终端会话状态
-export function getTerminalStatus(sessionId = 'default') {
-  return api.get(`/api/terminal/status?session_id=${sessionId}`)
-}
-
 // ==================== Chat Session API ====================
 
 // 获取项目的所有会话
@@ -324,6 +308,19 @@ export function getProjectTestCases(projectId, page = 1, perPage = 10, params = 
     ...params
   })
   return api.get(`/api/projects/${projectId}/testcases?${queryParams}`)
+}
+
+// 站内工作流通知（与邮件/CLI 同源落库）
+export function getWorkflowNotifications(params = {}) {
+  return api.get('/api/notifications', { params })
+}
+
+export function markWorkflowNotificationRead(id) {
+  return api.post(`/api/notifications/${id}/read`)
+}
+
+export function markAllWorkflowNotificationsRead(params = {}) {
+  return api.post('/api/notifications/mark-all-read', null, { params })
 }
 
 // ==================== Agent API ====================

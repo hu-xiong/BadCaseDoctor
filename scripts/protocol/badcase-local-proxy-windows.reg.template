@@ -1,0 +1,8 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CLASSES_ROOT\badcase-local-proxy]
+@="URL:BadCase Local Proxy"
+"URL Protocol"=""
+
+[HKEY_CLASSES_ROOT\badcase-local-proxy\shell\open\command]
+@="\"C:\\REPLACE\\badcase-local-proxy.exe\" \"%1\""

@@ -6,25 +6,12 @@
       <div class="loading-text">正在加载项目信息...</div>
     </div>
     
-    <!-- 顶部标题栏：嵌入模式也需要返回/关闭等操作，保留显示 -->
+    <!-- 顶部标题栏：嵌入模式也需要返回等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
         <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
         <span class="header-title">{{ isEdit ? '编辑Bug' : '新建Bug' }}</span>
         <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
-      </div>
-      <div class="header-right">
-        <button class="header-btn" @click="toggleRequiredOnly">
-          <span class="checkbox-icon" :class="{ checked: showRequiredOnly }">✓</span>
-          只看必填项
-        </button>
-        <button class="header-btn">
-          <span class="gear-icon">⚙</span>
-          配置
-        </button>
-        <button class="header-btn close-btn" @click="goBack">
-          <span class="close-icon">×</span>
-        </button>
       </div>
     </div>
 
@@ -362,7 +349,7 @@
         </div>
 
                 
-        <!-- 复现步骤编辑器 -->
+        <!-- 复现步骤编辑器（Tiptap） -->
         <div class="editor-section" :class="{ 'has-diff': pendingDiff?.modifications?.reproduction_steps || pendingDiff?.modifications?.steps_to_reproduce }">
           <!-- diff 显示区域 -->
           <div v-if="pendingDiff?.modifications?.reproduction_steps || pendingDiff?.modifications?.steps_to_reproduce" class="field-diff-panel">
@@ -385,38 +372,16 @@
               </div>
             </div>
           </div>
-          <div class="editor-toolbar">
-            <button class="toolbar-btn" title="插入" @click="addAttachment">📎</button>
-            <button class="toolbar-btn" title="撤销" @click="formatSteps('undo')">↶</button>
-            <button class="toolbar-btn" title="重做" @click="formatSteps('redo')">↷</button>
-            <div class="toolbar-divider"></div>
-            <button class="toolbar-btn" title="粗体" @click="formatSteps('bold')">B</button>
-            <button class="toolbar-btn" title="斜体" @click="formatSteps('italic')">I</button>
-            <button class="toolbar-btn" title="下划线" @click="formatSteps('underline')">U</button>
-            <button class="toolbar-btn" title="删除线" @click="formatSteps('strikeThrough')">S</button>
-            <div class="toolbar-divider"></div>
-            <button class="toolbar-btn" title="左对齐" @click="formatSteps('justifyLeft')">⫷</button>
-            <button class="toolbar-btn" title="居中" @click="formatSteps('justifyCenter')">⫸</button>
-            <button class="toolbar-btn" title="右对齐" @click="formatSteps('justifyRight')">⫹</button>
-            <button class="toolbar-btn" title="两端对齐" @click="formatSteps('justifyFull')">⫺</button>
-            <div class="toolbar-divider"></div>
-            <button class="toolbar-btn" title="无序列表" @click="formatSteps('insertUnorderedList')">•</button>
-            <button class="toolbar-btn" title="有序列表" @click="formatSteps('insertOrderedList')">1.</button>
-            <button class="toolbar-btn" title="链接" @click="insertStepsLink">🔗</button>
-            <button class="toolbar-btn" title="图片" @click="insertStepsImage">🖼</button>
-            <button class="toolbar-btn" title="表格" @click="insertStepsTable">⊞</button>
-            <button class="toolbar-btn" title="更多" @click="showMoreOptions">⋯</button>
-          </div>
-                
           <div class="editor-content">
-            <h3 class="editor-title">Bug复现步骤:</h3>
-            <div 
-              ref="stepsEditor" 
-              class="editor-textarea" 
-              contenteditable="true"
-              @input="updateSteps"
+            <div class="editor-title-row">
+              <h3 class="editor-title">Bug复现步骤:</h3>
+              <button type="button" class="toolbar-btn" title="添加附件到侧栏" @click="addAttachment">📎</button>
+            </div>
+            <RichTextHtmlEditor
+              v-model="bug.reproduction_steps"
+              class="editor-textarea"
               placeholder="请详细描述Bug的复现步骤..."
-            ></div>
+            />
             <div class="editor-count">{{ stepsLength }} / 2000</div>
           </div>
         </div>
@@ -609,62 +574,33 @@
            />
          </div>
 
-                  <!-- 输入评论 -->
+                  <!-- 输入评论：先只读预览，点击后再展开富文本 -->
          <div class="sidebar-section">
            <h3 class="sidebar-title">输入评论</h3>
            <div class="comment-input-container">
-             <!-- 普通输入框 -->
-             <textarea 
-               v-if="!commentEditorActive"
-               class="comment-textarea-simple" 
-               placeholder="请输入评论"
-               @click="activateCommentEditor"
-               readonly
-             >{{ commentText }}</textarea>
-             <div v-if="!commentEditorActive" class="comment-count">{{ commentText.length }} / 500</div>
-             
-             <!-- 富文本编辑器 -->
-             <div v-if="commentEditorActive" class="rich-editor">
-               <div class="editor-toolbar" @click="preventDeactivate">
-                 <button class="toolbar-btn" title="画笔" @click="togglePenTool">
-                   <span class="pen-icon">✏️</span>
-                 </button>
-                 <div class="toolbar-divider"></div>
-                 <button class="toolbar-btn" title="粗体" @click="formatText('bold')">
-                   <strong>B</strong>
-                 </button>
-                 <button class="toolbar-btn" title="斜体" @click="formatText('italic')">
-                   <em>I</em>
-                 </button>
-                 <button class="toolbar-btn" title="下划线" @click="formatText('underline')">
-                   <u>U</u>
-                 </button>
-                 <div class="toolbar-divider"></div>
-                 <button class="toolbar-btn" title="无序列表" @click="formatText('unorderedList')">
-                   <span class="list-icon">•</span>
-                 </button>
-                 <button class="toolbar-btn" title="有序列表" @click="formatText('orderedList')">
-                   <span class="list-icon">1.</span>
-                 </button>
-                 <div class="toolbar-divider"></div>
-                 <button class="toolbar-btn" title="插入图片" @click="insertImage">
-                   <span class="image-icon">🏔️</span>
-                 </button>
-                 <button class="toolbar-btn" title="插入链接" @click="insertLink">
-                   <span class="link-icon">🔗</span>
-                 </button>
+             <template v-if="!commentEditorActive">
+               <textarea
+                 class="comment-textarea-simple"
+                 readonly
+                 rows="3"
+                 :value="commentText"
+                 placeholder="点击输入评论…"
+                 @click="activateCommentEditor"
+               />
+               <div class="comment-count">{{ commentText.length }} / 500</div>
+             </template>
+             <template v-else>
+               <RichTextHtmlEditor
+                 v-model="bug.comment"
+                 variant="compact"
+                 placeholder="请输入评论"
+                 class="rich-editor"
+               />
+               <div class="comment-editor-actions">
+                 <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
                </div>
-               <div 
-                 ref="commentEditor" 
-                 class="editor-content" 
-                 contenteditable="true"
-                 @input="updateComment"
-                 @blur="deactivateCommentEditor"
-                 @click="preventDeactivate"
-                 placeholder="请输入"
-               ></div>
                <div class="editor-count">{{ commentText.length }} / 500</div>
-             </div>
+             </template>
            </div>
          </div>
       </div>
@@ -675,19 +611,19 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
 import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import user from '../store/user.js'
 import { defineAsyncComponent } from 'vue'
+import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
 
-
 export default {
   name: 'NewBug',
-  components: { MonacoDiffEditor },
+  components: { MonacoDiffEditor, RichTextHtmlEditor },
   props: {
     id: {
       type: [String, Number],
@@ -722,7 +658,6 @@ export default {
     const saveLoading = ref(false)
     const isEdit = ref(false)
     const bugId = ref(null)
-    const showRequiredOnly = ref(false)
     
     const projectInfo = ref({})
     const availableProjects = ref([])
@@ -1154,34 +1089,8 @@ export default {
               console.log('编辑模式：初始化_previousProjectId:', bug._previousProjectId)
             }
             
-            // 评论内容会在激活编辑器时设置
-            
-            // 设置步骤编辑器内容
-            if (stepsEditor.value && bug.reproduction_steps) {
-              console.log('设置步骤编辑器内容:', bug.reproduction_steps)
-              try {
-                stepsEditor.value.innerHTML = bug.reproduction_steps
-              } catch (e) {
-                console.error('设置编辑器内容失败:', e)
-              }
-            } else {
-              console.log('步骤编辑器或复现步骤为空')
-              console.log('stepsEditor.value:', stepsEditor.value)
-              console.log('bug.reproduction_steps:', bug.reproduction_steps)
-            }
-            
-            // 延迟设置编辑器内容，确保DOM已准备好
-            setTimeout(() => {
-              if (stepsEditor.value && bug.reproduction_steps) {
-                console.log('延迟设置步骤编辑器内容:', bug.reproduction_steps)
-                try {
-                  stepsEditor.value.innerHTML = bug.reproduction_steps
-                } catch (e) {
-                  console.error('延迟设置编辑器内容失败:', e)
-                }
-              }
-            }, 200)
-            
+            // 复现步骤由 RichTextHtmlEditor v-model 绑定 bug.reproduction_steps
+
             // 获取项目计划列表和成员列表（编辑模式）
             if (bug.project_id) {
               console.log('编辑模式，获取项目计划，项目ID:', bug.project_id)
@@ -1375,16 +1284,6 @@ export default {
       console.log('当前Bug数据:', bug)
       console.log('当前复现步骤:', bug.reproduction_steps)
       
-      // 在保存前更新复现步骤
-      if (stepsEditor.value) {
-        const editorContent = stepsEditor.value.innerHTML.trim()
-        console.log('编辑器内容:', editorContent)
-        if (editorContent && editorContent !== '<br>') {
-          bug.reproduction_steps = editorContent
-          console.log('从编辑器更新复现步骤:', bug.reproduction_steps)
-        }
-      }
-      
       if (!bug.title.trim()) {
         alert('请输入Bug标题')
         return
@@ -1398,22 +1297,9 @@ export default {
         return
       }
       
-      // 检查复现步骤是否为空
-      if (!bug.reproduction_steps || !bug.reproduction_steps.trim()) {
-        // 尝试从编辑器获取内容
-        if (stepsEditor.value) {
-          const editorContent = stepsEditor.value.innerHTML.trim()
-          if (editorContent && editorContent !== '<br>') {
-            bug.reproduction_steps = editorContent
-            console.log('从编辑器获取复现步骤:', bug.reproduction_steps)
-          } else {
-            alert('请输入复现步骤')
-            return
-          }
-        } else {
-          alert('请输入复现步骤')
-          return
-        }
+      if (!reproductionStepsPlain.value) {
+        alert('请输入复现步骤')
+        return
       }
 
       saveLoading.value = true
@@ -1478,11 +1364,6 @@ export default {
       }
     }
 
-    // 切换必填项显示
-    const toggleRequiredOnly = () => {
-      showRequiredOnly.value = !showRequiredOnly.value
-    }
-
     // 复制文档链接
     const copyDocumentLink = () => {
       const link = `https://knowledge-base.example.com/project/${bug.project_id}/documents`
@@ -1517,41 +1398,25 @@ export default {
       bug.attachments.splice(index, 1)
     }
 
-    // 富文本编辑器方法
-    const commentEditor = ref(null)
-    const stepsEditor = ref(null)
     const fileInput = ref(null)
     const commentEditorActive = ref(false)
-    
-    // 监听复现步骤变化，同步到编辑器
-    watch(() => bug.reproduction_steps, (newVal) => {
-      if (stepsEditor.value && newVal && stepsEditor.value.innerHTML !== newVal) {
-        console.log('watch: 同步复现步骤到编辑器')
-        try {
-          stepsEditor.value.innerHTML = newVal
-        } catch (e) {
-          console.error('同步编辑器内容失败:', e)
-        }
-      }
-    })
+    const activateCommentEditor = () => {
+      commentEditorActive.value = true
+    }
+    const finishCommentEditor = () => {
+      commentEditorActive.value = false
+    }
 
-    // 监听编辑器引用，当编辑器准备好时，如果已有内容则注入
-    watch(stepsEditor, (newVal) => {
-      if (newVal && bug.reproduction_steps) {
-        console.log('watch: 编辑器已就绪，注入内容')
-        try {
-          newVal.innerHTML = bug.reproduction_steps
-        } catch (e) {
-          console.error('编辑器就绪后注入内容失败:', e)
-        }
-      }
-    })
-    
-    // 计算步骤编辑器字符长度
-    const stepsLength = computed(() => {
-      if (!stepsEditor.value) return 0
-      return stepsEditor.value.innerText.length
-    })
+    const htmlToPlain = (html) => {
+      if (!html) return ''
+      const d = document.createElement('div')
+      d.innerHTML = html
+      return (d.textContent || d.innerText || '').trim()
+    }
+
+    const reproductionStepsPlain = computed(() => htmlToPlain(bug.reproduction_steps))
+
+    const stepsLength = computed(() => reproductionStepsPlain.value.length)
     
     // 计算评论文本（去除HTML标签）
     const commentText = computed(() => {
@@ -1561,230 +1426,6 @@ export default {
       tempDiv.innerHTML = bug.comment
       return tempDiv.textContent || tempDiv.innerText || ''
     })
-
-    // 切换画笔工具
-    const togglePenTool = () => {
-      // 实现画笔功能
-      console.log('切换画笔工具')
-    }
-
-    // 格式化文本
-    const formatText = (command) => {
-      if (!commentEditor.value) return
-      
-      // 确保编辑器获得焦点
-      commentEditor.value.focus()
-      
-      // 执行格式化命令
-      switch (command) {
-        case 'bold':
-          document.execCommand('bold', false, null)
-          break
-        case 'italic':
-          document.execCommand('italic', false, null)
-          break
-        case 'underline':
-          document.execCommand('underline', false, null)
-          break
-        case 'unorderedList':
-          document.execCommand('insertUnorderedList', false, null)
-          break
-        case 'orderedList':
-          document.execCommand('insertOrderedList', false, null)
-          break
-        default:
-          document.execCommand(command, false, null)
-      }
-      
-      // 更新内容
-      updateComment()
-    }
-
-    // 插入图片
-    const insertImage = () => {
-      if (!commentEditor.value) return
-      
-      commentEditor.value.focus()
-      const url = prompt('请输入图片URL:')
-      if (url) {
-        document.execCommand('insertImage', false, url)
-        updateComment()
-      }
-    }
-
-    // 插入链接
-    const insertLink = () => {
-      if (!commentEditor.value) return
-      
-      commentEditor.value.focus()
-      const url = prompt('请输入链接URL:')
-      if (url) {
-        document.execCommand('createLink', false, url)
-        updateComment()
-      }
-    }
-
-    // 激活评论编辑器
-    const activateCommentEditor = () => {
-      commentEditorActive.value = true
-      // 在下一个tick中设置编辑器内容
-      nextTick(() => {
-        if (commentEditor.value) {
-          // 如果有HTML内容，直接使用；否则使用纯文本
-          if (bug.comment && bug.comment.includes('<')) {
-            commentEditor.value.innerHTML = bug.comment
-          } else {
-            commentEditor.value.textContent = bug.comment || ''
-          }
-          commentEditor.value.focus()
-        }
-      })
-    }
-    
-    // 停用评论编辑器
-    const deactivateCommentEditor = () => {
-      // 延迟停用，避免点击工具栏按钮时立即停用
-      setTimeout(() => {
-        // 检查是否真的失去了焦点（不是点击了工具栏）
-        if (!commentEditor.value || !commentEditor.value.contains(document.activeElement)) {
-          // 保存当前内容
-          if (commentEditor.value) {
-            bug.comment = commentEditor.value.innerHTML
-          }
-          commentEditorActive.value = false
-        }
-      }, 100)
-    }
-    
-    // 防止编辑器停用
-    const preventDeactivate = () => {
-      // 阻止停用
-    }
-    
-    // 更新评论内容
-    const updateComment = () => {
-      if (commentEditor.value) {
-        bug.comment = commentEditor.value.innerHTML
-      }
-    }
-    
-    // 更新步骤内容
-    const updateSteps = () => {
-      if (stepsEditor.value) {
-        bug.reproduction_steps = stepsEditor.value.innerHTML
-      }
-    }
-    
-    // 格式化步骤编辑器
-    const formatSteps = (command) => {
-      if (!stepsEditor.value) return
-      
-      // 确保编辑器获得焦点
-      stepsEditor.value.focus()
-      
-      // 执行格式化命令
-      switch (command) {
-        case 'bold':
-          document.execCommand('bold', false, null)
-          break
-        case 'italic':
-          document.execCommand('italic', false, null)
-          break
-        case 'underline':
-          document.execCommand('underline', false, null)
-          break
-        case 'strikeThrough':
-          document.execCommand('strikeThrough', false, null)
-          break
-        case 'justifyLeft':
-          document.execCommand('justifyLeft', false, null)
-          break
-        case 'justifyCenter':
-          document.execCommand('justifyCenter', false, null)
-          break
-        case 'justifyRight':
-          document.execCommand('justifyRight', false, null)
-          break
-        case 'justifyFull':
-          document.execCommand('justifyFull', false, null)
-          break
-        case 'insertUnorderedList':
-          document.execCommand('insertUnorderedList', false, null)
-          break
-        case 'insertOrderedList':
-          document.execCommand('insertOrderedList', false, null)
-          break
-        case 'undo':
-          document.execCommand('undo', false, null)
-          break
-        case 'redo':
-          document.execCommand('redo', false, null)
-          break
-        default:
-          document.execCommand(command, false, null)
-      }
-      
-      // 更新内容
-      updateSteps()
-    }
-    
-    // 插入步骤链接
-    const insertStepsLink = () => {
-      if (!stepsEditor.value) return
-      
-      stepsEditor.value.focus()
-      const url = prompt('请输入链接URL:')
-      if (url) {
-        document.execCommand('createLink', false, url)
-        updateSteps()
-      }
-    }
-    
-    // 插入步骤图片
-    const insertStepsImage = () => {
-      if (!stepsEditor.value) return
-      
-      stepsEditor.value.focus()
-      const url = prompt('请输入图片URL:')
-      if (url) {
-        document.execCommand('insertImage', false, url)
-        updateSteps()
-      }
-    }
-    
-    // 插入步骤表格
-    const insertStepsTable = () => {
-      if (!stepsEditor.value) return
-      
-      stepsEditor.value.focus()
-      const rows = prompt('请输入表格行数:', '3')
-      const cols = prompt('请输入表格列数:', '3')
-      if (rows && cols) {
-        const table = document.createElement('table')
-        table.style.border = '1px solid #ccc'
-        table.style.borderCollapse = 'collapse'
-        
-        for (let i = 0; i < parseInt(rows); i++) {
-          const tr = document.createElement('tr')
-          for (let j = 0; j < parseInt(cols); j++) {
-            const td = document.createElement('td')
-            td.style.border = '1px solid #ccc'
-            td.style.padding = '4px'
-            td.textContent = `单元格 ${i+1}-${j+1}`
-            tr.appendChild(td)
-          }
-          table.appendChild(tr)
-        }
-        
-        document.execCommand('insertHTML', false, table.outerHTML)
-        updateSteps()
-      }
-    }
-    
-    // 显示更多选项
-    const showMoreOptions = () => {
-      alert('更多功能开发中...')
-    }
 
     // 切换状态下拉框显示
     const toggleStatusDropdown = () => {
@@ -2044,18 +1685,7 @@ export default {
           }
         }
         
-        // 等待DOM更新完成后再设置步骤编辑器内容
         await nextTick()
-        console.log('DOM更新完成，开始设置编辑器内容')
-        console.log('stepsEditor.value:', stepsEditor.value)
-        console.log('bug.reproduction_steps:', bug.reproduction_steps)
-        
-        if (stepsEditor.value && bug.reproduction_steps) {
-          console.log('设置步骤编辑器内容:', bug.reproduction_steps)
-          stepsEditor.value.innerHTML = bug.reproduction_steps
-        } else {
-          console.log('编辑器或复现步骤为空，无法设置内容')
-        }
 
         // 后台等待全量请求完成（不阻塞首屏）；忽略失败
         Promise.allSettled(bgTasks).then(() => {
@@ -2095,7 +1725,6 @@ export default {
       projectInfo,
       availableProjects,
       projectMembers,
-      showRequiredOnly,
       showStatusDropdown,
       showAssigneeDropdown,
       showPlanDropdown,
@@ -2109,7 +1738,6 @@ export default {
       expandedPlans,
       getStatusText,
       saveBug,
-      toggleRequiredOnly,
       toggleStatusDropdown,
       selectStatus,
       handleProjectChange,
@@ -2135,26 +1763,12 @@ export default {
       addAttachment,
       handleFileUpload,
       removeAttachment,
-      commentEditor,
-      stepsEditor,
       fileInput,
       stepsLength,
       commentText,
       commentEditorActive,
-      togglePenTool,
-      formatText,
-      formatSteps,
-      insertImage,
-      insertLink,
-      insertStepsLink,
-      insertStepsImage,
-      insertStepsTable,
-      showMoreOptions,
       activateCommentEditor,
-      deactivateCommentEditor,
-      preventDeactivate,
-      updateComment,
-      updateSteps
+      finishCommentEditor
     }
   }
 }
@@ -3016,30 +2630,30 @@ export default {
   padding: 16px;
 }
 
+.editor-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .editor-title {
   font-size: 16px;
   font-weight: 600;
   color: #333;
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 
 .editor-textarea {
   width: 100%;
-  min-height: 200px;
-  border: none;
-  outline: none;
-  resize: vertical;
   font-size: 14px;
   line-height: 1.6;
   font-family: inherit;
-  overflow-y: auto;
-  padding: 16px;
 }
 
-.editor-textarea:empty:before {
-  content: attr(placeholder);
-  color: #999;
-  pointer-events: none;
+.editor-textarea:deep(.rich-text-html-editor) {
+  width: 100%;
 }
 
 .editor-count {
@@ -3488,6 +3102,27 @@ export default {
   font-size: 12px;
   color: #999;
   margin-top: 4px;
+}
+
+.comment-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.comment-collapse-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  background: #fff;
+  color: #495057;
+  cursor: pointer;
+}
+
+.comment-collapse-btn:hover {
+  border-color: #667eea;
+  color: #667eea;
 }
 
 .editor-count {

@@ -14,6 +14,7 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
       duration: p.duration,
       thinking_time: p.thinking_time,
       summary: p.summary,
+      status: p.status,
       react_phase: p.react_phase,
       direct_reply: p.direct_reply === true
     }
@@ -22,13 +23,22 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
   if (chunk.type === 'stream' && chunk.payload?.lane === 'think') {
     const pl = chunk.payload || {}
     if (pl.as === 'agent_thought') {
-      return {
+      const ev = {
         event: 'agent_thought',
         delta: pl.delta != null ? String(pl.delta) : '',
         index: pl.index != null ? pl.index : 0,
         react_phase: pl.react_phase,
         stream_channel: pl.stream_channel || 'reasoning'
       }
+      if (pl.think_status != null && pl.think_status !== '') {
+        const n = Number(pl.think_status)
+        if (!Number.isNaN(n)) ev.think_status = n
+      }
+      if (pl.processType != null && pl.processType !== '') {
+        const n = Number(pl.processType)
+        if (!Number.isNaN(n)) ev.processType = n
+      }
+      return ev
     }
     return {
       event: 'reasoning',
@@ -54,6 +64,32 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
     return {
       event: 'summary_stream',
       delta: pl.delta != null ? String(pl.delta) : ''
+    }
+  }
+
+  if (chunk.type === 'stream' && chunk.payload?.lane === 'batch_preview') {
+    const pl = chunk.payload || {}
+    return {
+      event: 'batch_preview_row',
+      row: pl.row,
+      index: pl.index,
+      tool: pl.tool,
+      reason: pl.reason,
+      react_phase: pl.react_phase
+    }
+  }
+
+  if (chunk.type === 'stream' && chunk.payload?.lane === 'tool_error') {
+    const pl = chunk.payload || {}
+    return {
+      event: 'tool_error',
+      message: pl.message != null ? String(pl.message) : '',
+      tool: pl.tool,
+      index: pl.index,
+      step_id: pl.step_id,
+      code: pl.code,
+      details: pl.details,
+      react_phase: pl.react_phase
     }
   }
 

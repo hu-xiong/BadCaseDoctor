@@ -193,7 +193,7 @@ class GrepTool(BaseTool):
                         )
                         print(
                             f"[MODIFY-TRACE] grep_tool: grep_target={target!r}, nav_len={len(navigation_list)} "
-                            f"(无 plan_id 的记录不会进导航卡片)"
+                            f"(未计划 plan_id 为空也会进导航)"
                         )
                         _progress(grep_tool_progress("locate_done_nav", loc))
                     
@@ -445,51 +445,61 @@ class GrepTool(BaseTool):
         gt = (grep_target or 'all').strip().lower()
         items: List[Dict[str, Any]] = []
 
+        def _normalize_nav_plan_id(raw: Any) -> Any:
+            """None / 0 / '' 视为未计划，仍要进导航（否则未计划 Bug 点击查询不到、navigation 为空）。"""
+            if raw is None or raw == '':
+                return None
+            try:
+                n = int(raw)
+                return n if n > 0 else None
+            except (TypeError, ValueError):
+                return None
+
         def append_bug(bug: Dict[str, Any]) -> None:
-            pid = bug.get('plan_id')
-            if not pid:
-                return
+            pid = _normalize_nav_plan_id(bug.get('plan_id'))
             title = (bug.get('title') or '').strip()
             bid = bug.get('id')
+            if bid is None:
+                return
             items.append({
                 'type': 'expand_and_locate',
                 'target': 'bug',
                 'record_id': bid,
                 'title': title,
                 'plan_id': pid,
-                'plan_name': self._plan_display_name(plan_tree, pid),
+                'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
                 'bug_id': bid,
                 'bug_title': title,
             })
 
         def append_badcase(bc: Dict[str, Any]) -> None:
-            pid = bc.get('plan_id')
-            if not pid:
-                return
+            pid = _normalize_nav_plan_id(bc.get('plan_id'))
             title = (bc.get('title') or '').strip()
             rid = bc.get('id')
+            if rid is None:
+                return
             items.append({
                 'type': 'expand_and_locate',
                 'target': 'badcase',
                 'record_id': rid,
                 'title': title,
                 'plan_id': pid,
-                'plan_name': self._plan_display_name(plan_tree, pid),
+                'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
             })
 
         def append_tc(tc: Dict[str, Any]) -> None:
-            pid = tc.get('plan_id')
-            if not pid:
-                return
+            pid = _normalize_nav_plan_id(tc.get('plan_id'))
             title = (tc.get('title') or '').strip()
             rid = tc.get('id')
+            if rid is None:
+                return
             items.append({
                 'type': 'expand_and_locate',
                 'target': 'testcase',
                 'record_id': rid,
                 'title': title,
                 'plan_id': pid,
-                'plan_name': self._plan_display_name(plan_tree, pid),
+                'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
             })
 
         if gt in ('bug', 'all'):

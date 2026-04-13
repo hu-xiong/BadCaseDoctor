@@ -45,12 +45,24 @@
         </div>
 
         <div class="user-dropdown" @click="$emit('toggleUserDropdown')">
-          <div class="user-avatar">👤</div>
+          <div class="user-avatar" :title="currentUser?.name || t('shell.userFallback')">
+            <span class="user-avatar-initials">{{ userInitials }}</span>
+          </div>
 
           <div v-if="showUserDropdown" class="user-menu" @click.stop>
             <div class="user-info">
-              <div class="user-name">{{ currentUser?.name || t('shell.userFallback') }}</div>
-              <div class="user-email">{{ currentUser?.email || t('shell.emailFallback') }}</div>
+              <div class="user-info-row">
+                <div class="user-avatar user-avatar-sm">
+                  <span class="user-avatar-initials">{{ userInitials }}</span>
+                </div>
+                <div class="user-info-text">
+                  <div class="user-name">{{ currentUser?.name || t('shell.userFallback') }}</div>
+                  <div class="user-email">{{ currentUser?.email || t('shell.emailFallback') }}</div>
+                </div>
+              </div>
+              <button type="button" class="user-settings-entry" @click.stop="$emit('openSettings', 'account')">
+                {{ t('shell.settings') }}
+              </button>
             </div>
             <div class="menu-divider"></div>
             <div class="menu-item" @click="$emit('showNotifications')">
@@ -60,18 +72,6 @@
             <div class="menu-item" @click="$emit('showHelp')">
               <span class="menu-icon">❓</span>
               <span class="menu-text">{{ t('shell.help') }}</span>
-            </div>
-            <div class="menu-item" @click="$emit('showTeamManagement')">
-              <span class="menu-icon">👥</span>
-              <span class="menu-text">{{ t('shell.team') }}</span>
-            </div>
-            <div class="menu-item" @click="$emit('showUserProfile')">
-              <span class="menu-icon">👤</span>
-              <span class="menu-text">{{ t('shell.profile') }}</span>
-            </div>
-            <div class="menu-item" @click="$emit('showPreferences')">
-              <span class="menu-icon">⚙️</span>
-              <span class="menu-text">{{ t('shell.preferences') }}</span>
             </div>
             <div class="menu-divider"></div>
             <div class="menu-item logout-item" @click="$emit('logout')">
@@ -89,11 +89,12 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 
-defineProps({
+const props = defineProps({
   projectName: { type: String, default: '' },
   breadcrumb: { type: String, default: '' },
   currentUser: { type: Object, default: null },
@@ -103,15 +104,25 @@ defineProps({
   showUserDropdown: { type: Boolean, default: false }
 })
 
+const userInitials = computed(() => {
+  const u = props.currentUser
+  if (!u) return 'U'
+  const name = String(u.name || '').trim()
+  const local = String(u.email || '').split('@')[0] || ''
+  let s = 'U'
+  if (name.length >= 2) s = name.slice(0, 2)
+  else if (name.length === 1) s = (name + (local[0] || '')).slice(0, 2)
+  else if (local.length >= 2) s = local.slice(0, 2)
+  return s.toUpperCase()
+})
+
 defineEmits([
   'goToDashboard',
   'setLayout',
   'toggleUserDropdown',
   'showNotifications',
   'showHelp',
-  'showTeamManagement',
-  'showUserProfile',
-  'showPreferences',
+  'openSettings',
   'logout'
 ])
 </script>
@@ -280,17 +291,31 @@ defineEmits([
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #f0f0f0;
+  background: #e8eaed;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
   transition: all 0.2s ease;
   border: 2px solid transparent;
 }
 
+.user-avatar-initials {
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.user-avatar-sm {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
 .user-avatar:hover {
-  background: #e0e0e0;
+  background: #dde1e6;
   border-color: #007bff;
 }
 
@@ -309,9 +334,19 @@ defineEmits([
 }
 
 .user-info {
-  padding: 16px 20px;
+  padding: 14px 16px 12px;
   background: #f8f9fa;
   border-bottom: 1px solid #e0e0e0;
+}
+
+.user-info-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.user-info-text {
+  min-width: 0;
 }
 
 .user-name {
@@ -324,6 +359,26 @@ defineEmits([
 .user-email {
   font-size: 12px;
   color: #666;
+  word-break: break-all;
+}
+
+.user-settings-entry {
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #dee2e6;
+  background: #fff;
+  color: #333;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.user-settings-entry:hover {
+  background: #f1f3f5;
+  border-color: #ced4da;
 }
 
 .menu-divider {

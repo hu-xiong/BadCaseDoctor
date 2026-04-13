@@ -771,7 +771,13 @@ def get_cached_text2sql_agent(
     """
     进程级缓存 Text2SQLAgent，避免每次请求/每个工具重复初始化（连接DB/加载schema/初始化沙箱等）。
     """
-    key = f"{database_path}|{llm_backend}|{execution_mode}|{int(bool(debug))}|{api_key or ''}"
+    # 须包含 TEXT2SQL_MODEL / PROVIDER：否则改环境变量仍命中旧缓存，日志仍显示旧 model
+    _mk = (os.getenv("TEXT2SQL_MODEL", "") or "").strip()
+    _pk = (os.getenv("TEXT2SQL_PROVIDER", "") or "").strip().lower()
+    key = (
+        f"{database_path}|{llm_backend}|{execution_mode}|{int(bool(debug))}|{api_key or ''}"
+        f"|{_pk}|{_mk}"
+    )
     cached = _TEXT2SQL_CACHE.get(key, None)
     if cached is _TEXT2SQL_NONE:
         return None

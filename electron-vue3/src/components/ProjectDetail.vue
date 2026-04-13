@@ -10,10 +10,8 @@
     @setLayout="setLayout"
     @toggleUserDropdown="toggleUserDropdown"
     @showNotifications="showNotifications"
-    @showHelp="showHelp"
-    @showTeamManagement="showTeamManagement"
-    @showUserProfile="showUserProfile"
-    @showPreferences="openPreferences"
+    @showHelp="openHelpWorkbenchTab"
+    @openSettings="openAppSettings"
     @logout="logout"
   >
 
@@ -558,9 +556,8 @@
         </div>
         <div class="main-content-body">
         <!-- keep-alive：列表/详情切换时复用实例，减轻 Tab 来回切换的重复挂载与卡顿 -->
-        <keep-alive :max="16">
+        <keep-alive v-if="showMainEditor" :max="16">
           <component
-            v-if="showMainEditor"
             :is="mainEditorComponent"
             :key="mainEditorCacheKey"
             :project_id="projectId"
@@ -572,9 +569,28 @@
             @close="closeMainEditor"
           />
         </keep-alive>
-        <keep-alive :max="16">
+        <component
+          :is="AppSettingsPanel"
+          v-else-if="isSettingsWorkbenchTab"
+          :user="currentUser"
+          :project-id="projectId"
+          :initial-pane="appSettingsInitialPane"
+          :visible="isSettingsWorkbenchTab"
+          @close="closeAppSettingsWorkbenchTab"
+        />
+        <component
+          :is="ProjectHelpPanel"
+          v-else-if="isHelpWorkbenchTab"
+          :visible="isHelpWorkbenchTab"
+        />
+        <component
+          :is="WorkflowNotificationsPanel"
+          v-else-if="isNotificationsWorkbenchTab"
+          :project-id="projectId"
+          :visible="isNotificationsWorkbenchTab"
+        />
+        <keep-alive v-else :max="16">
           <component
-            v-if="!showMainEditor"
             :key="listPanelCacheKey"
             :is="currentPlanType === 'bug' ? 'BugListPanel' : (currentPlanType === 'test_case' ? 'TestCaseListPanel' : 'BadcaseListPanel')"
           v-model:searchText="searchText"
@@ -682,7 +698,13 @@
         </div>
         <!-- 聊天面板区域 -->
         <div class="chat-panel-container">
-          <SimpleChatPanel v-if="currentSession" :sessionId="currentSession" :projectId="Number(projectId)" @title-updated="handleTitleUpdated" />
+          <SimpleChatPanel
+            v-if="currentSession"
+            :sessionId="currentSession"
+            :projectId="Number(projectId)"
+            :project-display-name="projectName || ''"
+            @title-updated="handleTitleUpdated"
+          />
           <div v-else class="chat-empty-placeholder">
             <p>{{ t('common.chatEmptyHint') }}</p>
           </div>
@@ -998,20 +1020,6 @@
       </div>
     </div>
     
-    <!-- 团队管理模态框 -->
-    <div v-if="showTeamManagementModal" class="modal-overlay" @click="closeConfigModals">
-      <div class="modal-content team-management-modal" @click.stop>
-        <div class="modal-header">
-          <h3>{{ t('project.teamMgmt') }}</h3>
-          <button class="close-btn" @click="closeConfigModals">×</button>
-        </div>
-        
-        <div class="modal-body">
-          <TeamManagement :project-id="projectId" />
-        </div>
-      </div>
-    </div>
-    
     <!-- 项目设置模态框 -->
     <div v-if="showProjectSettingsModal" class="modal-overlay" @click="closeConfigModals">
       <div class="modal-content" @click.stop>
@@ -1040,35 +1048,6 @@
       </div>
     </div>
 
-    <!-- 个人资料弹窗 -->
-    <UserProfile 
-      v-if="showProfileModal" 
-      :user="currentUser" 
-      @close="showProfileModal = false"
-    />
-
-    <Teleport to="body">
-      <div
-        v-if="showPreferencesModal"
-        class="prefs-modal-overlay"
-        @click.self="showPreferencesModal = false"
-      >
-        <div class="prefs-modal">
-          <h3 class="prefs-modal-title">{{ t('prefs.title') }}</h3>
-          <label class="prefs-lang-label">{{ t('prefs.language') }}</label>
-          <select v-model="preferenceLocaleDraft" class="prefs-lang-select">
-            <option value="zh-CN">{{ t('prefs.zh') }}</option>
-            <option value="en">{{ t('prefs.en') }}</option>
-          </select>
-          <div class="prefs-actions">
-            <button type="button" class="prefs-btn prefs-btn-cancel" @click="showPreferencesModal = false">
-              {{ t('prefs.cancel') }}
-            </button>
-            <button type="button" class="prefs-btn prefs-btn-save" @click="savePreferences">{{ t('prefs.save') }}</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
   </ProjectWorkspaceShell>
 </template>
 
@@ -1076,13 +1055,13 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, provide } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { persistLocale } from '../i18n/index.js'
-import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession } from '../api.js'
+import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail } from '../api.js'
 import { getBadCaseStatusText } from '../constants/status.js'
-import TeamManagement from './TeamManagement.vue'
 import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
-import UserProfile from './UserProfile.vue'
+import AppSettingsPanel from './AppSettingsPanel.vue'
+import ProjectHelpPanel from './ProjectHelpPanel.vue'
+import WorkflowNotificationsPanel from './WorkflowNotificationsPanel.vue'
 import ProjectWorkspaceShell from './ProjectWorkspaceShell.vue'
 import BadcaseListPanel from './panels/BadcaseListPanel.vue'
 import BugListPanel from './panels/BugListPanel.vue'
@@ -1092,6 +1071,7 @@ import NewBug from './NewBug.vue'
 import NewTestCase from './NewTestCase.vue'
 import userStore from '../store/user.js'
 import { persistStableCreatedId, getStableCreatedId } from '../utils/createPreviewKeys.js'
+import { useLocalGoProxyStatus } from '../composables/useLocalGoProxyStatus'
 
 // 在浏览器环境中，这些Node.js模块可能不可用，需要处理
 let os, path
@@ -1116,20 +1096,18 @@ export default {
     BadcaseListPanel,
     BugListPanel,
     TestCaseListPanel,
-    TeamManagement,
     EmbeddedTerminalWorkspace,
-    SimpleChatPanel,
-    UserProfile
+    SimpleChatPanel
   },
   setup() {
     const router = useRouter()
     const route = useRoute()
-    const { t, locale } = useI18n()
+    const { t } = useI18n()
 
     // 项目信息
     const projectName = ref('')
     const projectId = ref(null)
-    // 嵌入式终端初始 cwd：空则后端在进程默认目录下开 shell（勿写死他人机器路径）
+    // 嵌入式终端 cwd：非空则传给 go-local-proxy；空则由代理用其**启动时的当前目录**（与你在哪开的 PS 一致）
     const currentWorkingDir = ref('')
     // 搜索和过滤
     const planSearchText = ref('')
@@ -1261,16 +1239,19 @@ export default {
     const sessionHistory = ref([])
     const historyLoading = ref(false)
 
-    const showTeamManagementModal = ref(false)
     const showProjectSettingsModal = ref(false)
     const showPermissionSettingsModal = ref(false)
     const showBaselineManagementModal = ref(false)
 
     // 用户下拉菜单状态
     const showUserDropdown = ref(false)
-    const showProfileModal = ref(false)
-    const showPreferencesModal = ref(false)
-    const preferenceLocaleDraft = ref('zh-CN')
+    const appSettingsInitialPane = ref('account')
+    /** 设置页：工作台 Tab id（与列表/详情并列） */
+    const SETTINGS_WORKBENCH_TAB_ID = 'app-settings'
+    /** 帮助页：工作台 Tab id */
+    const HELP_WORKBENCH_TAB_ID = 'app-help'
+    /** 通知收件箱：工作台 Tab id */
+    const NOTIFICATIONS_WORKBENCH_TAB_ID = 'app-notifications'
     const currentUser = ref(null)
     
     // 布局控制状态
@@ -1279,6 +1260,11 @@ export default {
 
     const terminalCtl = ref(null)
     provide('terminalCtl', terminalCtl)
+
+    const { localGoProxyOk, localGoProxyLastError, pingLocalGoProxy } = useLocalGoProxyStatus()
+    provide('localGoProxyOk', localGoProxyOk)
+    provide('localGoProxyLastError', localGoProxyLastError)
+    provide('pingLocalGoProxy', pingLocalGoProxy)
     const chatComposerPreset = ref({ token: 0, text: '' })
     provide('chatComposerPreset', chatComposerPreset)
 
@@ -1358,6 +1344,11 @@ export default {
       workbenchTabs.value.filter((t) => t.id !== 'unplanned-badcase')
     )
     const activeWorkbenchTabId = ref(null)
+    const isSettingsWorkbenchTab = computed(() => activeWorkbenchTabId.value === SETTINGS_WORKBENCH_TAB_ID)
+    const isHelpWorkbenchTab = computed(() => activeWorkbenchTabId.value === HELP_WORKBENCH_TAB_ID)
+    const isNotificationsWorkbenchTab = computed(
+      () => activeWorkbenchTabId.value === NOTIFICATIONS_WORKBENCH_TAB_ID
+    )
     const workbenchMenuRef = ref(null)
     const workbenchTabsStripRef = ref(null)
     /** Tab 条左键拖拽平移时用于样式（抓手 / 禁止选中文本） */
@@ -1818,6 +1809,43 @@ export default {
       }
     }
 
+    const parsePositivePlanId = (v) => {
+      if (v == null || v === '') return null
+      const n = typeof v === 'number' ? v : parseInt(String(v), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+
+    /** 列表分页可能不含目标行时，用详情接口解析 plan_id，避免误判进「未计划」Tab */
+    const resolvePlanIdByRecordApi = async (target, rawId) => {
+      const id = parseInt(String(rawId), 10)
+      if (!Number.isFinite(id) || id <= 0) return null
+      let tt = (target || 'badcase').toString().toLowerCase()
+      if (tt === 'test_case') tt = 'testcase'
+      try {
+        if (tt === 'bug') {
+          const res = await getBugDetail(id)
+          if (res?.data?.success && res.data.bug) {
+            return parsePositivePlanId(res.data.bug.plan_id)
+          }
+        } else if (tt === 'badcase') {
+          const res = await getBadcaseDetail(id)
+          const bc = res?.data?.badcase
+          if (res?.data?.success && bc) {
+            return parsePositivePlanId(bc.plan_id)
+          }
+        } else if (tt === 'testcase') {
+          const res = await getTestCaseDetail(id)
+          const tc = res?.data?.testcase
+          if (res?.data?.success && tc) {
+            return parsePositivePlanId(tc.plan_id)
+          }
+        }
+      } catch (e) {
+        console.warn('[NAV] resolvePlanIdByRecordApi failed', target, id, e)
+      }
+      return null
+    }
+
     /** show-modify-in-list 连发时合并为一次列表请求，避免反复触发后端权限检查与查库 */
     let _modifyListFetchCoalesceTimer = null
     let _modifyListFetchCoalescePromise = null
@@ -1847,6 +1875,15 @@ export default {
       return t || 'badcase'
     }
 
+    /** 与后端 chat_message.id（MySQL INT）一致；临时消息用 Date.now() 会溢出，勿传库 */
+    const MYSQL_SIGNED_INT_MAX = 2147483647
+    const safeIntFkForDiffApi = (v) => {
+      if (v == null || v === '') return null
+      const n = Number(v)
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > MYSQL_SIGNED_INT_MAX) return null
+      return n
+    }
+
     const persistPendingDiffReview = async ({
       target,
       targetId,
@@ -1867,8 +1904,8 @@ export default {
             plan_id: planId ?? null,
             diff: Array.isArray(diff) ? diff : [],
             modifications: modifications && typeof modifications === 'object' ? modifications : {},
-            message_id: messageId ?? null,
-            session_id: currentSession.value ?? null
+            message_id: safeIntFkForDiffApi(messageId),
+            session_id: safeIntFkForDiffApi(currentSession.value)
           })
         })
         if (!resp.ok) {
@@ -1891,8 +1928,8 @@ export default {
             target: normalizeDiffTargetForApi(target),
             target_id: Number(targetId),
             action,
-            message_id: messageId ?? null,
-            session_id: currentSession.value ?? null
+            message_id: safeIntFkForDiffApi(messageId),
+            session_id: safeIntFkForDiffApi(currentSession.value)
           })
         })
         if (!resp.ok) {
@@ -1903,6 +1940,22 @@ export default {
         console.warn('[DIFF] resolve 状态失败:', e)
         throw e
       }
+    }
+
+    let diffReviewSyncDebounceTimer = null
+    /** 与 show-modify 连发时避免 restore 重复整页跳转/高亮（约「闪三次」） */
+    let _restorePendingNavFingerprint = ''
+    let _restorePendingNavAtMs = 0
+    const handleDiffReviewSync = () => {
+      if (diffReviewSyncDebounceTimer) clearTimeout(diffReviewSyncDebounceTimer)
+      diffReviewSyncDebounceTimer = setTimeout(async () => {
+        diffReviewSyncDebounceTimer = null
+        try {
+          await restorePendingDiffReviews()
+        } catch (_e) {
+          /* ignore */
+        }
+      }, 320)
     }
 
     const restorePendingDiffReviews = async () => {
@@ -1955,7 +2008,24 @@ export default {
           return
         }
 
-        await handleShowModifyInList({ detail: { __modifyListBatch: true, items: batchItems } })
+        const navFp = batchItems
+          .map((x) => x.targetId)
+          .sort((a, b) => a - b)
+          .join(',')
+        const nowNav = Date.now()
+        const hi = highlightRowId.value != null ? Number(highlightRowId.value) : NaN
+        const hiInBatch =
+          Number.isFinite(hi) && batchItems.some((x) => Number(x.targetId) === hi)
+        const skipHeavyListNav =
+          navFp === _restorePendingNavFingerprint &&
+          nowNav - _restorePendingNavAtMs < 2800 &&
+          hiInBatch
+        _restorePendingNavFingerprint = navFp
+        _restorePendingNavAtMs = nowNav
+
+        if (!skipHeavyListNav) {
+          await handleShowModifyInList({ detail: { __modifyListBatch: true, items: batchItems } })
+        }
 
         // 以本次 GET 为权威：删掉内存里不在返回集合中的 target_id（他处已采纳/拒绝后本地残留）
         const allowed = new Set(batchItems.map((x) => x.targetId))
@@ -3131,16 +3201,22 @@ export default {
     const applyPlanListTabState = async (meta) => {
       const m = meta || {}
       const { planId, urlContentType: uct } = m
-      if (planId != null && planId !== 'unplanned' && typeof planId === 'number') {
+      const numericPlanIdForState =
+        planId != null && planId !== 'unplanned'
+          ? typeof planId === 'number'
+            ? planId
+            : parseInt(String(planId), 10)
+          : NaN
+      if (!Number.isNaN(numericPlanIdForState) && numericPlanIdForState > 0) {
         // 与侧栏点计划一致时 meta.urlContentType 为 null；grep/modify 可按记录类型覆盖
         urlContentType.value = uct !== undefined ? uct : null
-        selectedPlan.value = planId
-        await fetchBadcasesByPlan(planId, 1)
-        filterBadcasesByPlan(planId)
+        selectedPlan.value = numericPlanIdForState
+        await fetchBadcasesByPlan(numericPlanIdForState, 1)
+        filterBadcasesByPlan(numericPlanIdForState)
         await nextTick()
         window.dispatchEvent(
           new CustomEvent('request-pending-modify-for-plan', {
-            detail: { planId, suppressAutoOpenDetail: true }
+            detail: { planId: numericPlanIdForState, suppressAutoOpenDetail: true }
           })
         )
       } else if (planId === 'unplanned') {
@@ -3223,6 +3299,22 @@ export default {
       const tab = workbenchTabs.value.find((t) => t.id === tabId)
       if (!tab) return
       activeWorkbenchTabId.value = tabId
+      if (tab.kind === 'settings') {
+        clearEmbeddedEditor()
+        const p = tab.meta?.initialPane
+        if (['account', 'team', 'preferences'].includes(p)) {
+          appSettingsInitialPane.value = p
+        }
+        return
+      }
+      if (tab.kind === 'help') {
+        clearEmbeddedEditor()
+        return
+      }
+      if (tab.kind === 'notifications') {
+        clearEmbeddedEditor()
+        return
+      }
       if (tab.kind === 'detail') {
         const { entityId, editorPlanType, showDiff } = tab.meta || {}
         mountEditorComponents(entityId, editorPlanType, !!showDiff, true, null)
@@ -3310,17 +3402,23 @@ export default {
     const upsertAndActivatePlanListTab = async (meta) => {
       const m = meta || {}
       const { planId, urlContentType: uct } = m
+      const numericPlanIdForTab =
+        planId != null && planId !== 'unplanned'
+          ? typeof planId === 'number'
+            ? planId
+            : parseInt(String(planId), 10)
+          : NaN
 
-      if (planId != null && planId !== 'unplanned' && typeof planId === 'number') {
-        const planObj = findPlanRecursive(projectPlans.value, planId)
-        const title = truncateForTab(planObj?.name, t('tab.planFallback', { id: planId }))
+      if (!Number.isNaN(numericPlanIdForTab) && numericPlanIdForTab > 0) {
+        const planObj = findPlanRecursive(projectPlans.value, numericPlanIdForTab)
+        const title = truncateForTab(planObj?.name, t('tab.planFallback', { id: numericPlanIdForTab }))
         upsertWorkbenchTab({
-          id: `plan-${planId}`,
+          id: `plan-${numericPlanIdForTab}`,
           kind: 'plan-list',
           title,
-          meta: { planId, urlContentType: uct !== undefined ? uct : null }
+          meta: { planId: numericPlanIdForTab, urlContentType: uct !== undefined ? uct : null }
         })
-        await activateWorkbenchTab(`plan-${planId}`)
+        await activateWorkbenchTab(`plan-${numericPlanIdForTab}`)
         await nextTick()
         scrollActiveWorkbenchTabIntoView()
         return
@@ -4970,11 +5068,6 @@ export default {
       }
     }
     
-    const showTeamManagement = () => {
-      showUserDropdown.value = false
-      showTeamManagementModal.value = true
-    }
-    
     const showProjectSettings = () => {
       showProjectSettingsModal.value = true
     }
@@ -4985,7 +5078,6 @@ export default {
     
     // 关闭配置模态框
     const closeConfigModals = () => {
-      showTeamManagementModal.value = false
       showProjectSettingsModal.value = false
       showPermissionSettingsModal.value = false
     }
@@ -4995,32 +5087,80 @@ export default {
       showUserDropdown.value = !showUserDropdown.value
     }
     
-    const showUserProfile = () => {
+    const openAppSettings = async (pane) => {
       showUserDropdown.value = false
-      showProfileModal.value = true
+      const p = typeof pane === 'string' && ['account', 'team', 'preferences'].includes(pane) ? pane : 'account'
+      appSettingsInitialPane.value = p
+      clearEmbeddedEditor()
+      const tab = {
+        id: SETTINGS_WORKBENCH_TAB_ID,
+        kind: 'settings',
+        title: truncateForTab(t('shell.settings'), t('shell.settings')),
+        meta: { initialPane: p }
+      }
+      const idx = workbenchTabs.value.findIndex((x) => x.id === SETTINGS_WORKBENCH_TAB_ID)
+      if (idx >= 0) {
+        workbenchTabs.value[idx] = { ...workbenchTabs.value[idx], ...tab }
+      } else {
+        const cur = workbenchTabs.value.findIndex((x) => x.id === activeWorkbenchTabId.value)
+        const insertAt = cur >= 0 ? cur + 1 : workbenchTabs.value.length
+        workbenchTabs.value.splice(insertAt, 0, tab)
+      }
+      await activateWorkbenchTab(SETTINGS_WORKBENCH_TAB_ID)
+      await nextTick()
+      scrollActiveWorkbenchTabIntoView()
     }
 
-    const openPreferences = () => {
-      showUserDropdown.value = false
-      preferenceLocaleDraft.value = locale.value
-      showPreferencesModal.value = true
+    const closeAppSettingsWorkbenchTab = () => {
+      closeWorkbenchTab(SETTINGS_WORKBENCH_TAB_ID)
     }
 
-    const savePreferences = () => {
-      persistLocale(preferenceLocaleDraft.value)
-      showPreferencesModal.value = false
+    const openHelpWorkbenchTab = async () => {
+      showUserDropdown.value = false
+      clearEmbeddedEditor()
+      const tab = {
+        id: HELP_WORKBENCH_TAB_ID,
+        kind: 'help',
+        title: truncateForTab(t('shell.help'), t('shell.help')),
+        meta: {}
+      }
+      const idx = workbenchTabs.value.findIndex((x) => x.id === HELP_WORKBENCH_TAB_ID)
+      if (idx >= 0) {
+        workbenchTabs.value[idx] = { ...workbenchTabs.value[idx], ...tab }
+      } else {
+        const cur = workbenchTabs.value.findIndex((x) => x.id === activeWorkbenchTabId.value)
+        const insertAt = cur >= 0 ? cur + 1 : workbenchTabs.value.length
+        workbenchTabs.value.splice(insertAt, 0, tab)
+      }
+      await activateWorkbenchTab(HELP_WORKBENCH_TAB_ID)
+      await nextTick()
+      scrollActiveWorkbenchTabIntoView()
     }
-    
+
+    const openNotificationsWorkbenchTab = async () => {
+      showUserDropdown.value = false
+      clearEmbeddedEditor()
+      const tab = {
+        id: NOTIFICATIONS_WORKBENCH_TAB_ID,
+        kind: 'notifications',
+        title: truncateForTab(t('notifInbox.tabTitle'), t('notifInbox.tabTitle')),
+        meta: {}
+      }
+      const idx = workbenchTabs.value.findIndex((x) => x.id === NOTIFICATIONS_WORKBENCH_TAB_ID)
+      if (idx >= 0) {
+        workbenchTabs.value[idx] = { ...workbenchTabs.value[idx], ...tab }
+      } else {
+        const cur = workbenchTabs.value.findIndex((x) => x.id === activeWorkbenchTabId.value)
+        const insertAt = cur >= 0 ? cur + 1 : workbenchTabs.value.length
+        workbenchTabs.value.splice(insertAt, 0, tab)
+      }
+      await activateWorkbenchTab(NOTIFICATIONS_WORKBENCH_TAB_ID)
+      await nextTick()
+      scrollActiveWorkbenchTabIntoView()
+    }
+
     const showNotifications = () => {
-      showUserDropdown.value = false
-      // TODO: 实现通知页面
-      alert(t('project.notificationsDev'))
-    }
-    
-    const showHelp = () => {
-      showUserDropdown.value = false
-      // TODO: 实现帮助页面
-      alert(t('project.helpDev'))
+      openNotificationsWorkbenchTab()
     }
     
     const logout = () => {
@@ -5081,7 +5221,8 @@ export default {
                        
       // 监听 grep 导航事件
       window.addEventListener('grep-navigate', handleGrepNavigate)
-          
+      window.addEventListener('diff-review-sync', handleDiffReviewSync)
+
       // 监听 modify 显示事件
       window.addEventListener('show-modify-in-list', handleShowModifyInList)
                 
@@ -5212,6 +5353,7 @@ export default {
       workbenchMenuOutsideCleanup?.()
       console.log('=== ProjectDetail onUnmounted ===')
       window.removeEventListener('grep-navigate', handleGrepNavigate)
+      window.removeEventListener('diff-review-sync', handleDiffReviewSync)
       window.removeEventListener('show-modify-in-list', handleShowModifyInList)
       window.removeEventListener('clear-pending-modification', handleClearPendingModification)
       window.removeEventListener('modify-confirmed', handleModifyConfirmed)
@@ -5442,14 +5584,16 @@ export default {
       }
       if (!source) return
       const next = { ...pendingModifications.value }
+      let changed = false
       for (const pid of ids) {
         const existing = next[pid]
         const realKeys = existing ? Object.keys(existing).filter((k) => !k.startsWith('_')) : []
         if (realKeys.length === 0) {
           next[pid] = { ...source }
+          changed = true
         }
       }
-      pendingModifications.value = next
+      if (changed) pendingModifications.value = next
     }
 
     /** 与 handleShowModifyInList 内逻辑一致，供批量同步写入 pending 时复用 */
@@ -5536,14 +5680,71 @@ export default {
       }
     }
 
+    /** 批量：合并写入 pending + sessionStorage，只触发一次响应式更新，避免列表黄条连闪 */
+    const syncApplyShowModifyListBatchFromDetails = (items) => {
+      if (!Array.isArray(items) || items.length === 0) return
+      let sessionWritten = false
+      const base = { ...pendingModifications.value }
+      let touched = false
+      for (let i = 0; i < items.length; i++) {
+        const detail = items[i]
+        if (detail.executed === true) continue
+        const modifyData = buildModifyDataFromShowModifyDetail(detail)
+        const fieldKeys = Object.keys(modifyData)
+        if (fieldKeys.length === 0) continue
+        const hasDetailFields = fieldKeys.some((field) =>
+          DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
+        )
+        const allListFields = fieldKeys.every((field) =>
+          LIST_FIELDS.includes(normalizeDiffFieldKey(field))
+        )
+        const intTargetId = parseInt(detail.targetId, 10)
+        if (Number.isNaN(intTargetId)) continue
+        const { target, diff, messageId, batchIndex } = detail
+
+        if (diff && Array.isArray(diff) && diff.length > 0 && !sessionWritten) {
+          try {
+            sessionStorage.removeItem('pendingModifyDiff')
+            sessionStorage.setItem(
+              'pendingModifyDiff',
+              JSON.stringify({
+                targetId: intTargetId,
+                target: target,
+                diff: diff,
+                modifications: modifyData,
+                messageId: messageId,
+                batchIndex: batchIndex
+              })
+            )
+          } catch (_e) {
+            /* ignore */
+          }
+          sessionWritten = true
+        }
+
+        if (diff && Array.isArray(diff) && diff.length > 0 && allListFields && !hasDetailFields) {
+          const newModifyData = {
+            ...Object.fromEntries(
+              fieldKeys.map((field) => {
+                const v = modifyData[field]
+                return [field, typeof v === 'object' && v && 'new' in v ? v : { old: '', new: v }]
+              })
+            ),
+            _target: target,
+            _messageId: messageId
+          }
+          base[intTargetId] = { ...(base[intTargetId] || {}), ...newModifyData }
+          touched = true
+        }
+      }
+      if (touched) pendingModifications.value = base
+    }
+
     const handleShowModifyInList = async (event) => {
           const dtop = event.detail || {}
           if (dtop.__modifyListBatch === true && Array.isArray(dtop.items) && dtop.items.length > 0) {
             const items = dtop.items
-            for (let i = 0; i < items.length; i++) {
-              if (items[i].executed === true) continue
-              syncApplyShowModifyListPendingFromDetail(items[i], { sessionStorageWrite: i === 0 })
-            }
+            syncApplyShowModifyListBatchFromDetails(items)
             const p0 = items[0]
             if (p0?.peerTargetIds && Array.isArray(p0.peerTargetIds) && p0.peerTargetIds.length >= 2) {
               applyPeerPendingSync(parseInt(p0.targetId, 10), p0.peerTargetIds)
@@ -5630,6 +5831,13 @@ export default {
                 }
               }
             }
+            if (!targetPlanId) {
+              const fromApi = await resolvePlanIdByRecordApi(target, intTargetId)
+              if (fromApi) {
+                targetPlanId = fromApi
+                selectedPlan.value = targetPlanId
+              }
+            }
             const uctForNav =
               target === 'bug' ? 'bug' : target === 'testcase' ? 'test_case' : 'badcase'
             const navMeta = targetPlanId
@@ -5654,19 +5862,47 @@ export default {
               }
             }
             highlightRowId.value = intTargetId
-            const rowSel = `[data-bug-id="${intTargetId}"]`
-            let targetRow = null
+            const batchFlashIds =
+              Array.isArray(peerTargetIds) && peerTargetIds.length >= 2
+                ? [
+                    ...new Set(
+                      peerTargetIds
+                        .map((x) => Number(x))
+                        .filter((n) => Number.isFinite(n) && n > 0)
+                    )
+                  ]
+                : [intTargetId]
+            let anchorRow = null
             for (let i = 0; i < 12; i++) {
               await nextTick()
               await new Promise((resolve) => setTimeout(resolve, i === 0 ? 280 : 130))
-              targetRow = document.querySelector(rowSel)
-              if (targetRow) break
+              for (const bid of batchFlashIds) {
+                const el = document.querySelector(`[data-bug-id="${bid}"]`)
+                if (el) {
+                  anchorRow = el
+                  break
+                }
+              }
+              if (anchorRow) break
             }
-            if (targetRow) {
-              targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
-              targetRow.classList.add('highlight-row')
-              setTimeout(() => targetRow.classList.remove('highlight-row'), 3000)
+            if (anchorRow) {
+              anchorRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
             }
+            requestAnimationFrame(() => {
+              const els = []
+              for (const bid of batchFlashIds) {
+                const el = document.querySelector(`[data-bug-id="${bid}"]`)
+                if (el) els.push(el)
+              }
+              for (const el of els) {
+                el.classList.add('highlight-row')
+              }
+              if (els.length) {
+                setTimeout(() => {
+                  els.forEach((e) => e.classList.remove('highlight-row'))
+                }, 3000)
+              }
+            })
             return
           }
 
@@ -5893,6 +6129,13 @@ export default {
               }
             }
           }
+          if (!targetPlanId) {
+            const fromApi = await resolvePlanIdByRecordApi(target, intTargetId)
+            if (fromApi) {
+              targetPlanId = fromApi
+              selectedPlan.value = targetPlanId
+            }
+          }
           
           // 按文档统一走 Tab 导航：目标不在当前 Tab 时，激活已有或新建对应 Tab
           const uctForNav =
@@ -6064,6 +6307,20 @@ export default {
         meta = { planId: null, urlContentType: uctFromTarget }
       }
 
+      if (
+        rawPlanId !== 'unplanned' &&
+        meta &&
+        meta.planId == null &&
+        (recordIdsBatch?.length > 0 || (recordId != null && recordId !== ''))
+      ) {
+        const rid = recordIdsBatch?.length ? recordIdsBatch[0] : recordId
+        const resolved = await resolvePlanIdByRecordApi(target, rid)
+        if (resolved) {
+          expandPlanTreeToPlanId(resolved)
+          meta = { planId: resolved, urlContentType: uctFromTarget }
+        }
+      }
+
       await upsertAndActivatePlanListTab(meta)
 
       await nextTick()
@@ -6116,6 +6373,9 @@ export default {
     }
     
     return {
+      AppSettingsPanel,
+      ProjectHelpPanel,
+      WorkflowNotificationsPanel,
       projectName,
       projectId,
       planSearchText,
@@ -6143,7 +6403,6 @@ export default {
       planCollapsed,
       expandedPlans,
       showCreateModal,
-      showTeamManagementModal,
       showProjectSettingsModal,
       showPermissionSettingsModal,
       isCreatingSubPlan,
@@ -6268,22 +6527,22 @@ export default {
       fetchProjectMembers,
       generateBreadcrumb,
       togglePlanExpansion,
-      showTeamManagement,
       showProjectSettings,
       showPermissionSettings,
       closeConfigModals,
       showUserDropdown,
       currentUser,
       toggleUserDropdown,
-      showUserProfile,
-      showProfileModal,
-      showPreferencesModal,
-      preferenceLocaleDraft,
-      openPreferences,
-      savePreferences,
+      openAppSettings,
+      openHelpWorkbenchTab,
+      openNotificationsWorkbenchTab,
+      closeAppSettingsWorkbenchTab,
+      isSettingsWorkbenchTab,
+      isHelpWorkbenchTab,
+      isNotificationsWorkbenchTab,
+      appSettingsInitialPane,
       t,
       showNotifications,
-      showHelp,
       logout,
       showTerminal,
       showAIAssistant,
@@ -9210,12 +9469,15 @@ export default {
 }
 
 .panel-content {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 终端区需要参与父级 flex 收缩；auto 滚动会破坏 xterm 的 height:100% / absolute 填满链 */
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
   padding: 0;
   display: flex;
   flex-direction: column;
+  /* 与嵌入式终端 #1e1e1e 一致，避免子树未铺满时出现纯黑缝 */
+  background-color: #1e1e1e;
 }
 
 .terminal-content {
@@ -10002,65 +10264,4 @@ export default {
   background: #0056b3;
 }
 
-.prefs-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  z-index: 12000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.prefs-modal {
-  background: #fff;
-  border-radius: 10px;
-  padding: 20px 24px;
-  min-width: 320px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
-}
-
-.prefs-modal-title {
-  margin: 0 0 16px;
-  font-size: 18px;
-  font-weight: 600;
-  color: #333;
-}
-
-.prefs-lang-label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 14px;
-  color: #555;
-}
-
-.prefs-lang-select {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 14px;
-  margin-bottom: 20px;
-}
-
-.prefs-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.prefs-btn {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  cursor: pointer;
-  border: 1px solid #ddd;
-  background: #fff;
-}
-
-.prefs-btn-save {
-  background: #007bff;
-  color: #fff;
-  border-color: #007bff;
-}
 </style> 

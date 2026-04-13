@@ -1,0 +1,15 @@
+<!--
+  嵌入到 App Bundle 的 Info.plist 的 <dict> 根下（与现有键并列），或合并到现有 App。
+  将 CFBundleURLName / CFBundleURLSchemes 与 go-local-proxy 可执行路径通过 Electron/打包脚本关联。
+-->
+<key>CFBundleURLTypes</key>
+<array>
+  <dict>
+    <key>CFBundleURLName</key>
+    <string>com.badcasedoctor.local-proxy</string>
+    <key>CFBundleURLSchemes</key>
+    <array>
+      <string>badcase-local-proxy</string>
+    </array>
+  </dict>
+</array>

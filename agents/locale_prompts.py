@@ -127,6 +127,66 @@ def react_think_prelude_merge_intent(locale: Optional[str]) -> str:
     return "正在分析意图并生成规划…\n"
 
 
+def react_unified_duplicate_action_stall_message(
+    locale: Optional[str],
+    *,
+    tool: str,
+    window: int,
+) -> str:
+    if is_english_locale(locale):
+        return (
+            f"Stopped: the same tool call (`{tool}`) with identical parameters was repeated "
+            f"{window} times in a row with no progress. Please change parameters or split the task."
+        )
+    return (
+        f"已中断：连续 {window} 次使用相同工具「{tool}」且参数未变，判定为卡死。"
+        "请调整参数或拆分任务后重试。"
+    )
+
+
+def react_unified_partial_max_rounds_message(locale: Optional[str], *, max_rounds: int) -> str:
+    if is_english_locale(locale):
+        return (
+            f"Reached the maximum number of rounds ({max_rounds}). "
+            "Partial results are shown below."
+        )
+    return f"已达到最大轮次上限（{max_rounds}），以下为部分完成结果。"
+
+
+def react_unified_plan_step_skip_failures_message(
+    locale: Optional[str],
+    *,
+    step_index_1based: int,
+    max_retries: int,
+) -> str:
+    if is_english_locale(locale):
+        return (
+            f"Plan step {step_index_1based} failed {max_retries} times in a row; "
+            "skipping to the next step."
+        )
+    return f"计划第 {step_index_1based} 步已连续失败 {max_retries} 次，已跳过并尝试后续步骤。"
+
+
+def react_unified_strict_format_retry_suffix(locale: Optional[str]) -> str:
+    """统一流解析失败时追加到 prompt 末尾，要求模型严格重输出三段式 XML。"""
+    if is_english_locale(locale):
+        return (
+            "\n\n<system_reminder>\n"
+            "Your previous reply was not structurally valid: missing a closing </decision> or any "
+            "parsable <execute>/<tool>/<params> fields. Output again using exactly three segments: "
+            "<observation>...</observation>, <thinking>...</thinking>, <decision>...</decision>, "
+            "with every tag paired and <params> containing valid JSON only.\n"
+            "</system_reminder>\n"
+        )
+    return (
+        "\n\n<system_reminder>\n"
+        "你上一段输出无法被解析：缺少闭合的 </decision>，或决策子标签不完整。"
+        "请**重新完整输出**三段式：<observation>…</observation>、<thinking>…</thinking>、"
+        "<decision>…</decision>；所有标签必须成对出现，<params> 内为合法 JSON。\n"
+        "</system_reminder>\n"
+    )
+
+
 def react_phase_wait_message(kind: str, locale: Optional[str]) -> str:
     if kind == "decision_xml_parse":
         return "Parsing decision…" if is_english_locale(locale) else "正在解析决策结构…"
@@ -144,7 +204,30 @@ def react_phase_wait_message(kind: str, locale: Optional[str]) -> str:
             if is_english_locale(locale)
             else "正在理解任务意图…"
         )
+    if kind == "unified_round_think":
+        return (
+            "Waiting for the model…"
+            if is_english_locale(locale)
+            else "正在思考…"
+        )
     return "…"
+
+
+def react_unified_sse_xml_markers(locale: Optional[str]) -> Dict[str, str]:
+    """
+    统一流对外 SSE：不再输出语义标记（【观察开始】等），直接输出正文内容。
+    标记保留为空字符串以兼容现有逻辑，但不对前端可见。
+    """
+    return {
+        "thinking_start": "",
+        "thinking_end": "",
+        "observation_start": "",
+        "observation_end": "",
+        "decision_start": "",
+        "decision_end": "",
+        "task_plan_start": "",
+        "task_plan_end": "",
+    }
 
 
 def react_decide_fc_first_token_hint(locale: Optional[str]) -> str:
@@ -950,53 +1033,46 @@ def incremental_running_summary_prompt(
     step_n = int(step_index) + 1
 
     if is_english_locale(locale):
-        prev_block = prev if prev else "(No prior running summary yet; this is the first merge.)"
-        body = f"""You maintain a running Markdown summary for an automation agent session.
+        prev_block = prev if prev else "(No prior summary)"
+        body = f"""Merge new step into running summary. Output full Markdown.
 
-Rules:
-- Output ONE complete Markdown document that replaces the previous running summary.
-- You MUST use exactly these three level-2 headings in this order, with no other ## headings:
-  ## Confirmed
-  ## Next steps
-  ## Risks and blockers
-- Under each heading use bullet lines starting with "- ".
-- If a section has nothing to say, write a single bullet: "- None."
-- Merge faithfully: keep correct facts from the previous summary; add or update from the new step. Do not invent facts.
-- Be concise; prefer short bullets over long prose. Optional: at most two sentences before the first ## if needed.
+Required format:
+## Confirmed
+## Next steps
+## Risks and blockers
+- Use "- " bullets; empty section: "- None"
+- Keep facts, no invention
 
-Previous running summary:
+Previous summary:
 {prev_block}
 
 New step (round {step_n}):
-- Tool: {tool_s}
-- Todo: {todo}
-- Step observation (natural language):
+Tool: {tool_s}
+Todo: {todo}
+Observation:
 {obs}
 
-Output only the new full running summary (Markdown)."""
+Output only the new summary."""
         return wrap_react_user_prompt(body, locale)
 
-    prev_block = prev if prev else "（尚无上一轮运行总览，这是首次合并。）"
-    body = f"""你是自动化任务执行助手的「运行总览」编辑。请把**本步新观察**合并进**已有总览**，输出**一份可直接替换上一版的完整 Markdown**。
+    prev_block = prev if prev else "（首次合并）"
+    body = f"""合并本步观察到已有总览，输出完整 Markdown。
 
-硬性格式（不得增删改字，不得增加其它 ## 标题）：
-1. 必须且仅能按顺序出现以下三个二级标题（## 与文字之间有一个空格）：
-   ## 已确认
-   ## 待办与建议下一步
-   ## 风险与阻塞
-2. 每个标题下用无序列表，行首 "- "。
-3. 某块若无内容，只写一行：- 无。
-4. 忠实于已有总览与本步观察，不编造；可删去过时结论。
-5. 简练优先，条目化；正文最前如需总起，最多两句。
+格式要求：
+## 已确认
+## 待办与建议下一步
+## 风险与阻塞
+- 每块用 "- " 列表；空块写 "- 无"
+- 忠实合并，不编造
 
-已有运行总览：
+已有总览：
 {prev_block}
 
 本步（第 {step_n} 轮）：
-- 工具：{tool_s}
-- 待办描述：{todo}
-- 本步观察（自然语言）：
+工具：{tool_s}
+待办：{todo}
+观察：
 {obs}
 
-请只输出新的完整运行总览（Markdown），不要其它说明。"""
+只输出新总览。"""
     return wrap_react_user_prompt(body, locale)

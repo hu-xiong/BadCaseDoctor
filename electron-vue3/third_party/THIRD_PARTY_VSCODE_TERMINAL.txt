@@ -1,0 +1,18 @@
+The tree:
+
+  third_party/vscode-src/workbench/contrib/terminal/browser/
+
+is a verbatim copy of the same path under the Microsoft Visual Studio Code repository
+(MIT License). Upstream: https://github.com/microsoft/vscode
+
+It is included for reference and diffing; the running app wires xterm via
+src/vscode-terminal/ (ctor options aligned with xtermTerminal.ts in that tree).
+
+Line count reality (approximate): xterm/xtermTerminal.ts is ~1000 lines; terminalInstance.ts
+is ~2500+ lines. Most of that is Workbench services / DI, not duplicate-free “xterm config”.
+The hand-written bridge under src/vscode-terminal/ is short on purpose: it ports the ctor
+options + theme + portable addons only.
+
+UI shell: src/vscode-terminal-ui/ + EmbeddedTerminalWorkspace.vue — DOM/CSS tokens and
+constants derived from terminal.css and terminalTabsList.ts / terminalTabbedView.ts
+in that tree; icons from @vscode/codicons (published separately, CC-BY-4.0).

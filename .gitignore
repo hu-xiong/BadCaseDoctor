@@ -28,3 +28,9 @@ electron-vue3/.vite/
 .pnpm-store/
 electron-vue3/.pnpm-store/
 /electron-vue3/.npmrc
+
+go-local-proxy/badcase-local-proxy
+go-local-proxy/badcase-local-proxy.exe
+
+client_binaries/*
+!client_binaries/.gitkeep

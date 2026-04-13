@@ -22,6 +22,7 @@ ReAct SSE 协议 v1：引擎事件 → 对外 JSON。
 │ done            │ bye                  │                            │
 │ error           │ err                  │                            │
 │ reasoning       │ stream               │ lane=think, delta=content │
+│ agent_thought_done │ stream            │ lane=think, as=agent_thought, delta="", think_status=1 │
 │ todos_stream    │ stream               │ lane=plan, delta=正文片段 │
 │ summary_stream  │ stream               │ lane=summary, delta       │
 │ summary_stream_reset │ stream            │ lane=summary, reset=true  │
@@ -29,6 +30,10 @@ ReAct SSE 协议 v1：引擎事件 → 对外 JSON。
 │ running_summary_stream_reset │ stream    │ lane=running_summary, reset=true │
 │ running_summary_done │ stream            │ lane=running_summary, done=true, full_text │
 │ tool_task_*     │ tool_task            │ lifecycle=created|running|done|failed；task_id 等 │
+│ batch_preview_row │ stream             │ lane=batch_preview；modify 批量预览行 │
+│ tool_error      │ stream               │ lane=tool_error；标准工具失败（可与 observation 并存） │
+│ client_local_run │ client_action       │ Web 端本地下载/运行提示卡片（不自动执行 shell） │
+│ client_terminal_exec │ client_action   │ 本机 Shell：前端 go 代理 / Electron 执行       │
 │ （其余）        │ stream               │ lane=engine, data=整包    │
 │ （出口注入）   │ phase                │ ``run_stream`` 在 ``react_phase`` 变化时插入 │
 └─────────────────┴──────────────────────┴────────────────────────────┘
@@ -80,8 +85,21 @@ _STEP_STATUS_TO_S: Dict[str, int] = {
 REACT_PHASE_THINK = "think"
 REACT_PHASE_ACT = "act"
 REACT_PHASE_OBSERVE_DECIDE = "observe_decide"
+# 统一流 lane=think 内子过程（XML 语义块），与顶层 ReAct 三阶段正交
+REACT_PHASE_OBSERVE = "observe"
+REACT_PHASE_DECIDE = "decide"
 
 _REACT_PHASE_TO_N = {"think": 1, "act": 2, "observe_decide": 3}
+
+# lane=think / as=agent_thought 的流式状态（与工具 op 区分，用整数与前端对齐）
+THINK_STREAM_STATUS_START = 0
+THINK_STREAM_STATUS_END = 1
+THINK_STREAM_STATUS_ERROR = -1
+
+# payload.processType：0=开始或进行中（同值）, 1=该子过程结束, -1=失败（与 think_status 语义一致，对外 JSON 用 camelCase）
+PROCESS_TYPE_STREAMING = 0
+PROCESS_TYPE_END = 1
+PROCESS_TYPE_FAIL = -1
 
 
 def sse_v1_emit_phase_packets_enabled() -> bool:
@@ -127,9 +145,11 @@ def react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
     if ev in ("immutable_field_rejection", "intent_clarification"):
         return {"react_phase": REACT_PHASE_THINK}
     if ev == "agent_thought":
-        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "content"}
+        # 统一 XML 流式：与 lane=think 的 reasoning 轨一致，便于前端写入 thinkReasoningDraft（勿用 content 误走 todos 类分支）
+        return {"react_phase": REACT_PHASE_THINK, "stream_channel": "reasoning"}
     if ev == "agent_thought_done":
-        return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
+        # 叙述流结束：仍在 think 语义内，便于前端用 think_status=1 收束，勿标成 observe_decide
+        return {"react_phase": REACT_PHASE_THINK, "stream_channel": "reasoning"}
     if ev == "reasoning_step":
         return {"react_phase": REACT_PHASE_OBSERVE_DECIDE, "stream_channel": "reasoning"}
     if ev == "thought_content_step":
@@ -147,6 +167,11 @@ def react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
     if ev in ("exploring", "retry"):
         return {"react_phase": REACT_PHASE_ACT}
     if ev in ("todo_start", "todo_end"):
+        # 统一流：todo_skip 仅对齐索引，本轮仍在 LLM think，勿标 act（否则引擎包先出现「执行态」）
+        if ev == "todo_start" and step_data.get("todo_skip") is True:
+            return {"react_phase": REACT_PHASE_THINK}
+        return {"react_phase": REACT_PHASE_ACT}
+    if ev == "tool_error":
         return {"react_phase": REACT_PHASE_ACT}
     if ev == "step_status":
         return {"react_phase": REACT_PHASE_ACT}
@@ -166,6 +191,10 @@ def react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
     if ev in ("done", "finished"):
         return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
     if ev == "phase_wait":
+        kind = str(step_data.get("kind") or "").strip().lower()
+        # 统一轮 think 首包、决策叙述等待：语义为 think，勿标成 observe_decide
+        if kind in ("unified_round_think", "decision_stream"):
+            return {"react_phase": REACT_PHASE_THINK}
         return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
     if ev == "unified_summary_loading":
         return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
@@ -338,6 +367,8 @@ def _pack_done(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         "summary": step_data.get("summary"),
         "react_phase": step_data.get("react_phase"),
     }
+    if step_data.get("status") is not None:
+        pl["status"] = step_data.get("status")
     if step_data.get("direct_reply") is True:
         pl["direct_reply"] = True
     return [{"type": ClientWireType.BYE.value, "payload": pl}]
@@ -381,6 +412,21 @@ def _pack_stream_think(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     }
     if step_data.get("index") is not None:
         pl["index"] = step_data.get("index")
+    if step_data.get("think_status") is not None:
+        try:
+            pl["think_status"] = int(step_data["think_status"])
+        except (TypeError, ValueError):
+            pass
+    if step_data.get("processType") is not None:
+        try:
+            pl["processType"] = int(step_data["processType"])
+        except (TypeError, ValueError):
+            pass
+    elif step_data.get("process_type") is not None:
+        try:
+            pl["processType"] = int(step_data["process_type"])
+        except (TypeError, ValueError):
+            pass
     _as = step_data.get("as")
     if isinstance(_as, str) and _as.strip():
         pl["as"] = _as.strip()
@@ -399,6 +445,19 @@ def _pack_stream_agent_thought(step_data: Dict[str, Any]) -> List[Dict[str, Any]
     if not isinstance(d, str):
         d = str(d) if d is not None else ""
     merged = {**step_data, "content": d, "as": "agent_thought"}
+    return _pack_stream_think(merged)
+
+
+def _pack_agent_thought_done(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """引擎 event=agent_thought_done：仅状态位，delta 为空，think_status=END（兼容非统一流 decide 尾包）。"""
+    merged = {
+        **step_data,
+        "content": "",
+        "delta": "",
+        "as": "agent_thought",
+        "think_status": THINK_STREAM_STATUS_END,
+        "processType": PROCESS_TYPE_END,
+    }
     return _pack_stream_think(merged)
 
 
@@ -473,6 +532,71 @@ def _pack_stream_running_summary_done(step_data: Dict[str, Any]) -> List[Dict[st
     return [{"type": ClientWireType.STREAM.value, "payload": pl}]
 
 
+def _pack_batch_preview_row(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """modify 批量预览行：独立 lane，避免依赖 ``lane=engine`` 整包透传。"""
+    pl: Dict[str, Any] = {
+        "lane": "batch_preview",
+        "row": step_data.get("row"),
+        "index": step_data.get("index"),
+        "tool": step_data.get("tool"),
+        "reason": step_data.get("reason"),
+        "react_phase": step_data.get("react_phase"),
+    }
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": ClientWireType.STREAM.value, "payload": deep_sse_json_safe(pl)}]
+
+
+def _pack_client_local_run(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Web 端：多平台可执行文件下载 + 终端命令；由前端展示，不自动跑 shell。"""
+    pl: Dict[str, Any] = {
+        "kind": "local_run_script",
+        "title": step_data.get("title") or "本地脚本",
+        "body": step_data.get("body"),
+        "download_path": step_data.get("download_path") or step_data.get("path"),
+        "filename": step_data.get("filename") or "script.sh",
+        "react_phase": step_data.get("react_phase"),
+    }
+    arts = step_data.get("artifacts")
+    if isinstance(arts, list) and len(arts) > 0:
+        pl["artifacts"] = arts
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": "client_action", "payload": deep_sse_json_safe(pl)}]
+
+
+def _pack_client_terminal_exec(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """本机终端子 Agent：由前端经 go-local-proxy 或 Electron 执行 command。"""
+    pl: Dict[str, Any] = {
+        "kind": "terminal_exec",
+        "command": step_data.get("command"),
+        "cwd": step_data.get("cwd") or "",
+        "timeout": step_data.get("timeout") or 60,
+        "react_phase": step_data.get("react_phase"),
+    }
+    if step_data.get("stop_on_error") is True:
+        pl["stop_on_error"] = True
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": "client_action", "payload": deep_sse_json_safe(pl)}]
+
+
+def _pack_tool_error_event(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """标准工具失败信号（与 ``observation`` 失败态并存，便于单独订阅 UI）。"""
+    det = step_data.get("details")
+    if det is not None and not isinstance(det, dict):
+        det = {"raw": det}
+    pl: Dict[str, Any] = {
+        "lane": "tool_error",
+        "message": str(step_data.get("message") or step_data.get("error") or "工具执行失败"),
+        "tool": step_data.get("tool"),
+        "index": step_data.get("index"),
+        "step_id": step_data.get("step_id"),
+        "code": step_data.get("code"),
+        "details": deep_sse_json_safe(det) if isinstance(det, dict) else det,
+        "react_phase": step_data.get("react_phase"),
+    }
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": ClientWireType.STREAM.value, "payload": pl}]
+
+
 def _pack_tool_task_lifecycle(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """持久化工具任务 DAG：created / running / done / failed。"""
     ev = step_data.get("event") or ""
@@ -506,6 +630,7 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "error": _pack_error,
     "reasoning": _pack_stream_think,
     "agent_thought": _pack_stream_agent_thought,
+    "agent_thought_done": _pack_agent_thought_done,
     "todos_stream": _pack_stream_plan_raw,
     "summary_stream": _pack_stream_summary,
     "summary_stream_reset": _pack_stream_summary_reset,
@@ -516,6 +641,10 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "tool_task_running": _pack_tool_task_lifecycle,
     "tool_task_done": _pack_tool_task_lifecycle,
     "tool_task_failed": _pack_tool_task_lifecycle,
+    "batch_preview_row": _pack_batch_preview_row,
+    "tool_error": _pack_tool_error_event,
+    "client_local_run": _pack_client_local_run,
+    "client_terminal_exec": _pack_client_terminal_exec,
 }
 
 
@@ -536,7 +665,8 @@ def engine_dict_to_wire_packets(step_data: Dict[str, Any]) -> List[Dict[str, Any
     """引擎 yield 的 ``{event: ...}``：先合并 ``react_sse_meta``，再转为 v1 ``{type, payload}`` 列表。"""
     if not isinstance(step_data, dict):
         return []
-    merged = {**step_data, **react_sse_meta(step_data)}
+    # 引擎显式字段（react_phase / processType 等）须覆盖 meta 默认值
+    merged = {**react_sse_meta(step_data), **step_data}
     return map_engine_step_to_client_packets(merged)
 
 

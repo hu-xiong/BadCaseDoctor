@@ -90,7 +90,44 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
     return {}
   }
 
+  if (chunk.type === 'client_action') {
+    const p = chunk.payload || {}
+    if (p.kind === 'local_run_script') {
+      if (!Array.isArray(aiMessage.clientLocalRunCards)) aiMessage.clientLocalRunCards = []
+      aiMessage.clientLocalRunCards.push({ ...p })
+    }
+    if (p.kind === 'terminal_exec' && String(p.command || '').trim()) {
+      if (!Array.isArray(aiMessage.pendingTerminalExecQueue)) aiMessage.pendingTerminalExecQueue = []
+      const row = {
+        command: String(p.command || '').trim(),
+        cwd: String(p.cwd || '').trim(),
+        timeout: Math.min(86400, Math.max(1, Number(p.timeout) || 60)),
+        stop_on_error: p.stop_on_error === true
+      }
+      aiMessage.pendingTerminalExecQueue.push(row)
+      if (!Array.isArray(aiMessage.clientTerminalExecCards)) aiMessage.clientTerminalExecCards = []
+      aiMessage.clientTerminalExecCards.push({ ...row, status: 'queued' })
+    }
+    scrollToBottom()
+    return {}
+  }
+
   if (chunk.type === 'heartbeat') {
+    // 扩展思维等待期：收到首个 think 状态但尚无可见内容时，显示明确的等待提示
+    if (aiMessage && aiMessage._reasoningPhaseLive && !aiMessage._extendedThinkingHintShown) {
+      const hasVisibleContent = String(aiMessage.thinkReasoningDraft || '').trim().length >= 2
+        || String(aiMessage.reasoningContent || '').trim().length >= 2
+      if (!hasVisibleContent) {
+        aiMessage._extendedThinkingHintShown = true
+        // 触发等待提示更新（由前端模板根据此标志显示）
+        if (aiMessage.steps?.[0]) {
+          const st = aiMessage.steps[0]
+          if (!st.phaseWait?.active) {
+            st.phaseWait = { active: true, kind: 'extended_thinking', message: i18n.global.t('chat.extendedThinking') }
+          }
+        }
+      }
+    }
     return {}
   }
 
@@ -102,6 +139,11 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
   }
   if (chunk.type === 'phase') {
     applyAgentSseV1PhaseChunk(aiMessage, chunk.payload || {})
+    // 进入 think 阶段时，提前创建占位 step 并显示加载动画
+    const pl = chunk.payload || {}
+    if (pl.name === 'think' && (!aiMessage.steps || aiMessage.steps.length === 0)) {
+      ensureFirstStepPlaceholder(aiMessage, buildReactStepsFromTodoStrings)
+    }
     scrollToBottom()
     return {}
   }

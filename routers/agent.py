@@ -501,6 +501,24 @@ def save_bugs():
         }), 500
 
 
+@agent_bp.route('/react/cancel', methods=['POST'])
+@login_required
+def react_agent_stream_cancel():
+    """前端「停止生成」时合作式通知统一流：须携带与 SSE 包一致的 request_id。"""
+    try:
+        data = request.get_json() or {}
+        rid = (data.get('request_id') or data.get('react_request_id') or '').strip()
+        if not rid:
+            return jsonify({'code': 400, 'message': 'missing request_id'}), 400
+        from agents.react_simplified import request_react_stream_cancel
+
+        ok = bool(request_react_stream_cancel(rid))
+        return jsonify({'code': 200, 'ok': ok})
+    except Exception as e:
+        logger.exception('[REACT] /react/cancel: %s', e)
+        return jsonify({'code': 500, 'message': str(e)}), 500
+
+
 @agent_bp.route('/react', methods=['POST'])
 def react_agent():
     """
@@ -550,6 +568,22 @@ def react_agent():
 
         if not user_input.strip():
             return jsonify({'code': 400, 'message': '输入不能为空'}), 400
+
+        # 预热 Redis：避免首条 ReAct 在 asyncio.to_thread 里首次 get_redis_client 冷连拖慢 gather（数百 ms～数秒）
+        try:
+            from app import get_redis_client
+
+            get_redis_client()
+        except Exception:
+            pass
+
+        _hpn = data.get("project_display_name") or data.get("context_project_name")
+        _hpln = data.get("plan_display_name") or data.get("context_plan_name")
+        hint_project_name = str(_hpn).strip() if _hpn is not None and str(_hpn).strip() else None
+        hint_plan_name = str(_hpln).strip() if _hpln is not None and str(_hpln).strip() else None
+
+        _cs = data.get("client_shell") or data.get("clientShell")
+        client_shell = _cs if isinstance(_cs, dict) else None
 
         t_llm0 = time.perf_counter()
         llm = _get_cached_llm(model_name)
@@ -779,6 +813,9 @@ def react_agent():
                             pending_diff_context=pending_diff_context,
                             agent_session_id=react_request_id,
                             long_memory_context=long_memory_context,
+                            hint_project_name=hint_project_name,
+                            hint_plan_name=hint_plan_name,
+                            client_shell=client_shell,
                         ):
                             if perf and not getattr(task, "_first_chunk_logged", False):
                                 setattr(task, "_first_chunk_logged", True)

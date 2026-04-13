@@ -6,21 +6,12 @@
       <div class="loading-text">正在加载项目信息...</div>
     </div>
     
-    <!-- 顶部标题栏：嵌入模式也需要返回/关闭等操作，保留显示 -->
+    <!-- 顶部标题栏：嵌入模式也需要返回等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
         <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
         <span class="header-title">{{ isEdit ? '编辑测试用例' : '新建测试用例' }}</span>
         <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
-      </div>
-      <div class="header-right">
-        <button class="header-btn" @click="toggleRequiredOnly">
-          <span class="checkbox-icon" :class="{ checked: showRequiredOnly }">✓</span>
-          只看必填项
-        </button>
-        <button class="header-btn close-btn" @click="goBack">
-          <span class="close-icon">×</span>
-        </button>
       </div>
     </div>
 
@@ -266,29 +257,11 @@
                 </div>
               </div>
               <div class="editor-section">
-                <div class="editor-toolbar">
-                  <button class="toolbar-btn" type="button" title="撤销" @click="formatPreconditions('undo')">↶</button>
-                  <button class="toolbar-btn" type="button" title="重做" @click="formatPreconditions('redo')">↷</button>
-                  <div class="toolbar-divider"></div>
-                  <button class="toolbar-btn" type="button" title="粗体" @click="formatPreconditions('bold')">B</button>
-                  <button class="toolbar-btn" type="button" title="斜体" @click="formatPreconditions('italic')">I</button>
-                  <button class="toolbar-btn" type="button" title="下划线" @click="formatPreconditions('underline')">U</button>
-                  <button class="toolbar-btn" type="button" title="删除线" @click="formatPreconditions('strikeThrough')">S</button>
-                  <div class="toolbar-divider"></div>
-                  <button class="toolbar-btn" type="button" title="左对齐" @click="formatPreconditions('justifyLeft')">⫷</button>
-                  <button class="toolbar-btn" type="button" title="居中" @click="formatPreconditions('justifyCenter')">⫸</button>
-                  <button class="toolbar-btn" type="button" title="右对齐" @click="formatPreconditions('justifyRight')">⫹</button>
-                  <div class="toolbar-divider"></div>
-                  <button class="toolbar-btn" type="button" title="无序列表" @click="formatPreconditions('insertUnorderedList')">•</button>
-                  <button class="toolbar-btn" type="button" title="有序列表" @click="formatPreconditions('insertOrderedList')">1.</button>
-                </div>
-                <div 
-                  ref="preconditionsEditor" 
+                <RichTextHtmlEditor
+                  v-model="testcase.preconditions"
                   class="editor-textarea"
-                  contenteditable="true"
-                  @input="updatePreconditions"
                   placeholder="请输入前置条件..."
-                ></div>
+                />
               </div>
             </div>
 
@@ -551,62 +524,33 @@
           />
         </div>
 
-        <!-- 输入评论 -->
+        <!-- 输入评论：先只读预览，点击后再展开富文本 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">输入评论</h3>
           <div class="comment-input-container">
-            <!-- 普通输入框 -->
-            <textarea 
-              v-if="!commentEditorActive"
-              class="comment-textarea-simple" 
-              placeholder="请输入评论"
-              @click="activateCommentEditor"
-              readonly
-            >{{ commentText || '' }}</textarea>
-            <div v-if="!commentEditorActive" class="comment-count">{{ (commentText || '').length }} / 500</div>
-            
-            <!-- 富文本编辑器 -->
-            <div v-if="commentEditorActive" class="rich-editor">
-              <div class="editor-toolbar" @click="preventDeactivate">
-                <button class="toolbar-btn" title="画笔" @click="togglePenTool">
-                  <span class="pen-icon">✏️</span>
-                </button>
-                <div class="toolbar-divider"></div>
-                <button class="toolbar-btn" title="粗体" @click="formatText('bold')">
-                  <strong>B</strong>
-                </button>
-                <button class="toolbar-btn" title="斜体" @click="formatText('italic')">
-                  <em>I</em>
-                </button>
-                <button class="toolbar-btn" title="下划线" @click="formatText('underline')">
-                  <u>U</u>
-                </button>
-                <div class="toolbar-divider"></div>
-                <button class="toolbar-btn" title="无序列表" @click="formatText('unorderedList')">
-                  <span class="list-icon">•</span>
-                </button>
-                <button class="toolbar-btn" title="有序列表" @click="formatText('orderedList')">
-                  <span class="list-icon">1.</span>
-                </button>
-                <div class="toolbar-divider"></div>
-                <button class="toolbar-btn" title="插入图片" @click="insertImage">
-                  <span class="image-icon">🏞️</span>
-                </button>
-                <button class="toolbar-btn" title="插入链接" @click="insertLink">
-                  <span class="link-icon">🔗</span>
-                </button>
+            <template v-if="!commentEditorActive">
+              <textarea
+                class="comment-textarea-simple"
+                readonly
+                rows="3"
+                :value="commentText"
+                placeholder="点击输入评论…"
+                @click="activateCommentEditor"
+              />
+              <div class="comment-count">{{ (commentText || '').length }} / 500</div>
+            </template>
+            <template v-else>
+              <RichTextHtmlEditor
+                v-model="testcase.comment"
+                variant="compact"
+                placeholder="请输入评论"
+                class="rich-editor"
+              />
+              <div class="comment-editor-actions">
+                <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
               </div>
-              <div 
-                ref="commentEditor" 
-                class="editor-content" 
-                contenteditable="true"
-                @input="updateComment"
-                @blur="deactivateCommentEditor"
-                @click="preventDeactivate"
-                placeholder="请输入"
-              ></div>
               <div class="editor-count">{{ (commentText || '').length }} / 500</div>
-            </div>
+            </template>
           </div>
         </div>
       </div>
@@ -732,6 +676,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectEditContext, getProjectDetail, getProjectPlans, getPlanDetail, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
 import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import { defineAsyncComponent } from 'vue'
+import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
 
@@ -743,7 +688,7 @@ function isTestCasePlanType(planType) {
 
 export default {
   name: 'NewTestCase',
-  components: { MonacoDiffEditor },
+  components: { MonacoDiffEditor, RichTextHtmlEditor },
   props: {
     id: {
       type: [String, Number],
@@ -797,15 +742,18 @@ export default {
 
     const loading = ref(false)
     const saving = ref(false)
-    const showRequiredOnly = ref(false)
     const showStatusDropdown = ref(false)
     const showAssigneeDropdown = ref(false)
     const showAddDefectDialog = ref(false)
     const activeTab = ref('basic')
-    const preconditionsEditor = ref(null)
     const fileInput = ref(null)
-    const commentEditor = ref(null)
     const commentEditorActive = ref(false)
+    const activateCommentEditor = () => {
+      commentEditorActive.value = true
+    }
+    const finishCommentEditor = () => {
+      commentEditorActive.value = false
+    }
     const defectSearchText = ref('')
     const bugPlans = ref([])
 
@@ -1086,10 +1034,6 @@ export default {
       showAssigneeDropdown.value = !showAssigneeDropdown.value
     }
 
-    const toggleRequiredOnly = () => {
-      showRequiredOnly.value = !showRequiredOnly.value
-    }
-
     const addStep = () => {
       testcase.steps.push({ step: '', expected: '' })
     }
@@ -1303,121 +1247,11 @@ export default {
       }
     }
 
-    const activateCommentEditor = () => {
-      commentEditorActive.value = true
-    }
-
-    const deactivateCommentEditor = () => {
-      commentEditorActive.value = false
-    }
-
-    const preventDeactivate = (event) => {
-      event.stopPropagation()
-    }
-
-    const togglePenTool = () => {
-      console.log('Toggle pen tool')
-    }
-
-    const formatText = (command) => {
-      if (!commentEditor.value) return
-      commentEditor.value.focus()
-      
-      switch (command) {
-        case 'bold':
-          document.execCommand('bold', false, null)
-          break
-        case 'italic':
-          document.execCommand('italic', false, null)
-          break
-        case 'underline':
-          document.execCommand('underline', false, null)
-          break
-        case 'unorderedList':
-          document.execCommand('insertUnorderedList', false, null)
-          break
-        case 'orderedList':
-          document.execCommand('insertOrderedList', false, null)
-          break
-      }
-      
-      updateComment()
-    }
-
-    const insertImage = () => {
-      console.log('Insert image')
-    }
-
-    const insertLink = () => {
-      console.log('Insert link')
-    }
-
-    const updateComment = () => {
-      if (commentEditor.value) {
-        testcase.comment = commentEditor.value.innerHTML
-      }
-    }
-
-    const updatePreconditions = () => {
-      if (preconditionsEditor.value) {
-        testcase.preconditions = preconditionsEditor.value.innerHTML
-      }
-    }
-
-    const formatPreconditions = (command) => {
-      if (!preconditionsEditor.value) return
-      
-      preconditionsEditor.value.focus()
-      
-      switch (command) {
-        case 'bold':
-          document.execCommand('bold', false, null)
-          break
-        case 'italic':
-          document.execCommand('italic', false, null)
-          break
-        case 'underline':
-          document.execCommand('underline', false, null)
-          break
-        case 'strikeThrough':
-          document.execCommand('strikeThrough', false, null)
-          break
-        case 'justifyLeft':
-          document.execCommand('justifyLeft', false, null)
-          break
-        case 'justifyCenter':
-          document.execCommand('justifyCenter', false, null)
-          break
-        case 'justifyRight':
-          document.execCommand('justifyRight', false, null)
-          break
-        case 'insertUnorderedList':
-          document.execCommand('insertUnorderedList', false, null)
-          break
-        case 'insertOrderedList':
-          document.execCommand('insertOrderedList', false, null)
-          break
-        case 'undo':
-          document.execCommand('undo', false, null)
-          break
-        case 'redo':
-          document.execCommand('redo', false, null)
-          break
-        default:
-          document.execCommand(command, false, null)
-      }
-      
-      updatePreconditions()
-    }
-
     const saveTestCase = async () => {
       if (!testcase.title.trim()) {
         alert('请输入测试用例标题')
         return
       }
-
-      // 保存前从富文本编辑器同步前置条件，避免未触发的 @input 导致提交空值
-      updatePreconditions()
 
       saving.value = true
       try {
@@ -1721,11 +1555,7 @@ export default {
           }
         }
 
-        // 将前置条件同步到富文本编辑器（编辑器是 contenteditable，不会自动绑定 testcase.preconditions）
         await nextTick()
-        if (preconditionsEditor.value && testcase.preconditions != null) {
-          preconditionsEditor.value.innerHTML = testcase.preconditions
-        }
 
         // 后台等待全量请求完成（不阻塞首屏）；忽略失败
         Promise.allSettled(bgTasks).then(() => {
@@ -1777,9 +1607,6 @@ export default {
           }
           if (data.plan_id) testcase.plan = String(data.plan_id)
           await nextTick()
-          if (preconditionsEditor.value && testcase.preconditions != null) {
-            preconditionsEditor.value.innerHTML = testcase.preconditions
-          }
         }
       } catch (e) {
         console.error('watch id 加载测试用例失败:', e)
@@ -1800,7 +1627,6 @@ export default {
     return {
       loading,
       saving,
-      showRequiredOnly,
       showStatusDropdown,
       showAssigneeDropdown,
       showAddDefectDialog,
@@ -1838,31 +1664,20 @@ export default {
       toggleStatusDropdown,
       selectStatus,
       toggleAssigneeDropdown,
-      toggleRequiredOnly,
       addStep,
       removeStep,
       removeDefect,
-      updatePreconditions,
-      formatPreconditions,
-      preconditionsEditor,
       fileInput,
-      commentEditor,
-      commentEditorActive,
       commentText,
+      commentEditorActive,
+      activateCommentEditor,
+      finishCommentEditor,
       handleProjectChange,
       onProjectSelectChange,
       copyDocumentLink,
       addAttachment,
       removeAttachment,
       handleFileUpload,
-      activateCommentEditor,
-      deactivateCommentEditor,
-      preventDeactivate,
-      togglePenTool,
-      formatText,
-      insertImage,
-      insertLink,
-      updateComment,
       saveTestCase,
       goBack,
       pendingDiff,
@@ -2142,6 +1957,27 @@ export default {
   font-size: 12px;
   color: #999;
   margin-top: 4px;
+}
+
+.comment-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.comment-collapse-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  background: #fff;
+  color: #495057;
+  cursor: pointer;
+}
+
+.comment-collapse-btn:hover {
+  border-color: #667eea;
+  color: #667eea;
 }
 
 .editor-count {

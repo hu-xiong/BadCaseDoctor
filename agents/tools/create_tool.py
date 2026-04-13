@@ -2,7 +2,7 @@
 对话新增Bug/BadCase/计划工具
 支持预览和确认流程，集成Text2SQL智能查询
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from agents.tool_registry import BaseTool
 from config import Config
 import difflib
@@ -63,6 +63,36 @@ class CreateTool(BaseTool):
                 return False
             return default
         return bool(value)
+
+    @staticmethod
+    def _positive_plan_id_or_none(v: Any) -> Optional[int]:
+        """仅接受正整数计划 ID；None/0/''/非法 → None（未计划）。"""
+        if v is None or v == '':
+            return None
+        try:
+            n = int(v)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_plan_id_for_copy(
+        self,
+        *,
+        explicit_raw: Any,
+        copy_source_id: Any,
+        plan_from_copy: Any,
+    ) -> Optional[int]:
+        """
+        复制创建时 plan_id：显式正整数优先；否则沿用源的归属计划。
+        源为「未计划」时：只有显式正 plan_id 才归入计划，避免 LLM 把上下文里的迭代 plan_id 误塞进未计划副本。
+        """
+        explicit = self._positive_plan_id_or_none(explicit_raw)
+        src = self._positive_plan_id_or_none(plan_from_copy)
+        if copy_source_id and str(copy_source_id).strip():
+            if src is None:
+                return explicit
+            return explicit if explicit is not None else src
+        return explicit if explicit is not None else src
 
     def _ensure_text2sql(self):
         if not TEXT2SQL_AVAILABLE or self.text2sql is not None:
@@ -130,6 +160,13 @@ class CreateTool(BaseTool):
             _progress("智能填充字段：完成")
         
         if not fields or not project_id:
+            _fk = list(fields.keys())[:24] if isinstance(fields, dict) else type(fields).__name__
+            _nq = bool((natural_query or "").strip())
+            print(
+                f"[CREATE] 校验失败（将返回 error）: project_id={project_id!r} missing={not project_id}, "
+                f"fields_truthy={bool(fields)} fields_key_count={len(fields) if isinstance(fields, dict) else 'n/a'} "
+                f"fields_keys={_fk!r} natural_query_nonempty={_nq}"
+            )
             _progress("create：缺少必要参数，直接失败")
             return {
                 'success': False,
@@ -286,18 +323,20 @@ class CreateTool(BaseTool):
         plan_from_copy = None
             
         # 如果是复制 Bug，获取源 Bug 的 plan_id
+        src_bug = None
         if copy_from_bug_id:
             from app import Bug
             src_bug = self.db.query(Bug).get(int(copy_from_bug_id)) if copy_from_bug_id else None
             if src_bug:
                 plan_from_copy = src_bug.plan_id
                 print(f"[CREATE] copy_from_bug_id 命中：copy_from={copy_from_bug_id}, src_plan_id={plan_from_copy}")
-            
-        # plan_id 优先级：1. 明确指定的 > 2. 复制源的 > 3. 未计划的同类型计划
-        plan_id = fields.get('plan_id')
-        if not plan_id and plan_from_copy:
-            plan_id = plan_from_copy
-            
+
+        plan_id = self._resolve_plan_id_for_copy(
+            explicit_raw=fields.get('plan_id'),
+            copy_source_id=copy_from_bug_id,
+            plan_from_copy=plan_from_copy,
+        )
+
         validated = {
             'title': fields.get('title', ''),
             'description': fields.get('description', ''),
@@ -330,12 +369,13 @@ class CreateTool(BaseTool):
             if src_badcase:
                 plan_from_copy = src_badcase.plan_id
                 print(f"[CREATE] copy_from_badcase_id 命中：copy_from={copy_from_badcase_id}, src_plan_id={plan_from_copy}")
-            
-        # plan_id 优先级：1. 明确指定的 > 2. 复制源的 > 3. 未计划的同类型计划
-        plan_id = fields.get('plan_id')
-        if not plan_id and plan_from_copy:
-            plan_id = plan_from_copy
-            
+
+        plan_id = self._resolve_plan_id_for_copy(
+            explicit_raw=fields.get('plan_id'),
+            copy_source_id=copy_from_badcase_id,
+            plan_from_copy=plan_from_copy,
+        )
+
         validated = {
             'title': fields.get('title', ''),
             'description': fields.get('description', ''),
@@ -456,8 +496,11 @@ class CreateTool(BaseTool):
             merged[k] = v
 
         merged['project_id'] = int(project_id)
-        if merged.get('plan_id') in (None, ''):
-            merged['plan_id'] = plan_from_copy
+        merged['plan_id'] = self._resolve_plan_id_for_copy(
+            explicit_raw=merged.get('plan_id'),
+            copy_source_id=copy_from if use_copy else None,
+            plan_from_copy=plan_from_copy,
+        )
 
         if not use_copy:
             # 无复制源：补默认，避免 NOT NULL / 缺字段（与原先白名单行为一致）

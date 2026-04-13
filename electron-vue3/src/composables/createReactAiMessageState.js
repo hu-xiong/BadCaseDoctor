@@ -48,6 +48,12 @@ export function createReactAiMessageState(id) {
     unifiedSummaryLoading: false,
     sseMirror: null,
     /** 大模型判定纯对话：不展示分步 Thought/总结条，正文走 finalResponse（可配合 summary_stream 拼接） */
-    reactDirectChatReply: false
+    reactDirectChatReply: false,
+    /** SSE client_action：本地 wget/curl 下载脚本提示卡片（用户自行在终端执行） */
+    clientLocalRunCards: [],
+    /** SSE client_action kind=terminal_exec：待本机执行队列（handleReactAgentMode 尾部消费） */
+    pendingTerminalExecQueue: [],
+    /** 终端子 Agent 卡片（展示命令与执行状态） */
+    clientTerminalExecCards: []
   }
 }

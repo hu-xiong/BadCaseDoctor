@@ -6,25 +6,32 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
-    host: 'localhost', // 只监听本地，不对外暴露
-    strictPort: true, // 如果端口被占用则退出
-    open: false, // 不自动打开浏览器
+    host: 'localhost',
+    strictPort: true,
+    open: false,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:5000',
         changeOrigin: true,
         secure: false
       },
-      '/socket.io': {
-        target: 'http://127.0.0.1:5000',
-        ws: true,
+      '/__badcase_local_go': {
+        target: 'http://127.0.0.1:8794',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        rewrite: (path) => path.replace(/^\/__badcase_local_go/, '') || '/'
       }
     }
   },
   optimizeDeps: {
-    include: ['monaco-editor', 'socket.io-client', 'xterm', 'xterm-addon-fit']
+    include: ['monaco-editor'],
+    exclude: [
+      '@xterm/xterm',
+      '@xterm/addon-fit',
+      '@xterm/addon-webgl',
+      '@xterm/addon-unicode11',
+      '@xterm/addon-clipboard'
+    ]
   },
   build: {
     rollupOptions: {

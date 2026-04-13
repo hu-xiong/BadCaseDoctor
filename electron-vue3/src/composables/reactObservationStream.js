@@ -75,10 +75,15 @@ export const extractToolName = (title) => {
 /** 从 observation 生成人类可读的一行结果摘要 */
 export const buildStepResultSummary = (outputData, toolName, toolData) => {
   const t = i18n.global.t.bind(i18n.global)
+  const outer = outputData && typeof outputData === 'object' ? outputData : {}
   const d = toolData && typeof toolData === 'object' ? toolData : {}
-  const tool = toolName || outputData?.tool || ''
+  const tool = toolName || outer.tool || ''
   const listSep = i18n.global.locale.value === 'en' ? ', ' : '，'
-  if (d.error) return t('chat.stepErr', { msg: d.error })
+  const combinedErr =
+    (typeof d.error === 'string' && d.error.trim()) ||
+    (typeof outer.error === 'string' && outer.error.trim()) ||
+    ''
+  if (combinedErr) return t('chat.stepErr', { msg: combinedErr })
   if (tool === 'grep' || d.testcase_location || d.bug_location || d.badcase_analysis || d.plan_tree) {
     const tc = d.testcase_location?.length ?? 0
     const bugs = d.bug_location?.length ?? 0
@@ -100,13 +105,88 @@ export const buildStepResultSummary = (outputData, toolName, toolData) => {
     return d.message || t('chat.stepModifyDone')
   }
   if (tool === 'create' || (d.preview && typeof d.preview === 'object' && d.target)) {
+    if (d.success === false || outer.success === false) {
+      return combinedErr || t('chat.stepFailed')
+    }
     const title = d.preview?.title
     if (title) return t('chat.stepCreatePreview', { title })
     return d.message || t('chat.stepCreateReady')
   }
   if (d.message) return String(d.message).slice(0, 400)
-  if (outputData?.success === false) return t('chat.stepFailed')
+  if (outer.success === false) return t('chat.stepFailed')
   return t('chat.stepDone')
+}
+
+/** 流式 ensureReactStepsForStreamIndex 占位标题（不用「步骤 N」数字） */
+export const STREAM_STEP_INDEX_PLACEHOLDER_TITLE = '…'
+
+/** 尾部仅占位（… 或历史「步骤 N」）且无实质产出：用于裁剪空壳面板 */
+export const isPhantomTailAgentStep = (s) => {
+  if (!s || typeof s !== 'object') return false
+  const title = String(s.title || '').trim()
+  const isWaitingTitle =
+    title === STREAM_STEP_INDEX_PLACEHOLDER_TITLE ||
+    /^(\.\s*){3,}\s*$/u.test(title) ||
+    /^\.{2,}\s*$/u.test(title) ||
+    /^步骤\s*\d+\s*$/u.test(title)
+  if (!isWaitingTitle) return false
+  const tn = extractToolName(title)
+  if (tn && tn !== '') return false
+  if (s.grepNavigation?.items?.length) return false
+  if (s.resultSummary != null && String(s.resultSummary).trim()) return false
+  // 有思考/观察流式内容时不当作幽灵步骤，否则 todo_skip step 积累的 thoughtReasoningDraft 不可见
+  const _hasMeaningful = (t) => {
+    const v = String(t || '').replace(/[\u200B-\u200D\uFEFF\u2060]/g, '').trim()
+    return v.length >= 2 && /[\u4e00-\u9fa5A-Za-z0-9]/.test(v)
+  }
+  if (_hasMeaningful(s.thoughtReasoningDraft) || _hasMeaningful(s.agentThoughtDraft)) return false
+  const exec = [...(s.detailLog || []), ...(s.progressLog || [])].join('\n').trim()
+  if (/结果|失败|成功|error|preview|定位|修改|缺少|创建|grep|modify|create|参数|project/i.test(exec)) {
+    return false
+  }
+  if (exec.replace(/─/g, '-').replace(/\s/g, '').length > 40) return false
+  if (s.status === 'failed' || s.status === 'error') return false
+  return true
+}
+
+export const pruneTrailingPhantomAgentSteps = (steps) => {
+  if (!Array.isArray(steps) || steps.length === 0) return steps
+  const out = [...steps]
+  while (out.length > 0 && isPhantomTailAgentStep(out[out.length - 1])) {
+    out.pop()
+  }
+  return out
+}
+
+/**
+ * ``resolveStreamStepIndex`` 要求 ``steps[n]`` 已存在；若未收到 todos/todo_start 扩行，工具事件会绑不到 UI 步骤。
+ * 按 SSE 的 0-based index 补齐占位行：中间隙标已完成，目标行为 running。
+ */
+export function ensureReactStepsForStreamIndex(aiMessage, raw, buildReactStepsFromTodoStrings) {
+  if (!aiMessage || raw === null || raw === undefined) return
+  if (typeof raw === 'string' && raw.trim() === '') return
+  const base = Number(aiMessage._reactStreamStepBase || 0)
+  const rel = Number(raw)
+  if (!Number.isFinite(rel) || rel < 0) return
+  const n = base + rel
+  if (!Number.isFinite(n) || n < 0) return
+  if (typeof buildReactStepsFromTodoStrings !== 'function') return
+  if (!Array.isArray(aiMessage.steps)) aiMessage.steps = []
+  while (aiMessage.steps.length <= n) {
+    const i = aiMessage.steps.length
+    const label = STREAM_STEP_INDEX_PLACEHOLDER_TITLE
+    const rows = buildReactStepsFromTodoStrings([label])
+    const row = rows && rows[0]
+    if (!row) break
+    if (i < n) {
+      row.status = 'completed'
+      row.description = row.description || '…'
+    } else {
+      row.status = 'running'
+      if (row.stepStartedAt == null) row.stepStartedAt = Date.now()
+    }
+    aiMessage.steps.push(row)
+  }
 }
 
 /**
@@ -119,16 +199,23 @@ export const buildStepResultSummary = (outputData, toolName, toolData) => {
  * @param {function} ctx.handleShowGroupInList
  * @param {number|null|undefined} ctx.projectId
  * @param {function} ctx.handleNavigation
+ * @param {function} [ctx.buildReactStepsFromTodoStrings]
  */
 export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) {
   const resolveStreamStepIndex = ctx.resolveStreamStepIndex
   const appendStepDetailLine = ctx.appendStepDetailLine
+  const buildReactStepsFromTodoStrings = ctx.buildReactStepsFromTodoStrings
   const tick = ctx.nextTick || nextTick
   const handleShowGroupInList = ctx.handleShowGroupInList
   const projectId = ctx.projectId
   const handleNavigation = ctx.handleNavigation
 
   console.log('[CHAT-STREAM] === 触发 observation 事件 ===')
+  ensureReactStepsForStreamIndex(
+    aiMessage,
+    stepEvent.stepIndex ?? stepEvent.index,
+    buildReactStepsFromTodoStrings
+  )
   const outputData = stepEvent.data
   const observationTool = (stepEvent.tool || '').toString().trim() || ''
   try {
@@ -194,8 +281,8 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   }
 
   freezeThoughtSnapshotForStep(runningStep)
-  runningStep.status = 'completed'
   const od = typeof outputData === 'object' && outputData !== null ? outputData : {}
+  runningStep.status = od.success === false ? 'failed' : 'completed'
   const humanMsg = od.message || od.summary || (od.data && (od.data.message || od.data.summary))
   runningStep.description =
     humanMsg && String(humanMsg).trim() ? String(humanMsg).trim().slice(0, 200) : '已完成'
@@ -542,7 +629,17 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           text: `create：${errText}`,
           success: false
         })
-        console.warn('[CREATE] 工具返回失败，未生成预览:', toolData)
+        const hint =
+          /fields|project_id/i.test(String(errText))
+            ? '缺 project_id 多为会话未带项目；fields 为空对象 {} 在 Python 里视为无 fields。请对照上一条 [CREATE][executing] 入参诊断 与终端 [CREATE] 校验失败'
+            : ''
+        console.warn('[CREATE] 工具返回失败，未生成预览', {
+          errText,
+          success: toolData.success,
+          chatProjectId: projectId,
+          toolDataKeys: Object.keys(toolData),
+          hint
+        })
       }
     }
 
