@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"unicode/utf16"
 	"unsafe"
 
@@ -14,14 +15,26 @@ import (
 )
 
 var (
-	modKernel32                        = windows.NewLazySystemDLL("kernel32.dll")
-	fCreatePseudoConsole               = modKernel32.NewProc("CreatePseudoConsole")
-	fResizePseudoConsole               = modKernel32.NewProc("ResizePseudoConsole")
-	fClosePseudoConsole                = modKernel32.NewProc("ClosePseudoConsole")
+	modKernel32                         = windows.NewLazySystemDLL("kernel32.dll")
+	fCreatePseudoConsole                = modKernel32.NewProc("CreatePseudoConsole")
+	fResizePseudoConsole                = modKernel32.NewProc("ResizePseudoConsole")
+	fClosePseudoConsole                 = modKernel32.NewProc("ClosePseudoConsole")
 	fInitializeProcThreadAttributeList = modKernel32.NewProc("InitializeProcThreadAttributeList")
-	fUpdateProcThreadAttribute         = modKernel32.NewProc("UpdateProcThreadAttribute")
-	ErrConPtyUnsupported               = errors.New("ConPty is not available on this version of Windows")
+	fUpdateProcThreadAttribute          = modKernel32.NewProc("UpdateProcThreadAttribute")
+	fAttachConsole                      = modKernel32.NewProc("AttachConsole")
+	ErrConPtyUnsupported                = errors.New("ConPty is not available on this version of Windows")
 )
+
+// AttachConsole flag for attaching to parent process
+const ATTACH_PARENT_PROCESS = ^uint32(0)
+
+func attachConsoleToPid(pid uint32) error {
+	ret, _, err := fAttachConsole.Call(uintptr(pid))
+	if ret == 0 {
+		return err
+	}
+	return nil
+}
 
 func IsConPtyAvailable() bool {
 	return fCreatePseudoConsole.Find() == nil &&
@@ -73,6 +86,7 @@ type ConPty struct {
 	hpc                          _HPCON
 	pi                           *windows.ProcessInformation
 	ptyIn, ptyOut, cmdIn, cmdOut *handleIO
+	inputHandle                  windows.Handle // For WriteConsoleInputW
 }
 
 func win32ClosePseudoConsole(hPc _HPCON) {
@@ -244,7 +258,8 @@ func (cpty *ConPty) Close() error {
 		cpty.ptyIn.handle,
 		cpty.ptyOut.handle,
 		cpty.cmdIn.handle,
-		cpty.cmdOut.handle)
+		cpty.cmdOut.handle,
+		cpty.inputHandle)
 }
 
 // Wait for the process to exit and return the exit code. If context is canceled,
@@ -278,6 +293,42 @@ func (cpty *ConPty) Read(p []byte) (int, error) {
 
 func (cpty *ConPty) Write(p []byte) (int, error) {
 	return cpty.cmdIn.Write(p)
+}
+
+// WriteConsoleInput writes INPUT_RECORD events to the console input buffer.
+// This is used for win32-input-mode support to send special key sequences.
+func (cpty *ConPty) WriteConsoleInput(records []INPUT_RECORD) (uint32, error) {
+	if cpty.inputHandle == windows.InvalidHandle {
+		log.Printf("[conpty] WriteConsoleInput: invalid handle")
+		return 0, fmt.Errorf("invalid input handle")
+	}
+
+	// Convert INPUT_RECORD slice to byte slice
+	size := len(records) * INPUT_RECORD_SIZE
+	data := make([]byte, size)
+	for i, rec := range records {
+		offset := i * INPUT_RECORD_SIZE
+		// EventType (little-endian)
+		data[offset] = byte(rec.EventType)
+		data[offset+1] = byte(rec.EventType >> 8)
+		// Event data (16 bytes)
+		copy(data[offset+2:offset+18], rec.Event[:])
+	}
+
+	var numWritten uint32
+	err := windows.WriteFile(cpty.inputHandle, data, &numWritten, nil)
+	if err != nil {
+		log.Printf("[conpty] WriteConsoleInput WriteFile error: %v", err)
+		return 0, err
+	}
+	n := numWritten / INPUT_RECORD_SIZE
+	log.Printf("[conpty] WriteConsoleInput: wrote %d records (bytes: %d)", n, numWritten)
+	return n, nil
+}
+
+// GetInputHandle returns the console input handle for direct use.
+func (cpty *ConPty) GetInputHandle() windows.Handle {
+	return cpty.inputHandle
 }
 
 func (cpty *ConPty) Pid() int {
@@ -349,13 +400,50 @@ func Start(commandLine string, options ...ConPtyOption) (*ConPty, error) {
 		return nil, fmt.Errorf("Failed to create console process: %v", err)
 	}
 
+	// Open console input handle for WriteConsoleInputW support
+	// Try to attach to the parent process's console first
+	var inputHandle windows.Handle = windows.InvalidHandle
+
+	// Try attaching to parent console
+	if err := attachConsoleToPid(ATTACH_PARENT_PROCESS); err == nil {
+		// Successfully attached, now open CONIN$
+		inputHandle, err = windows.Open("CONIN$", windows.O_RDWR, 0)
+		if err == nil {
+			log.Printf("[conpty] Attached to parent console, CONIN$ handle: %d", inputHandle)
+			cpty := &ConPty{
+				hpc:         hPc,
+				pi:          pi,
+				ptyIn:       &handleIO{ptyIn},
+				ptyOut:      &handleIO{ptyOut},
+				cmdIn:       &handleIO{cmdIn},
+				cmdOut:      &handleIO{cmdOut},
+				inputHandle: inputHandle,
+			}
+			return cpty, nil
+		}
+		log.Printf("[conpty] AttachConsole succeeded but CONIN$ failed: %v", err)
+	} else {
+		log.Printf("[conpty] AttachConsole failed: %v (may be GUI app, no console)", err)
+	}
+
+	// Fallback: Try opening CONIN$ directly (for console applications)
+	inputHandle, err = windows.Open("CONIN$", windows.O_RDWR, 0)
+	if err != nil {
+		log.Printf("[conpty] Failed to get console input handle: %v", err)
+		closeHandles(ptyIn, ptyOut, cmdIn, cmdOut)
+		win32ClosePseudoConsole(hPc)
+		return nil, fmt.Errorf("failed to get console input handle: %v", err)
+	}
+
+	log.Printf("[conpty] Opened CONIN$ directly, handle: %d", inputHandle)
 	cpty := &ConPty{
-		hpc:    hPc,
-		pi:     pi,
-		ptyIn:  &handleIO{ptyIn},
-		ptyOut: &handleIO{ptyOut},
-		cmdIn:  &handleIO{cmdIn},
-		cmdOut: &handleIO{cmdOut},
+		hpc:         hPc,
+		pi:          pi,
+		ptyIn:       &handleIO{ptyIn},
+		ptyOut:      &handleIO{ptyOut},
+		cmdIn:       &handleIO{cmdIn},
+		cmdOut:      &handleIO{cmdOut},
+		inputHandle: inputHandle,
 	}
 	return cpty, nil
 }

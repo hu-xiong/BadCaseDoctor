@@ -17,7 +17,7 @@
 
     <div class="main-content">
       <!-- 左侧主要内容区 -->
-      <div class="content-left">
+      <div class="content-left" :class="{ 'collapsed': isLeftCollapsed }">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
           v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
@@ -473,9 +473,8 @@
               <option value="p3">P3 - 中</option>
               <option value="p4">P4 - 低</option>
             </select>
-                    </div>
-                  </div>
-
+          </div>
+        </div>
         <!-- 底部操作区 -->
         <div class="footer-section">
           <div class="footer-tip">
@@ -492,7 +491,12 @@
                 </div>
                 
       <!-- 右侧边栏 -->
-      <div class="sidebar-right">
+      <div class="sidebar-right" :class="{ 'expanded': isLeftCollapsed }">
+        <!-- 伸缩按钮 -->
+        <div class="resize-handle" @click="toggleLeftPanel">
+          <img src="../assets/resize-icon.svg" alt="Resize" class="resize-icon" :class="{ 'rotated': isLeftCollapsed }" />
+        </div>
+        
         <!-- 所属项目 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">所属项目</h3>
@@ -658,6 +662,12 @@ export default {
     const saveLoading = ref(false)
     const isEdit = ref(false)
     const bugId = ref(null)
+    const isLeftCollapsed = ref(false)
+    
+    // 切换左侧面板的收缩/展开状态
+    const toggleLeftPanel = () => {
+      isLeftCollapsed.value = !isLeftCollapsed.value
+    }
     
     const projectInfo = ref({})
     const availableProjects = ref([])
@@ -1773,6 +1783,95 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+/* 伸缩按钮样式 */
+.resize-handle {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  background-color: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+  z-index: 10;
+}
+
+.resize-handle:hover {
+  background-color: #f5f5f5;
+  border-color: #d0d0d0;
+}
+
+.resize-icon {
+  width: 12px;
+  height: 18px;
+  transition: transform 0.3s ease;
+}
+
+.resize-icon.rotated {
+  transform: rotate(180deg);
+}
+
+/* 右侧边栏样式 */
+.sidebar-right {
+  position: relative;
+  width: 300px;
+  transition: all 0.3s ease;
+}
+
+.sidebar-title {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+/* 左侧面板收缩样式 */
+.content-left {
+  flex: 1;
+  min-width: 300px;
+  transition: all 0.3s ease;
+}
+
+.content-left.collapsed {
+  flex: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 右侧边栏展开样式 */
+.sidebar-right {
+  width: 300px;
+  transition: all 0.3s ease;
+}
+
+.sidebar-right.expanded {
+  flex: 1;
+  min-width: 300px;
+  max-width: none;
+}
+
+/* 主内容区布局 */
+.main-content {
+  position: relative;
+  display: flex;
+  gap: 16px;
+  padding: 20px;
+  min-height: 600px;
+}
+
+/* 确保在嵌入模式下也能正常显示 */
+.bug-detail-wrapper.is-embedded .main-content {
+  padding: 16px;
+}
+</style>
 
 <style scoped>
 .bug-detail-wrapper {

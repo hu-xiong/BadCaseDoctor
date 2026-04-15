@@ -24,7 +24,22 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"golang.org/x/sys/windows"
 )
+
+var (
+	modKernel32       = windows.NewLazySystemDLL("kernel32.dll")
+	procAllocConsole  = modKernel32.NewProc("AllocConsole")
+)
+
+func init() {
+	// Windows GUI apps (like those started by Electron) don't have a console by default.
+	// Allocate one so WriteConsoleInput can work for win32-input-mode support.
+	if runtime.GOOS == "windows" {
+		procAllocConsole.Call()
+	}
+}
 
 // 自定义 URL 协议（见 scripts/protocol/）：badcase-local-proxy://wakeup?... 由系统传给本进程。
 // 若本机已有实例在监听，则直接退出 0，避免重复启动。

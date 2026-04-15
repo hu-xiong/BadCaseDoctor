@@ -117,7 +117,9 @@
     "localProxyInstallAgreeCheckbox": "我已阅读并理解上述条款（含安装路径、唤醒协议与隐私说明）",
     "localProxyInstallDownloadBtn": "下载并保存",
     "localProxyInstallConfirmBtn": "同意并保存",
-    "localProxyInstallSaving": "正在写入…"
+    "localProxyInstallSaving": "正在写入…",
+    "localProxyWin32InputMode": "win32-input-mode 协议",
+    "localProxyWin32InputModeDesc": "启用后支持 Ctrl+方向键、Shift+方向键等修饰键组合"
   },
   "shell": {
     "toggleSidebar": "切换侧边栏",
@@ -129,6 +131,7 @@
     "profile": "个人资料",
     "preferences": "偏好设置",
     "settings": "设置",
+    "projectManagement": "项目管理",
     "logout": "退出登录",
     "userFallback": "用户",
     "emailFallback": "user@example.com"

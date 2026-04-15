@@ -13,9 +13,51 @@
     </div>
     <div
       v-if="findVisible"
-      class="embedded-pty-find-bar etw-vscode-terminal vs-dark"
+      ref="findBarRef"
+      class="embedded-pty-find-bar"
       @keydown.capture.stop="onFindBarKeydown"
+      @mousedown="onFindBarMouseDown"
     >
+      <button
+        type="button"
+        class="embedded-pty-find-btn embedded-pty-find-close"
+        :title="t('embeddedTerminal.findClose')"
+        @click="closeFind"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <path d="M6 4.586L9.293 1.293l1.414 1.414L7.414 6l3.293 3.293-1.414 1.414L6 7.414l-3.293 3.293-1.414-1.414L4.586 6 1.293 2.707l1.414-1.414L6 4.586z"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="embedded-pty-find-btn"
+        :title="t('embeddedTerminal.findNext')"
+        @click="findNextClick"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <path d="M6 9l4-4H2l4 4z"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="embedded-pty-find-btn"
+        :title="t('embeddedTerminal.findPrev')"
+        @click="findPrevClick"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <path d="M6 3L2 7h8L6 3z"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="embedded-pty-find-btn"
+        :class="{ active: findCaseSensitive }"
+        :title="t('embeddedTerminal.findCaseSensitive')"
+        @click="findCaseSensitive = !findCaseSensitive; runFindIncremental()"
+      >
+        Aa
+      </button>
+      <span class="embedded-pty-find-status">{{ findMatchStatus }}</span>
       <input
         ref="findInputRef"
         v-model="findQuery"
@@ -25,35 +67,6 @@
         autocomplete="off"
         spellcheck="false"
       />
-      <label class="embedded-pty-find-case">
-        <input v-model="findCaseSensitive" type="checkbox" @change="runFindIncremental" />
-        <span>{{ t('embeddedTerminal.findCaseSensitive') }}</span>
-      </label>
-      <button
-        type="button"
-        class="embedded-pty-find-btn"
-        :title="t('embeddedTerminal.findPrev')"
-        @click="findPrevClick"
-      >
-        ↑
-      </button>
-      <button
-        type="button"
-        class="embedded-pty-find-btn"
-        :title="t('embeddedTerminal.findNext')"
-        @click="findNextClick"
-      >
-        ↓
-      </button>
-      <span class="embedded-pty-find-status">{{ findMatchStatus }}</span>
-      <button
-        type="button"
-        class="embedded-pty-find-btn embedded-pty-find-close"
-        :title="t('embeddedTerminal.findClose')"
-        @click="closeFind"
-      >
-        ×
-      </button>
     </div>
     <div
       ref="xtermWrapRef"
@@ -166,6 +179,7 @@ import {
   badcasePtyDebugEnabled
 } from '../utils/badcasePtyDebug.js'
 import { normalizeConptyStdinDelToBs } from '../utils/embeddedPtyWinStdin.js'
+import { win32InputModeEnabled } from '../composables/useLocalGoProxyStatus'
 
 function ptyPreviewU8(u8, max = 96) {
   if (!(u8 instanceof Uint8Array) || u8.length === 0) return ''
@@ -233,6 +247,39 @@ const findQuery = ref('')
 const findCaseSensitive = ref(false)
 const findMatchStatus = ref('')
 const findInputRef = ref(null)
+const findBarRef = ref(null)
+
+// 搜索栏拖拽状态
+let isDraggingFindBar = false
+let dragStartX = 0
+let dragStartWidth = 0
+
+function onFindBarMouseDown(e) {
+  if (e.target.closest('.embedded-pty-find-btn')) return
+  const bar = findBarRef.value
+  if (!bar) return
+  isDraggingFindBar = true
+  dragStartX = e.clientX
+  dragStartWidth = bar.offsetWidth
+  document.addEventListener('mousemove', onFindBarMouseMove)
+  document.addEventListener('mouseup', onFindBarMouseUp)
+  e.preventDefault()
+}
+
+function onFindBarMouseMove(e) {
+  if (!isDraggingFindBar) return
+  const bar = findBarRef.value
+  if (!bar) return
+  const delta = dragStartX - e.clientX
+  const newWidth = Math.min(600, Math.max(200, dragStartWidth + delta))
+  bar.style.width = newWidth + 'px'
+}
+
+function onFindBarMouseUp() {
+  isDraggingFindBar = false
+  document.removeEventListener('mousemove', onFindBarMouseMove)
+  document.removeEventListener('mouseup', onFindBarMouseUp)
+}
 
 /** 对齐 SearchAddon ISearchDecorationOptions 必填项（overview 在本嵌入 UI 中未展示）。 */
 const SEARCH_DECO = {
@@ -293,10 +340,6 @@ let _lastSentRows = 0
  * 避免 xterm 一帧、WebSocket 又一帧的时序错乱；立即 emitResize（如 term_started）会 bump 代数作废挂起的 microtask。
  */
 let layoutResizeFlushGen = 0
-/** Windows ConPTY 路径：stdin 将 DEL(0x7F) 换成 BS(0x08)，否则 PSReadLine 常不删字符 */
-let windowsConptyStdinDelToBs = false
-/** 本地退格标志：当用户在 attachCustomKeyEventHandler 中拦截退格并发送 BS 到 PTY 时设置，用于忽略 PTY 回显的 BS */
-let localBackspacePending = false
 /** badcasePtyCursorTrace=1 时：rAF 合并采样，看 cell 宽推算列数 vs term.cols、缓冲区光标 */
 let cursorTraceRaf = 0
 let cursorTracePhase = 'unspecified'
@@ -413,15 +456,6 @@ function writePtyStdoutTransformed(u8) {
           /* ignore */
         }
       }, 900)
-      return
-    }
-    
-    // Windows ConPTY 退格回显处理：
-    // 当用户在 attachCustomKeyEventHandler 中拦截退格并发送 BS 到 PTY 时，xterm 没有本地处理退格。
-    // PTY 会回显 BS，但 xterm 不应该再次处理这个 BS（因为没有本地字符可删）。
-    // 如果收到单个 BS 且 localBackspacePending 为 true，忽略这个 BS。
-    if (u8.length === 1 && u8[0] === 0x08 && localBackspacePending) {
-      localBackspacePending = false
       return
     }
     
@@ -766,19 +800,7 @@ function attachIntegratedTerminalKeyChordHandler() {
     if (ev.type !== 'keydown') return true
     if (ev.altKey) return true
 
-    // Windows ConPTY 退格键处理：
-    // 在 win32InputMode 下，xterm 本地处理退格（删除本地字符），但 PTY 也会回显 BS。
-    // 这导致双重删除。解决方案：拦截退格键，阻止 xterm 本地处理，只发送 BS 到 PTY。
-    // PTY 会处理退格（更新内部状态），并回显 BS。xterm 忽略回显的 BS（因为没有本地字符可删）。
-    if (ev.key === 'Backspace' && navIsWindowsHost() && props.mode !== 'ssh') {
-      ev.stopPropagation()
-      // 发送 BS 到 PTY（让 PTY 更新内部状态）
-      emitPtyTermInput('\u0008')
-      // 阻止 xterm 本地处理（避免双重删除）
-      // 注意：xterm 的 onData 仍会触发，但我们稍后通过 localBackspacePending 忽略 PTY 回显
-      // 所以这里返回 false 阻止 xterm 默认处理
-      return false
-    }
+    // 退格键现在由 go-local-proxy 处理（DEL→BS 转换），xterm 让其默认处理
 
     if (ev.key === 'Escape' && findVisible.value) {
       ev.preventDefault()
@@ -977,16 +999,29 @@ function addToChatFromSelection() {
   const raw = String(term.getSelection() || '').trim()
   if (!raw) return
   
-  // 生成终端引用而不是直接复制文本
-  // 格式：@log:session_<id>#L<start>-L<end>
-  const sessionId = props.clientSessionId
-  const head = t('embeddedTerminal.addToChatPrefillPrefix')
+  // 计算选中的行号范围
+  let startLine = 1
+  let endLine = 1
   
-  // 这里简化处理，实际应该获取选中的行号范围
-  // 由于 xterm.js 没有直接提供行号信息，我们使用简化的引用格式
-  const reference = `@log:${sessionId}#L1-L100`
+  // 尝试获取选中范围
+  if (typeof term.getSelectionPosition === 'function') {
+    try {
+      const range = term.getSelectionPosition()
+      if (range) {
+        // xterm.js 的行号从 0 开始，转换为从 1 开始
+        startLine = Math.min(range.start.y, range.end.y) + 1
+        endLine = Math.max(range.start.y, range.end.y) + 1
+      }
+    } catch (e) {
+      // 若获取失败，使用默认值
+    }
+  }
   
-  openAiComposerPrefill(`${head}\n\n${reference}`)
+  // 生成与 Trae 相同的终端引用样式
+  // 格式：📱 Terminal <start>-<end>
+  const reference = `📱 Terminal ${startLine}-${endLine}`
+  
+  openAiComposerPrefill(reference)
 }
 
 function onAddToChatFloaterClick() {
@@ -1009,55 +1044,23 @@ function navIsWindowsHost() {
   }
 }
 
-function updateWindowsConptyStdinNorm(payload) {
-  if (props.mode === 'ssh') {
-    windowsConptyStdinDelToBs = false
-    return
-  }
-  const backend = String(payload?.windows_pty?.backend || '').toLowerCase()
-  if (backend === 'conpty') {
-    windowsConptyStdinDelToBs = true
-    return
-  }
-  if (!navIsWindowsHost()) {
-    windowsConptyStdinDelToBs = false
-    return
-  }
-  const sid = socket?.id
-  if (sid === 'browser-go-local' || sid === 'electron-local') {
-    windowsConptyStdinDelToBs = true
-    return
-  }
-  windowsConptyStdinDelToBs = false
-}
-
 function emitPtyTermInput(data) {
   if (!socket || !socket.connected) return
-  // Windows ConPTY 路径：始终将 DEL(0x7F) 换成 BS(0x08)，确保退格键能正确删除字符。
-  let s = data
-  if (windowsConptyStdinDelToBs && typeof data === 'string' && data.indexOf('\u007f') >= 0) {
-    s = data.replace(/\u007f/g, '\u0008')
-  }
-  
-  // 当发送 BS 到 PTY 时，设置标志以忽略 PTY 回显的 BS（避免双重删除）
-  if (s === '\u0008') {
-    localBackspacePending = true
-  }
+  // 退格键转换现在由 go-local-proxy 处理（DEL→BS），前端直接透传
   if (badcasePtyDebugEnabled() && termInputDbgCount < TERM_INPUT_DBG_MAX) {
     termInputDbgCount += 1
-    const u8 = typeof s === 'string' ? new TextEncoder().encode(s) : new Uint8Array()
+    const u8 = typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array()
     badcasePtyLog('term_input', {
       n: termInputDbgCount,
       socketId: socket?.id,
-      utf16Units: typeof s === 'string' ? s.length : 0,
+      utf16Units: typeof data === 'string' ? data.length : 0,
       utf8Bytes: u8.length,
-      windowsConptyStdinDelToBs,
       preview: dbgTermInputU8Esc(u8, 56)
     })
   }
   try {
     socket.emit('term_input', {
-      b64: stringToUtf8B64(s),
+      b64: stringToUtf8B64(data),
       client_session_id: props.clientSessionId
     })
   } catch (e) {
@@ -1191,7 +1194,6 @@ function scheduleTermStart() {
 
 function onPtyConnect() {
   badcasePtyLog('socket connect', { csid: props.clientSessionId })
-  updateWindowsConptyStdinNorm(null)
   statusText.value = ''
   statusTone.value = 'info'
   nextTick(() => {
@@ -1210,7 +1212,6 @@ function onPtyConnectError(err) {
 }
 
 function onPtyDisconnect() {
-  windowsConptyStdinDelToBs = false
   termInputDbgCount = 0
   pendingPtyOutput = []
   resetPtyStdoutCrHold()
@@ -1266,11 +1267,9 @@ function onPtyTermStarted(payload) {
   } catch {
     /* ignore */
   }
-  updateWindowsConptyStdinNorm(payload)
   badcasePtyLog('term_started xterm keys', {
     win32InputMode: isXtermWin32InputMode(term),
     windows_pty: payload?.windows_pty,
-    delToBsPath: windowsConptyStdinDelToBs,
     uaWindows: navIsWindowsHost()
   })
   emitResize()
@@ -1364,16 +1363,15 @@ function unbindSocketHandlers() {
   socket.off('term_error', onPtyTermError)
   socket.off('term_exit', onPtyTermExit)
   handlersBound = false
-  windowsConptyStdinDelToBs = false
-  localBackspacePending = false
   termInputDbgCount = 0
 }
 
 function setupTerminal() {
   const host = termHost.value
   if (!host) return
+  const enableWin32 = navIsWindowsHost() && win32InputModeEnabled.value
   void mountVscodeIntegratedTerminal(host, {
-    win32InputMode: props.mode !== 'ssh' && navIsWindowsHost()
+    win32InputMode: enableWin32
   }).then(({ term: xterm, fit: f, serializeAddon: sa }) => {
     term = xterm
     fit = f
@@ -1756,6 +1754,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .embedded-pty-root {
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 200px;
@@ -1787,70 +1786,93 @@ onBeforeUnmount(() => {
 }
 
 .embedded-pty-find-bar {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 8px;
+  right: 0;
   display: flex;
+  flex-direction: row-reverse;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 5px 8px;
-  background: rgba(58, 61, 65, 0.95);
-  border-bottom: 1px solid rgba(62, 62, 66, 0.9);
+  gap: 4px;
+  padding: 4px 12px 4px 8px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px 0 0 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  width: 200px;
+  min-width: 200px;
+  max-width: 600px;
+  user-select: none;
+}
+
+/* 左侧拖拽区域 */
+.embedded-pty-find-bar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 10;
+}
+
+.embedded-pty-find-bar:hover::before {
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .embedded-pty-find-input {
-  flex: 1 1 120px;
-  max-width: 420px;
-  min-width: 100px;
+  width: 80px;
+  flex: 1;
+  min-width: 60px;
   font-size: 13px;
-  padding: 4px 8px;
+  padding: 2px 6px;
   color: #cccccc;
   background: #3c3c3c;
-  border: 1px solid #3e3e42;
+  border: 1px solid #5c5c5c;
   border-radius: 2px;
   outline: none;
 }
 
 .embedded-pty-find-input:focus {
-  border-color: #007fd4;
+  border-color: #007acc;
 }
 
-.embedded-pty-find-case {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.embedded-pty-find-status {
   font-size: 12px;
-  color: #cccccc;
-  white-space: nowrap;
-  user-select: none;
+  color: #808080;
+  padding: 0 4px;
+  min-width: 48px;
+  text-align: center;
 }
 
 .embedded-pty-find-btn {
   flex: 0 0 auto;
-  min-width: 28px;
-  height: 26px;
-  padding: 0 8px;
-  font-size: 14px;
-  line-height: 1;
-  color: #cccccc;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: #808080;
   background: transparent;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 3px;
   cursor: pointer;
 }
 
 .embedded-pty-find-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  color: #cccccc;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.embedded-pty-find-btn.active {
+  color: #4ec9b0;
 }
 
 .embedded-pty-find-close {
-  font-size: 18px;
-  padding: 0 6px;
-}
-
-.embedded-pty-find-status {
-  font-size: 12px;
-  color: #9d9d9d;
-  min-width: 5em;
+  margin-left: 2px;
 }
 
 .embedded-pty-xterm-wrap {

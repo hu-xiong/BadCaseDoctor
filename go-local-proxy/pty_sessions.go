@@ -102,16 +102,15 @@ func (sm *ptySessionMap) start(clientSessionID, cwd string, cols, rows int, writ
 
 	writeJSON(ptyWireTermStarted(clientSessionID, wantCwd))
 
-	if ptyDebugEnabled() {
-		log.Printf("[pty-debug] shellPostStartNudge id=%q", clientSessionID)
-	}
-	shellPostStartNudge(sh)
-
 	go func() {
 		buf := make([]byte, 32768)
 		var outCarry []byte
 		var outChunkSeq int
 		for {
+			// 检查 sh 是否仍然有效
+			if sh == nil || sh.Stdout == nil {
+				break
+			}
 			n, err := sh.Stdout.Read(buf)
 			if n > 0 {
 				var out []byte
@@ -223,13 +222,4 @@ func (s *ptySession) stop() {
 	s.sh.stop()
 }
 
-// shellPostStartNudge 写入一次 CRLF，促使 PowerShell 等在 ConPTY/管道下尽快吐出提示符（与前端首帧 fit 并行）。
-func shellPostStartNudge(sh *interactiveShell) {
-	if sh == nil || sh.Stdin == nil {
-		return
-	}
-	go func() {
-		time.Sleep(120 * time.Millisecond)
-		_, _ = sh.Stdin.Write([]byte("\r\n"))
-	}()
-}
+

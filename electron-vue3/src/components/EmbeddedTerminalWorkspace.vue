@@ -287,7 +287,9 @@ function scheduleBrowserGoLocalPtyReconnect(reason) {
 }
 
 watch(localGoProxyOk, (ok, prevOk) => {
-  if (ok !== true || prevOk !== false) return
+  // 当代理从不可用(null/false)变为可用(true)时重连
+  if (ok !== true) return
+  if (prevOk === true) return  // 已经是连接状态，不需要重连
   scheduleBrowserGoLocalPtyReconnect('proxy-health-recovered')
 })
 provide('terminalPaste', terminalPasteRef)

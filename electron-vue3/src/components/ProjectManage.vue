@@ -11,9 +11,6 @@
         <button class="refresh-btn" @click="refreshProjects">
           <span class="refresh-icon">🔄</span>
         </button>
-        <button class="debug-btn" @click="debugProjects" style="background: #ff6b6b; color: white; border: none; padding: 8px 12px; border-radius: 8px; margin-left: 8px;">
-          {{ t('projectList.debug') }}
-        </button>
       </div>
     </div>
 
@@ -108,7 +105,8 @@ import api from '../api.js'
 
 export default {
   name: 'ProjectManage',
-  setup() {
+  emits: ['projectSelected'],
+  setup(props, { emit }) {
     const router = useRouter()
     const { t, locale } = useI18n()
     const projects = ref([])
@@ -257,10 +255,8 @@ export default {
     }
 
     const viewProject = (project) => {
-      router.push({
-        name: 'ProjectDetail',
-        params: { id: project.id }
-      })
+      // 发出项目选择事件，让父组件处理跳转逻辑
+      emit('projectSelected', project)
     }
 
     const editProject = (project) => {
@@ -288,19 +284,7 @@ export default {
       project.imageLoaded = true
     }
 
-    const debugProjects = () => {
-      console.log('=== 项目数据调试 ===')
-      console.log('所有项目:', projects.value)
-      projects.value.forEach((project, index) => {
-        console.log(`项目 ${index + 1}:`, {
-          id: project.id,
-          name: project.name,
-          avatar: project.avatar,
-          owner: project.owner,
-          status: project.status
-        })
-      })
-    }
+
 
     const formatDate = (dateString) => {
       return new Date(dateString).toLocaleDateString(locale.value === 'en' ? 'en-US' : 'zh-CN', {
@@ -371,8 +355,7 @@ export default {
       refreshProjects,
       jumpToPage,
       handleImageError,
-      handleImageLoad,
-      debugProjects
+      handleImageLoad
     }
   }
 }
@@ -472,27 +455,27 @@ export default {
   background: #667eea;
   color: white;
   border: none;
-  border-radius: 8px;
-  padding: 14px 20px;
+  border-radius: 6px;
+  padding: 8px 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  font-size: 16px;
+  gap: 6px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  box-shadow: 0 3px 8px rgba(102, 126, 234, 0.3);
 }
 
 .new-project-btn:hover {
   background: #5a6fd8;
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
 }
 
 .new-project-icon {
-  font-size: 20px;
+  font-size: 16px;
   font-weight: bold;
 }
 

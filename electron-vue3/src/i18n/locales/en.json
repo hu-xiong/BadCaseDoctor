@@ -117,7 +117,9 @@
     "localProxyInstallAgreeCheckbox": "I have read and understood the terms (install path, wake scheme, privacy)",
     "localProxyInstallDownloadBtn": "Download and save",
     "localProxyInstallConfirmBtn": "Agree and save",
-    "localProxyInstallSaving": "Writing…"
+    "localProxyInstallSaving": "Writing…",
+    "localProxyWin32InputMode": "win32-input-mode Protocol",
+    "localProxyWin32InputModeDesc": "Enable for Ctrl+Arrow, Shift+Arrow modifier key support"
   },
   "shell": {
     "toggleSidebar": "Toggle sidebar",
@@ -129,6 +131,7 @@
     "profile": "Profile",
     "preferences": "Preferences",
     "settings": "Settings",
+    "projectManagement": "Projects",
     "logout": "Log out",
     "userFallback": "User",
     "emailFallback": "user@example.com"

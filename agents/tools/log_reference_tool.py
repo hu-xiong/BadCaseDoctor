@@ -22,23 +22,40 @@ class LogReferenceTool(BaseTool):
     
     def parse_reference(self, reference: str) -> Optional[Dict]:
         """解析引用字符串"""
-        pattern = r'@log:(session_[a-f0-9]+)#L(\d+)-L(\d+)'
-        match = re.match(pattern, reference)
-        if not match:
-            return None
+        # 支持两种格式：
+        # 1. 旧格式：@log:session_<id>#L<start>-L<end>
+        # 2. 新格式：📱 Terminal <start>-<end>
         
-        session_id = match.group(1)
-        start_line = int(match.group(2))
-        end_line = int(match.group(3))
+        # 尝试匹配新格式
+        new_pattern = r'📱 Terminal (\d+)-(\d+)'
+        new_match = re.match(new_pattern, reference)
+        if new_match:
+            start_line = int(new_match.group(1))
+            end_line = int(new_match.group(2))
+            if start_line > end_line:
+                return None
+            return {
+                'session_id': 'default',  # 使用默认会话
+                'start_line': start_line,
+                'end_line': end_line
+            }
         
-        if start_line > end_line:
-            return None
+        # 尝试匹配旧格式
+        old_pattern = r'@log:(session_[a-f0-9]+)#L(\d+)-L(\d+)'
+        old_match = re.match(old_pattern, reference)
+        if old_match:
+            session_id = old_match.group(1)
+            start_line = int(old_match.group(2))
+            end_line = int(old_match.group(3))
+            if start_line > end_line:
+                return None
+            return {
+                'session_id': session_id,
+                'start_line': start_line,
+                'end_line': end_line
+            }
         
-        return {
-            'session_id': session_id,
-            'start_line': start_line,
-            'end_line': end_line
-        }
+        return None
     
     async def execute(self, **kwargs: Dict) -> Dict:
         reference = str(kwargs.get("reference") or "").strip()

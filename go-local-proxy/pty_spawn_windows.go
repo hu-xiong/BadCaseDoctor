@@ -28,13 +28,256 @@ type interactiveShell struct {
 	pipeStdoutUTF16 bool
 }
 
-type conptyStdin struct{ c *conpty.ConPty }
+type conptyStdin struct {
+	c *conpty.ConPty
+	t *conpty.InputTransformer
+}
+
+// CSI sequence buffer for handling partial sequences
+type csiBuffer struct {
+	data []byte
+}
+
+func (cb *csiBuffer) append(b byte) {
+	cb.data = append(cb.data, b)
+}
+
+func (cb *csiBuffer) reset() {
+	cb.data = cb.data[:0]
+}
+
+func (cb *csiBuffer) isCSI() bool {
+	return len(cb.data) >= 2 && cb.data[0] == 0x1B && cb.data[1] == '['
+}
+
+// parseCSIParams parses a CSI sequence and extracts parameters.
+// Returns (params, final byte, success)
+func parseCSIParams(data []byte) (params []int, final byte, ok bool) {
+	if len(data) < 3 || data[0] != 0x1B || data[1] != '[' {
+		return nil, 0, false
+	}
+	data = data[2:] // Skip ESC [
+
+	paramStr := ""
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if c >= '0' && c <= '9' || c == ';' {
+			paramStr += string(c)
+		} else if c >= 0x40 && c <= 0x7E {
+			final = c
+			ok = true
+			break
+		}
+	}
+
+	if !ok {
+		return nil, 0, false
+	}
+
+	// Parse parameters separated by semicolons
+	parts := strings.Split(paramStr, ";")
+	for _, part := range parts {
+		if part == "" {
+			params = append(params, 0)
+		} else {
+			var p int
+			fmt.Sscanf(part, "%d", &p)
+			params = append(params, p)
+		}
+	}
+
+	return params, final, true
+}
+
+// CSI modifiers from xterm (same as conpty_csi.go)
+const (
+	CSIParamNone = 0
+)
+
+// HandleCSIInput handles a complete CSI sequence and sends appropriate INPUT_RECORD.
+// Returns the number of INPUT_RECORDs processed.
+func (w *conptyStdin) HandleCSIInput(csiData []byte) (int, error) {
+	params, final, ok := parseCSIParams(csiData)
+	if !ok {
+		return 0, nil
+	}
+
+	// Extract key parameter and modifier
+	keyParam := 0
+	modifier := 0
+	if len(params) > 0 {
+		keyParam = params[0]
+	}
+	if len(params) > 1 {
+		modifier = params[1]
+	}
+
+	// Handle ~ format (CSI <num> [;<mod>] ~)
+	if final == '~' {
+		vk, ok := csiTildeToVK[keyParam]
+		if !ok {
+			return 0, nil
+		}
+		ctrlState := CSIParamToModifier(modifier)
+		keyEvent := conpty.NewKeyEventRecord(vk, ctrlState, true)
+		rec := keyEvent.ToINPUTRecord()
+
+		var records []conpty.INPUT_RECORD
+		records = append(records, rec)
+
+		// For special keys like Delete, we send both key down and key up
+		// Some applications expect both events
+		if vk == conpty.VK_DELETE || vk == conpty.VK_HOME || vk == conpty.VK_END ||
+			vk == conpty.VK_INSERT || vk == conpty.VK_PRIOR || vk == conpty.VK_NEXT ||
+			vk >= conpty.VK_F1 && vk <= conpty.VK_F12 {
+			keyUp := conpty.NewKeyEventRecord(vk, ctrlState, false)
+			records = append(records, keyUp.ToINPUTRecord())
+		}
+
+		n, err := w.c.WriteConsoleInput(records)
+		return int(n), err
+	}
+
+	// Handle letter format (CSI <num> [;<mod>] <letter>)
+	// Arrow keys: CSI A/B/C/D with optional modifiers
+	vk, ok := csiLetterToVK[final]
+	if !ok {
+		return 0, nil
+	}
+	ctrlState := CSIParamToModifier(modifier)
+	keyEvent := conpty.NewKeyEventRecord(vk, ctrlState, true)
+	rec := keyEvent.ToINPUTRecord()
+
+	var records []conpty.INPUT_RECORD
+	records = append(records, rec)
+
+	// Send key up event
+	keyUp := conpty.NewKeyEventRecord(vk, ctrlState, false)
+	records = append(records, keyUp.ToINPUTRecord())
+
+	n, err := w.c.WriteConsoleInput(records)
+	return int(n), err
+}
+
+// CSI tilde to VK mapping
+var csiTildeToVK = map[int]uint16{
+	1:  conpty.VK_HOME,    // Home
+	2:  conpty.VK_INSERT,   // Insert
+	3:  conpty.VK_DELETE,  // Delete
+	4:  conpty.VK_END,     // End
+	5:  conpty.VK_PRIOR,   // Page Up
+	6:  conpty.VK_NEXT,    // Page Down
+	11: conpty.VK_F1,
+	12: conpty.VK_F2,
+	13: conpty.VK_F3,
+	14: conpty.VK_F4,
+	15: conpty.VK_F5,
+	16: conpty.VK_F6,
+	17: conpty.VK_F7,
+	18: conpty.VK_F8,
+	19: conpty.VK_F9,
+	20: conpty.VK_F10,
+	21: conpty.VK_F11,
+	23: conpty.VK_F12,
+}
+
+// CSI letter to VK mapping
+var csiLetterToVK = map[byte]uint16{
+	'A': conpty.VK_UP,     // Up
+	'B': conpty.VK_DOWN,   // Down
+	'C': conpty.VK_RIGHT,  // Right
+	'D': conpty.VK_LEFT,   // Left
+	'H': conpty.VK_HOME,  // Home
+	'F': conpty.VK_END,   // End
+}
+
+// CSI modifier to control key state
+var csiModifierToCtrlState = map[int]uint32{
+	0: 0,
+	2: conpty.LEFT_SHIFT_PRESSED | conpty.RIGHT_SHIFT_PRESSED,
+	3: conpty.LEFT_ALT_PRESSED | conpty.RIGHT_ALT_PRESSED,
+	4: conpty.LEFT_SHIFT_PRESSED | conpty.RIGHT_SHIFT_PRESSED | conpty.LEFT_ALT_PRESSED | conpty.RIGHT_ALT_PRESSED,
+	5: conpty.LEFT_CTRL_PRESSED | conpty.RIGHT_CTRL_PRESSED,
+	6: conpty.LEFT_SHIFT_PRESSED | conpty.RIGHT_SHIFT_PRESSED | conpty.LEFT_CTRL_PRESSED | conpty.RIGHT_CTRL_PRESSED,
+	7: conpty.LEFT_ALT_PRESSED | conpty.RIGHT_ALT_PRESSED | conpty.LEFT_CTRL_PRESSED | conpty.RIGHT_CTRL_PRESSED,
+	8: conpty.LEFT_SHIFT_PRESSED | conpty.RIGHT_SHIFT_PRESSED | conpty.LEFT_ALT_PRESSED | conpty.RIGHT_ALT_PRESSED | conpty.LEFT_CTRL_PRESSED | conpty.RIGHT_CTRL_PRESSED,
+}
+
+func CSIParamToModifier(modifier int) uint32 {
+	if state, ok := csiModifierToCtrlState[modifier]; ok {
+		return state
+	}
+	return 0
+}
 
 func (w *conptyStdin) Write(p []byte) (int, error) {
 	if w.c == nil {
 		return 0, io.ErrClosedPipe
 	}
-	return w.c.Write(p)
+
+	// Process the input
+	result := make([]byte, 0, len(p))
+	i := 0
+	for i < len(p) {
+		b := p[i]
+
+		// Check for CSI sequence start
+		if b == 0x1B && i+1 < len(p) && p[i+1] == '[' {
+			// Try to find the complete CSI sequence
+			j := i + 2
+			for j < len(p) && j < i+20 { // Limit search to prevent runaway
+				c := p[j]
+				if c >= 0x40 && c <= 0x7E {
+					// Found final byte
+					csiSeq := p[i : j+1]
+
+					// Tilde format: CSI <num> [;<mod>] ~ (Home, End, Delete, F1-F12, etc.)
+					if csiSeq[len(csiSeq)-1] == '~' {
+						n, err := w.HandleCSIInput(csiSeq)
+						if err == nil && n > 0 {
+							i = j + 1
+							continue
+						}
+					}
+
+					// Letter format: CSI A/B/C/D (arrow keys)
+					if vk, ok := csiLetterToVK[c]; ok {
+						ctrlState := CSIParamToModifier(0)
+						keyEvent := conpty.NewKeyEventRecord(vk, ctrlState, true)
+						records := []conpty.INPUT_RECORD{keyEvent.ToINPUTRecord()}
+						// Send key up
+						keyUp := conpty.NewKeyEventRecord(vk, ctrlState, false)
+						records = append(records, keyUp.ToINPUTRecord())
+
+						n, err := w.c.WriteConsoleInput(records)
+						if err == nil && n > 0 {
+							i = j + 1
+							continue
+						}
+					}
+
+					break
+				}
+				j++
+			}
+		}
+
+		// DEL (0x7F) → BS (0x08) conversion for Windows console compatibility
+		if b == 0x7F {
+			result = append(result, 0x08)
+			i++
+			continue
+		}
+
+		// Regular character - pass through
+		result = append(result, b)
+		i++
+	}
+
+	if len(result) > 0 {
+		return w.c.Write(result)
+	}
+	return len(p), nil
 }
 
 func (w *conptyStdin) Close() error { return nil }
@@ -134,9 +377,10 @@ func buildPowerShellCommandLine() string {
 }
 
 func newConptyInteractive(c *conpty.ConPty) *interactiveShell {
+	transformer := conpty.NewInputTransformer()
 	return &interactiveShell{
 		cpty:   c,
-		Stdin:  &conptyStdin{c: c},
+		Stdin:  &conptyStdin{c: c, t: transformer},
 		Stdout: &conptyStdout{c: c},
 	}
 }

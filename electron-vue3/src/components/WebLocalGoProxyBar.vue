@@ -50,6 +50,17 @@
       <p v-else-if="!proxyActionBusy" class="wlgp-popover-body wlgp-popover-muted">
         {{ t('embeddedTerminal.localProxyPopoverIdleShort') }}
       </p>
+      <div v-if="!proxyActionBusy && localGoProxyOk === true" class="wlgp-win32-section">
+        <label class="wlgp-win32-label">
+          <input
+            type="checkbox"
+            :checked="win32InputModeEnabled"
+            @change="handleWin32Toggle"
+          />
+          <span>{{ t('embeddedTerminal.localProxyWin32InputMode') }}</span>
+        </label>
+        <span class="wlgp-win32-desc">{{ t('embeddedTerminal.localProxyWin32InputModeDesc') }}</span>
+      </div>
       <button type="button" class="wlgp-recheck wlgp-recheck--solo" @click="onProxyRecheck">
         {{ t('embeddedTerminal.localProxyRecheck') }}
       </button>
@@ -76,7 +87,9 @@ import { isElectronShell } from '../utils/electronPtySocketAdapter.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
   localGoProxyLastError as sharedLocalGoProxyLastError,
-  pingLocalGoProxy as sharedPingLocalGoProxy
+  pingLocalGoProxy as sharedPingLocalGoProxy,
+  win32InputModeEnabled,
+  setWin32InputMode
 } from '../composables/useLocalGoProxyStatus'
 import {
   detectClientOS,
@@ -186,6 +199,10 @@ const proxyPillLabel = computed(() => {
 function onProxyRecheck() {
   proxyInlineError.value = ''
   pingLocalGoProxy()
+}
+
+function handleWin32Toggle() {
+  setWin32InputMode(!win32InputModeEnabled.value)
 }
 
 function onProxyDownloadProgress(pct, phase) {
@@ -473,6 +490,37 @@ onMounted(() => {
   color: #ffab91;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.wlgp-win32-section {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+
+.wlgp-win32-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.wlgp-win32-label input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.wlgp-win32-desc {
+  display: block;
+  margin-top: 4px;
+  margin-left: 22px;
+  font-size: 10px;
+  color: #888;
+  line-height: 1.4;
 }
 
 .wlgp-recheck {

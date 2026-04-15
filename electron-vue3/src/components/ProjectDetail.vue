@@ -13,6 +13,7 @@
     @showHelp="openHelpWorkbenchTab"
     @openSettings="openAppSettings"
     @logout="logout"
+    @showProjectManagement="openProjectManagementWorkbenchTab"
   >
 
     <div class="main-container">
@@ -589,6 +590,12 @@
           :project-id="projectId"
           :visible="isNotificationsWorkbenchTab"
         />
+        <component
+          :is="ProjectManage"
+          v-else-if="isProjectManagementWorkbenchTab"
+          :visible="isProjectManagementWorkbenchTab"
+          @project-selected="handleProjectSelected"
+        />
         <keep-alive v-else :max="16">
           <component
             :key="listPanelCacheKey"
@@ -1069,6 +1076,7 @@ import TestCaseListPanel from './panels/TestCaseListPanel.vue'
 import NewBadcase from './NewBadcase.vue'
 import NewBug from './NewBug.vue'
 import NewTestCase from './NewTestCase.vue'
+import ProjectManage from './ProjectManage.vue'
 import userStore from '../store/user.js'
 import { persistStableCreatedId, getStableCreatedId } from '../utils/createPreviewKeys.js'
 import { useLocalGoProxyStatus } from '../composables/useLocalGoProxyStatus'
@@ -1346,6 +1354,7 @@ export default {
     const activeWorkbenchTabId = ref(null)
     const isSettingsWorkbenchTab = computed(() => activeWorkbenchTabId.value === SETTINGS_WORKBENCH_TAB_ID)
     const isHelpWorkbenchTab = computed(() => activeWorkbenchTabId.value === HELP_WORKBENCH_TAB_ID)
+    const isProjectManagementWorkbenchTab = computed(() => activeWorkbenchTabId.value === 'project-management')
     const isNotificationsWorkbenchTab = computed(
       () => activeWorkbenchTabId.value === NOTIFICATIONS_WORKBENCH_TAB_ID
     )
@@ -5137,6 +5146,37 @@ export default {
       scrollActiveWorkbenchTabIntoView()
     }
 
+    const openProjectManagementWorkbenchTab = async () => {
+      showUserDropdown.value = false
+      clearEmbeddedEditor()
+      const PROJECT_MANAGEMENT_WORKBENCH_TAB_ID = 'project-management'
+      const tab = {
+        id: PROJECT_MANAGEMENT_WORKBENCH_TAB_ID,
+        kind: 'projectManagement',
+        title: truncateForTab('项目管理', '项目管理'),
+        meta: {}
+      }
+      const idx = workbenchTabs.value.findIndex((x) => x.id === PROJECT_MANAGEMENT_WORKBENCH_TAB_ID)
+      if (idx >= 0) {
+        workbenchTabs.value[idx] = { ...workbenchTabs.value[idx], ...tab }
+      } else {
+        const cur = workbenchTabs.value.findIndex((x) => x.id === activeWorkbenchTabId.value)
+        const insertAt = cur >= 0 ? cur + 1 : workbenchTabs.value.length
+        workbenchTabs.value.splice(insertAt, 0, tab)
+      }
+      await activateWorkbenchTab(PROJECT_MANAGEMENT_WORKBENCH_TAB_ID)
+      await nextTick()
+      scrollActiveWorkbenchTabIntoView()
+    }
+
+    const handleProjectSelected = (project) => {
+      // 跳转到选中的项目详情页
+      router.push({
+        name: 'ProjectDetail',
+        params: { id: project.id }
+      })
+    }
+
     const openNotificationsWorkbenchTab = async () => {
       showUserDropdown.value = false
       clearEmbeddedEditor()
@@ -6376,6 +6416,7 @@ export default {
       AppSettingsPanel,
       ProjectHelpPanel,
       WorkflowNotificationsPanel,
+      ProjectManage,
       projectName,
       projectId,
       planSearchText,
@@ -6535,10 +6576,13 @@ export default {
       toggleUserDropdown,
       openAppSettings,
       openHelpWorkbenchTab,
+      openProjectManagementWorkbenchTab,
+      handleProjectSelected,
       openNotificationsWorkbenchTab,
       closeAppSettingsWorkbenchTab,
       isSettingsWorkbenchTab,
       isHelpWorkbenchTab,
+      isProjectManagementWorkbenchTab,
       isNotificationsWorkbenchTab,
       appSettingsInitialPane,
       t,

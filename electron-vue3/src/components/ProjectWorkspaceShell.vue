@@ -73,6 +73,10 @@
               <span class="menu-icon">❓</span>
               <span class="menu-text">{{ t('shell.help') }}</span>
             </div>
+            <div class="menu-item" @click="$emit('showProjectManagement')">
+              <span class="menu-icon">📋</span>
+              <span class="menu-text">{{ t('shell.projectManagement') }}</span>
+            </div>
             <div class="menu-divider"></div>
             <div class="menu-item logout-item" @click="$emit('logout')">
               <span class="menu-icon">🚪</span>
@@ -123,7 +127,8 @@ defineEmits([
   'showNotifications',
   'showHelp',
   'openSettings',
-  'logout'
+  'logout',
+  'showProjectManagement'
 ])
 </script>
 

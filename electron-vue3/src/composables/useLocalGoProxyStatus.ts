@@ -10,6 +10,31 @@ export const localGoProxyOk = ref<boolean | null>(null)
 export const localGoProxyLastCheckAt = ref<number | null>(null)
 export const localGoProxyLastError = ref<string | null>(null)
 
+// win32-input-mode 协议开关
+export const win32InputModeEnabled = ref<boolean>(true)
+const STORAGE_KEY_WIN32 = 'badcase-win32-input-mode'
+
+function loadWin32Setting() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_WIN32)
+    if (stored !== null) return stored === 'true'
+  } catch { /* ignore */ }
+  return true
+}
+
+export function setWin32InputMode(enabled: boolean) {
+  win32InputModeEnabled.value = enabled
+  try {
+    localStorage.setItem(STORAGE_KEY_WIN32, String(enabled))
+  } catch { /* ignore */ }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('badcase-win32-input-mode-changed', { detail: { enabled } }))
+  }
+}
+
+// 初始化
+win32InputModeEnabled.value = loadWin32Setting()
+
 const POLL_OK_MS = 20_000
 const POLL_DOWN_MS = 5_000
 const FETCH_TIMEOUT_MS = 3_000
