@@ -88,7 +88,9 @@
     </div>
 
     <!-- 壳下方内容由外部挂载 -->
-    <slot />
+    <div class="shell-content">
+      <slot />
+    </div>
   </div>
 </template>
 
@@ -138,6 +140,13 @@ defineEmits([
   display: flex;
   flex-direction: column;
   background: #f8f9fa;
+}
+
+.shell-content {
+  display: flex;
+  flex: 1;
+  height: 100%;
+  overflow: hidden;
 }
 
 /* 叠在右侧 fixed 对话层之上，避免全高侧栏挡住顶栏点击；对话层仍从视口顶铺满（类似 Cursor 覆盖） */

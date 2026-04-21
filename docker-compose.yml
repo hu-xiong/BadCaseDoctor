@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    container_name: badcasedoctor-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: badcasedoctor
+      MYSQL_USER: badcasedoctor
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - badcasedoctor-network
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: badcasedoctor-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - badcasedoctor-network
+
+  # Go后端服务
+  backend:
+    build:
+      context: ./backend-go
+      dockerfile: Dockerfile
+    container_name: badcasedoctor-backend
+    environment:
+      DATABASE_URL: "badcasedoctor:password@tcp(mysql:3306)/badcasedoctor?charset=utf8mb4&parseTime=True&loc=Local"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      JWT_SECRET: "your-jwt-secret-key-here"
+      ENVIRONMENT: production
+      PORT: 8000
+      SMTP_HOST: "smtp.gmail.com"
+      SMTP_PORT: "587"
+      SMTP_USERNAME: "your-email@gmail.com"
+      SMTP_PASSWORD: "your-app-password"
+      FROM_EMAIL: "your-email@gmail.com"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+      - redis
+    networks:
+      - badcasedoctor-network
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  badcasedoctor-network:
+    driver: bridge

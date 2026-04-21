@@ -116,6 +116,10 @@ export function publishProject(id) {
 export function revokeProject(id) {
   return api.post(`/api/projects/${id}/revoke`)
 }
+// 删除项目
+export function deleteProject(id) {
+  return api.delete(`/api/projects/${id}`)
+}
 
 // 上传头像
 export function uploadAvatar(file, projectId = null) {
@@ -310,6 +314,28 @@ export function getProjectTestCases(projectId, page = 1, perPage = 10, params = 
   return api.get(`/api/projects/${projectId}/testcases?${queryParams}`)
 }
 
+// ==================== 基线 API ====================
+
+// 获取计划的基线列表
+export function getPlanBaselines(planId) {
+  return api.get(`/api/plans/${planId}/baselines`)
+}
+
+// 创建基线
+export function createBaseline(data) {
+  return api.post('/api/baselines', data)
+}
+
+// 获取基线详情
+export function getBaselineDetail(baselineId) {
+  return api.get(`/api/baselines/${baselineId}`)
+}
+
+// 删除基线
+export function deleteBaseline(baselineId) {
+  return api.delete(`/api/baselines/${baselineId}`)
+}
+
 // 站内工作流通知（与邮件/CLI 同源落库）
 export function getWorkflowNotifications(params = {}) {
   return api.get('/api/notifications', { params })
@@ -333,6 +359,102 @@ export function executeAgent(data) {
 // 保存 Agent 生成的 Bug
 export function saveAgentBugs(data) {
   return api.post('/api/agent/save-bugs', data)
+}
+
+// ==================== 快速命令 API ====================
+
+export function getQuickCommands(projectId = null) {
+  const params = projectId ? { project_id: projectId } : {}
+  return api.get('/api/terminal/quick-commands', { params })
+}
+
+export function createQuickCommand(data) {
+  return api.post('/api/terminal/quick-commands', data)
+}
+
+export function deleteQuickCommand(id) {
+  return api.delete(`/api/terminal/quick-commands/${id}`)
+}
+
+// ==================== Card API ====================
+
+// 创建卡片
+export function createCard(data) {
+  return api.post('/api/cards', data)
+}
+
+// 获取项目卡片列表
+export function getProjectCards(projectId, page = 1, perPage = 10, additionalParams = {}) {
+  const params = { page, per_page: perPage, ...additionalParams }
+  return api.get(`/api/projects/${projectId}/cards`, { params })
+}
+
+// 获取卡片详情
+export function getCardDetail(cardId) {
+  return api.get(`/api/cards/${cardId}`)
+}
+
+// 更新卡片
+export function updateCard(cardId, data) {
+  return api.put(`/api/cards/${cardId}`, data)
+}
+
+// 删除卡片
+export function deleteCard(cardId) {
+  return api.delete(`/api/cards/${cardId}`)
+}
+
+// 全局搜索卡片
+export function searchCards(params) {
+  const { query, types = 'bug,badcase,testcase', project_id, page = 1, per_page = 20 } = params
+  const configParams = { query, types, page, per_page }
+  if (project_id) configParams.project_id = project_id
+  return api.get('/api/cards/search', { params: configParams })
+}
+
+// 移动卡片到指定计划
+export function moveCard(cardId, planId) {
+  return api.post(`/api/cards/${cardId}/move`, { plan_id: planId })
+}
+
+// 获取卡片类型列表
+export function getCardTypes(projectId) {
+  return api.get('/api/card-types', { params: { project_id: projectId } })
+}
+
+// 创建卡片类型
+export function createCardType(data) {
+  return api.post('/api/card-types', data)
+}
+
+// 更新卡片类型
+export function updateCardType(typeId, data) {
+  return api.put(`/api/card-types/${typeId}`, data)
+}
+
+// 删除卡片类型
+export function deleteCardType(typeId) {
+  return api.delete(`/api/card-types/${typeId}`)
+}
+
+// 获取卡片计划关联关系
+export function getCardPlanRelations(params) {
+  return api.get('/api/card-plan-relations', { params })
+}
+
+// 创建卡片计划关联
+export function createCardPlanRelation(data) {
+  return api.post('/api/card-plan-relations', data)
+}
+
+// 删除卡片计划关联
+export function deleteCardPlanRelation(relationId) {
+  return api.delete(`/api/card-plan-relations/${relationId}`)
+}
+
+// 获取卡片计划变更历史
+export function getCardPlanHistory(cardId) {
+  return api.get(`/api/cards/${cardId}/history`)
 }
 
 export default api 

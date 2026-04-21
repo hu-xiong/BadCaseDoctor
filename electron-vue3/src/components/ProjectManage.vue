@@ -100,7 +100,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { getProjects } from '../api.js'
+import { getProjects, deleteProject as deleteProjectApi } from '../api.js'
 import api from '../api.js'
 
 export default {
@@ -266,10 +266,16 @@ export default {
       })
     }
 
-    const deleteProject = (id) => {
+    const deleteProject = async (id) => {
       if (confirm(t('projectList.deleteConfirm'))) {
-        console.log('删除项目:', id)
-        // 这里添加删除逻辑
+        try {
+          await deleteProjectApi(id)
+          alert(t('projectList.deleteSuccess') || '删除成功')
+          refreshProjects()
+        } catch (error) {
+          console.error('删除项目失败:', error)
+          alert(error.response?.data?.error || t('projectList.deleteFailed') || '删除失败')
+        }
       }
     }
 

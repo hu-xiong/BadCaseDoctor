@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 )
 
 // 每个会话只打一次：transform 把整段输出吃成空（误判 UTF-16 等）时便于发现。
@@ -120,11 +119,15 @@ func (sm *ptySessionMap) start(clientSessionID, cwd string, cols, rows int, writ
 					outCarry = nil
 					out = append([]byte(nil), buf[:n]...)
 				}
-				if ptyDebugEnabled() {
-					outChunkSeq++
-					log.Printf("[pty-debug] stdout read id=%q #%d raw=%d out=%d carry_left=%d",
-						clientSessionID, outChunkSeq, n, len(out), len(outCarry))
+			if ptyDebugEnabled() {
+				outChunkSeq++
+				headN := n
+				if headN > 128 {
+					headN = 128
 				}
+				log.Printf("[pty-debug] stdout read id=%q #%d raw=%d out=%d carry_left=%d first_bytes=%x",
+					clientSessionID, outChunkSeq, n, len(out), len(outCarry), buf[:headN])
+			}
 				if n > 0 && len(out) == 0 {
 					if _, already := ptyEmptyTransformOnce.LoadOrStore(clientSessionID, true); !already {
 						headN := n
@@ -177,6 +180,13 @@ func (sm *ptySessionMap) writeInput(clientSessionID, b64 string) error {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		return err
+	}
+	if ptyDebugEnabled() && len(raw) > 0 {
+		headN := len(raw)
+		if headN > 64 {
+			headN = 64
+		}
+		log.Printf("[pty-debug] term_input id=%q bytes=%d first=%x", clientSessionID, len(raw), raw[:headN])
 	}
 	_, err = s.sh.Stdin.Write(raw)
 	return err

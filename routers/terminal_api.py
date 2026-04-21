@@ -354,3 +354,133 @@ def audit_export_csv():
         )
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ---------- 快速命令 (Quick Commands) ----------
+
+
+@terminal_bp.route("/quick-commands", methods=["GET"])
+@login_required
+def quick_command_list():
+    """获取当前用户的快速命令列表"""
+    try:
+        from app import db, QuickCommand
+
+        project_id = request.args.get("project_id")
+        query = db.session.query(QuickCommand).filter(QuickCommand.user_id == current_user.id)
+        if project_id:
+            query = query.filter(
+                (QuickCommand.project_id == int(project_id)) | (QuickCommand.project_id.is_(None))
+            )
+
+        rows = query.order_by(QuickCommand.created_at.desc()).all()
+        items = [
+            {
+                "id": r.id,
+                "name": r.name,
+                "command": r.command,
+                "project_id": r.project_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+        return jsonify({"success": True, "items": items})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@terminal_bp.route("/quick-commands", methods=["POST"])
+@login_required
+def quick_command_create():
+    """新建快速命令"""
+    try:
+        from app import db, QuickCommand
+
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        command = (data.get("command") or "").strip()
+        project_id = data.get("project_id")
+
+        if not name or not command:
+            return jsonify({"success": False, "error": "name 和 command 不能为空"}), 400
+
+        qc = QuickCommand(
+            user_id=current_user.id,
+            name=name[:100],
+            command=command,
+            project_id=int(project_id) if project_id else None,
+        )
+        db.session.add(qc)
+        db.session.commit()
+
+        return jsonify(
+            {
+                "success": True,
+                "item": {
+                    "id": qc.id,
+                    "name": qc.name,
+                    "command": qc.command,
+                    "project_id": qc.project_id,
+                    "created_at": qc.created_at.isoformat() if qc.created_at else None,
+                },
+            }
+        )
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@terminal_bp.route("/quick-commands/<int:cmd_id>", methods=["DELETE"])
+@login_required
+def quick_command_delete(cmd_id):
+    """删除快速命令"""
+    try:
+        from app import db, QuickCommand
+
+        row = db.session.query(QuickCommand).filter(QuickCommand.id == cmd_id, QuickCommand.user_id == current_user.id).first()
+        if not row:
+            return jsonify({"success": False, "error": "记录不存在"}), 404
+
+        db.session.delete(row)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@terminal_bp.route("/quick-commands/sync", methods=["POST"])
+@login_required
+def quick_command_sync():
+    """批量同步快速命令（全量替换）"""
+    try:
+        from app import db, QuickCommand
+
+        data = request.get_json() or {}
+        commands = data.get("commands", [])
+        project_id = data.get("project_id")
+
+        # 删除该用户/项目的旧命令
+        db.session.query(QuickCommand).filter(
+            QuickCommand.user_id == current_user.id,
+            QuickCommand.project_id == (int(project_id) if project_id else None),
+        ).delete()
+        db.session.flush()
+
+        # 批量插入新命令
+        for i, cmd in enumerate(commands):
+            if not cmd.get("name") or not cmd.get("command"):
+                continue
+            qc = QuickCommand(
+                user_id=current_user.id,
+                name=cmd["name"][:100],
+                command=cmd["command"],
+                project_id=int(project_id) if project_id else None,
+            )
+            db.session.add(qc)
+
+        db.session.commit()
+        return jsonify({"success": True, "count": len(commands)})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500

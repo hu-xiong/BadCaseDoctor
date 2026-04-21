@@ -121,12 +121,18 @@ class BadCaseStatus(enum.Enum):
     RESOLVED = 'resolved'
     HOLD = 'hold'
     NOT_BADCASE = 'not_badcase'
+    UNPUBLISHED = 'unpublished'  # 兼容遗留数据
 
 class TestCaseStatus(enum.Enum):
     DRAFT = 'draft'        # 草稿
     REVIEW = 'review'      # 规绩
     ACTIVE = 'active'      # 生效
     ARCHIVED = 'archived'  # 归档
+
+class CardType(enum.Enum):
+    BUG = 'bug'
+    BADCASE = 'badcase'
+    TESTCASE = 'testcase'
 
 class ExecutionResult(enum.Enum):
     PASS = 'pass'
@@ -681,7 +687,7 @@ class User(UserMixin, db.Model):
 class UserCredits(db.Model):
     """用户额度表"""
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), unique=True, nullable=False)
+    user_id = db.Column(db.Integer, unique=True, nullable=False)
     credits = db.Column(db.Integer, default=0)  # 剩余使用次数
     total_purchased = db.Column(db.Integer, default=0)  # 累计购买次数
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -691,7 +697,7 @@ class UserCredits(db.Model):
 class PaymentHistory(db.Model):
     """支付历史记录"""
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     plan_id = db.Column(db.String(50), nullable=False)  # basic/standard/professional/enterprise
     credits = db.Column(db.Integer, nullable=False)  # 购买的额度
     amount = db.Column(db.Integer, nullable=False)  # 支付金额(美分)
@@ -710,49 +716,43 @@ class Project(db.Model):
     status = db.Column(db.String(20), default='published')  # published, unpublished
     login_configs = db.Column(db.Text)  # 网站登录配置 JSON: [{"url": "...", "username": "...", "password": "..."}]
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
 
 class ProjectPermission(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    project_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     role = db.Column(db.String(20), nullable=False)  # admin, collaborator
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    # 关系
-    project = db.relationship('Project', backref='permissions')
-    user = db.relationship('User', backref='project_permissions')
+
 
 class Team(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    project_id = db.Column(db.Integer, nullable=False)
+    creator_id = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    # 关系
-    project = db.relationship('Project', backref='teams')
-    creator = db.relationship('User', backref='created_teams')
+
 
 class TeamMember(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    team_id = db.Column(db.Integer, db.ForeignKey('team.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    team_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     role = db.Column(db.String(20), default='member')  # leader, member
     permissions = db.Column(db.Text)  # 权限JSON字符串
     joined_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    # 关系
-    team = db.relationship('Team', backref='members')
-    user = db.relationship('User', backref='team_memberships')
+    # 不使用 backref，避免依赖外键
 
 class BadCase(db.Model):
     __tablename__ = 'bad_case'
     id = db.Column(db.Integer, primary_key=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    plan_id = db.Column(db.Integer, db.ForeignKey('plan.id'))  # 关联计划
-    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    project_id = db.Column(db.Integer, nullable=False)
+    plan_id = db.Column(db.Integer)  # 关联计划
+    creator_id = db.Column(db.Integer, nullable=False)
     title = db.Column(db.String(200))  # BadCase标题
     case_category = db.Column(db.String(100), nullable=False)  # 问题分类
     base_problem = db.Column(db.Text, nullable=False)  # 具体问题
@@ -774,10 +774,7 @@ class BadCase(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # 关系
-    project = db.relationship('Project', backref='badcases')
-    plan_relation = db.relationship('Plan', backref='badcases')
-    creator = db.relationship('User', backref='created_badcases')
+
     
     def to_dict(self):
         """序列化为字典，处理枚举值"""
@@ -811,8 +808,8 @@ class BadCase(db.Model):
 class Comment(db.Model):
     __tablename__ = 'comment'
     id = db.Column(db.Integer, primary_key=True)
-    badcase_id = db.Column(db.Integer, db.ForeignKey('bad_case.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    badcase_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -825,24 +822,19 @@ class Plan(db.Model):
     status = db.Column(db.String(20), default='active')  # active, archived, completed
     priority = db.Column(db.String(10), default='medium')  # low, medium, high
     is_pinned = db.Column(db.Boolean, default=False)  # 是否置顶
+    is_default = db.Column(db.Boolean, default=False)  # 是否为默认迭代
     start_date = db.Column(db.Date)  # 开始日期
     end_date = db.Column(db.Date)  # 结束日期
     progress = db.Column(db.Float, default=0.0)  # 进度百分比 0-100
-    parent_id = db.Column(db.Integer, db.ForeignKey('plan.id'))  # 父计划ID，支持递归
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    assignee_id = db.Column(db.Integer, db.ForeignKey('user.id'))  # 负责人
-    cycle = db.Column(db.String(20))  # 计划周期：one_week, two_weeks, one_month, custom
-    plan_count = db.Column(db.Integer, default=1)  # 计划个数
+    parent_id = db.Column(db.Integer)  # 父计划ID，支持递归
+    project_id = db.Column(db.Integer, nullable=False)
+    creator_id = db.Column(db.Integer, nullable=False)
+    assignee_id = db.Column(db.Integer)  # 负责人
     scope_notification = db.Column(db.Boolean, default=False)  # 范围变更通知
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # 关系
-    parent = db.relationship('Plan', remote_side=[id], backref='children')
-    project = db.relationship('Project', backref='plans')
-    creator = db.relationship('User', foreign_keys=[creator_id], backref='created_plans')
-    assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_plans')
+
 
 class Bug(db.Model):
     __tablename__ = 'bug'
@@ -860,19 +852,15 @@ class Bug(db.Model):
     browser = db.Column(db.String(50))  # 浏览器
     os = db.Column(db.String(50))  # 操作系统
     # 可为空：与「未计划的 Bug」列表（plan_id IS NULL）一致
-    plan_id = db.Column(db.Integer, db.ForeignKey('plan.id'), nullable=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    assignee_id = db.Column(db.Integer, db.ForeignKey('user.id'))  # 负责人
+    plan_id = db.Column(db.Integer, nullable=True)
+    project_id = db.Column(db.Integer, nullable=False)
+    creator_id = db.Column(db.Integer, nullable=False)
+    assignee_id = db.Column(db.Integer)  # 负责人
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # 关系
-    plan = db.relationship('Plan', backref='bugs')
-    project = db.relationship('Project', backref='bugs')
-    creator = db.relationship('User', foreign_keys=[creator_id], backref='created_bugs')
-    assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_bugs')
+
 
 class TestCase(db.Model):
     __tablename__ = 'test_case'
@@ -896,7 +884,7 @@ class TestCase(db.Model):
     
     # 缺陷（执行信息）
     last_executed = db.Column(db.DateTime)  # 最后执行时间
-    executed_by = db.Column(db.Integer, db.ForeignKey('user.id'))  # 执行人
+    executed_by = db.Column(db.Integer)  # 执行人
     execution_result = db.Column(Enum(ExecutionResult, values_callable=lambda obj: [e.value for e in obj]), nullable=True)  # 执行结果：pass/fail/blocked/skip，NULL 表示未执行
     
     # 执行（测试集）
@@ -908,10 +896,10 @@ class TestCase(db.Model):
     remaining_time = db.Column(db.Float)  # 剩余工时（小时）
     
     # 关联信息
-    plan_id = db.Column(db.Integer, db.ForeignKey('plan.id'))  # 所属计划
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    assignee_id = db.Column(db.Integer, db.ForeignKey('user.id'))  # 维护人
+    plan_id = db.Column(db.Integer)  # 所属计划
+    project_id = db.Column(db.Integer, nullable=False)
+    creator_id = db.Column(db.Integer, nullable=False)
+    assignee_id = db.Column(db.Integer)  # 维护人
     
     # 版本信息
     version = db.Column(db.String(20), default='v1')  # 版本号
@@ -919,12 +907,7 @@ class TestCase(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # 关系
-    plan = db.relationship('Plan', backref='testcases')
-    project = db.relationship('Project', backref='testcases')
-    creator = db.relationship('User', foreign_keys=[creator_id], backref='created_testcases')
-    assignee = db.relationship('User', foreign_keys=[assignee_id], backref='assigned_testcases')
-    executor = db.relationship('User', foreign_keys=[executed_by], backref='executed_testcases')
+
     
     def to_dict(self):
         """序列化为字典，处理枚举值"""
@@ -956,6 +939,214 @@ class TestCase(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
+class Card(db.Model):
+    """统一的卡片模型，支持Bug、BadCase、TestCase三种类型"""
+    __tablename__ = 'card'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    type = db.Column(Enum(CardType, values_callable=lambda obj: [e.value for e in obj]), default=CardType.BADCASE, nullable=False)
+    priority = db.Column(db.String(10), default='p3')
+    assignee_id = db.Column(db.Integer)
+    project_id = db.Column(db.Integer, nullable=False)
+    creator_id = db.Column(db.Integer, nullable=False)
+    plan_id = db.Column(db.Integer, nullable=True)
+    description = db.Column(db.Text)
+    
+    # Bug特有字段
+    severity = db.Column(db.String(20))
+    steps_to_reproduce = db.Column(db.Text)
+    expected_result = db.Column(db.Text)
+    actual_result = db.Column(db.Text)
+    bug_type = db.Column(db.String(50))
+    environment = db.Column(db.String(100))
+    browser = db.Column(db.String(50))
+    os = db.Column(db.String(50))
+    
+    # BadCase特有字段
+    case_category = db.Column(db.String(100))
+    base_problem = db.Column(db.Text)
+    reproduction_steps = db.Column(db.Text)
+    badcase_result = db.Column(db.Text)
+    answer = db.Column(db.Text)
+    correct_answer = db.Column(db.Text)
+    problem_reason = db.Column(db.Text)
+    solution = db.Column(db.Text)
+    
+    # TestCase特有字段
+    case_type_test = db.Column(db.String(50))
+    test_type = db.Column(db.String(50))
+    preconditions = db.Column(db.Text)
+    steps = db.Column(db.JSON)
+    remark = db.Column(db.Text)
+    requirement_id = db.Column(db.Integer)
+    related_defects = db.Column(db.JSON)
+    last_executed = db.Column(db.DateTime)
+    executed_by = db.Column(db.Integer)
+    execution_result = db.Column(Enum(ExecutionResult, values_callable=lambda obj: [e.value for e in obj]))
+    baseline = db.Column(db.String(100))
+    estimated_time = db.Column(db.Float)
+    actual_time = db.Column(db.Float)
+    remaining_time = db.Column(db.Float)
+    version = db.Column(db.String(20), default='v1')
+    
+    # 数据迁移追溯字段
+    source_type = db.Column(db.String(30), nullable=True)  # 'bug', 'bad_case', 'test_case', NULL表示新创建的卡片
+    source_id = db.Column(db.Integer, nullable=True)  # 源表中的ID
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+
+    
+    def to_dict(self):
+        """序列化为字典，处理枚举值"""
+        result = {
+            'id': self.id,
+            'title': self.title,
+            'type': self.type.value if isinstance(self.type, CardType) else self.type,
+            'priority': self.priority,
+            'assignee_id': self.assignee_id,
+            'project_id': self.project_id,
+            'creator_id': self.creator_id,
+            'plan_id': self.plan_id,
+            'description': self.description,
+            'source_type': self.source_type,
+            'source_id': self.source_id,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+        
+        # 根据类型添加特定字段
+        if self.type == CardType.BUG:
+            result.update({
+                'severity': self.severity,
+                'steps_to_reproduce': self.steps_to_reproduce,
+                'expected_result': self.expected_result,
+                'actual_result': self.actual_result,
+                'bug_type': self.bug_type,
+                'environment': self.environment,
+                'browser': self.browser,
+                'os': self.os
+            })
+        elif self.type == CardType.BADCASE:
+            result.update({
+                'case_category': self.case_category,
+                'base_problem': self.base_problem,
+                'reproduction_steps': self.reproduction_steps,
+                'badcase_result': self.badcase_result,
+                'answer': self.answer,
+                'correct_answer': self.correct_answer,
+                'problem_reason': self.problem_reason,
+                'solution': self.solution
+            })
+        elif self.type == CardType.TESTCASE:
+            result.update({
+                'case_type_test': self.case_type_test,
+                'test_type': self.test_type,
+                'preconditions': self.preconditions,
+                'steps': self.steps,
+                'remark': self.remark,
+                'requirement_id': self.requirement_id,
+                'related_defects': self.related_defects,
+                'last_executed': self.last_executed.isoformat() if self.last_executed else None,
+                'executed_by': self.executed_by,
+                'execution_result': self.execution_result.value if self.execution_result and isinstance(self.execution_result, ExecutionResult) else self.execution_result,
+                'baseline': self.baseline,
+                'estimated_time': self.estimated_time,
+                'actual_time': self.actual_time,
+                'remaining_time': self.remaining_time,
+                'version': self.version
+            })
+        
+        return result
+
+
+class CardTypeDefinition(db.Model):
+    """卡片类型定义表 - 支持自定义卡片类型扩展"""
+    __tablename__ = 'card_type'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, nullable=False)
+    name = db.Column(db.String(50), nullable=False)  # 类型名称
+    code = db.Column(db.String(30), nullable=False, unique=True)  # 类型代码 (bug, badcase, testcase, 或自定义)
+    icon = db.Column(db.String(50))  # 图标
+    color = db.Column(db.String(20))  # 颜色
+    description = db.Column(db.Text)  # 描述
+    
+    # 字段配置 (JSON格式，定义该类型支持的字段)
+    fields_config = db.Column(db.JSON)  # {'severity': {'type': 'select', 'options': [...]}, ...}
+    
+    # 状态配置 (JSON格式，定义该类型的可用状态)
+    status_config = db.Column(db.JSON)  # ['open', 'in_progress', 'resolved', 'closed']
+    
+    is_active = db.Column(db.Boolean, default=True)  # 是否启用
+    sort_order = db.Column(db.Integer, default=0)  # 排序
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'name': self.name,
+            'code': self.code,
+            'icon': self.icon,
+            'color': self.color,
+            'description': self.description,
+            'fields_config': self.fields_config,
+            'status_config': self.status_config,
+            'is_active': self.is_active,
+            'sort_order': self.sort_order,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class CardPlanRelation(db.Model):
+    """卡片与计划的关联关系表 - 支持卡片在多个计划之间移动"""
+    __tablename__ = 'card_plan_relation'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    card_id = db.Column(db.Integer, nullable=False)
+    plan_id = db.Column(db.Integer, nullable=False)
+    
+    # 关联关系类型
+    relation_type = db.Column(db.String(20), default='primary')  # primary(主要), related(关联), blocked_by(被阻塞)
+    
+    # 在计划中的状态
+    status_in_plan = db.Column(db.String(20))  # 该卡片在该计划中的状态
+    
+    # 添加时间
+    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    removed_at = db.Column(db.DateTime, nullable=True)  # 移除时间 (软删除)
+    
+    # 排序
+    sort_order = db.Column(db.Integer, default=0)
+    
+
+    
+    # 复合唯一索引
+    __table_args__ = (
+        db.UniqueConstraint('card_id', 'plan_id', 'relation_type', name='uix_card_plan_type'),
+    )
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'card_id': self.card_id,
+            'plan_id': self.plan_id,
+            'relation_type': self.relation_type,
+            'status_in_plan': self.status_in_plan,
+            'added_at': self.added_at.isoformat() if self.added_at else None,
+            'removed_at': self.removed_at.isoformat() if self.removed_at else None,
+            'sort_order': self.sort_order
+        }
+
+
 class ProposalStatus(enum.Enum):
     """提案状态"""
     PENDING = 'pending'          # 待审核
@@ -971,8 +1162,8 @@ class Proposal(db.Model):
     __tablename__ = 'proposal'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False, index=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    project_id = db.Column(db.Integer, nullable=False, index=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
 
     # 多租户标识，对应沙箱中的 tenant_id（如 default / p{project_id}）
     tenant_id = db.Column(db.String(64), nullable=False, index=True)
@@ -1006,8 +1197,7 @@ class Proposal(db.Model):
     # 额外元数据，例如生成时使用的模型、提示词摘要等
     meta = db.Column(db.JSON)
 
-    project = db.relationship('Project', backref='proposals')
-    user = db.relationship('User', backref='proposals')
+
 
 
 class ProposalSnapshot(db.Model):
@@ -1015,7 +1205,7 @@ class ProposalSnapshot(db.Model):
     __tablename__ = 'proposal_snapshot'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    proposal_id = db.Column(db.Integer, db.ForeignKey('proposal.id', ondelete='CASCADE'),
+    proposal_id = db.Column(db.Integer,
                             nullable=False, index=True)
 
     tenant_id = db.Column(db.String(64), nullable=False, index=True)
@@ -1032,29 +1222,27 @@ class ProposalSnapshot(db.Model):
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
-    proposal = db.relationship('Proposal', backref='snapshots')
+
 
 class ChatSession(db.Model):
     __tablename__ = 'chat_session'
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    project_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     memory_enabled = db.Column(db.Boolean, default=True)
     memory_data = db.Column(db.Text)  # JSON格式存储
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # 关系
-    project = db.relationship('Project', backref='chat_sessions')
-    user = db.relationship('User', backref='chat_sessions')
+
 
 class ChatMessage(db.Model):
     __tablename__ = 'chat_message'
     id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.Integer, db.ForeignKey('chat_session.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    session_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer)
     is_user = db.Column(db.Boolean, default=True)
     content = db.Column(db.Text)
     understanding = db.Column(db.Text)
@@ -1069,9 +1257,7 @@ class ChatMessage(db.Model):
     final_response = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # 关系
-    session = db.relationship('ChatSession', backref='messages')
-    user = db.relationship('User', backref='chat_messages')
+    # 不使用 backref，避免依赖外键
 
 
 class DiffReviewState(db.Model):
@@ -1079,7 +1265,7 @@ class DiffReviewState(db.Model):
     __tablename__ = 'diff_review_state'
 
     id = db.Column(db.Integer, primary_key=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False, index=True)
+    project_id = db.Column(db.Integer, nullable=False, index=True)
     target = db.Column(db.String(32), nullable=False, index=True)  # badcase/bug/testcase
     target_id = db.Column(db.Integer, nullable=False, index=True)
     plan_id = db.Column(db.Integer, nullable=True, index=True)
@@ -1095,28 +1281,26 @@ class DiffReviewState(db.Model):
     adopted_at = db.Column(db.DateTime, nullable=True)
     rejected_at = db.Column(db.DateTime, nullable=True)
     # 待采纳/待拒绝 Diff 的操作者：仅该用户可见 pending 与可执行采纳/拒绝（NULL 为历史数据兼容）
-    operator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True, index=True)
+    operator_id = db.Column(db.Integer, nullable=True, index=True)
 
-    project = db.relationship('Project', backref='diff_review_states')
+    # 不使用 backref，避免依赖外键
 
 class BugComment(db.Model):
     __tablename__ = 'bug_comment'
     id = db.Column(db.Integer, primary_key=True)
-    bug_id = db.Column(db.Integer, db.ForeignKey('bug.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    bug_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    # 关系
-    bug = db.relationship('Bug', backref='comments')
-    user = db.relationship('User', backref='bug_comments')
+    # 不使用 backref，避免依赖外键
 
 class PromptTemplate(db.Model):
     __tablename__ = 'prompt_template'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     content = db.Column(db.Text, nullable=False)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
+    project_id = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -1142,11 +1326,23 @@ class TerminalAudit(db.Model):
     __tablename__ = 'terminal_audit'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=True, index=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    project_id = db.Column(db.Integer, nullable=True, index=True)
     event_type = db.Column(db.String(40), nullable=False)
     client_session_id = db.Column(db.String(64), nullable=True, index=True)
     detail = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class QuickCommand(db.Model):
+    """用户快速命令：云端同步，支持多项目。"""
+    __tablename__ = 'quick_command'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    project_id = db.Column(db.Integer, nullable=True, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    command = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -1155,14 +1351,14 @@ class WorkflowInAppNotification(db.Model):
     __tablename__ = 'workflow_in_app_notification'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    actor_id = db.Column(db.Integer, nullable=True)
     actor_name = db.Column(db.String(120), nullable=True)
     event = db.Column(db.String(40), nullable=False)
     entity_type = db.Column(db.String(20), nullable=False, index=True)
     entity_id = db.Column(db.Integer, nullable=False, index=True)
     title = db.Column(db.String(500), nullable=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=True, index=True)
+    project_id = db.Column(db.Integer, nullable=True, index=True)
     project_name = db.Column(db.String(200), nullable=True)
     status = db.Column(db.String(64), nullable=True)
     previous_status = db.Column(db.String(64), nullable=True)
@@ -1631,7 +1827,7 @@ def dashboard():
             'name': p.name,
             'description': p.description,
             'created_at': p.created_at.strftime('%Y-%m-%d'),
-            'badcases': [{'id': b.id} for b in p.badcases]
+            'badcases': [{'id': b.id} for b in BadCase.query.filter_by(project_id=p.id).limit(100).all()]
         })
     return render_template('dashboard.html', projects=projects, projects_json=projects_json)
 
@@ -3668,8 +3864,21 @@ def api_create_project():
             role='admin'
         )
         db.session.add(permission)
+        
+        # 创建默认迭代
+        default_plan = Plan(
+            name='迭代 1',
+            description='项目默认迭代',
+            plan_type='badcase',
+            status='active',
+            project_id=project.id,
+            creator_id=current_user.id,
+            is_default=True
+        )
+        db.session.add(default_plan)
         db.session.commit()
         print(f"已为用户 {current_user.id} 添加项目 {project.id} 的管理员权限")
+        print(f"已为项目 {project.id} 创建默认迭代，ID: {default_plan.id}")
         
         result = {
             'success': True,
@@ -3843,6 +4052,7 @@ def api_get_project_edit_context(project_id):
                 'status': plan.status,
                 'priority': plan.priority,
                 'is_pinned': plan.is_pinned,
+                'is_default': plan.is_default,
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
@@ -4249,6 +4459,102 @@ def api_revoke_project(project_id):
         
     except Exception as e:
         print(f"撤销发布项目时发生错误: {str(e)}")
+        print(f"错误类型: {type(e).__name__}")
+        import traceback
+        print(f"错误堆栈: {traceback.format_exc()}")
+        db.session.rollback()
+        print("数据库回滚完成")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/projects/<int:project_id>', methods=['DELETE'])
+@login_required
+def api_delete_project(project_id):
+    """删除项目"""
+    print(f"=== 开始删除项目 {project_id} ===")
+    print(f"当前用户ID: {current_user.id}")
+    print(f"当前用户邮箱: {current_user.email}")
+    
+    try:
+        # 先获取项目信息检查是否是所有者
+        project = Project.query.get_or_404(project_id)
+        print(f"项目所有者(user_id): {project.user_id}, 当前用户: {current_user.id}")
+        
+        # 检查是否是项目所有者(user_id)，或者有管理员权限
+        is_owner = project.user_id == current_user.id
+        has_admin = has_project_permission(current_user.id, project_id, 'admin')
+        
+        print(f"是否所有者: {is_owner}, 是否有管理员权限: {has_admin}")
+        
+        if not is_owner and not has_admin:
+            print(f"权限检查失败: 用户 {current_user.id} 无权删除项目 {project_id}")
+            return jsonify({'success': False, 'error': '无权删除此项目，只有项目创建者或管理员可以删除'}), 403
+        print("权限检查通过")
+        
+        print(f"项目信息: ID={project.id}, 名称={project.name}")
+        project_name = project.name
+        
+        # 手动删除所有关联数据
+        print("开始删除关联数据...")
+        
+        from sqlalchemy import text
+        
+        # 使用原生 SQL 删除，避免 SQLAlchemy 关系行为干扰
+        
+        # 删除关联的 BadCase
+        result = db.session.execute(text("DELETE FROM bad_case WHERE project_id = :pid"), {"pid": project_id})
+        print(f"删除 {result.rowcount} 个 BadCase...")
+        
+        # 删除关联的 TestCase
+        result = db.session.execute(text("DELETE FROM test_case WHERE project_id = :pid"), {"pid": project_id})
+        print(f"删除 {result.rowcount} 个 TestCase...")
+        
+        # 删除关联的 Bug（包括关联到该项目下所有 Plan 的 Bug）
+        result = db.session.execute(text("""
+            DELETE FROM bug WHERE project_id = :pid OR plan_id IN (
+                SELECT id FROM plan WHERE project_id = :pid
+            )
+        """), {"pid": project_id})
+        print(f"删除 {result.rowcount} 个 Bug...")
+        
+        # 删除关联的 Plan
+        result = db.session.execute(text("DELETE FROM plan WHERE project_id = :pid"), {"pid": project_id})
+        print(f"删除 {result.rowcount} 个 Plan...")
+        
+        # 删除关联的 Team
+        teams = Team.query.filter_by(project_id=project_id).all()
+        print(f"删除 {len(teams)} 个 Team...")
+        for team in teams:
+            # 删除团队成员
+            TeamMember.query.filter_by(team_id=team.id).delete()
+            db.session.delete(team)
+        
+        # 删除关联的 ProjectPermission
+        permissions = ProjectPermission.query.filter_by(project_id=project_id).all()
+        print(f"删除 {len(permissions)} 个 ProjectPermission...")
+        for perm in permissions:
+            db.session.delete(perm)
+        
+        # 最后删除项目本身
+        print("删除项目本身...")
+        db.session.delete(project)
+        print(f"项目已标记删除: {project_name}")
+        
+        # 提交到数据库
+        print("提交数据库更改...")
+        db.session.commit()
+        print("数据库提交成功")
+        
+        response_data = {
+            'success': True,
+            'message': f'项目 "{project_name}" 删除成功'
+        }
+        print(f"返回响应: {response_data}")
+        print(f"=== 项目 {project_id} 删除完成 ===")
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        print(f"删除项目时发生错误: {str(e)}")
         print(f"错误类型: {type(e).__name__}")
         import traceback
         print(f"错误堆栈: {traceback.format_exc()}")
@@ -4770,7 +5076,714 @@ def api_close_badcase(badcase_id):
     
     return jsonify({'success': True})
 
+# Card相关的API端点
+@app.route('/api/cards', methods=['POST'])
+@login_required
+def api_create_card():
+    """创建卡片"""
+    print(f"=== 创建卡片 ===")
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求数据不能为空'}), 400
+        
+        # 获取参数
+        title = data.get('title', '').strip()
+        card_type = data.get('type', 'badcase')
+        project_id = data.get('project_id')
+        
+        if not title:
+            return jsonify({'success': False, 'error': '标题不能为空'}), 400
+        
+        if not project_id:
+            return jsonify({'success': False, 'error': '项目ID不能为空'}), 400
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        
+        # 创建卡片
+        card = Card(
+            title=title,
+            type=card_type,
+            project_id=project_id,
+            creator_id=current_user.id,
+            priority='p3'
+        )
+        
+        # 根据类型设置特定字段
+        if card_type == 'bug':
+            card.severity = data.get('severity', 'medium')
+            card.steps_to_reproduce = data.get('steps_to_reproduce')
+            card.expected_result = data.get('expected_result')
+            card.actual_result = data.get('actual_result')
+            card.bug_type = data.get('bug_type')
+            card.environment = data.get('environment')
+            card.browser = data.get('browser')
+            card.os = data.get('os')
+        elif card_type == 'badcase':
+            card.case_category = data.get('case_category')
+            card.base_problem = data.get('base_problem')
+            card.reproduction_steps = data.get('reproduction_steps')
+            card.badcase_result = data.get('badcase_result')
+            card.answer = data.get('answer')
+            card.correct_answer = data.get('correct_answer')
+            card.problem_reason = data.get('problem_reason')
+            card.solution = data.get('solution')
+        elif card_type == 'testcase':
+            card.case_type_test = data.get('case_type_test')
+            card.test_type = data.get('test_type')
+            card.preconditions = data.get('preconditions')
+            card.steps = data.get('steps')
+            card.remark = data.get('remark')
+            card.requirement_id = data.get('requirement_id')
+            card.related_defects = data.get('related_defects')
+            card.baseline = data.get('baseline')
+            card.estimated_time = data.get('estimated_time')
+            card.actual_time = data.get('actual_time')
+            card.remaining_time = data.get('remaining_time')
+            card.version = data.get('version', 'v1')
+        
+        db.session.add(card)
+        db.session.commit()
+        
+        print(f"✅ 卡片创建成功: {card.id}")
+        return jsonify({'success': True, 'data': card.to_dict()})
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 创建卡片失败: {e}")
+        return jsonify({'success': False, 'error': f'创建卡片失败: {str(e)}'}), 500
 
+@app.route('/api/projects/<int:project_id>/cards', methods=['GET'])
+@login_required
+def api_get_project_cards(project_id):
+    """获取项目的卡片列表"""
+    print(f"=== 获取项目卡片列表 {project_id} ===")
+    
+    try:
+        # 检查权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        
+        # 获取卡片类型参数
+        card_type = request.args.get('type')
+        
+        # 构建查询条件
+        query = Card.query.filter_by(project_id=project_id)
+        
+        # 根据类型过滤
+        if card_type:
+            query = query.filter(Card.type == card_type)
+        
+        # 分页查询
+        pagination = query.order_by(Card.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        cards = [card.to_dict() for card in pagination.items]
+        
+        return jsonify({
+            'success': True,
+            'data': cards,
+            'pagination': {
+                'total': pagination.total,
+                'pages': pagination.pages,
+                'current_page': page,
+                'per_page': per_page
+            }
+        })
+    
+    except Exception as e:
+        print(f"❌ 获取卡片列表失败: {e}")
+        return jsonify({'success': False, 'error': f'获取卡片列表失败: {str(e)}'}), 500
+
+@app.route('/api/cards/<int:card_id>', methods=['GET'])
+@login_required
+def api_get_card_detail(card_id):
+    """获取卡片详情"""
+    print(f"=== 获取卡片详情 {card_id} ===")
+    
+    try:
+        card = Card.query.get_or_404(card_id)
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, card.project_id):
+            return jsonify({'success': False, 'error': '无权访问此卡片'}), 403
+        
+        return jsonify({'success': True, 'data': card.to_dict()})
+    
+    except Exception as e:
+        print(f"❌ 获取卡片详情失败: {e}")
+        return jsonify({'success': False, 'error': f'获取卡片详情失败: {str(e)}'}), 500
+
+@app.route('/api/cards/<int:card_id>', methods=['PUT'])
+@login_required
+def api_update_card(card_id):
+    """更新卡片"""
+    print(f"=== 更新卡片 {card_id} ===")
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求数据不能为空'}), 400
+        
+        card = Card.query.get_or_404(card_id)
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, card.project_id):
+            return jsonify({'success': False, 'error': '无权修改此卡片'}), 403
+        
+        # 更新字段
+        if 'title' in data:
+            card.title = data['title']
+        if 'priority' in data:
+            card.priority = data['priority']
+        if 'assignee_id' in data:
+            card.assignee_id = data['assignee_id']
+        if 'plan_id' in data:
+            card.plan_id = data['plan_id']
+        if 'description' in data:
+            card.description = data['description']
+        
+        # 根据类型更新特定字段
+        if card.type == CardType.BUG:
+            if 'severity' in data:
+                card.severity = data['severity']
+            if 'steps_to_reproduce' in data:
+                card.steps_to_reproduce = data['steps_to_reproduce']
+            if 'expected_result' in data:
+                card.expected_result = data['expected_result']
+            if 'actual_result' in data:
+                card.actual_result = data['actual_result']
+            if 'bug_type' in data:
+                card.bug_type = data['bug_type']
+            if 'environment' in data:
+                card.environment = data['environment']
+            if 'browser' in data:
+                card.browser = data['browser']
+            if 'os' in data:
+                card.os = data['os']
+        elif card.type == CardType.BADCASE:
+            if 'case_category' in data:
+                card.case_category = data['case_category']
+            if 'base_problem' in data:
+                card.base_problem = data['base_problem']
+            if 'reproduction_steps' in data:
+                card.reproduction_steps = data['reproduction_steps']
+            if 'badcase_result' in data:
+                card.badcase_result = data['badcase_result']
+            if 'answer' in data:
+                card.answer = data['answer']
+            if 'correct_answer' in data:
+                card.correct_answer = data['correct_answer']
+            if 'problem_reason' in data:
+                card.problem_reason = data['problem_reason']
+            if 'solution' in data:
+                card.solution = data['solution']
+        elif card.type == CardType.TESTCASE:
+            if 'case_type_test' in data:
+                card.case_type_test = data['case_type_test']
+            if 'test_type' in data:
+                card.test_type = data['test_type']
+            if 'preconditions' in data:
+                card.preconditions = data['preconditions']
+            if 'steps' in data:
+                card.steps = data['steps']
+            if 'remark' in data:
+                card.remark = data['remark']
+            if 'requirement_id' in data:
+                card.requirement_id = data['requirement_id']
+            if 'related_defects' in data:
+                card.related_defects = data['related_defects']
+            if 'baseline' in data:
+                card.baseline = data['baseline']
+            if 'estimated_time' in data:
+                card.estimated_time = data['estimated_time']
+            if 'actual_time' in data:
+                card.actual_time = data['actual_time']
+            if 'remaining_time' in data:
+                card.remaining_time = data['remaining_time']
+            if 'version' in data:
+                card.version = data['version']
+        
+        card.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        print(f"✅ 卡片更新成功: {card.id}")
+        return jsonify({'success': True, 'data': card.to_dict()})
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 更新卡片失败: {e}")
+        return jsonify({'success': False, 'error': f'更新卡片失败: {str(e)}'}), 500
+
+@app.route('/api/cards/<int:card_id>', methods=['DELETE'])
+@login_required
+def api_delete_card(card_id):
+    """删除卡片"""
+    print(f"=== 删除卡片 {card_id} ===")
+    
+    try:
+        card = Card.query.get_or_404(card_id)
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, card.project_id):
+            return jsonify({'success': False, 'error': '无权删除此卡片'}), 403
+        
+        db.session.delete(card)
+        db.session.commit()
+        
+        print(f"✅ 卡片删除成功: {card.id}")
+        return jsonify({'success': True, 'message': '卡片删除成功'})
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 删除卡片失败: {e}")
+        return jsonify({'success': False, 'error': f'删除卡片失败: {str(e)}'}), 500
+
+@app.route('/api/cards/search', methods=['GET'])
+@login_required
+def api_search_cards():
+    """全局搜索卡片"""
+    print(f"=== 全局搜索卡片 ===")
+    
+    try:
+        query_text = request.args.get('query', '').strip()
+        types_param = request.args.get('types', 'bug,badcase,testcase')
+        project_id = request.args.get('project_id', type=int)
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        
+        if not query_text:
+            return jsonify({
+                'success': True,
+                'data': {'results': [], 'counts': {}}
+            })
+        
+        # 解析类型
+        types = [t.strip() for t in types_param.split(',') if t.strip()]
+        
+        # 构建基础查询
+        base_query = Card.query
+        
+        # 项目过滤
+        if project_id:
+            base_query = base_query.filter(Card.project_id == project_id)
+        
+        # 类型过滤
+        if types:
+            base_query = base_query.filter(Card.type.in_(types))
+        
+        # 全文搜索 (标题和描述)
+        search_pattern = f'%{query_text}%'
+        base_query = base_query.filter(
+            db.or_(
+                Card.title.ilike(search_pattern),
+                Card.description.ilike(search_pattern)
+            )
+        )
+        
+        # 获取各类型计数
+        counts_query = Card.query
+        if project_id:
+            counts_query = counts_query.filter(Card.project_id == project_id)
+        
+        counts = {}
+        for t in types:
+            count = counts_query.filter(Card.type == t).filter(
+                db.or_(
+                    Card.title.ilike(search_pattern),
+                    Card.description.ilike(search_pattern)
+                )
+            ).count()
+            counts[t] = count
+        
+        # 分页查询
+        pagination = base_query.order_by(Card.updated_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        results = [card.to_dict() for card in pagination.items]
+        
+        # 添加assignee名称
+        for result in results:
+            if result.get('assignee_id'):
+                assignee = User.query.get(result['assignee_id'])
+                if assignee:
+                    result['assignee'] = assignee.name
+        
+        print(f"✅ 搜索完成，找到 {len(results)} 条结果")
+        return jsonify({
+            'success': True,
+            'data': {
+                'results': results,
+                'counts': counts,
+                'pagination': {
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'current_page': page,
+                    'per_page': per_page
+                }
+            }
+        })
+    
+    except Exception as e:
+        print(f"❌ 搜索卡片失败: {e}")
+        return jsonify({'success': False, 'error': f'搜索卡片失败: {str(e)}'}), 500
+
+@app.route('/api/cards/<int:card_id>/move', methods=['POST'])
+@login_required
+def api_move_card(card_id):
+    """移动卡片到指定计划"""
+    print(f"=== 移动卡片 {card_id} ===")
+    
+    try:
+        card = Card.query.get_or_404(card_id)
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, card.project_id):
+            return jsonify({'success': False, 'error': '无权移动此卡片'}), 403
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求数据不能为空'}), 400
+        
+        target_plan_id = data.get('plan_id')  # None表示移至未计划
+        
+        # 验证目标计划存在（如果指定了）
+        if target_plan_id:
+            plan = Plan.query.get(target_plan_id)
+            if not plan:
+                return jsonify({'success': False, 'error': '目标计划不存在'}), 404
+            if plan.project_id != card.project_id:
+                return jsonify({'success': False, 'error': '目标计划不属于同一项目'}), 400
+        
+        old_plan_id = card.plan_id
+        card.plan_id = target_plan_id
+        card.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        print(f"✅ 卡片移动成功: {card.id}, 从计划 {old_plan_id} -> {target_plan_id}")
+        return jsonify({
+            'success': True,
+            'data': card.to_dict(),
+            'message': f'卡片已移动至{"计划 " + str(target_plan_id) if target_plan_id else "未计划"}'
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 移动卡片失败: {e}")
+        return jsonify({'success': False, 'error': f'移动卡片失败: {str(e)}'}), 500
+
+# ==================== 卡片类型管理 API ====================
+
+@app.route('/api/card-types', methods=['GET'])
+@login_required
+def api_get_card_types():
+    """获取卡片类型列表"""
+    print(f"=== 获取卡片类型列表 ===")
+    
+    try:
+        project_id = request.args.get('project_id', type=int)
+        
+        query = CardTypeDefinition.query
+        
+        if project_id:
+            query = query.filter(CardTypeDefinition.project_id == project_id)
+        
+        # 只返回启用的类型
+        query = query.filter(CardTypeDefinition.is_active == True)
+        
+        types = query.order_by(CardTypeDefinition.sort_order.asc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [t.to_dict() for t in types]
+        })
+    
+    except Exception as e:
+        print(f"❌ 获取卡片类型失败: {e}")
+        return jsonify({'success': False, 'error': f'获取卡片类型失败: {str(e)}'}), 500
+
+@app.route('/api/card-types', methods=['POST'])
+@login_required
+def api_create_card_type():
+    """创建卡片类型"""
+    print(f"=== 创建卡片类型 ===")
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求数据不能为空'}), 400
+        
+        project_id = data.get('project_id')
+        name = data.get('name')
+        code = data.get('code')
+        
+        if not all([project_id, name, code]):
+            return jsonify({'success': False, 'error': '缺少必填字段'}), 400
+        
+        # 检查权限
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权创建此卡片类型'}), 403
+        
+        # 检查code唯一性
+        existing = CardTypeDefinition.query.filter_by(code=code).first()
+        if existing:
+            return jsonify({'success': False, 'error': '类型代码已存在'}), 400
+        
+        card_type = CardTypeDefinition(
+            project_id=project_id,
+            name=name,
+            code=code,
+            icon=data.get('icon'),
+            color=data.get('color'),
+            description=data.get('description'),
+            fields_config=data.get('fields_config'),
+            status_config=data.get('status_config'),
+            sort_order=data.get('sort_order', 0)
+        )
+        
+        db.session.add(card_type)
+        db.session.commit()
+        
+        print(f"✅ 卡片类型创建成功: {card_type.id}")
+        return jsonify({
+            'success': True,
+            'data': card_type.to_dict()
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 创建卡片类型失败: {e}")
+        return jsonify({'success': False, 'error': f'创建卡片类型失败: {str(e)}'}), 500
+
+@app.route('/api/card-types/<int:type_id>', methods=['PUT'])
+@login_required
+def api_update_card_type(type_id):
+    """更新卡片类型"""
+    print(f"=== 更新卡片类型 {type_id} ===")
+    
+    try:
+        card_type = CardTypeDefinition.query.get_or_404(type_id)
+        
+        if not has_project_permission(current_user.id, card_type.project_id):
+            return jsonify({'success': False, 'error': '无权修改此卡片类型'}), 403
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求数据不能为空'}), 400
+        
+        # 更新字段
+        for field in ['name', 'icon', 'color', 'description', 'fields_config', 'status_config', 'sort_order', 'is_active']:
+            if field in data:
+                setattr(card_type, field, data[field])
+        
+        db.session.commit()
+        
+        print(f"✅ 卡片类型更新成功: {card_type.id}")
+        return jsonify({
+            'success': True,
+            'data': card_type.to_dict()
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 更新卡片类型失败: {e}")
+        return jsonify({'success': False, 'error': f'更新卡片类型失败: {str(e)}'}), 500
+
+@app.route('/api/card-types/<int:type_id>', methods=['DELETE'])
+@login_required
+def api_delete_card_type(type_id):
+    """删除卡片类型"""
+    print(f"=== 删除卡片类型 {type_id} ===")
+    
+    try:
+        card_type = CardTypeDefinition.query.get_or_404(type_id)
+        
+        if not has_project_permission(current_user.id, card_type.project_id):
+            return jsonify({'success': False, 'error': '无权删除此卡片类型'}), 403
+        
+        # 软删除
+        card_type.is_active = False
+        db.session.commit()
+        
+        print(f"✅ 卡片类型删除成功: {card_type.id}")
+        return jsonify({
+            'success': True,
+            'message': '卡片类型删除成功'
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 删除卡片类型失败: {e}")
+        return jsonify({'success': False, 'error': f'删除卡片类型失败: {str(e)}'}), 500
+
+# ==================== 卡片计划关联关系 API ====================
+
+@app.route('/api/card-plan-relations', methods=['GET'])
+@login_required
+def api_get_card_plan_relations():
+    """获取卡片与计划的关联关系"""
+    print(f"=== 获取卡片计划关联关系 ===")
+    
+    try:
+        card_id = request.args.get('card_id', type=int)
+        plan_id = request.args.get('plan_id', type=int)
+        include_removed = request.args.get('include_removed', 'false').lower() == 'true'
+        
+        query = CardPlanRelation.query
+        
+        if card_id:
+            query = query.filter(CardPlanRelation.card_id == card_id)
+        if plan_id:
+            query = query.filter(CardPlanRelation.plan_id == plan_id)
+        if not include_removed:
+            query = query.filter(CardPlanRelation.removed_at.is_(None))
+        
+        relations = query.order_by(CardPlanRelation.sort_order.asc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [r.to_dict() for r in relations]
+        })
+    
+    except Exception as e:
+        print(f"❌ 获取关联关系失败: {e}")
+        return jsonify({'success': False, 'error': f'获取关联关系失败: {str(e)}'}), 500
+
+@app.route('/api/card-plan-relations', methods=['POST'])
+@login_required
+def api_create_card_plan_relation():
+    """创建卡片与计划的关联"""
+    print(f"=== 创建卡片计划关联 ===")
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求数据不能为空'}), 400
+        
+        card_id = data.get('card_id')
+        plan_id = data.get('plan_id')
+        
+        if not all([card_id, plan_id]):
+            return jsonify({'success': False, 'error': '缺少必填字段'}), 400
+        
+        # 检查卡片是否存在
+        card = Card.query.get(card_id)
+        if not card:
+            return jsonify({'success': False, 'error': '卡片不存在'}), 404
+        
+        # 检查计划是否存在
+        plan = Plan.query.get(plan_id)
+        if not plan:
+            return jsonify({'success': False, 'error': '计划不存在'}), 404
+        
+        # 检查是否已存在关联
+        relation_type = data.get('relation_type', 'primary')
+        existing = CardPlanRelation.query.filter_by(
+            card_id=card_id,
+            plan_id=plan_id,
+            relation_type=relation_type
+        ).filter(CardPlanRelation.removed_at.is_(None)).first()
+        
+        if existing:
+            return jsonify({'success': False, 'error': '关联关系已存在'}), 400
+        
+        relation = CardPlanRelation(
+            card_id=card_id,
+            plan_id=plan_id,
+            relation_type=relation_type,
+            status_in_plan=data.get('status_in_plan'),
+            sort_order=data.get('sort_order', 0)
+        )
+        
+        db.session.add(relation)
+        db.session.commit()
+        
+        print(f"✅ 关联关系创建成功: {relation.id}")
+        return jsonify({
+            'success': True,
+            'data': relation.to_dict()
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 创建关联关系失败: {e}")
+        return jsonify({'success': False, 'error': f'创建关联关系失败: {str(e)}'}), 500
+
+@app.route('/api/card-plan-relations/<int:relation_id>', methods=['DELETE'])
+@login_required
+def api_delete_card_plan_relation(relation_id):
+    """删除卡片与计划的关联（软删除）"""
+    print(f"=== 删除卡片计划关联 {relation_id} ===")
+    
+    try:
+        relation = CardPlanRelation.query.get_or_404(relation_id)
+        
+        # 软删除
+        relation.removed_at = datetime.utcnow()
+        db.session.commit()
+        
+        print(f"✅ 关联关系删除成功: {relation.id}")
+        return jsonify({
+            'success': True,
+            'message': '关联关系删除成功'
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ 删除关联关系失败: {e}")
+        return jsonify({'success': False, 'error': f'删除关联关系失败: {str(e)}'}), 500
+
+@app.route('/api/cards/<int:card_id>/history', methods=['GET'])
+@login_required
+def api_get_card_plan_history(card_id):
+    """获取卡片的计划变更历史"""
+    print(f"=== 获取卡片 {card_id} 的计划变更历史 ===")
+    
+    try:
+        card = Card.query.get_or_404(card_id)
+        
+        if not has_project_permission(current_user.id, card.project_id):
+            return jsonify({'success': False, 'error': '无权查看此卡片'}), 403
+        
+        # 获取该卡片的所有关联关系（包括已移除的）
+        relations = CardPlanRelation.query.filter_by(card_id=card_id).order_by(
+            CardPlanRelation.added_at.desc()
+        ).all()
+        
+        # 获取计划信息
+        history = []
+        for rel in relations:
+            plan = Plan.query.get(rel.plan_id)
+            if plan:
+                history.append({
+                    'relation_id': rel.id,
+                    'plan_id': rel.plan_id,
+                    'plan_name': plan.name,
+                    'relation_type': rel.relation_type,
+                    'status_in_plan': rel.status_in_plan,
+                    'added_at': rel.added_at.isoformat() if rel.added_at else None,
+                    'removed_at': rel.removed_at.isoformat() if rel.removed_at else None,
+                    'is_current': rel.removed_at is None and rel.plan_id == card.plan_id
+                })
+        
+        return jsonify({
+            'success': True,
+            'data': history
+        })
+    
+    except Exception as e:
+        print(f"❌ 获取卡片历史失败: {e}")
+        return jsonify({'success': False, 'error': f'获取卡片历史失败: {str(e)}'}), 500
 
 # CORS已在上面配置，这里不需要重复配置
 
@@ -4947,8 +5960,6 @@ def sync_database_schema():
                     'project_id INT NOT NULL',
                     'creator_id INT NOT NULL',
                     'assignee_id INT',
-                    'cycle VARCHAR(20)',
-                    'plan_count INT DEFAULT 1',
                     'scope_notification BOOLEAN DEFAULT FALSE',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
@@ -5529,16 +6540,17 @@ def api_create_plan():
         print(f"当前用户ID: {current_user.id}")
             
         # 验证必填字段
-        required_fields = ['name', 'cycle', 'start_date', 'end_date', 'project_id']
+        required_fields = ['name', 'start_date', 'end_date', 'project_id']
         for field in required_fields:
             if not data.get(field):
                 print(f"缺少必填字段: {field}")
                 return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
             
-        # 验证计划周期
-        valid_cycles = ['one_week', 'two_weeks', 'one_month', 'custom']
-        if data.get('cycle') and data['cycle'] not in valid_cycles:
-            return jsonify({'success': False, 'error': '无效的计划周期'}), 400
+        # 验证计划周期（可选字段）
+        if data.get('cycle'):
+            valid_cycles = ['one_week', 'two_weeks', 'one_month', 'custom']
+            if data['cycle'] not in valid_cycles:
+                return jsonify({'success': False, 'error': '无效的计划周期'}), 400
             
         # 检查项目权限
         print(f"检查项目权限: 用户ID={current_user.id}, 项目 ID={data['project_id']}")
@@ -5602,6 +6614,7 @@ def api_create_plan():
                 'plan_type': plan.plan_type,
                 'status': plan.status,
                 'priority': plan.priority,
+                'is_default': plan.is_default,
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
@@ -5748,6 +6761,7 @@ def api_update_plan(plan_id):
                 'plan_type': plan.plan_type,
                 'status': plan.status,
                 'priority': plan.priority,
+                'is_default': plan.is_default,
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
@@ -5777,6 +6791,10 @@ def api_delete_plan(plan_id):
         # 检查项目权限
         if not has_project_permission(current_user.id, plan.project_id):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        
+        # 检查是否为默认迭代
+        if plan.is_default:
+            return jsonify({'success': False, 'error': '默认迭代不能删除'}), 400
         
         # 检查是否有子计划
         if plan.children:
@@ -6654,7 +7672,17 @@ def api_bug_detail(bug_id):
             if 'os' in data:
                 bug.os = data['os']
             if 'plan_id' in data:
-                bug.plan_id = data['plan_id']
+                # 处理plan_id为None的情况，确保不会设置为NULL
+                plan_id_value = data['plan_id']
+                if plan_id_value is not None and plan_id_value != '':
+                    try:
+                        bug.plan_id = int(plan_id_value)
+                    except (TypeError, ValueError):
+                        # 如果无法转换为整数，保持原有值
+                        pass
+                else:
+                    # 如果plan_id为空，保持原有值
+                    pass
             if 'assignee_id' in data:
                 bug.assignee_id = data['assignee_id']
             if 'attachments' in data:

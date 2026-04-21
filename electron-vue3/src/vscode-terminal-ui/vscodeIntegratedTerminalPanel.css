@@ -634,6 +634,95 @@
 }
 
 /* 终端区域内右键菜单：由脚本用 fixed 定位父层，菜单本身不再用顶栏下拉的几何 */
+/* 命令历史弹窗：嵌入终端区域顶部下拉 */
+.etw-vscode-terminal .etw-cmd-history-host {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 500;
+  pointer-events: none;
+}
+.etw-vscode-terminal .etw-cmd-history-panel {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  background: var(--vscode-editor-widget-background, #252526);
+  border-bottom: 1px solid var(--vscode-widget-border, #454545);
+  display: flex;
+  flex-direction: column;
+  pointer-events: all;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.etw-vscode-terminal .etw-cmd-history-search-row {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  gap: 6px;
+}
+.etw-vscode-terminal .etw-cmd-history-search-icon {
+  color: var(--vscode-foreground, #cccccc);
+  font-size: 14px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.etw-vscode-terminal .etw-cmd-history-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--vscode-editor-foreground, #cccccc);
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, monospace);
+  font-size: 14px;
+  padding: 2px 0;
+  caret-color: var(--vscode-editor-foreground, #cccccc);
+}
+.etw-vscode-terminal .etw-cmd-history-search-input::placeholder {
+  color: var(--vscode-foreground, #cccccc);
+  opacity: 0.4;
+}
+.etw-vscode-terminal .etw-cmd-history-divider {
+  height: 1px;
+  background: var(--vscode-widget-border, #454545);
+  margin: 0;
+}
+.etw-vscode-terminal .etw-cmd-history-list {
+  overflow-y: auto;
+  max-height: 280px;
+}
+.etw-vscode-terminal .etw-cmd-history-item {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, monospace);
+  font-size: 13px;
+  gap: 8px;
+  min-height: 28px;
+}
+.etw-vscode-terminal .etw-cmd-history-item:hover,
+.etw-vscode-terminal .etw-cmd-history-item--selected {
+  background: var(--vscode-list-hoverBackground, #2a2d2e);
+}
+.etw-vscode-terminal .etw-cmd-history-num {
+  color: var(--vscode-descriptionForeground, #858585);
+  min-width: 20px;
+  font-size: 12px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.etw-vscode-terminal .etw-cmd-history-text {
+  color: var(--vscode-editor-foreground, #cccccc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.etw-vscode-terminal .etw-cmd-history-empty {
+  padding: 16px 10px;
+  color: var(--vscode-foreground, #cccccc);
+  opacity: 0.5;
+  font-size: 13px;
+  text-align: center;
+}
+
 .etw-vscode-terminal .etw-vscode-menu.etw-vscode-menu-context {
   position: relative;
   top: auto;

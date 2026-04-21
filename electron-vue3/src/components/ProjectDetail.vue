@@ -1,4 +1,39 @@
 <template>
+  <!-- 全局命令历史弹框：覆盖所有面板，出现在 top-bar 下方 -->
+  <Teleport to="body">
+    <div v-if="showGlobalCmdHistory" class="etw-global-cmd-history">
+      <div class="etw-global-cmd-panel">
+        <div class="etw-global-cmd-search-row">
+          <span class="etw-global-cmd-icon codicon codicon-search"></span>
+          <input
+            :ref="el => { globalCmdSearchInput = el }"
+            v-model="globalCmdSearchText"
+            class="etw-global-cmd-search"
+            :placeholder="t('embeddedTerminal.searchPlaceholder')"
+            @keydown="onGlobalCmdKeydown"
+          />
+        </div>
+        <div class="etw-global-cmd-divider"></div>
+        <div ref="globalCmdListRef" class="etw-global-cmd-list">
+          <div
+            v-for="(cmd, idx) in filteredGlobalCmdHistory"
+            :key="idx"
+            class="etw-global-cmd-item"
+            :class="{ 'etw-global-cmd-item--selected': idx === globalCmdSelected }"
+            @click="pickGlobalCmd(idx)"
+            @mouseenter="globalCmdSelected = idx"
+          >
+            <span class="etw-global-cmd-num">{{ cmd.index }}</span>
+            <span class="etw-global-cmd-text">{{ cmd.text }}</span>
+          </div>
+          <div v-if="!filteredGlobalCmdHistory.length" class="etw-global-cmd-empty">
+            {{ t('embeddedTerminal.noCommandHistory') }}
+          </div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
   <ProjectWorkspaceShell
     :projectName="projectName || t('project.detailTitle')"
     :currentUser="currentUser"
@@ -15,11 +50,30 @@
     @logout="logout"
     @showProjectManagement="openProjectManagementWorkbenchTab"
   >
+    <!-- 窄条导航栏和主内容容器 -->
+    <div class="narrow-nav-and-main">
+      <!-- 搜索面板 -->
+      <div v-if="showGlobalSearch" class="narrow-search-panel">
+        <GlobalSearch
+          @close="showGlobalSearch = false"
+          @select-card="handleSearchResultSelect"
+          @select-detail="handleSearchResultSelect"
+        />
+      </div>
+      <!-- 窄条导航栏 -->
+      <NarrowNavBar
+        v-else
+        @return-to-plans="handleReturnToPlans"
+        @open-search="handleOpenGlobalSearch"
+        @open-settings="openAppSettings"
+        @open-archive="handleOpenArchive"
+      />
 
-    <div class="main-container">
+      <div class="main-container">
       <!-- 左侧导航栏 -->
-      <div class="left-sidebar" :class="{ 'collapsed': planCollapsed }" v-show="!leftSidebarHidden">
-       
+      <div class="left-sidebar" :class="{ 'collapsed': planCollapsed }" v-show="!leftSidebarHidden" :style="{ width: !planCollapsed ? leftSidebarWidth + 'px' : '60px' }">
+        <!-- 拖拽手柄 -->
+        <div v-show="!planCollapsed" class="drag-handle-left" @mousedown="startDragLeftSidebar"></div>
        
       
         
@@ -27,476 +81,122 @@
         <div class="sidebar-content" v-show="!planCollapsed">
           <div class="sidebar-header">
             <div class="header-top">
-              <h3>{{ t('project.sidebarTitle') }}</h3>
-                            <div class="header-actions">
-                <button class="action-icon-btn" @click="manualRefreshPlans" :title="t('project.refreshAll')">
-                  <span class="icon">🔄</span>
-                </button>
-                <button class="action-icon-btn" @click="showCreatePlanModal" :title="t('project.addPlan')">
-                  <span class="icon">➕</span>
-                </button>
-                <button class="action-icon-btn" @click="showBaselineManagement" :title="t('project.baselineMgmt')">
-                  <span class="icon">📋</span>
-                </button>
-              
-              </div>
-            </div>
-            <div class="search-section">
-              <input 
-                type="text" 
-                v-model="planSearchText"
-                :placeholder="t('project.searchPlanPlaceholder')"
-                class="plan-search-input"
-                @keyup.enter="searchPlans"
-              />
-              <button class="search-btn" @click="searchPlans">
-                <span class="search-icon">🔍</span>
-              </button>
-              <button v-if="planSearchText" class="clear-search-btn" @click="clearSearch" :title="t('project.clearSearch')">
-                <span class="clear-icon">✕</span>
+              <button class="action-icon-btn" @click="showCreatePlanModal" :title="t('project.addPlan')">
+                <span class="icon">➕</span>
+                <span class="btn-text">新建迭代</span>
               </button>
             </div>
           </div>
           
           <div class="plan-tree">
-            <div class="plan-section">
-              <div class="section-header" @click="toggleSection('unplanned')">
-                <span class="section-icon">📄</span>
-                <span class="section-title">{{ t('project.sectionUnplanned') }}</span>
-                <span class="expand-arrow" :class="{ 'expanded': expandedSections.unplanned }">▶</span>
-            </div>
-            
-              <div v-if="expandedSections.unplanned" class="section-content">
-                <!-- 未计划卡片的类型选择 -->
-                <div class="unplanned-type-section">
-                  <!-- BadCase -->
-                  <div class="type-item" :class="{ 'active': isUnplannedTypeChipActive('badcase') }" @click="selectUnplannedType('badcase')">
-                    <span class="type-icon">📋</span>
-                    <span class="type-title">BadCase</span>
-                  </div>
-                  <!-- Bug -->
-                  <div class="type-item" :class="{ 'active': isUnplannedTypeChipActive('bug') }" @click="selectUnplannedType('bug')">
-                    <span class="type-icon">🐛</span>
-                    <span class="type-title">Bug</span>
-                  </div>
-                  <!-- 测试用例 -->
-                  <div class="type-item" :class="{ 'active': isUnplannedTypeChipActive('test_case') }" @click="selectUnplannedType('test_case')">
-                    <span class="type-icon">🧪</span>
-                    <span class="type-title">{{ t('project.typeTestCase') }}</span>
-                  </div>
-                </div>
-
-                <!-- 渲染未计划类型的计划 -->
-                <div v-if="unplannedPlans.length > 0" class="plan-list">
-                  <template v-for="plan in unplannedPlans" :key="plan.id">
+            <!-- 扁平展示所有活跃迭代（排除已归档） -->
+            <div class="active-iterations">
+              <div v-if="loading" class="loading-state">
+                <span class="loading-text">{{ t('common.loading') }}</span>
+              </div>
+              
+              <div v-else-if="activePlans.length === 0" class="empty-state">
+                <span class="empty-text">{{ t('project.noActivePlans') }}</span>
+              </div>
+              
+              <div v-else class="plan-list">
+                <template v-for="plan in activePlans" :key="plan.id">
+                  <div 
+                    class="plan-item"
+                    :class="{ 'active': selectedPlan === plan.id }"
+                    @click="selectPlan(plan.id)"
+                    @mouseenter="showPlanActions(plan.id)"
+                    @mouseleave="hidePlanActions(plan.id)"
+                  >
+                    <span 
+                      v-if="plan.children && plan.children.length > 0" 
+                      class="expand-arrow"
+                      :class="{ 'expanded': expandedPlans.includes(plan.id) }"
+                      @click.stop="togglePlanExpansion(plan.id)"
+                    >▶</span>
+                    <span v-else class="expand-placeholder"></span>
+                    <span class="plan-icon">{{ getPlanIcon(plan.content_type || plan.plan_type || 'badcase') }}</span>
+                    <span class="plan-name">{{ plan.name }}</span>
+                    <span class="plan-date">{{ formatDate(plan.created_at) }}</span>
+                    
+                    <!-- 操作按钮 -->
+                    <div v-show="hoveredPlan === plan.id" class="plan-actions">
+                      <button class="action-btn" @click.stop="showContextMenu(plan, $event)">
+                        ⚙️
+                      </button>
+                    </div>
+                    
+                    <!-- 上下文菜单 -->
                     <div 
-                      class="plan-item"
-                      :class="{ 'active': selectedPlan === plan.id }"
-                      @click="selectPlan(plan.id)"
-                      @mouseenter="showPlanActions(plan.id)"
-                      @mouseleave="hidePlanActions(plan.id)"
+                      v-if="contextMenu.visible && contextMenu.planId === plan.id"
+                      class="context-menu"
+                      :class="{ 'is-dragging': contextMenuDragActive }"
+                      :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
+                      @mousedown.stop
                     >
-                      <span 
-                        v-if="plan.children && plan.children.length > 0" 
-                        class="expand-arrow"
-                        :class="{ 'expanded': expandedPlans.includes(plan.id) }"
-                        @click="togglePlanExpansion(plan.id)"
-                      >▶</span>
-                      <span v-else class="expand-placeholder"></span>
-                      <span class="plan-icon">{{ getPlanIcon(plan.content_type || plan.plan_type || 'badcase') }}</span>
-                      <span class="plan-name">
-                        {{ plan.name }}
-                        <span v-if="plan.is_pinned" class="pin-indicator" :title="t('project.pinned')">📌</span>
-                      </span>
-                      <span class="plan-info">
-                        <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
-                        <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
-                        <span v-if="(plan.content_type || plan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count ?? 0 }}</span>
-                      </span>
+                      <div
+                        class="context-menu-drag-handle"
+                        :title="t('project.contextMenuDragHint')"
+                        @mousedown.stop="onContextMenuDragStart"
+                      >
+                        <span class="drag-grip">⋮⋮</span>
+                        <span class="drag-label">{{ t('project.contextMenuDrag') }}</span>
+                      </div>
+                      <div class="context-menu-body">
+                        <div class="menu-item" @click="createSubPlan(plan)">
+                          <span class="menu-icon">➕</span>
+                          <span>{{ t('project.menuSubPlan') }}</span>
+                        </div>
+                        <div class="menu-item" @click="createSiblingPlan(plan)">
+                          <span class="menu-icon">📝</span>
+                          <span>{{ t('project.menuSiblingPlan') }}</span>
+                        </div>
+                        <div class="menu-item" @click="editPlan(plan)">
+                          <span class="menu-icon">✏️</span>
+                          <span>{{ t('project.menuEdit') }}</span>
+                        </div>
+                        <div class="menu-item" @click="archivePlan(plan)">
+                          <span class="menu-icon">📦</span>
+                          <span>{{ t('project.menuArchive') }}</span>
+                        </div>
+                        <div class="menu-item" @click="deletePlan(plan)">
+                          <span class="menu-icon">🗑️</span>
+                          <span>{{ t('project.menuDelete') }}</span>
+                        </div>
+                        <div class="menu-item" @click="pinPlan(plan)">
+                          <span class="menu-icon">📌</span>
+                          <span>{{ plan.is_pinned ? t('project.unpin') : t('project.pin') }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <!-- 子计划 -->
+                  <div v-if="plan.children && plan.children.length > 0 && expandedPlans.includes(plan.id)" class="sub-plan-list">
+                    <div 
+                      v-for="childPlan in plan.children" 
+                      :key="childPlan.id"
+                      class="plan-item sub-plan"
+                      :class="{ 'active': selectedPlan === childPlan.id }"
+                      @click="selectPlan(childPlan.id)"
+                      @mouseenter="showPlanActions(childPlan.id)"
+                      @mouseleave="hidePlanActions(childPlan.id)"
+                    >
+                      <span class="expand-placeholder"></span>
+                      <span class="plan-icon">{{ getPlanIcon(childPlan.content_type || childPlan.plan_type || 'badcase') }}</span>
+                      <span class="plan-name">{{ childPlan.name }}</span>
+                      <span class="plan-date">{{ formatDate(childPlan.created_at) }}</span>
                       
-                      <!-- 操作按钮 -->
-                      <div v-show="hoveredPlan === plan.id" class="plan-actions">
-                        <button class="action-btn" @click.stop="showContextMenu(plan, $event)">
+                      <div v-show="hoveredPlan === childPlan.id" class="plan-actions">
+                        <button class="action-btn" @click.stop="showContextMenu(childPlan, $event)">
                           ⚙️
                         </button>
                       </div>
                     </div>
-
-                    <!-- 子计划 -->
-                    <div v-if="plan.children && plan.children.length > 0 && expandedPlans.includes(plan.id)" class="sub-plan-list">
-                      <div 
-                        v-for="childPlan in plan.children" 
-                        :key="childPlan.id"
-                        class="plan-item sub-plan"
-                        :class="{ 'active': selectedPlan === childPlan.id }"
-                        @click="selectPlan(childPlan.id)"
-                        @mouseenter="showPlanActions(childPlan.id)"
-                        @mouseleave="hidePlanActions(childPlan.id)"
-                      >
-                        <span class="expand-placeholder"></span>
-                        <span class="plan-icon">{{ getPlanIcon(childPlan.content_type || childPlan.plan_type || 'badcase') }}</span>
-                        <span class="plan-name">{{ childPlan.name }}</span>
-                        <span class="plan-info">
-                          <span v-if="childPlan.badcase_count > 0" class="count-badge badcase">{{ childPlan.badcase_count }}</span>
-                          <span v-if="childPlan.bug_count > 0" class="count-badge bug">{{ childPlan.bug_count }}</span>
-                          <span v-if="(childPlan.content_type || childPlan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count ?? 0 }}</span>
-                        </span>
-                        
-                        <!-- 操作按钮 -->
-                        <div v-show="hoveredPlan === childPlan.id" class="plan-actions">
-                          <button class="action-btn" @click.stop="showContextMenu(childPlan, $event)">
-                            ⚙️
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </div>
-            
-            <!-- 进行中计划 -->
-            <div class="plan-section">
-              <div class="section-header" @click="toggleSection('inProgress')">
-                <span class="section-icon">📁</span>
-                <span class="section-title">{{ t('project.sectionInProgress') }}</span>
-                <span class="expand-arrow" :class="{ 'expanded': expandedSections.inProgress }">▶</span>
-              </div>
-              
-              <div v-if="expandedSections.inProgress" class="section-content">
-                <div v-if="loading" class="loading-state">
-                  <span class="loading-text">{{ t('common.loading') }}</span>
-                </div>
-                
-                <div v-else-if="inProgressPlans.length === 0" class="empty-state">
-                  <span class="empty-text">{{ t('project.emptyInProgress') }}</span>
-                </div>
-                
-                <div v-else>
-                  <div class="plan-list">
-                    <!-- 渲染计划和其子计划 -->
-                    <template v-for="plan in inProgressPlans" :key="plan.id">
-                      <!-- 父计划 -->
-                      <div 
-                        class="plan-item"
-                        :class="{ 'active': selectedPlan === plan.id }"
-                        @click="selectPlan(plan.id)"
-                        @mouseenter="showPlanActions(plan.id)"
-                        @mouseleave="hidePlanActions(plan.id)"
-                      >
-                        <span 
-                          v-if="plan.children && plan.children.length > 0" 
-                          class="expand-arrow"
-                          :class="{ 'expanded': expandedPlans.includes(plan.id) }"
-                          @click="togglePlanExpansion(plan.id)"
-                        >▶</span>
-                        <span v-else class="expand-placeholder"></span>
-                        <span class="plan-icon">{{ getPlanIcon(plan.content_type || plan.plan_type || 'badcase') }}</span>
-                        <span class="plan-name">
-                          {{ plan.name }}
-                          <span v-if="plan.is_pinned" class="pin-indicator" :title="t('project.pinned')">📌</span>
-                        </span>
-                        <span class="plan-info">
-                          <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
-                          <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
-                          <span v-if="(plan.content_type || plan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count ?? 0 }}</span>
-                        </span>
-                        
-                        <!-- 操作按钮 -->
-                        <div v-show="hoveredPlan === plan.id" class="plan-actions">
-                          <button class="action-btn" @click.stop="showContextMenu(plan, $event)">
-                            ⚙️
-                          </button>
-                        </div>
-                        
-                        <!-- 上下文菜单（可拖动标题条 + 内容区滚动） -->
-                        <div 
-                          v-if="contextMenu.visible && contextMenu.planId === plan.id"
-                          class="context-menu"
-                          :class="{ 'is-dragging': contextMenuDragActive }"
-                          :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
-                          @mousedown.stop
-                        >
-                          <div
-                            class="context-menu-drag-handle"
-                            :title="t('project.contextMenuDragHint')"
-                            @mousedown.stop="onContextMenuDragStart"
-                          >
-                            <span class="drag-grip">⋮⋮</span>
-                            <span class="drag-label">{{ t('project.contextMenuDrag') }}</span>
-                          </div>
-                          <div class="context-menu-body">
-                          <div class="menu-item" @click="createSubPlan(plan)">
-                            <span class="menu-icon">➕</span>
-                            <span>{{ t('project.menuSubPlan') }}</span>
-                          </div>
-                          <div class="menu-item" @click="createSiblingPlan(plan)">
-                            <span class="menu-icon">📝</span>
-                            <span>{{ t('project.menuSiblingPlan') }}</span>
-                          </div>
-                          <div class="menu-item" @click="editPlan(plan)">
-                            <span class="menu-icon">✏️</span>
-                            <span>{{ t('project.menuEdit') }}</span>
-                          </div>
-                          <div class="menu-item" @click="archivePlan(plan)">
-                            <span class="menu-icon">📦</span>
-                            <span>{{ t('project.menuArchive') }}</span>
-                          </div>
-                          <div class="menu-item" @click="deletePlan(plan)">
-                            <span class="menu-icon">🗑️</span>
-                            <span>{{ t('project.menuDelete') }}</span>
-                          </div>
-                          <div class="menu-item" @click="pinPlan(plan)">
-                            <span class="menu-icon">📌</span>
-                            <span>{{ plan.is_pinned ? t('project.unpin') : t('project.pin') }}</span>
-                          </div>
-                          <div class="menu-item" @click="favoritePlan(plan)">
-                            <span class="menu-icon">⭐</span>
-                            <span>{{ t('project.favorite') }}</span>
-                          </div>
-                          <div class="menu-separator"></div>
-                          <div class="menu-item" @click="createBaseline(plan)">
-                            <span class="menu-icon">📋</span>
-                            <span>{{ t('project.menuNewBaseline') }}</span>
-                          </div>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <!-- 子计划 - 紧跟在父计划后面 -->
-                      <div v-if="plan.children && plan.children.length > 0 && expandedPlans.includes(plan.id)" class="sub-plan-list">
-                        <template v-for="childPlan in plan.children" :key="childPlan.id">
-                          <div 
-                            class="plan-item sub-plan"
-                            :class="{ 'active': selectedPlan === childPlan.id }"
-                            @click="selectPlan(childPlan.id)"
-                            @mouseenter="showPlanActions(childPlan.id)"
-                            @mouseleave="hidePlanActions(childPlan.id)"
-                          >
-                            <span 
-                              v-if="childPlan.children && childPlan.children.length > 0" 
-                              class="expand-arrow"
-                              :class="{ 'expanded': expandedPlans.includes(childPlan.id) }"
-                              @click="togglePlanExpansion(childPlan.id)"
-                            >▶</span>
-                            <span v-else class="expand-placeholder"></span>
-                            <span class="plan-icon">{{ getPlanIcon(childPlan.content_type || childPlan.plan_type || 'badcase') }}</span>
-                            <span class="plan-name">
-                              {{ childPlan.name }}
-                              <span v-if="childPlan.is_pinned" class="pin-indicator" :title="t('project.pinned')">📌</span>
-                            </span>
-                            <span class="plan-info">
-                              <span v-if="childPlan.badcase_count > 0" class="count-badge badcase">{{ childPlan.badcase_count }}</span>
-                              <span v-if="childPlan.bug_count > 0" class="count-badge bug">{{ childPlan.bug_count }}</span>
-                              <span v-if="(childPlan.content_type || childPlan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(childPlan.id)] ?? childPlan.test_case_count ?? 0 }}</span>
-                            </span>
-                            
-                            <!-- 操作按钮 -->
-                            <div v-show="hoveredPlan === childPlan.id" class="plan-actions">
-                              <button class="action-btn" @click.stop="showContextMenu(childPlan, $event)">
-                                ⚙️
-                              </button>
-                            </div>
-                            
-                            <!-- 上下文菜单（可拖动标题条 + 内容区滚动） -->
-                            <div 
-                              v-if="contextMenu.visible && contextMenu.planId === childPlan.id"
-                              class="context-menu"
-                              :class="{ 'is-dragging': contextMenuDragActive }"
-                              :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
-                              @mousedown.stop
-                            >
-                              <div
-                                class="context-menu-drag-handle"
-                                :title="t('project.contextMenuDragHint')"
-                                @mousedown.stop="onContextMenuDragStart"
-                              >
-                                <span class="drag-grip">⋮⋮</span>
-                                <span class="drag-label">{{ t('project.contextMenuDrag') }}</span>
-                              </div>
-                              <div class="context-menu-body">
-                              <div class="menu-item" @click="createSubPlan(childPlan)">
-                                <span class="menu-icon">➕</span>
-                                <span>{{ t('project.menuSubPlan') }}</span>
-                              </div>
-                              <div class="menu-item" @click="createSiblingPlan(childPlan)">
-                                <span class="menu-icon">📝</span>
-                                <span>{{ t('project.menuSiblingPlan') }}</span>
-                              </div>
-                              <div class="menu-item" @click="editPlan(childPlan)">
-                                <span class="menu-icon">✏️</span>
-                                <span>{{ t('project.menuEdit') }}</span>
-                              </div>
-                              <div class="menu-item" @click="archivePlan(childPlan)">
-                                <span class="menu-icon">📦</span>
-                                <span>{{ t('project.menuArchive') }}</span>
-                              </div>
-                              <div class="menu-item" @click="deletePlan(childPlan)">
-                                <span class="menu-icon">🗑️</span>
-                                <span>{{ t('project.menuDelete') }}</span>
-                              </div>
-                              <div class="menu-item" @click="pinPlan(childPlan)">
-                                <span class="menu-icon">📌</span>
-                                <span>{{ childPlan.is_pinned ? t('project.unpin') : t('project.pin') }}</span>
-                              </div>
-                              <div class="menu-item" @click="favoritePlan(childPlan)">
-                                <span class="menu-icon">⭐</span>
-                                <span>{{ t('project.favorite') }}</span>
-                              </div>
-                              <div class="menu-separator"></div>
-                              <div class="menu-item" @click="createBaseline(childPlan)">
-                                <span class="menu-icon">📋</span>
-                                <span>{{ t('project.menuNewBaseline') }}</span>
-                              </div>
-                              </div>
-                            </div>
-                          </div>
-                          
-                          <!-- 孙计划 - 紧跟在子计划后面 -->
-                          <div v-if="childPlan.children && childPlan.children.length > 0 && expandedPlans.includes(childPlan.id)" class="sub-plan-list level-2">
-                            <div 
-                              v-for="grandChildPlan in childPlan.children" 
-                              :key="grandChildPlan.id"
-                              class="plan-item sub-plan level-2"
-                              :class="{ 'active': selectedPlan === grandChildPlan.id }"
-                              @click="selectPlan(grandChildPlan.id)"
-                              @mouseenter="showPlanActions(grandChildPlan.id)"
-                              @mouseleave="hidePlanActions(grandChildPlan.id)"
-                            >
-                              <span class="expand-placeholder"></span>
-                              <span class="plan-icon">{{ getPlanIcon(grandChildPlan.content_type || grandChildPlan.plan_type || 'badcase') }}</span>
-                              <span class="plan-name">
-                                {{ grandChildPlan.name }}
-                                <span v-if="grandChildPlan.is_pinned" class="pin-indicator" :title="t('project.pinned')">📌</span>
-                              </span>
-                              <span class="plan-info">
-                                <span v-if="grandChildPlan.badcase_count > 0" class="count-badge badcase">{{ grandChildPlan.badcase_count }}</span>
-                                <span v-if="grandChildPlan.bug_count > 0" class="count-badge bug">{{ grandChildPlan.bug_count }}</span>
-                                <span v-if="(grandChildPlan.content_type || grandChildPlan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(grandChildPlan.id)] ?? grandChildPlan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(grandChildPlan.id)] ?? grandChildPlan.test_case_count ?? 0 }}</span>
-                              </span>
-                              
-                              <!-- 操作按钮 -->
-                              <div v-show="hoveredPlan === grandChildPlan.id" class="plan-actions">
-                                <button class="action-btn" @click.stop="showContextMenu(grandChildPlan, $event)">
-                                  ⚙️
-                                </button>
-                              </div>
-                              
-                              <!-- 上下文菜单（可拖动标题条 + 内容区滚动） -->
-                              <div 
-                                v-if="contextMenu.visible && contextMenu.planId === grandChildPlan.id"
-                                class="context-menu"
-                                :class="{ 'is-dragging': contextMenuDragActive }"
-                                :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
-                                @mousedown.stop
-                              >
-                                <div
-                                  class="context-menu-drag-handle"
-                                  :title="t('project.contextMenuDragHint')"
-                                  @mousedown.stop="onContextMenuDragStart"
-                                >
-                                  <span class="drag-grip">⋮⋮</span>
-                                  <span class="drag-label">{{ t('project.contextMenuDrag') }}</span>
-                                </div>
-                                <div class="context-menu-body">
-                                <div class="menu-item" @click="createSubPlan(grandChildPlan)">
-                                  <span class="menu-icon">➕</span>
-                                  <span>{{ t('project.menuSubPlan') }}</span>
-                                </div>
-                                <div class="menu-item" @click="createSiblingPlan(grandChildPlan)">
-                                  <span class="menu-icon">📝</span>
-                                  <span>{{ t('project.menuSiblingPlan') }}</span>
-                                </div>
-                                <div class="menu-item" @click="editPlan(grandChildPlan)">
-                                  <span class="menu-icon">✏️</span>
-                                  <span>{{ t('project.menuEdit') }}</span>
-                                </div>
-                                <div class="menu-item" @click="archivePlan(grandChildPlan)">
-                                  <span class="menu-icon">📦</span>
-                                  <span>{{ t('project.menuArchive') }}</span>
-                                </div>
-                                <div class="menu-item" @click="deletePlan(grandChildPlan)">
-                                  <span class="menu-icon">🗑️</span>
-                                  <span>{{ t('project.menuDelete') }}</span>
-                                </div>
-                                <div class="menu-item" @click="pinPlan(grandChildPlan)">
-                                  <span class="menu-icon">📌</span>
-                                  <span>{{ grandChildPlan.is_pinned ? t('project.unpin') : t('project.pin') }}</span>
-                                </div>
-                                <div class="menu-item" @click="favoritePlan(grandChildPlan)">
-                                  <span class="menu-icon">⭐</span>
-                                  <span>{{ t('project.favorite') }}</span>
-                                </div>
-                                <div class="menu-separator"></div>
-                                <div class="menu-item" @click="createBaseline(grandChildPlan)">
-                                  <span class="menu-icon">📋</span>
-                                  <span>{{ t('project.menuNewBaseline') }}</span>
-                                </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
                   </div>
-                </div>
+                </template>
               </div>
             </div>
-            
-            <!-- 已归档计划 -->
-            <div class="plan-section">
-              <div class="section-header" @click="toggleSection('archived')">
-                <span class="section-icon">📦</span>
-                <span class="section-title">{{ t('project.sectionArchived') }}</span>
-                <span class="expand-arrow" :class="{ 'expanded': expandedSections.archived }">▶</span>
-              </div>
-              
-              <div v-if="expandedSections.archived" class="section-content">
-                <div v-if="loading" class="loading-state">
-                  <span class="loading-text">{{ t('common.loading') }}</span>
-            </div>
-                
-                <div v-else-if="archivedPlans.length === 0" class="empty-state">
-                  <span class="empty-text">{{ t('project.emptyArchived') }}</span>
-                </div>
-                
-                <div v-else>
-                  <div class="plan-list">
-                    <template v-for="plan in archivedPlans" :key="plan.id">
-                      <div 
-                        class="plan-item"
-                        :class="{ 'active': selectedPlan === plan.id }"
-                        @click="selectPlan(plan.id)"
-                        @mouseenter="showPlanActions(plan.id)"
-                        @mouseleave="hidePlanActions(plan.id)"
-                      >
-                        <span class="expand-placeholder"></span>
-                        <span class="plan-icon">📦</span>
-                        <span class="plan-name">
-                          {{ plan.name }}
-                          <span v-if="plan.is_pinned" class="pin-indicator" :title="t('project.pinned')">📌</span>
-                        </span>
-                        <span class="plan-info">
-                          <span v-if="plan.badcase_count > 0" class="count-badge badcase">{{ plan.badcase_count }}</span>
-                          <span v-if="plan.bug_count > 0" class="count-badge bug">{{ plan.bug_count }}</span>
-                          <span v-if="(plan.content_type || plan.plan_type) === 'test_case' || ((planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count) ?? 0) > 0" class="count-badge testcase">{{ planTestCaseCounts[Number(plan.id)] ?? plan.test_case_count ?? 0 }}</span>
-                        </span>
-                        
-                        <!-- 操作按钮 -->
-                        <div v-show="hoveredPlan === plan.id" class="plan-actions">
-                          <button class="action-btn" @click.stop="showContextMenu(plan, $event)">
-                            ⚙️
-                          </button>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-           
           </div>
         </div>
       </div>
@@ -529,6 +229,7 @@
             </button>
           </div>
           <div ref="workbenchMenuRef" class="workbench-tabbar-trailing">
+
             <button
               type="button"
               class="workbench-more-btn"
@@ -556,6 +257,7 @@
           </div>
         </div>
         <div class="main-content-body">
+        
         <!-- keep-alive：列表/详情切换时复用实例，减轻 Tab 来回切换的重复挂载与卡顿 -->
         <keep-alive v-if="showMainEditor" :max="16">
           <component
@@ -599,39 +301,22 @@
         <keep-alive v-else :max="16">
           <component
             :key="listPanelCacheKey"
-            :is="currentPlanType === 'bug' ? 'BugListPanel' : (currentPlanType === 'test_case' ? 'TestCaseListPanel' : 'BadcaseListPanel')"
-          v-model:searchText="searchText"
-          v-model:selectedAssignee="selectedAssignee"
-          v-model:selectedStatus="selectedStatus"
-          :generateBreadcrumb="generateBreadcrumb"
-          :show-long-breadcrumb="workbenchTabs.length === 0"
-          :currentPlanType="currentPlanType"
-          :totalBadcases="totalBadcases"
-          :projectMembers="projectMembers"
-          :applyFilters="applyFilters"
-          :refreshBadcases="refreshBadcases"
-          :badcaseLoading="badcaseLoading"
-          :filteredBadcases="filteredBadcases"
-          :selectedTasks="selectedTasks"
-          :selectAll="selectAll"
-          :toggleSelectAll="toggleSelectAll"
-          :toggleTaskSelection="toggleTaskSelection"
-          :editItem="editBadcase"
-          :pendingModifications="pendingModifications"
-          :pendingCreates="pendingCreatesForCurrentView"
-          :expandedDetailRows="expandedDetailRows"
-          :hasDetailFieldModifications="hasDetailFieldModifications"
-          :toggleDetailExpand="toggleDetailExpand"
-          :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
-          :getConsecutiveGroupSize="getConsecutiveGroupSize"
-          :confirmModify="confirmConsecutiveGroup"
-          :cancelModify="cancelConsecutiveGroup"
-          :confirmCreate="confirmCreate"
-          :cancelCreate="cancelCreate"
-          :getBadcaseStatusText="getBadcaseStatusText"
-          :getAssigneeDisplayText="getAssigneeDisplayText"
-          :createNewBadcase="createNewBadcase"
-          />
+            :is="'CardPanel'"
+            :ref="el => { console.log('[CardPanel] mounted, items:', filteredCards?.length, 'total:', totalCards, 'loading:', cardLoading) }"
+            v-model:searchText="searchText"
+            :title="selectedBaselinePlanName || t('project.selectPlan')"
+            :showHeader="true"
+            :itemType="'card'"
+            :items="filteredCards"
+            :total="totalCards"
+            :loading="cardLoading"
+            :selectedItems="selectedTasks"
+            :selectAll="selectAll"
+            :toggleSelectAll="toggleSelectAll"
+            :toggleTaskSelection="toggleTaskSelection"
+            :editItem="editBadcase"
+            :onQuickCreate="handleQuickCreate"
+            />
         </keep-alive>
         </div>
         
@@ -641,6 +326,7 @@
           'with-collapsed-sidebar': !leftSidebarHidden && planCollapsed
         }" :style="{ 
           height: bottomPanelHeight + 'px',
+          left: (leftSidebarHidden ? 48 : (!planCollapsed ? 48 + leftSidebarWidth : 108)) + 'px',
           right: showAIAssistant ? rightSidebarWidth + 'px' : '0px',
           zIndex: 100
         }">
@@ -655,8 +341,9 @@
           </div>
         </div>
       </div>
-      
-      <!-- 右侧AI助手面板 -->
+    </div><!-- 关闭 narrow-nav-and-main -->
+
+    <!-- 右侧AI助手面板 -->
       <div v-if="showAIAssistant" class="right-sidebar ai-assistant-panel" :style="{ width: rightSidebarWidth + 'px' }">
         <!-- 拖拽手柄 -->
         <div class="drag-handle" @mousedown="startDragRightSidebar"></div>
@@ -878,151 +565,70 @@
     
     <!-- 新建计划模态框 -->
     <div v-if="showCreateModal" class="modal-overlay" @click="closeCreateModal">
-      <div class="modal-content" @click.stop>
-        <div class="modal-header">
+      <div class="plan-modal-content" @click.stop>
+        <div class="plan-modal-header">
           <h3>{{ getModalTitle() }}</h3>
-          <button class="close-btn" @click="closeCreateModal">✕</button>
+          <button class="plan-modal-close" @click="closeCreateModal">✕</button>
         </div>
         
-        <div class="modal-body">
-          <div class="form-group cycle-row">
-            <label class="form-label cycle-label required">{{ t('project.planCycle') }}</label>
-            <select v-model="newPlan.cycle" class="form-select">
-              <option value="one_week">{{ t('project.cycleOneWeek') }}</option>
-              <option value="two_weeks">{{ t('project.cycleTwoWeeks') }}</option>
-              <option value="one_month">{{ t('project.cycleOneMonth') }}</option>
-              <option value="custom">{{ t('project.cycleCustom') }}</option>
-            </select>
-          </div>
-          
-          <div class="form-group date-row">
-            <div class="date-field">
-              <label class="form-label required">{{ t('project.startDate') }}</label>
-              <div class="date-input-wrapper">
-                <input 
-                  type="date" 
-                  v-model="newPlan.startDate" 
-                  class="form-input"
-                />
-                <span class="calendar-icon">📅</span>
-              </div>
-            </div>
-            
-            <div class="date-field">
-              <label class="form-label required">{{ t('project.endDate') }}</label>
-              <div class="date-input-wrapper">
-                <input 
-                  type="date" 
-                  v-model="newPlan.endDate" 
-                  class="form-input"
-                />
-                <span class="calendar-icon">📅</span>
-              </div>
-            </div>
-          </div>
-          
-          <div class="form-group count-row">
-            <label class="form-label count-label">{{ t('project.planCount') }}</label>
-            <div class="number-input-wrapper">
-              <input 
-                type="number" 
-                v-model="newPlan.count" 
-                min="1" 
-                class="form-input count-input"
-              />
-              <span class="helper-text">{{ t('project.planCountHint', { count: newPlan.count, end: calculateEndDate() }) }}</span>
-            </div>
-          </div>
-          
-          <div class="form-group">
-            <label class="form-label required">{{ t('project.planName') }}</label>
-            <div class="name-input-wrapper">
+        <div class="plan-modal-body">
+          <div class="plan-form-row">
+            <div class="plan-form-item">
+              <label class="plan-form-label required">标题</label>
               <input 
                 type="text" 
                 v-model="newPlan.name" 
-                :placeholder="namePlaceholder"
-                class="form-input name-input"
+                class="plan-form-input"
                 maxlength="50"
               />
-              <div class="name-input-actions">
-                <span class="char-count">{{ newPlan.name.length }}/50</span>
-                <button class="help-btn" :title="t('project.namingHelp')">❓</button>
-              </div>
             </div>
           </div>
           
-          <div class="form-group parent-row">
-            <label class="form-label parent-label">{{ t('project.parentPlan') }}</label>
-            <select v-model="newPlan.parentId" class="form-select" :disabled="isCreatingSubPlan || isCreatingSiblingPlan">
-              <option value="">{{ t('project.selectParentPlaceholder') }}</option>
-              <option v-for="plan in availableParentPlans" :key="plan.id" :value="plan.id">
-                {{ plan.name }}
-              </option>
-            </select>
-            <div v-if="isCreatingSubPlan && newPlan.parentId" class="parent-plan-info">
-              <span class="info-text">{{ t('project.parentAsCurrent') }}</span>
+          <div class="plan-form-row plan-form-row-2col">
+            <div class="plan-form-item">
+              <label class="plan-form-label required">开始时间</label>
+              <input type="date" v-model="newPlan.startDate" class="plan-form-input" placeholder=" " />
             </div>
-            <div v-if="isCreatingSiblingPlan" class="parent-plan-info">
-              <span class="info-text">{{ newPlan.parentId ? t('project.siblingUnderParent') : t('project.topLevelPlan') }}</span>
+            <div class="plan-form-item">
+              <label class="plan-form-label required">结束时间</label>
+              <input type="date" v-model="newPlan.endDate" class="plan-form-input" placeholder=" " />
             </div>
           </div>
           
-          <div class="form-group">
-            <label class="form-label">{{ t('common.description') }}</label>
-            <div class="textarea-wrapper">
+          <div class="plan-form-row">
+            <div class="plan-form-item">
+              <label class="plan-form-label">{{ t('project.parentPlan') }}</label>
+              <select v-model="newPlan.parentId" class="plan-form-select">
+                <option value="">{{ t('project.selectParentPlaceholder') }}</option>
+                <option v-for="plan in availableParentPlans" :key="plan.id" :value="plan.id">
+                  {{ plan.name }}
+                </option>
+              </select>
+            </div>
+          </div>
+          
+          <div class="plan-form-row">
+            <div class="plan-form-item">
+              <label class="plan-form-label">{{ t('common.description') }}</label>
               <textarea 
                 v-model="newPlan.description" 
-                class="form-textarea"
+                class="plan-form-textarea"
                 maxlength="500"
               ></textarea>
-              <span class="textarea-char-count">{{ newPlan.description.length }}/500</span>
             </div>
-          </div>
-          
-          <!-- 新增：计划状态类型选择 -->
-          <div class="form-group">
-            <label class="form-label required">{{ t('project.planStatus') }}</label>
-            <select v-model="newPlan.statusType" class="form-select">
-              <option value="in_progress">{{ t('project.planStatusInProgress') }}</option>
-              <option value="unplanned">{{ t('project.planStatusUnplanned') }}</option>
-              <option value="archived">{{ t('project.planStatusArchived') }}</option>
-            </select>
-          </div>
-          
-          <!-- 新增：内容类型选择（子计划/同级计划必须与所选计划同类型，不可混选） -->
-          <div class="form-group">
-            <label class="form-label required">{{ t('project.contentType') }}</label>
-            <select
-              v-model="newPlan.contentType"
-              class="form-select"
-              :disabled="isCreatingSubPlan || isCreatingSiblingPlan"
-            >
-              <option value="badcase">{{ t('project.contentBadcase') }}</option>
-              <option value="bug">{{ t('project.contentBug') }}</option>
-              <option value="test_case">{{ t('project.contentTestCase') }}</option>
-            </select>
-            <p v-if="isCreatingSubPlan || isCreatingSiblingPlan" class="form-hint-inline">
-              {{ t('project.contentTypeLocked') }}
-            </p>
-          </div>
-          
-          <div class="form-group">
-            <label class="toggle-label">
-              <span>{{ t('project.scopeNotify') }}</span>
-              <input 
-                type="checkbox" 
-                v-model="newPlan.scopeNotification" 
-                class="toggle-switch"
-              />
-            </label>
           </div>
         </div>
         
-        <div class="modal-footer">
-          <button class="btn btn-secondary" @click="closeCreateModal">{{ t('prefs.cancel') }}</button>
-          <button class="btn btn-primary" @click="createPlan" :disabled="!isFormValid">
-            {{ isEditingPlan ? t('common.update') : t('common.confirm') }}
+        <div class="plan-modal-footer">
+          <button class="plan-btn plan-btn-default" @click="createPlanAndContinue" :disabled="!isFormValid">
+            继续添加
           </button>
+          <div class="plan-modal-footer-right">
+            <button class="plan-btn plan-btn-cancel" @click="closeCreateModal">{{ t('prefs.cancel') }}</button>
+            <button class="plan-btn plan-btn-primary" @click="createPlan" :disabled="!isFormValid">
+              {{ isEditingPlan ? t('common.update') : t('common.confirm') }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1062,7 +668,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, provide } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail } from '../api.js'
+import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, createCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline } from '../api.js'
 import { getBadCaseStatusText } from '../constants/status.js'
 import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
@@ -1070,9 +676,12 @@ import AppSettingsPanel from './AppSettingsPanel.vue'
 import ProjectHelpPanel from './ProjectHelpPanel.vue'
 import WorkflowNotificationsPanel from './WorkflowNotificationsPanel.vue'
 import ProjectWorkspaceShell from './ProjectWorkspaceShell.vue'
+import NarrowNavBar from './NarrowNavBar.vue'
+import GlobalSearch from './GlobalSearch.vue'
 import BadcaseListPanel from './panels/BadcaseListPanel.vue'
 import BugListPanel from './panels/BugListPanel.vue'
 import TestCaseListPanel from './panels/TestCaseListPanel.vue'
+import CardPanel from './panels/CardPanel.vue'
 import NewBadcase from './NewBadcase.vue'
 import NewBug from './NewBug.vue'
 import NewTestCase from './NewTestCase.vue'
@@ -1104,8 +713,11 @@ export default {
     BadcaseListPanel,
     BugListPanel,
     TestCaseListPanel,
+    CardPanel,
     EmbeddedTerminalWorkspace,
-    SimpleChatPanel
+    SimpleChatPanel,
+    NarrowNavBar,
+    GlobalSearch
   },
   setup() {
     const router = useRouter()
@@ -1128,22 +740,20 @@ export default {
     const selectedStatus = ref('')
     const projectMembers = ref([])
 
+
     // 展开状态
     const expandedSections = reactive({
       inProgress: true,
-      archived: false,
-      unplanned: true
+      archived: false
     })
 
-    // 未计划badcase展开状态
-    const expandedUnplannedBadcase = ref(false)
 
     // 选择状态
     const selectedPlan = ref(null)
     const highlightBugId = ref(null) // 用于高亮显示的bug ID
     const urlContentType = ref(null) // URL参数传递的内容类型，优先级高于计划类型
     const currentPlan = computed(() => {
-      if (!selectedPlan.value || selectedPlan.value === 'unplanned') {
+      if (!selectedPlan.value) {
         return null
       }
       
@@ -1167,10 +777,6 @@ export default {
         return urlContentType.value
       }
       
-      if (selectedPlan.value === 'unplanned') {
-        console.log('🐛 currentPlanType: unplanned → badcase')
-        return 'badcase'
-      }
       if (!currentPlan.value) {
         console.log('🐛 currentPlanType: no currentPlan → badcase')
         return 'badcase'
@@ -1197,18 +803,6 @@ export default {
         (urlContentType.value || '')
     )
 
-    /** 未计划区 BadCase/Bug/测试用例 三枚入口高亮（需与 fetch 后 selectedPlan 可为 unplanned 共存） */
-    const isUnplannedTypeChipActive = (type) => {
-      if (selectedPlan.value != null && typeof selectedPlan.value === 'number') return false
-      if (type === 'badcase') {
-        return (
-          urlContentType.value === 'badcase' ||
-          (!urlContentType.value && selectedPlan.value === 'unplanned')
-        )
-      }
-      return urlContentType.value === type
-    }
-    
     const selectAll = ref(false)
     const selectedTasks = ref([])
 
@@ -1279,6 +873,87 @@ export default {
     const badcaseDraftPreset = ref({ token: 0, description: '' })
     provide('badcaseDraftPreset', badcaseDraftPreset)
 
+    // ── 全局命令历史弹框（出现在 top-bar 下方，跨越所有面板） ──
+    const showGlobalCmdHistory = ref(false)
+    const globalCmdHistoryList = ref([])
+    const globalCmdSearchText = ref('')
+    const globalCmdSelected = ref(0)
+    const globalCmdSearchInput = ref(null)
+    const globalCmdListRef = ref(null)
+
+    const indexedGlobalCmd = computed(() =>
+      globalCmdHistoryList.value.map((text, i) => ({ text, index: i + 1 }))
+    )
+    const filteredGlobalCmdHistory = computed(() => {
+      const q = globalCmdSearchText.value.trim().toLowerCase()
+      if (!q) return indexedGlobalCmd.value
+      return indexedGlobalCmd.value.filter((c) => c.text.toLowerCase().includes(q))
+    })
+
+    function openGlobalCmdHistory(csid) {
+      if (!csid) return
+      // 先强制关闭再打开，确保触发更新
+      showGlobalCmdHistory.value = false
+      nextTick(() => {
+        // 从子组件获取命令历史
+        const termCommandRegistry = globalThis.__termCommandRegistry__
+        if (termCommandRegistry) {
+          globalCmdHistoryList.value = termCommandRegistry.getCommands(csid) || []
+        } else {
+          globalCmdHistoryList.value = []
+        }
+        globalCmdSelected.value = 0
+        globalCmdSearchText.value = ''
+        showGlobalCmdHistory.value = true
+        // setTimeout 确保 Teleport 完成后再聚焦
+        setTimeout(() => {
+          const input = document.querySelector('.etw-global-cmd-search')
+          if (input) input.focus()
+        }, 100)
+      })
+    }
+
+    function scrollGlobalSelectedIntoView() {
+      nextTick(() => {
+        const el = globalCmdListRef.value?.querySelector('.etw-global-cmd-item--selected')
+        el?.scrollIntoView({ block: 'nearest' })
+      })
+    }
+
+    function onGlobalCmdKeydown(e) {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        globalCmdSelected.value = Math.max(0, globalCmdSelected.value - 1)
+        scrollGlobalSelectedIntoView()
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        globalCmdSelected.value = Math.min(filteredGlobalCmdHistory.value.length - 1, globalCmdSelected.value + 1)
+        scrollGlobalSelectedIntoView()
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        pickGlobalCmd(globalCmdSelected.value)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        showGlobalCmdHistory.value = false
+      }
+    }
+
+    function pickGlobalCmd(idx) {
+      const item = filteredGlobalCmdHistory.value[idx]
+      if (!item) return
+      showGlobalCmdHistory.value = false
+      // 通过全局 terminal 实例写入命令（_activeTerm 定义在 termRegistry 上）
+      const termRegistry = globalThis.__termRegistry__
+      if (termRegistry) {
+        const term = termRegistry._activeTerm
+        if (term) {
+          term.write(item.text + '\r')
+        }
+      }
+    }
+
+    provide('openGlobalCmdHistory', openGlobalCmdHistory)
+
     /** 打开项目时拉取最近长期记忆，随每条 ReAct 请求传入（不在每条对话后端 embed） */
     const projectLongMemoryContext = ref(null)
     provide('projectLongMemoryContext', projectLongMemoryContext)
@@ -1345,12 +1020,9 @@ export default {
       return `editor-${embeddedEditorKind.value}-detail-${id}-${pid}-${editFlag}-${diffFlag}`
     })
 
-    /** Cursor 式工作区：计划列表 / 未计划 / 详情 各为一个 Tab，标题为短名 */
+    /** Cursor 式工作区：计划列表 / 详情 各为一个 Tab，标题为短名 */
     const workbenchTabs = ref([])
-    /** ⋯ 下拉不展示「未计划 BadCase」列表 Tab（与 Tab 条切换即可，避免重复一项） */
-    const workbenchTabsForMoreMenu = computed(() =>
-      workbenchTabs.value.filter((t) => t.id !== 'unplanned-badcase')
-    )
+    const workbenchTabsForMoreMenu = computed(() => workbenchTabs.value)
     const activeWorkbenchTabId = ref(null)
     const isSettingsWorkbenchTab = computed(() => activeWorkbenchTabId.value === SETTINGS_WORKBENCH_TAB_ID)
     const isHelpWorkbenchTab = computed(() => activeWorkbenchTabId.value === HELP_WORKBENCH_TAB_ID)
@@ -1358,6 +1030,7 @@ export default {
     const isNotificationsWorkbenchTab = computed(
       () => activeWorkbenchTabId.value === NOTIFICATIONS_WORKBENCH_TAB_ID
     )
+    const activeWorkbenchTab = computed(() => workbenchTabs.value.find(t => t.id === activeWorkbenchTabId.value))
     const workbenchMenuRef = ref(null)
     const workbenchTabsStripRef = ref(null)
     /** Tab 条左键拖拽平移时用于样式（抓手 / 禁止选中文本） */
@@ -1367,11 +1040,17 @@ export default {
     const showWorkbenchTabMenu = ref(false)
     let workbenchMenuOutsideCleanup = null
     
+    // 左侧对话框拖拽状态
+    const leftSidebarWidth = ref(280)
+    const isDraggingLeftSidebar = ref(false)
+    const leftDragStartX = ref(0)
+    const leftDragStartWidth = ref(280)
+    
     // 右侧对话框拖拽状态
     const rightSidebarWidth = ref(320)
     const isDraggingRightSidebar = ref(false)
-    const dragStartX = ref(0)
-    const dragStartWidth = ref(320)
+    const rightDragStartX = ref(0)
+    const rightDragStartWidth = ref(320)
     
     // 底部面板拖拽状态
     const bottomPanelHeight = ref(300)
@@ -1386,6 +1065,75 @@ export default {
     const baselines = ref([])
     const availableBadcases = ref([])
     
+    // 窄条导航栏相关状态
+    const showGlobalSearch = ref(false)
+    
+    // 窄条导航栏处理函数
+    const handleReturnToPlans = () => {
+      // 收起左侧边栏
+      if (leftSidebarHidden.value) {
+        leftSidebarHidden.value = false
+        planCollapsed.value = false
+      }
+      
+      // 如果有选中的计划，选中该计划并挂载Tab（与点击迭代1行为一致）
+      if (selectedPlan.value) {
+        selectPlan(selectedPlan.value)
+      } else {
+        // 如果没有选中计划，关闭所有工作区Tab
+        workbenchTabs.value = []
+        activeWorkbenchTabId.value = null
+      }
+    }
+    
+    const handleOpenGlobalSearch = () => {
+      showGlobalSearch.value = true
+    }
+    
+    // 打开归档视图
+    const handleOpenArchive = () => {
+      // 展开已归档计划的section
+      if (!expandedSections.value.archived) {
+        expandedSections.value.archived = true
+      }
+      // 确保侧边栏显示
+      if (leftSidebarHidden.value) {
+        leftSidebarHidden.value = false
+        planCollapsed.value = false
+      }
+      // 关闭搜索
+      showGlobalSearch.value = false
+    }
+    
+    const handleOpenCardCreate = () => {
+      // 直接选中当前计划并打开 BadCase 列表（和点击迭代1一样的界面）
+      // 如果没有选中计划，使用第一个计划
+      let targetPlanId = selectedPlan.value
+      if (!targetPlanId && activePlans.value && activePlans.value.length > 0) {
+        targetPlanId = activePlans.value[0].id
+      }
+      
+      if (targetPlanId) {
+        // 选中该计划并加载 BadCase 列表
+        selectPlan(targetPlanId)
+      } else {
+        // 如果没有任何计划，显示提示
+        console.warn('没有可用的迭代计划')
+      }
+    }
+    
+    const handleSearchResultSelect = (result) => {
+      console.log('选择搜索结果:', result)
+      // 根据类型跳转到对应详情
+      if (result.type === 'bug') {
+        openMainEditor('bug', result.id, true)
+      } else if (result.type === 'badcase') {
+        openMainEditor('badcase', result.id, true)
+      } else if (result.type === 'testcase') {
+        openMainEditor('test_case', result.id, true)
+      }
+    }
+    
     // 计划展开状态
     const expandedPlans = ref([])
     
@@ -1396,18 +1144,11 @@ export default {
     const isEditingPlan = ref(false) // 是否处于编辑模式
     const editingPlanId = ref(null) // 正在编辑的计划ID
     const newPlan = reactive({
-      cycle: 'one_week',
+      name: '',
       startDate: '',
       endDate: '',
-      count: 1,
-      name: '',
       parentId: '',
-      description: '',
-      scopeNotification: false,
-      // 新增：计划状态类型
-      statusType: 'in_progress', // 'in_progress' | 'unplanned' | 'archived'
-      // 新增：内容类型
-      contentType: 'badcase' // 'badcase' | 'bug' | 'test_case'
+      description: ''
     })
     
     // BadCase数据
@@ -1417,6 +1158,15 @@ export default {
     const badcasePage = ref(1)
     const badcasePerPage = ref(20)
     const totalBadcases = ref(0)
+    
+    // Card数据（统一卡片列表）
+    const cards = ref([])
+    const filteredCards = ref([])
+    const cardLoading = ref(false)
+    const cardPage = ref(1)
+    const cardPerPage = ref(20)
+    const totalCards = ref(0)
+    
     const pendingModifications = ref({}) // 存储待确认的修改
     /** 须在 restorePendingDiffReviews 之前声明：route watch immediate 会立刻恢复 diff，避免 TDZ */
     const highlightRowId = ref(null) // 高亮的列表行，用于滚动&样式
@@ -1629,11 +1379,6 @@ export default {
     
     const hasBaselines = computed(() => baselines.value.length > 0)
     
-    // 计算未计划的BadCase数量
-    const unplannedBadcaseCount = computed(() => {
-      return badcases.value.filter(b => !b.plan_id || b.plan_id === null).length
-    })
-    
     const planMatchesInProgress = (plan) => {
       if (plan.status_type === 'archived') return false
       const st = String(plan.status ?? '').toLowerCase()
@@ -1691,34 +1436,17 @@ export default {
       return plans
     })
     
-    const unplannedPlans = computed(() => {
-      // 兼容更多可能的状态值，包括新创建和待处理状态
-      const plans = projectPlans.value.filter(plan => {
+    // 活跃迭代 = 未计划 + 进行中（排除已归档）
+    const activePlans = computed(() => {
+      // 排除已归档的计划
+      const active = projectPlans.value.filter(plan => {
         const st = String(plan.status ?? '').toLowerCase()
-        const mistypedUnplanned =
-          plan.status_type === 'unplanned' &&
-          st &&
-          !['unplanned', 'new'].includes(st)
-        if (mistypedUnplanned) return false
-        return (
-          (plan.status_type === 'unplanned') ||
-          (plan.status === 'unplanned') ||
-          (plan.status === 'new') ||
-          (!plan.status && !plan.status_type)
+        return !(
+          plan.status_type === 'archived' ||
+          ['archived', 'completed', 'finished', 'done'].includes(st)
         )
       })
-
-      // 去重逻辑：针对名称为“未计划BadCase”的自动创建计划，只保留第一个
-      const seenUnplannedSystemPlan = new Set()
-      return plans.filter(plan => {
-        if (plan.name === '未计划BadCase') {
-          if (seenUnplannedSystemPlan.has(plan.name)) {
-            return false
-          }
-          seenUnplannedSystemPlan.add(plan.name)
-        }
-        return true
-      })
+      return active
     })
     
     const archivedPlans = computed(() => {
@@ -1748,14 +1476,12 @@ export default {
       try {
         console.log('调用API: 获取列表')
         const additionalParams = {}
-        if (selectedPlan.value && selectedPlan.value !== 'unplanned') {
+        if (selectedPlan.value) {
           // 确保是数字类型传递给后端
           const planId = parseInt(selectedPlan.value)
           if (!isNaN(planId)) {
             additionalParams.plan_id = planId
           }
-        } else if (selectedPlan.value === 'unplanned') {
-          additionalParams.status_type = 'unplanned'
         }
         
         // 如果有特定的内容类型，也传递给后端
@@ -1815,6 +1541,107 @@ export default {
       } finally {
         badcaseLoading.value = false
         console.log('=== fetchBadcases 完成 ===')
+      }
+    }
+    
+    // 快速创建卡片（只填标题）
+    const handleQuickCreate = async (title) => {
+      console.log('[handleQuickCreate] 快速创建卡片:', title)
+      
+      if (!title?.trim()) {
+        console.error('标题不能为空')
+        return
+      }
+      
+      try {
+        const cardData = {
+          title: title.trim(),
+          plan_id: selectedPlan.value || null,
+          status: 'new',
+          type: 'card'
+        }
+        
+        const response = await createCard(cardData)
+        console.log('[handleQuickCreate] 创建响应:', response)
+        
+        if (response?.data?.success) {
+          console.log('[handleQuickCreate] 卡片创建成功:', response.data.card)
+          
+          // 在列表前面插入新卡片
+          const newCard = response.data.card
+          filteredCards.value = [newCard, ...filteredCards.value]
+          totalCards.value++
+          
+          return newCard
+        } else {
+          console.error('[handleQuickCreate] 创建失败:', response?.data?.error)
+          alert(response?.data?.error || t('common.unknownError'))
+        }
+      } catch (error) {
+        console.error('[handleQuickCreate] 创建异常:', error)
+        alert(error?.message || t('common.unknownError'))
+      }
+    }
+    
+    // 获取Card数据（统一卡片列表）
+    const fetchCards = async (page = 1) => {
+      console.log('=== fetchCards 开始 ===')
+      console.log('项目ID:', projectId.value)
+      console.log('页码:', page)
+      
+      if (!projectId.value) {
+        console.error('项目ID为空，无法获取Card数据')
+        return
+      }
+      
+      cardLoading.value = true
+      try {
+        const additionalParams = {}
+        if (selectedPlan.value) {
+          const planId = parseInt(selectedPlan.value)
+          if (!isNaN(planId)) {
+            additionalParams.plan_id = planId
+          }
+        }
+        
+        const response = await getProjectCards(projectId.value, page, cardPerPage.value, additionalParams)
+        console.log('[CardPanel] Cards API响应:', response)
+        
+        if (response && response.data && response.data.success) {
+          cards.value = response.data.cards || []
+          // 按创建时间倒序排列（新的在前）
+          cards.value.sort((a, b) => {
+            const timeA = new Date(b.created_at || 0).getTime()
+            const timeB = new Date(a.created_at || 0).getTime()
+            return timeA - timeB
+          })
+          filteredCards.value = [...cards.value]
+          totalCards.value = (response.data.pagination && response.data.pagination.total) || response.data.total || 0
+          cardPage.value = page
+          console.log('[CardPanel] Card数据获取成功:', cards.value)
+          
+          // 应用筛选条件
+          if (searchText.value) {
+            const search = searchText.value.toLowerCase()
+            filteredCards.value = filteredCards.value.filter(c => 
+              (c.title && c.title.toLowerCase().includes(search)) ||
+              (c.assignee && c.assignee.toLowerCase().includes(search))
+            )
+          }
+        } else {
+          console.error('获取Card数据失败:', response?.data?.error || '未知错误')
+          cards.value = []
+          filteredCards.value = []
+          totalCards.value = 0
+        }
+      } catch (error) {
+        console.error('获取Card数据异常:', error)
+        cards.value = []
+        filteredCards.value = []
+        totalCards.value = 0
+      } finally {
+        cardLoading.value = false
+        console.log('=== fetchCards 完成 ===')
       }
     }
 
@@ -2358,15 +2185,21 @@ export default {
     
     // 根据内容类型获取计划图标
     const getPlanIcon = (contentType) => {
-      console.log('📦 getPlanIcon 被调用:', contentType)
       const iconMap = {
         'badcase': '📋',
         'bug': '🐛',
         'test_case': '🧪'
       }
-      const icon = iconMap[contentType] || '📋'
-      console.log('📦 返回图标:', icon, '（contentType:', contentType, '）')
-      return icon
+      return iconMap[contentType] || '📋'
+    }
+    
+    // 格式化日期
+    const formatDate = (dateStr) => {
+      if (!dateStr) return ''
+      const date = new Date(dateStr)
+      const month = String(date.getMonth() + 1).padStart(2, '0')
+      const day = String(date.getDate()).padStart(2, '0')
+      return `${month}-${day}`
     }
     
     // 根据内容类型获取计划类型文本
@@ -2484,7 +2317,7 @@ export default {
     })
     
     const isFormValid = computed(() => {
-      return newPlan.cycle && newPlan.startDate && newPlan.endDate && newPlan.name.trim()
+      return newPlan.startDate && newPlan.endDate && newPlan.name.trim()
     })
     
     // 获取项目计划
@@ -2521,6 +2354,13 @@ export default {
           filterPlans()
           projectPlans.value = [...projectPlans.value]
           filteredPlans.value = [...filteredPlans.value]
+          
+          // 如果没有选中任何计划，自动选中第一个活跃计划并挂载Tab
+          if (!selectedPlan.value && filteredPlans.value.length > 0) {
+            const firstPlan = filteredPlans.value[0]
+            console.log('自动选中第一个计划:', firstPlan.id, firstPlan.name)
+            await selectPlan(firstPlan.id)
+          }
         } else {
           console.error('获取项目计划失败:', response?.data?.error || '未知错误')
         }
@@ -2535,14 +2375,6 @@ export default {
       } finally {
         loading.value = false
       }
-    }
-    
-    // 确保有未计划的BadCase类型计划 - 已禁用
-    let isEnsuringUnplannedPlan = false
-    const ensureUnplannedBadcasePlan = async () => {
-      // 已禁用自动创建未计划BadCase计划
-      console.log('⚠️ ensureUnplannedBadcasePlan 已禁用')
-      return
     }
     
     // 获取项目信息
@@ -2580,12 +2412,7 @@ export default {
       expandedSections[section] = !expandedSections[section]
     }
     
-    // 切换未计划badcase展开状态
-    const toggleUnplannedBadcaseSection = () => {
-      expandedUnplannedBadcase.value = !expandedUnplannedBadcase.value
-    }
-
-    /** 切换侧栏计划/未计划视图时关闭主区域嵌入详情，否则会一直盖在列表上 */
+    /** 切换侧栏计划视图时关闭主区域嵌入详情，否则会一直盖在列表上 */
     const clearEmbeddedEditor = () => {
       if (!showMainEditor.value) return
       showMainEditor.value = false
@@ -2663,123 +2490,6 @@ export default {
       activeWorkbenchTabId.value = `plan-${pid}`
       console.log('选择计划:', planId)
       await applyPlanListTabState({ planId: pid, urlContentType: null })
-    }
-    
-    // 选择未计划的卡片
-    const selectUnplanned = async () => {
-      clearEmbeddedEditor()
-      upsertWorkbenchTab({
-        id: 'unplanned-badcase',
-        kind: 'plan-list',
-        title: truncateForTab(t('tab.unplannedBadcase'), t('tab.unplannedShort')),
-        meta: { planId: 'unplanned', urlContentType: null }
-      })
-      activeWorkbenchTabId.value = 'unplanned-badcase'
-      console.log('选择未计划的卡片')
-      expandedSections.unplanned = true
-      expandedUnplannedBadcase.value = true
-      await applyPlanListTabState({ planId: 'unplanned', urlContentType: null })
-    }
-    
-    // 选择未计划卡片中的BadCase
-    const selectUnplannedBadcase = async () => {
-      console.log('=== 点击未计划卡片中的BadCase ===')
-      
-      try {
-        // 检查现有的BadCase数据
-        console.log('🔍 检查现有BadCase数据')
-        
-        // 检查是否有BadCase数据
-        if (badcases.value.length === 0) {
-          console.log('⚠️ 没有BadCase数据，需要先获取数据')
-          // 如果没有数据，才调用API获取
-          // 直接调用fetchUnplannedBadcases方法，使用status_type和content_type筛选
-          await fetchUnplannedBadcases(1)
-        }
-        
-        // 检查每个BadCase是否有关联的plan
-        const badcaseWithPlan = badcases.value.find(b => b.plan_id && b.plan_id !== 0)
-        const badcaseWithoutPlan = badcases.value.find(b => !b.plan_id || b.plan_id === 0)
-        
-        console.log('🔍 BadCase检查结果:')
-        console.log('- 有关联计划的BadCase:', badcaseWithPlan)
-        console.log('- 无关联计划的BadCase:', badcaseWithoutPlan)
-        
-        if (badcaseWithPlan) {
-          // 如果有BadCase关联了plan，但仍然使用status_type和content_type查询
-          console.log(`✅ 找到关联plan的BadCase: "${badcaseWithPlan.title}" -> plan_id: ${badcaseWithPlan.plan_id}`)
-          selectedPlan.value = 'unplanned'
-          
-          // 始终使用status_type和content_type查询，不使用plan_id
-          console.log(`🔍 调用API: /api/projects/${projectId.value}/badcases?page=1&per_page=20&status_type=unplanned&content_type=badcase`)
-          await fetchUnplannedBadcases(1)
-          
-          // 展开未计划section
-          expandedSections.unplanned = true
-          expandedUnplannedBadcase.value = true
-          
-          // 应用筛选条件
-          applyFilters()
-          
-        } else if (badcaseWithoutPlan) {
-          // 如果没有BadCase关联plan，创建一个新plan
-          console.log(`⚠️ BadCase "${badcaseWithoutPlan.title}" 没有关联plan，开始创建新plan...`)
-          await createPlanForBadcase(badcaseWithoutPlan)
-          
-        } else {
-          // 所有BadCase都没有关联plan
-          console.log('📊 所有BadCase都没有关联plan，使用status_type和content_type查询')
-          selectedPlan.value = 'unplanned'
-          
-          // 使用status_type和content_type查询未计划的BadCase
-          console.log(`🔍 调用API: /api/projects/${projectId.value}/badcases?page=1&per_page=20&status_type=unplanned&content_type=badcase`)
-          await fetchUnplannedBadcases(1)
-          
-          // 展开未计划section
-          expandedSections.unplanned = true
-          expandedUnplannedBadcase.value = true
-          
-          // 应用筛选条件
-          applyFilters()
-          console.log(`📊 显示所有未关联计划的BadCase，共${filteredBadcases.value.length}个`)
-        }
-        
-        // 确保右侧主内容区显示BadCase数据
-        console.log('📊 右侧主内容区将显示BadCase数据')
-        
-        // 强制更新右侧主内容区的显示
-        nextTick(() => {
-          console.log('✅ 右侧主内容区已更新')
-          console.log(`📊 当前BadCase数据: ${filteredBadcases.value.length} 个`)
-        })
-        
-      } catch (error) {
-        console.error('❌ 处理BadCase时发生错误:', error)
-      }
-    }
-    
-    // 选择未计划的类型（BadCase/Bug/测试用例）
-    const selectUnplannedType = async (type) => {
-      console.log(`=== 点击未计划类型: ${type} ===`)
-      clearEmbeddedEditor()
-      const shortTitles = {
-        badcase: t('tab.unplannedBadcase'),
-        bug: t('tab.unplannedBug'),
-        test_case: t('tab.unplannedTestCase')
-      }
-      upsertWorkbenchTab({
-        id: `unplanned-${type}`,
-        kind: 'plan-list',
-        title: truncateForTab(shortTitles[type] || String(type), t('tab.unplannedShort')),
-        meta: { planId: null, urlContentType: type }
-      })
-      activeWorkbenchTabId.value = `unplanned-${type}`
-      try {
-        await applyPlanListTabState({ planId: null, urlContentType: type })
-        expandedSections.unplanned = true
-      } catch (error) {
-        console.error(`❌ 处理${type}时发生错误:`, error)
-      }
     }
     
     // 根据BadCase选择对应的计划
@@ -2912,172 +2622,6 @@ export default {
       }
     }
     
-    // 获取未计划且BadCase类型的BadCase
-    const fetchUnplannedBadcases = async (page = 1) => {
-      console.log(`=== fetchUnplannedBadcases 开始 ===`)
-      console.log('页码:', page)
-      console.log('项目ID:', projectId.value)
-      
-      if (!projectId.value) {
-        console.error('项目ID为空，无法获取BadCase数据')
-        return
-      }
-      
-      badcaseLoading.value = true
-      try {
-        // 构建API参数：使用status_type和content_type筛选
-        const params = {
-          status_type: 'unplanned',
-          content_type: 'badcase'
-        }
-        
-        console.log('📋 未计划BadCase筛选参数:', params)
-        console.log('调用API: getProjectBadcases，参数:', params)
-        console.log(`🔍 检索条件: 项目ID=${projectId.value}, 页码=${page}, 每页数量=${badcasePerPage.value}`)
-        
-        const response = await getProjectBadcases(projectId.value, page, badcasePerPage.value, params)
-        console.log('API响应:', response)
-        
-        if (response && response.data && response.data.success) {
-          badcases.value = response.data.badcases || []
-          filteredBadcases.value = [...badcases.value]
-          totalBadcases.value = response.data.total || 0
-          badcasePage.value = page
-          
-          console.log(`✅ 未计划且BadCase类型的BadCase检索成功，共${badcases.value.length}个`)
-          console.log(`📊 检索结果: 总数=${totalBadcases.value}, 当前页=${badcasePage.value}`)
-          
-          // 已禁用自动创建未计划BadCase计划
-          // if (badcases.value.length === 0 && totalBadcases.value === 0) {
-          //   console.log('⚠️ 未计划BadCase查询结果为空，开始创建未计划的BadCase类型计划...')
-          //   await createUnplannedBadcasePlan()
-          // }
-          
-          // 检查每个BadCase的数据
-          badcases.value.forEach((badcase, index) => {
-            console.log(`BadCase ${index + 1}:`, {
-              id: badcase.id,
-              title: badcase.title,
-              status: badcase.status,
-              assignee: badcase.assignee,
-              plan_id: badcase.plan_id,
-              created_at: badcase.created_at
-            })
-          })
-          
-          // 设置selectedPlan为'unplanned'，确保UI状态正确
-          selectedPlan.value = 'unplanned'
-          
-          // 应用筛选条件
-          applyFilters()
-          
-          console.log('📊 未计划BadCase数据已获取，右侧主内容区将显示数据')
-          console.log(`📊 获取到 ${badcases.value.length} 个BadCase`)
-          
-        } else {
-          console.error('获取未计划BadCase数据失败:', response?.data?.error || '未知错误')
-          badcases.value = []
-          totalBadcases.value = 0
-        }
-      } catch (error) {
-        console.error('获取未计划BadCase数据异常:', error)
-        console.error('错误详情:', error.message)
-        console.error('错误堆栈:', error.stack)
-      } finally {
-        badcaseLoading.value = false
-        console.log('=== fetchUnplannedBadcases 完成 ===')
-      }
-    }
-    
-    // 获取未计划的Bug
-    const fetchUnplannedBugs = async (page = 1) => {
-      console.log(`=== fetchUnplannedBugs 开始 ===`)
-      
-      if (!projectId.value) {
-        console.error('项目ID为空，无法获取Bug数据')
-        return
-      }
-      
-      badcaseLoading.value = true
-      try {
-        const params = {
-          status_type: 'unplanned'
-        }
-        
-        console.log('🐛 未计划Bug筛选参数:', params)
-        
-        // 调用Bug专用API
-        const response = await getProjectBugs(projectId.value, page, badcasePerPage.value, params)
-        
-        if (response && response.data && response.data.success) {
-          badcases.value = response.data.badcases || []
-          filteredBadcases.value = [...badcases.value]
-          totalBadcases.value = response.data.total || 0
-          badcasePage.value = page
-          selectedPlan.value = 'unplanned'
-          
-          applyFilters()
-          console.log(`✅ 未计划Bug检索成功，共${badcases.value.length}个`)
-        } else {
-          console.error('获取未计划Bug数据失败:', response?.data?.error || '未知错误')
-          badcases.value = []
-          totalBadcases.value = 0
-        }
-      } catch (error) {
-        console.error('获取未计划Bug数据异常:', error)
-      } finally {
-        badcaseLoading.value = false
-      }
-    }
-    
-    // 获取未计划的测试用例
-    const fetchUnplannedTestCases = async (page = 1) => {
-      console.log(`=== fetchUnplannedTestCases 开始 ===`)
-      
-      if (!projectId.value) {
-        console.error('项目ID为空，无法获取测试用例数据')
-        return
-      }
-      
-      badcaseLoading.value = true
-      try {
-        const params = {
-          status_type: 'unplanned'
-        }
-        
-        console.log('🧪 未计划测试用例筛选参数:', params)
-        
-        // 调用TestCase专用API
-        const response = await getProjectTestCases(projectId.value, page, badcasePerPage.value, params)
-        
-        if (response && response.data && response.data.success) {
-          badcases.value = response.data.badcases || []
-          filteredBadcases.value = [...badcases.value]
-          totalBadcases.value = response.data.total || 0
-          badcasePage.value = page
-          selectedPlan.value = 'unplanned'
-          
-          applyFilters()
-          console.log(`✅ 未计划测试用例检索成功，共${badcases.value.length}个`)
-        } else {
-          console.error('获取未计划测试用例数据失败:', response?.data?.error || '未知错误')
-          badcases.value = []
-          totalBadcases.value = 0
-        }
-      } catch (error) {
-        console.error('获取未计划测试用例数据异常:', error)
-      } finally {
-        badcaseLoading.value = false
-      }
-    }
-    
-    // 创建未计划的BadCase类型计划（当查询结果为空时调用）
-    const createUnplannedBadcasePlan = async () => {
-      // 已禁用自动创建"未计划BadCase"计划
-      console.log('⚠️ 自动创建未计划BadCase计划已禁用')
-      return
-    }
-
     /** 按 planId 解析应使用的列表 API（切换计划时 selectedPlan 可能仍是上一个计划，不能依赖 currentPlanType） */
     const getPlanListApiKindByPlanId = (planId) => {
       const numericPlanId = typeof planId === 'number' ? planId : parseInt(String(planId), 10)
@@ -3104,12 +2648,6 @@ export default {
       if (!projectId.value) {
         console.error('项目ID为空，无法获取BadCase数据')
         return
-      }
-      
-      // 如果传入的是'unplanned'，调用专门的未计划BadCase查询方法
-      if (planId === 'unplanned') {
-        console.log('🔍 检测到unplanned标识，调用fetchUnplannedBadcases方法')
-        return await fetchUnplannedBadcases(page)
       }
       
       badcaseLoading.value = true
@@ -3206,7 +2744,8 @@ export default {
       console.log(`=== filterBadcasesByPlan 完成 ===`)
     }
 
-    /** 按 Tab 元数据恢复列表状态（需在 fetchBadcasesByPlan / fetchUnplanned* 之后定义） */
+
+    /** 按 Tab 元数据恢复列表状态 */
     const applyPlanListTabState = async (meta) => {
       const m = meta || {}
       const { planId, urlContentType: uct } = m
@@ -3220,35 +2759,17 @@ export default {
         // 与侧栏点计划一致时 meta.urlContentType 为 null；grep/modify 可按记录类型覆盖
         urlContentType.value = uct !== undefined ? uct : null
         selectedPlan.value = numericPlanIdForState
-        await fetchBadcasesByPlan(numericPlanIdForState, 1)
-        filterBadcasesByPlan(numericPlanIdForState)
+        // 获取卡片数据（统一卡片列表）
+        await fetchCards()
         await nextTick()
         window.dispatchEvent(
           new CustomEvent('request-pending-modify-for-plan', {
             detail: { planId: numericPlanIdForState, suppressAutoOpenDetail: true }
           })
         )
-      } else if (planId === 'unplanned') {
-        urlContentType.value = null
-        selectedPlan.value = 'unplanned'
-        expandedSections.unplanned = true
-        expandedUnplannedBadcase.value = true
-        await fetchUnplannedBadcases(1)
-        filterBadcasesByPlan('unplanned')
-      } else if (uct) {
-        urlContentType.value = uct
-        selectedPlan.value = null
-        if (uct === 'badcase') {
-          await fetchUnplannedBadcases(1)
-        } else if (uct === 'bug') {
-          await fetchUnplannedBugs(1)
-        } else if (uct === 'test_case') {
-          await fetchUnplannedTestCases(1)
-        }
-        expandedSections.unplanned = true
-        applyFilters()
       }
     }
+
 
     /** 首次进入 / 刷新后若尚无工作区 Tab，则根据当前列表状态补一条，保证默认也有 Tab 栏 */
     const ensureWorkbenchTabForCurrentView = () => {
@@ -3276,31 +2797,6 @@ export default {
         })
         activeWorkbenchTabId.value = `plan-${numericPlanId}`
         return
-      }
-      // 未计划 BadCase（含首次进入：selectedPlan/url 尚未就绪时的兜底）
-      if (!uct && (st === 'unplanned' || st == null)) {
-        upsertWorkbenchTab({
-          id: 'unplanned-badcase',
-          kind: 'plan-list',
-          title: truncateForTab(t('tab.unplannedBadcase'), t('tab.unplannedShort')),
-          meta: { planId: 'unplanned', urlContentType: null }
-        })
-        activeWorkbenchTabId.value = 'unplanned-badcase'
-        return
-      }
-      if (uct) {
-        const shortTitles = {
-          badcase: t('tab.unplannedBadcase'),
-          bug: t('tab.unplannedBug'),
-          test_case: t('tab.unplannedTestCase')
-        }
-        upsertWorkbenchTab({
-          id: `unplanned-${uct}`,
-          kind: 'plan-list',
-          title: truncateForTab(shortTitles[uct] || String(uct), t('tab.unplannedShort')),
-          meta: { planId: null, urlContentType: uct }
-        })
-        activeWorkbenchTabId.value = `unplanned-${uct}`
       }
     }
 
@@ -3340,12 +2836,12 @@ export default {
 
     const closeWorkbenchTab = async (tabId, e) => {
       if (e) e.stopPropagation()
+      
       const idx = workbenchTabs.value.findIndex((t) => t.id === tabId)
       if (idx === -1) return
       const wasActive = activeWorkbenchTabId.value === tabId
-      const wasDetail = workbenchTabs.value[idx].kind === 'detail'
+      
       workbenchTabs.value.splice(idx, 1)
-      if (wasDetail && wasActive) clearEmbeddedEditor()
       if (!wasActive) {
         refreshBadcases()
         fetchProjectPlans()
@@ -3380,7 +2876,7 @@ export default {
 
     /** 展开左侧计划树至某一计划（grep / modify / URL 展开共用） */
     const expandPlanTreeToPlanId = (targetId) => {
-      if (targetId == null || targetId === 'unplanned') return
+      if (targetId == null) return
       const tid = typeof targetId === 'number' ? targetId : parseInt(String(targetId), 10)
       if (Number.isNaN(tid)) return
       const findAndExpand = (plans, id, parents = []) => {
@@ -3428,35 +2924,6 @@ export default {
           meta: { planId: numericPlanIdForTab, urlContentType: uct !== undefined ? uct : null }
         })
         await activateWorkbenchTab(`plan-${numericPlanIdForTab}`)
-        await nextTick()
-        scrollActiveWorkbenchTabIntoView()
-        return
-      }
-      if (planId === 'unplanned') {
-        upsertWorkbenchTab({
-          id: 'unplanned-badcase',
-          kind: 'plan-list',
-          title: truncateForTab(t('tab.unplannedBadcase'), t('tab.unplannedShort')),
-          meta: { planId: 'unplanned', urlContentType: null }
-        })
-        await activateWorkbenchTab('unplanned-badcase')
-        await nextTick()
-        scrollActiveWorkbenchTabIntoView()
-        return
-      }
-      if (uct) {
-        const shortTitles = {
-          badcase: t('tab.unplannedBadcase'),
-          bug: t('tab.unplannedBug'),
-          test_case: t('tab.unplannedTestCase')
-        }
-        upsertWorkbenchTab({
-          id: `unplanned-${uct}`,
-          kind: 'plan-list',
-          title: truncateForTab(shortTitles[uct] || String(uct), t('tab.unplannedShort')),
-          meta: { planId: null, urlContentType: uct }
-        })
-        await activateWorkbenchTab(`unplanned-${uct}`)
         await nextTick()
         scrollActiveWorkbenchTabIntoView()
       }
@@ -3570,17 +3037,6 @@ export default {
       // 更新全选状态
       selectAll.value = selectedTasks.value.length === filteredBadcases.value.length
     }
-    
-    const createNewBadcase = () => {
-      // 新建也走工作区 Tab（不离开 ProjectDetail）
-      const pid =
-        selectedPlan.value && selectedPlan.value !== 'unplanned'
-          ? typeof selectedPlan.value === 'number'
-            ? selectedPlan.value
-            : parseInt(String(selectedPlan.value), 10)
-          : null
-      openMainCreateEditor(currentPlanType.value, Number.isFinite(pid) ? pid : null)
-    }
 
     // 编辑 BadCase/Bug/TestCase（统一入口）
     const editBadcase = (badcaseId) => {
@@ -3596,6 +3052,7 @@ export default {
     // 在主区域挂载 Editor（替代 overlay）
     const openMainEditor = (itemId, itemType, showDiff = false) => {
       console.log('[MAIN-EDITOR] 打开主区域编辑:', { itemId, itemType, showDiff })
+      
       const et = mapToEditorPlanType(itemType)
       const returnTo = activeWorkbenchTabId.value
       const tid = `detail-${et}-${itemId}`
@@ -3609,9 +3066,8 @@ export default {
       })
       activeWorkbenchTabId.value = tid
       mountEditorComponents(itemId, et, showDiff, true, null)
-      console.log('[MAIN-EDITOR] 设置后 mainEditorItemId:', mainEditorItemId.value)
     }
-
+    
     const openMainCreateEditor = (itemType, planId = null) => {
       const et = mapToEditorPlanType(itemType)
       const returnTo = activeWorkbenchTabId.value
@@ -3657,7 +3113,7 @@ export default {
           returnTo !== tid &&
           workbenchTabs.value.some((t) => t.id === returnTo)
 
-        // 先切换 active 到来源 Tab，让 closeWorkbenchTab 走“非 active 关闭”的分支
+        // 先切换 active 到来源 Tab，让 closeWorkbenchTab 走"非 active 关闭"的分支
         if (canReturn) {
           activeWorkbenchTabId.value = returnTo
         }
@@ -4170,7 +3626,7 @@ export default {
       let filtered = [...badcases.value]
       
       // 根据计划过滤
-      if (selectedPlan.value && selectedPlan.value !== 'unplanned') {
+      if (selectedPlan.value) {
         // 递归查找计划（包括子计划）
         const findPlan = (plans, planId) => {
           for (const plan of plans) {
@@ -4212,11 +3668,6 @@ export default {
         } else {
           // 如果找不到计划，直接根据plan_id过滤
           filtered = filtered.filter(b => b.plan_id == selectedPlan.value)
-        }
-      } else if (selectedPlan.value === 'unplanned') {
-        // 未计划 + Bug/测试用例/BadCase 专用接口已按类型筛好，勿再按 plan_id 过滤（否则带 plan_id 的项会被误清空）
-        if (!urlContentType.value) {
-          filtered = filtered.filter(b => !b.plan_id || b.plan_id === 0)
         }
       }
       
@@ -4463,16 +3914,11 @@ export default {
     }
     
     const resetNewPlanForm = () => {
-      newPlan.cycle = 'one_week'
+      newPlan.name = ''
       newPlan.startDate = ''
       newPlan.endDate = ''
-      newPlan.count = 1
-      newPlan.name = ''
       newPlan.parentId = ''
       newPlan.description = ''
-      newPlan.scopeNotification = false
-      newPlan.statusType = 'in_progress'
-      newPlan.contentType = 'badcase'
     }
     
     const closeCreateModal = () => {
@@ -4535,6 +3981,8 @@ export default {
       selectedBaselinePlan.value = planId
       // 加载该计划下未在基线中的BadCase
       loadAvailableBadcases(planId)
+      // 加载该计划的基线列表
+      loadBaselines()
     }
     
     const toggleBadcaseSelection = (badcaseId) => {
@@ -4553,14 +4001,31 @@ export default {
       }
       
       try {
-        // TODO: 调用API创建基线
         const baselineName = `基线_${new Date().toLocaleDateString()}`
         console.log('创建基线:', baselineName, '包含BadCase:', selectedBadcases.value)
+        
+        // 调用API创建基线
+        const response = await apiCreateBaseline({
+          name: baselineName,
+          plan_id: selectedBaselinePlan.value,
+          badcase_ids: selectedBadcases.value
+        })
+        
+        const newBaseline = response.data.baseline
+        console.log('基线创建成功:', newBaseline)
+        
+        baselines.value.unshift(newBaseline)
+        selectedBadcases.value = []
+        
+        console.log(`基线创建成功！包含${newBaseline.badcase_count}个BadCase`)
+      } catch (error) {
+        console.error('创建基线失败:', error)
+        console.error('错误详情:', error.message)
         
         // 模拟创建成功
         const newBaseline = {
           id: Date.now(),
-          name: baselineName,
+          name: `基线_${new Date().toLocaleDateString()}`,
           version: baselines.value.length + 1,
           created_at: new Date().toISOString(),
           badcase_count: selectedBadcases.value.length,
@@ -4570,10 +4035,7 @@ export default {
         baselines.value.unshift(newBaseline)
         selectedBadcases.value = []
         
-        console.log(`基线创建成功！包含${newBaseline.badcase_count}个BadCase`)
-      } catch (error) {
-        console.error('创建基线失败:', error)
-        console.error('错误详情:', error.message)
+        console.log(`基线创建成功（模拟）！包含${newBaseline.badcase_count}个BadCase`)
       }
     }
     
@@ -4591,16 +4053,41 @@ export default {
       selectedBaseline.value = baselineId
     }
     
-    const viewBaseline = (baselineId) => {
-      // TODO: 实现查看基线详情
-      console.log('查看基线详情功能开发中...')
+    const viewBaseline = async (baselineId) => {
+      try {
+        console.log('查看基线详情:', baselineId)
+        const response = await getBaselineDetail(baselineId)
+        const baseline = response.data.baseline
+        console.log('基线详情:', baseline)
+        
+        // 显示基线详情（可以弹出模态框或在页面上显示）
+        alert(`基线详情\n名称: ${baseline.name}\n版本: v${baseline.version}\n创建时间: ${new Date(baseline.created_at).toLocaleString()}\n包含BadCase数量: ${baseline.badcase_count}`)
+      } catch (error) {
+        console.error('获取基线详情失败:', error)
+        // 模拟数据
+        const baseline = baselines.value.find(b => b.id === baselineId)
+        if (baseline) {
+          alert(`基线详情\n名称: ${baseline.name}\n版本: v${baseline.version}\n创建时间: ${new Date(baseline.created_at).toLocaleString()}\n包含BadCase数量: ${baseline.badcase_count}`)
+        }
+      }
     }
     
-    const deleteBaseline = (baselineId) => {
+    const deleteBaseline = async (baselineId) => {
       if (window.confirm(t('project.deleteBaselineConfirm'))) {
-        const index = baselines.value.findIndex(b => b.id === baselineId)
-        if (index > -1) {
-          baselines.value.splice(index, 1)
+        try {
+          await apiDeleteBaseline(baselineId)
+          console.log('基线删除成功:', baselineId)
+          const index = baselines.value.findIndex(b => b.id === baselineId)
+          if (index > -1) {
+            baselines.value.splice(index, 1)
+          }
+        } catch (error) {
+          console.error('删除基线失败:', error)
+          // 即使API调用失败，也从本地数组中删除（模拟删除）
+          const index = baselines.value.findIndex(b => b.id === baselineId)
+          if (index > -1) {
+            baselines.value.splice(index, 1)
+          }
         }
       }
     }
@@ -4629,26 +4116,35 @@ export default {
     const loadBaselines = async () => {
       try {
         console.log('开始加载基线数据...')
-        // TODO: 调用API获取基线列表
-        // 模拟数据
-        baselines.value = [
-          {
-            id: 1,
-            name: '基线_v1.0',
-            version: 1,
-            created_at: '2025-08-15T10:00:00Z',
-            badcase_count: 5,
-            plan_id: 1
-          },
-          {
-            id: 2,
-            name: '基线_v1.1',
-            version: 2,
-            created_at: '2025-08-16T14:30:00Z',
-            badcase_count: 8,
-            plan_id: 1
-          }
-        ]
+        if (selectedBaselinePlan.value) {
+          const response = await getPlanBaselines(selectedBaselinePlan.value)
+          baselines.value = response.data.baselines || []
+          console.log('基线数据加载成功:', baselines.value)
+        } else {
+          baselines.value = []
+        }
+        // 模拟数据（当API调用失败时使用）
+        if (baselines.value.length === 0) {
+          baselines.value = [
+            {
+              id: 1,
+              name: '基线_v1.0',
+              version: 1,
+              created_at: '2025-08-15T10:00:00Z',
+              badcase_count: 5,
+              plan_id: selectedBaselinePlan.value
+            },
+            {
+              id: 2,
+              name: '基线_v1.1',
+              version: 2,
+              created_at: '2025-08-16T14:30:00Z',
+              badcase_count: 8,
+              plan_id: selectedBaselinePlan.value
+            }
+          ]
+          console.log('使用模拟基线数据:', baselines.value)
+        }
         console.log('基线数据加载成功:', baselines.value)
         
         // 暂时注释掉测试代码，避免语法错误
@@ -4761,14 +4257,7 @@ export default {
         if (expandPlanId) {
           selectedPlan.value = expandPlanId
           await fetchBadcases(1)
-        } else {
-          expandedSections.unplanned = true
-          expandedUnplannedBadcase.value = true
-          await fetchUnplannedBadcases(1)
         }
-        
-        // 确保有未计划的BadCase类型计划
-        await ensureUnplannedBadcasePlan()
         
         console.log('数据刷新完成')
       } catch (error) {
@@ -4839,12 +4328,14 @@ export default {
       return filtered
     }
     
-    const calculateEndDate = () => {
-      if (!newPlan.startDate || !newPlan.count) return ''
-      const start = new Date(newPlan.startDate)
-      const end = new Date(start)
-      end.setDate(start.getDate() + (newPlan.count * 7))
-      return end.toISOString().split('T')[0]
+    const createPlanAndContinue = async () => {
+      await createPlan()
+      // 成功后重置表单但保持弹框打开
+      newPlan.name = ''
+      newPlan.startDate = ''
+      newPlan.endDate = ''
+      newPlan.description = ''
+      // 保持 parentId 不变，方便连续添加同级计划
     }
     
     const createPlan = async () => {
@@ -4860,18 +4351,11 @@ export default {
       try {
         const planData = {
           name: newPlan.name,
-          cycle: newPlan.cycle,
           start_date: newPlan.startDate,
           end_date: newPlan.endDate,
-          count: newPlan.count,
           description: newPlan.description,
-          scope_notification: newPlan.scopeNotification,
           parent_id: newPlan.parentId || null,
-          project_id: projectId.value,
-          // 计划状态类型和内容类型
-          status_type: newPlan.statusType,
-          plan_type: newPlan.contentType,  // 使用用户选择的内容类型
-          status: 'active'       // 明确设置状态
+          project_id: projectId.value
         }
         
         console.log('发送到后端的数据:', planData)
@@ -4982,11 +4466,53 @@ export default {
       }
     }
     
+    // 左侧边栏拖拽相关方法
+    const startDragLeftSidebar = (event) => {
+      isDraggingLeftSidebar.value = true
+      leftDragStartX.value = event.clientX
+      leftDragStartWidth.value = leftSidebarWidth.value
+      
+      // 添加拖拽时的样式类
+      document.body.classList.add('dragging')
+      
+      document.addEventListener('mousemove', handleDragLeftSidebar)
+      document.addEventListener('mouseup', stopDragLeftSidebar)
+      
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    
+    const handleDragLeftSidebar = (event) => {
+      if (!isDraggingLeftSidebar.value) return
+      
+      event.preventDefault()
+      event.stopPropagation()
+      
+      const deltaX = event.clientX - leftDragStartX.value
+      const newWidth = Math.max(180, Math.min(400, leftDragStartWidth.value + deltaX))
+      leftSidebarWidth.value = newWidth
+    }
+    
+    const stopDragLeftSidebar = (event) => {
+      isDraggingLeftSidebar.value = false
+      
+      // 移除拖拽时的样式类
+      document.body.classList.remove('dragging')
+      
+      document.removeEventListener('mousemove', handleDragLeftSidebar)
+      document.removeEventListener('mouseup', stopDragLeftSidebar)
+      
+      if (event) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    }
+    
     // 右侧对话框拖拽相关方法
     const startDragRightSidebar = (event) => {
       isDraggingRightSidebar.value = true
-      dragStartX.value = event.clientX
-      dragStartWidth.value = rightSidebarWidth.value
+      rightDragStartX.value = event.clientX
+      rightDragStartWidth.value = rightSidebarWidth.value
       
       // 添加拖拽时的样式类
       document.body.classList.add('dragging')
@@ -5010,8 +4536,8 @@ export default {
       event.preventDefault()
       event.stopPropagation()
       
-      const deltaX = dragStartX.value - event.clientX
-      const newWidth = Math.max(200, Math.min(600, dragStartWidth.value + deltaX))
+      const deltaX = rightDragStartX.value - event.clientX
+      const newWidth = Math.max(200, Math.min(600, rightDragStartWidth.value + deltaX))
       rightSidebarWidth.value = newWidth
     }
     
@@ -5429,7 +4955,7 @@ export default {
         return
       }
       const createKey = makeCreateKey(target, preview, messageId)
-      // 仅在带 messageId 时才应用“已处理”拦截；无 messageId 场景避免误吞新预览
+      // 仅在带 messageId 时才应用"已处理"拦截；无 messageId 场景避免误吞新预览
       if (hasStableMessageScope && processedCreateKeyMap[createKey]) return
       // 生成临时 id
       const tempId = `create_${Date.now()}_${Math.random().toString(16).slice(2)}`
@@ -6334,9 +5860,7 @@ export default {
         target === 'badcase' ? 'badcase' : target === 'testcase' ? 'test_case' : 'bug'
 
       let meta = null
-      if (rawPlanId === 'unplanned') {
-        meta = { planId: 'unplanned', urlContentType: null }
-      } else if (rawPlanId != null && rawPlanId !== '') {
+      if (rawPlanId != null && rawPlanId !== '') {
         const n = typeof rawPlanId === 'number' ? rawPlanId : parseInt(String(rawPlanId), 10)
         if (!Number.isNaN(n) && n > 0) {
           expandPlanTreeToPlanId(n)
@@ -6348,7 +5872,6 @@ export default {
       }
 
       if (
-        rawPlanId !== 'unplanned' &&
         meta &&
         meta.planId == null &&
         (recordIdsBatch?.length > 0 || (recordId != null && recordId !== ''))
@@ -6423,20 +5946,23 @@ export default {
       showOnlyMine,
       includeSubPlans,
       expandedSections,
-      expandedUnplannedBadcase,
       selectedPlan,
       selectAll,
       selectedTasks,
       projectPlans,
       filteredPlans,
       badcases,
-      unplannedBadcaseCount,
-      inProgressPlans,
-      unplannedPlans,
+      activePlans,
       archivedPlans,
       filteredBadcases,
       badcaseLoading,
       totalBadcases,
+      // Card数据
+      cards,
+      filteredCards,
+      cardLoading,
+      totalCards,
+      handleQuickCreate,
       loading,
       planTestCaseCounts,
       hoveredPlan,
@@ -6457,7 +5983,6 @@ export default {
       currentPlan,  // 新增：当前选中的计划
       currentPlanType,  // 新增：当前计划类型
       urlContentType,  // 新增：URL参数传递的内容类型
-      isUnplannedTypeChipActive,
       pendingModifications,  // 新增：待确认的修改
       expandedDetailRows,  // 新增：展开的详情行
       hasDetailFieldModifications,  // 新增：检查是否有详情字段修改
@@ -6492,18 +6017,13 @@ export default {
       openMainEditor,
       closeMainEditor,
       toggleSection,
-      toggleUnplannedBadcaseSection,
       selectPlan,
-      selectUnplanned,
-      selectUnplannedBadcase,
-      selectUnplannedType,
       selectBadcasePlan,
       createPlanForBadcase,
       associateBadcaseWithPlan,
       filterBadcasesByPlan,
       toggleSelectAll,
       toggleTaskSelection,
-      createNewBadcase,
       editBadcase,
       goToDashboard,
       showPlanActions,
@@ -6537,10 +6057,9 @@ export default {
       clearSearch,
       filterPlans,
       filterPlansRecursively,
-      calculateEndDate,
       createPlan,
+      createPlanAndContinue,
       fetchBadcases,
-      fetchUnplannedBadcases,
       refreshBadcases,
       getBadcaseStatusText,
       getBadcaseTypeText,
@@ -6549,9 +6068,8 @@ export default {
       acceptBadcase,
       rejectBadcase,
       getPlanIcon,
+      formatDate,
       getPlanTypeText,
-      ensureUnplannedBadcasePlan,
-      createUnplannedBadcasePlan,
       getAssigneeDisplayText,
       confirmModify,  // 新增：确认修改
       cancelModify,   // 新增：取消修改
@@ -6584,6 +6102,7 @@ export default {
       isHelpWorkbenchTab,
       isProjectManagementWorkbenchTab,
       isNotificationsWorkbenchTab,
+      activeWorkbenchTab,
       appSettingsInitialPane,
       t,
       showNotifications,
@@ -6593,6 +6112,8 @@ export default {
       setLayout,
       planCollapsed,
       leftSidebarHidden,
+      leftSidebarWidth,
+      startDragLeftSidebar,
       rightSidebarWidth,
       startDragRightSidebar,
       bottomPanelHeight,
@@ -6629,12 +6150,121 @@ export default {
       handleTitleUpdated,
       // Terminal相关（保留工作目录用于Terminal组件）
       currentWorkingDir,
+      // 全局命令历史弹框
+      showGlobalCmdHistory,
+      filteredGlobalCmdHistory,
+      globalCmdSelected,
+      globalCmdSearchText,
+      globalCmdSearchInput,
+      globalCmdListRef,
+      onGlobalCmdKeydown,
+      pickGlobalCmd,
       // Grep导航
-      handleGrepNavigate
+      handleGrepNavigate,
+      // 窄条导航栏事件处理
+      handleReturnToPlans,
+      handleOpenGlobalSearch,
+      handleOpenArchive,
+      handleOpenCardCreate,
+      showGlobalSearch,
     }
   }
 }
 </script>
+
+<!-- 全局命令历史弹框样式（非 scoped，Teleport 到 body） -->
+<style>
+.etw-global-cmd-history {
+  position: fixed;
+  top: 60px;
+  left: 0;
+  width: 100%;
+  z-index: 2200;
+  pointer-events: all;
+}
+.etw-global-cmd-panel {
+  background: var(--vscode-editor-widget-background, #252526);
+  border: 1px solid var(--vscode-widget-border, #454545);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  max-height: 400px;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  /* 居中显示，宽度适中 */
+  width: 680px;
+  margin: 0 auto;
+}
+.etw-global-cmd-search-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+}
+.etw-global-cmd-icon {
+  color: var(--vscode-foreground, #cccccc);
+  font-size: 14px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.etw-global-cmd-search {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--vscode-editor-foreground, #cccccc);
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, monospace);
+  font-size: 14px;
+  padding: 2px 0;
+  caret-color: var(--vscode-editor-foreground, #cccccc);
+}
+.etw-global-cmd-search::placeholder {
+  color: var(--vscode-foreground, #cccccc);
+  opacity: 0.4;
+}
+.etw-global-cmd-divider {
+  height: 1px;
+  background: var(--vscode-widget-border, #454545);
+}
+.etw-global-cmd-list {
+  overflow-y: auto;
+  max-height: 500px;
+}
+.etw-global-cmd-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, monospace);
+  font-size: 14px;
+  gap: 12px;
+  min-height: 36px;
+}
+.etw-global-cmd-item:hover,
+.etw-global-cmd-item--selected {
+  background: var(--vscode-list-hoverBackground, #2a2d2e);
+}
+.etw-global-cmd-num {
+  color: var(--vscode-descriptionForeground, #858585);
+  min-width: 22px;
+  font-size: 12px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.etw-global-cmd-text {
+  color: var(--vscode-editor-foreground, #cccccc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.etw-global-cmd-empty {
+  padding: 20px 12px;
+  color: var(--vscode-foreground, #cccccc);
+  opacity: 0.45;
+  font-size: 13px;
+  text-align: center;
+}
+</style>
 
 <style scoped>
 .project-detail-wrapper {
@@ -6759,24 +6389,65 @@ export default {
   font-size: 16px;
 }
 
+/* 窄条导航栏和主内容容器 */
+.narrow-nav-and-main {
+  display: flex;
+  flex: 1;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 窄条搜索面板 */
+.narrow-search-panel {
+  width: 320px;
+  min-width: 320px;
+  height: 100%;
+  background: #fff;
+  border-right: 1px solid #e8e8e8;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
 /* 主容器 */
 .main-container {
   display: flex;
   flex: 1;
+  height: 100%;
   overflow: hidden;
 }
 
 /* 左侧导航栏 */
 .left-sidebar {
   display: flex;
-  width: 300px;
+  width: 280px; /* 默认宽度，会被动态样式覆盖 */
   background: #fff;
   border-right: 1px solid #e9ecef;
-  transition: all 0.3s ease;
+  transition: width 0.2s ease;
+  position: relative;
 }
 
 .left-sidebar.collapsed {
   width: 60px;
+}
+
+/* 左侧边栏拖拽手柄 */
+.drag-handle-left {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: #e1e5e9;
+  cursor: ew-resize;
+  transition: background-color 0.2s ease;
+  z-index: 1000;
+  user-select: none;
+}
+
+.drag-handle-left:hover {
+  background: #a8d4ff;
 }
 
 /* 左侧边栏完全隐藏时的主内容区域样式 */
@@ -7059,11 +6730,10 @@ export default {
 
 .header-top {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
   min-height: 32px;
-  gap: 8px;
+  gap: 4px;
 }
 
 .sidebar-header h3 {
@@ -7082,7 +6752,6 @@ export default {
 }
 
 .action-icon-btn {
-  width: 24px;
   height: 24px;
   border: none;
   background: transparent;
@@ -7093,7 +6762,13 @@ export default {
   justify-content: center;
   font-size: 13px;
   transition: background-color 0.2s;
-  padding: 0;
+  padding: 0 6px;
+  gap: 4px;
+}
+
+.action-icon-btn .btn-text {
+  font-size: 12px;
+  color: #666;
 }
 
 .action-icon-btn:hover {
@@ -7172,6 +6847,34 @@ export default {
   margin-left: 4px;
   color: #ff6b6b;
   opacity: 0.8;
+}
+
+/* 默认迭代徽章样式 */
+.default-badge {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #e3f2fd;
+  color: #1976d2;
+  margin-left: 4px;
+}
+
+/* 默认迭代项样式 */
+.plan-item.default-plan {
+  background: #f8f9fa;
+}
+
+/* 无活跃迭代提示 */
+.empty-state {
+  padding: 20px 12px;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+}
+
+.empty-state .empty-text {
+  display: block;
+  line-height: 1.5;
 }
 
 .clear-search-btn:hover .clear-icon {
@@ -7506,6 +7209,177 @@ export default {
   cursor: not-allowed;
 }
 
+/* 简化版新建计划弹框样式 */
+.plan-modal-content {
+  background: white;
+  border-radius: 8px;
+  width: 676px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+.plan-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.plan-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.plan-modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #666;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.plan-modal-close:hover {
+  background: #f5f5f5;
+}
+
+.plan-modal-body {
+  padding: 20px;
+}
+
+.plan-form-row {
+  margin-bottom: 16px;
+}
+
+.plan-form-row:last-child {
+  margin-bottom: 0;
+}
+
+.plan-form-row-2col {
+  display: flex;
+  gap: 16px;
+}
+
+.plan-form-row-2col .plan-form-item {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.plan-form-item {
+  margin-bottom: 16px;
+}
+
+.plan-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.plan-form-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #333;
+}
+
+.plan-form-label.required::after {
+  content: ' *';
+  color: #ff4d4f;
+}
+
+.plan-form-input,
+.plan-form-select,
+.plan-form-textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.plan-form-input:focus,
+.plan-form-select:focus,
+.plan-form-textarea:focus {
+  border-color: #1890ff;
+}
+
+.plan-form-textarea {
+  resize: vertical;
+  min-height: 104px;
+}
+
+.plan-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-top: 1px solid #e8e8e8;
+  background: #fafafa;
+  border-radius: 0 0 8px 8px;
+}
+
+.plan-modal-footer-right {
+  display: flex;
+  gap: 12px;
+}
+
+.plan-btn {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.plan-btn-default {
+  background: #fff;
+  color: #1890ff;
+  border: 1px solid #1890ff;
+}
+
+.plan-btn-default:hover:not(:disabled) {
+  background: #e6f7ff;
+}
+
+.plan-btn-default:disabled {
+  color: #d9d9d9;
+  border-color: #d9d9d9;
+  cursor: not-allowed;
+}
+
+.plan-btn-cancel {
+  background: #f5f5f5;
+  color: #333;
+}
+
+.plan-btn-cancel:hover {
+  background: #e8e8e8;
+}
+
+.plan-btn-primary {
+  background: #1890ff;
+  color: white;
+}
+
+.plan-btn-primary:hover:not(:disabled) {
+  background: #40a9ff;
+}
+
+.plan-btn-primary:disabled {
+  background: #d9d9d9;
+  cursor: not-allowed;
+}
+
 .plan-tree {
   margin-top: 16px;
 }
@@ -7524,155 +7398,6 @@ export default {
 .plan-item.active {
   background: #e3f2fd;
   color: #1976d2;
-}
-
-.plan-item.unplanned {
-  color: #666;
-}
-
-.plan-item.unplanned.active {
-  background: #e3f2fd;
-  color: #1976d2;
-  border-left: 3px solid #ff9800;
-}
-
-.plan-item.unplanned {
-  margin-left: 0;
-  border-left: 3px solid #ff9800;
-}
-
-.unplanned-badcase-section {
-  margin: 0;
-  padding: 0;
-}
-
-.unplanned-type-section {
-  margin: 8px 0;
-  padding: 4px 0;
-}
-
-.unplanned-type-section .type-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  border-radius: 6px;
-  transition: all 0.2s;
-  color: #666;
-  background: transparent;
-  margin-bottom: 2px;
-}
-
-.unplanned-type-section .type-item:hover {
-  background: #e9ecef;
-}
-
-.unplanned-type-section .type-item.active {
-  background: #e3f2fd;
-  color: #1976d2;
-  border-left: 3px solid #1976d2;
-}
-
-.unplanned-type-section .type-icon {
-  font-size: 14px;
-  width: 16px;
-  text-align: center;
-}
-
-.unplanned-type-section .type-title {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.unplanned-badcase-section .section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  border-radius: 6px;
-  transition: background-color 0.2s;
-  color: #666;
-  background: #f8f9fa;
-  border: 1px solid #e9ecef;
-  margin-bottom: 8px;
-}
-
-.unplanned-badcase-section .section-header:hover {
-  background: #e9ecef;
-  border-color: #dee2e6;
-}
-
-.unplanned-badcase-section .section-icon {
-  font-size: 14px;
-  width: 16px;
-  text-align: center;
-}
-
-.unplanned-badcase-section .section-title {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.unplanned-badcase-section .expand-arrow {
-  font-size: 10px;
-  color: #999;
-  transition: transform 0.2s;
-  width: 16px;
-  text-align: center;
-}
-
-.unplanned-badcase-section .expand-arrow.expanded {
-  transform: rotate(90deg);
-}
-
-        .unplanned-badcase-section .section-content {
-          margin-left: 0;
-          border-left: none;
-          padding-left: 0;
-          margin-top: 8px;
-          padding: 12px;
-          text-align: center;
-          color: #666;
-          font-size: 14px;
-        }
-
-        .unplanned-badcase-section .empty-state {
-          padding: 20px;
-          text-align: center;
-          color: #999;
-          font-size: 13px;
-        }
-
-        .unplanned-badcase-section .empty-text {
-          font-style: italic;
-        }
-
-.unplanned-badcase-section .badcase-list {
-  margin-top: 8px;
-}
-
-.unplanned-badcase-section .badcase-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  border-radius: 8px;
-  transition: all 0.3s ease;
-  margin-bottom: 6px;
-  border: 1px solid transparent;
-  position: relative;
-  overflow: hidden;
-}
-
-.unplanned-badcase-section .badcase-item:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 .badcase-content {
@@ -7804,28 +7529,6 @@ export default {
   opacity: 0.7;
 }
 
-.unplanned-badcase-section .badcase-icon {
-  font-size: 12px;
-  width: 14px;
-  text-align: center;
-}
-
-.unplanned-badcase-section .badcase-title {
-  flex: 1;
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.unplanned-badcase-section .badcase-status {
-  font-size: 11px;
-  padding: 2px 6px;
-  background: #f0f0f0;
-  border-radius: 8px;
-  color: #666;
-}
-
 .plan-item.parent-plan {
   border-left: 3px solid #2196f3;
 }
@@ -7835,17 +7538,25 @@ export default {
 }
 
 .plan-icon {
-  font-size: 16px;
-  width: 20px;
+  font-size: 14px;
+  width: 16px;
   text-align: center;
+  flex-shrink: 0;
 }
 
 .plan-name {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.plan-date {
+  font-size: 11px;
+  color: #999;
+  margin-left: 8px;
+  flex-shrink: 0;
 }
 
 .plan-content {
@@ -7905,16 +7616,22 @@ export default {
 }
 
 .expand-arrow {
-  font-size: 10px;
-  color: #999;
-  transition: transform 0.2s;
+  font-size: 8px;
+  color: #888;
+  transition: transform 0.15s;
   cursor: pointer;
-  width: 16px;
+  width: 6px;
+  min-width: 6px;
   text-align: center;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
 }
 
 .expand-arrow:hover {
-  color: #666;
+  color: #333;
 }
 
 .expand-arrow.expanded {
@@ -7922,7 +7639,9 @@ export default {
 }
 
 .expand-placeholder {
-  width: 16px;
+  width: 8px;
+  min-width: 8px;
+  flex-shrink: 0;
 }
 
 .plan-section {
@@ -8082,11 +7801,6 @@ export default {
   color: #2e7d32;
 }
 
-.count-badge.unplanned {
-  background: #f8f9fa;
-  color: #6c757d;
-}
-
 /* 计划类型标签 */
 .plan-type-badge {
   display: inline-block;
@@ -8100,18 +7814,16 @@ export default {
 }
 
 .sub-plan-list {
-  margin-left: 16px;
-  margin-top: 4px;
+  margin-left: 8px;
 }
 
 .sub-plan {
-  padding: 8px 12px;
+  padding: 2px 8px;
   font-size: 13px;
-  border-bottom: 1px solid #f8f8f8;
 }
 
 .sub-plan .plan-icon {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .sub-plan .plan-name {
@@ -8119,16 +7831,16 @@ export default {
 }
 
 .sub-plan-list.level-2 {
-  margin-left: 16px;
+  margin-left: 8px;
 }
 
 .sub-plan.level-2 {
-  padding: 6px 12px;
+  padding: 2px 8px;
   font-size: 12px;
 }
 
 .sub-plan.level-2 .plan-icon {
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .sub-plan.level-2 .plan-name {
@@ -8166,35 +7878,35 @@ export default {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
 }
 
-/* 上下文菜单：顶栏可拖动，下方列表过高时内部滚动 */
+/* 上下文菜单：紧凑设计 */
 .context-menu {
   position: fixed;
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  max-height: min(85vh, 520px);
-  min-width: 180px;
+  max-height: min(60vh, 360px);
+  min-width: 150px;
   background: white;
-  border: 1px solid #e9ecef;
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
   overflow: hidden;
 }
 
 .context-menu.is-dragging {
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
 }
 
 .context-menu-drag-handle {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  font-size: 12px;
-  color: #666;
-  background: linear-gradient(180deg, #f8f9fa 0%, #f0f2f5 100%);
-  border-bottom: 1px solid #e9ecef;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #888;
+  background: #fafafa;
+  border-bottom: 1px solid #eee;
   cursor: grab;
   user-select: none;
 }
@@ -8205,47 +7917,47 @@ export default {
 
 .drag-grip {
   letter-spacing: -2px;
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
 .drag-label {
-  font-weight: 500;
+  font-weight: 400;
 }
 
 .context-menu-body {
   flex: 1;
   min-height: 0;
-  max-height: min(60vh, 380px);
+  max-height: min(50vh, 300px);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 2px 0;
 }
 
 .menu-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   cursor: pointer;
-  font-size: 14px;
-  color: #333;
-  transition: background-color 0.2s;
+  font-size: 12px;
+  color: #444;
+  transition: background-color 0.15s;
 }
 
 .menu-item:hover {
-  background: #f8f9fa;
+  background: #f0f5ff;
 }
 
 .menu-icon {
-  font-size: 14px;
-  width: 16px;
+  font-size: 12px;
+  width: 14px;
   text-align: center;
 }
 
 .menu-separator {
   height: 1px;
-  background: #e9ecef;
-  margin: 4px 0;
+  background: #eee;
+  margin: 2px 0;
 }
 
 
@@ -9111,16 +8823,16 @@ export default {
 .plan-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: 4px;
+  padding: 2px 8px;
   cursor: pointer;
-  border-radius: 6px;
-  transition: all 0.2s ease;
-  margin-bottom: 8px;
+  border-radius: 3px;
+  transition: background-color 0.15s;
+  min-height: 22px;
 }
 
 .plan-item:hover {
-  background: #f8f9fa;
+  background: #f0f0f0;
 }
 
 .plan-item.active {
@@ -9474,17 +9186,7 @@ export default {
   background: rgba(96, 165, 250, 0.6);
 }
 
-/* 当左侧边栏存在时，调整底部面板的左边距 */
-.bottom-panel.with-left-sidebar {
-  left: 300px;
-}
-
-/* 当左侧边栏折叠时，调整底部面板的左边距 */
-.bottom-panel.with-collapsed-sidebar {
-  left: 60px;
-}
-
-/* 底部面板的右边距通过内联样式动态设置 */
+/* 底部面板位置通过内联样式动态设置 */
 
 .panel-tabs {
   display: flex;

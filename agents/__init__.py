@@ -6,6 +6,7 @@ from .test_agent import TestAgent
 from .scriptAgent import scriptAgengt
 from .browser_use_agent import BrowserUseAgent
 from .bug_management_agent import BugManagementAgent
+from .card_management_agent import CardManagementAgent
 
 __all__ = [
     'BaseAgent',
@@ -14,5 +15,6 @@ __all__ = [
     'TestAgent',
     'scriptAgengt',
     'BrowserUseAgent',
-    'BugManagementAgent'
+    'BugManagementAgent',
+    'CardManagementAgent'
 ]

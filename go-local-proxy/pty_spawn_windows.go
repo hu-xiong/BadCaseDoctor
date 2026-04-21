@@ -360,20 +360,24 @@ func (s *interactiveShell) stop() {
 	s.cmd = nil
 }
 
-// UTF-16LE：NormalView + PSReadLine Prediction Off + PS7 PlainText；「\r 盖行」由前端 EmbeddedPty 对 lone CR+报错包插 LF 缓解；供 -EncodedCommand。
-const windowsPsInitEncodedCommand = "JgAgAHsAIAAkAEUAcgByAG8AcgBWAGkAZQB3ACAAPQAgACcATgBvAHIAbQBhAGwAVgBpAGUAdwAnADsAIAB0AHIAeQAgAHsAIABpAGYAIAAoAEcAZQB0AC0ATQBvAGQAdQBsAGUAIABQAFMAUgBlAGEAZABMAGkAbgBlACAALQBFAHIAcgBvAHIAQQBjAHQAaQBvAG4AIABTAGkAbABlAG4AdABsAHkAQwBvAG4AdABpAG4AdQBlACkAIAB7ACAAUwBlAHQALQBQAFMAUgBlAGEAZABMAGkAbgBlAE8AcAB0AGkAbwBuACAALQBQAHIAZQBkAGkAYwB0AGkAbwBuAFMAbwB1AHIAYwBlACAATgBvAG4AZQAgAC0ARQByAHIAbwByAEEAYwB0AGkAbwBuACAAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAgAH0AIAB9ACAAYwBhAHQAYwBoACAAewAgAH0AOwAgAHQAcgB5ACAAewAgAGkAZgAgACgAJABQAFMAUwB0AHkAbABlACkAIAB7ACAAJABQAFMAUwB0AHkAbABlAC4ATwB1AHQAcAB1AHQAUgBlAG4AZABlAHIAaQBuAGcAIAA9ACAAJwBQAGwAYQBpAG4AVABlAHgAdAAnACAAfQAgAH0AIABjAGEAdABjAGgAIAB7ACAAfQAgAH0A"
+// PowerShell 初始化命令留空，避免任何可能导致 >> 续行提示符的语法
+const windowsPsInitEncodedCommand = ""
 
 // buildPowerShellCommandLine 供 CreateProcess 整条命令行；含空格的路径必须加引号。
 // EncodedCommand：NormalView、PSReadLine Prediction Off、PS7 PlainText（\r 盖提示符行由前端插 LF 缓解）。
 func buildPowerShellCommandLine() string {
+	exe := "powershell.exe"
 	if p, err := exec.LookPath("pwsh.exe"); err == nil && p != "" {
-		return fmt.Sprintf(`"%s" -NoLogo -NoProfile -NoExit -EncodedCommand %s`, p, windowsPsInitEncodedCommand)
+		exe = p
+	} else if p, err := exec.LookPath("powershell.exe"); err == nil && p != "" {
+		exe = p
+	} else {
+		exe = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
 	}
-	p, err := exec.LookPath("powershell.exe")
-	if err != nil || p == "" {
-		p = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+	if windowsPsInitEncodedCommand != "" {
+		return fmt.Sprintf(`"%s" -NoLogo -NoProfile -NoExit -EncodedCommand %s`, exe, windowsPsInitEncodedCommand)
 	}
-	return fmt.Sprintf(`"%s" -NoLogo -NoProfile -NoExit -EncodedCommand %s`, p, windowsPsInitEncodedCommand)
+	return fmt.Sprintf(`"%s" -NoLogo -NoProfile -NoExit`, exe)
 }
 
 func newConptyInteractive(c *conpty.ConPty) *interactiveShell {
@@ -389,10 +393,17 @@ func spawnInteractiveShellPipe(cwd string) (*interactiveShell, error) {
 	exe := "powershell.exe"
 	if p, err := exec.LookPath("pwsh.exe"); err == nil && p != "" {
 		exe = p
-	} else if p2, err2 := exec.LookPath("powershell.exe"); err2 == nil && p2 != "" {
-		exe = p2
+	} else if p, err := exec.LookPath("powershell.exe"); err == nil && p != "" {
+		exe = p
+	} else {
+		exe = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
 	}
-	cmd := exec.Command(exe, "-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", windowsPsInitEncodedCommand)
+	var cmd *exec.Cmd
+	if windowsPsInitEncodedCommand != "" {
+		cmd = exec.Command(exe, "-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", windowsPsInitEncodedCommand)
+	} else {
+		cmd = exec.Command(exe, "-NoLogo", "-NoProfile", "-NoExit")
+	}
 	if cwd != "" {
 		cmd.Dir = cwd
 	}

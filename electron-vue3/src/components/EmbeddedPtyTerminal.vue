@@ -297,6 +297,9 @@ const selectionRegistry = inject('terminalSelectionRegistry', null)
 const onTermSelectionChange = inject('onTermSelectionChange', null)
 const onPtySessionMeta = inject('onPtySessionMeta', null)
 const openAiComposerPrefill = inject('openAiComposerPrefill', null)
+const termRegistry = inject('termRegistry', null)
+const termHistoryRegistry = inject('termHistoryRegistry', null)
+const termCommandRegistry = inject('termCommandRegistry', null)
 
 const addToChatVisible = ref(false)
 const addToChatLeft = ref(0)
@@ -1447,9 +1450,61 @@ function setupTerminal() {
       uaWindows: navIsWindowsHost()
     })
 
+    // 记录用户当前输入的命令，供"执行最近命令"使用
+    let pendingCommand = ''
     term.onData((data) => {
+      // 记录输入字符（可打印字符、退格、Enter）
+      if (data === '\r') {
+        // Enter：保存命令到历史
+        const cmd = pendingCommand.trim()
+        if (cmd && termCommandRegistry) {
+          termCommandRegistry.pushCommand(props.clientSessionId, cmd)
+        }
+        // 延迟读取 buffer（避免在 onData 回调中直接访问 term.buffer 导致状态冲突）
+        if (termHistoryRegistry) {
+          nextTick(() => {
+            try {
+              const buf = term.buffer.active
+              const cursorY = buf.cursorY
+              let prevDir = null
+              for (let y = cursorY - 1; y >= 0; y--) {
+                const line = buf.getLine(y)
+                if (!line || line.isWrapped) continue
+                const text = line.translateToString().trim()
+                if (!text) continue
+                // 匹配 Windows PowerShell 提示符: PS C:\Users\...>
+                const psPrompt = text.match(/PS ([A-Za-z]:[^\s>]+)/)
+                if (psPrompt) {
+                  prevDir = psPrompt[1]
+                  break
+                }
+              }
+              if (prevDir) termHistoryRegistry.pushDir(props.clientSessionId, prevDir)
+              // 注册命令位置到滚动位置栈
+              const termScrollRegistry = globalThis.__termScrollRegistry__
+              if (termScrollRegistry) {
+                termScrollRegistry.pushCommandPos(props.clientSessionId, cursorY)
+              }
+            } catch (e) {
+              // ignore
+            }
+          })
+        }
+        pendingCommand = ''
+      } else if (data === '\x7f') {
+        // Backspace
+        pendingCommand = pendingCommand.slice(0, -1)
+      } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        // 可打印字符
+        pendingCommand += data
+      }
       emitPtyTermInput(data)
     })
+
+    // 注册 terminal 实例，供菜单操作使用
+    if (termRegistry && typeof termRegistry.register === 'function') {
+      termRegistry.register(props.clientSessionId, term)
+    }
 
     if (onTermSelectionChange) {
       term.onSelectionChange(() => {
@@ -1471,6 +1526,7 @@ function setupTerminal() {
 
     flushPendingPtyOutput()
     badcasePtyLog('xterm open, initial cols/rows', term.cols, term.rows)
+
     scheduleInitialFit()
     // WebSocket 常在 mountVscodeIntegratedTerminal 完成前就 onopen；此前 onPtyConnect / watch 里的
     // scheduleTermStart 会因 !term 全部空跑。若随后 fit 迟迟未触发 onSyncedDimensions，可能永不 term_start → 黑屏。
@@ -1716,6 +1772,15 @@ onBeforeUnmount(() => {
   unbindSocketHandlers()
   if (selectionRegistry && typeof selectionRegistry.unregister === 'function') {
     selectionRegistry.unregister(props.clientSessionId)
+  }
+  if (termRegistry && typeof termRegistry.unregister === 'function') {
+    termRegistry.unregister(props.clientSessionId)
+  }
+  if (termHistoryRegistry && typeof termHistoryRegistry.unregister === 'function') {
+    termHistoryRegistry.unregister(props.clientSessionId)
+  }
+  if (termCommandRegistry && typeof termCommandRegistry.unregister === 'function') {
+    termCommandRegistry.unregister(props.clientSessionId)
   }
   if (onWinResize) window.removeEventListener('resize', onWinResize)
   if (resizeObserver && termHost.value) {
