@@ -1,0 +1,28 @@
+{
+  "name": "mysql-website-team",
+  "leadAgentId": "fb309455732d4a22ba0b519299598818",
+  "workspacePath": "c:/Users/h2629/PycharmProjects/PythonProject/BadCaseDoctor",
+  "createdAt": "2026-04-27T09:31:06.217Z",
+  "options": {
+    "workspacePath": "c:/Users/h2629/PycharmProjects/PythonProject/BadCaseDoctor",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@mysql-website-team",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "backend-dev@mysql-website-team",
+      "name": "backend-dev",
+      "role": "Go后端开发"
+    },
+    {
+      "memberId": "frontend-dev@mysql-website-team",
+      "name": "frontend-dev",
+      "role": "Vue3前端开发"
+    }
+  ],
+  "isAutoTeam": false
+}

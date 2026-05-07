@@ -5,6 +5,7 @@ import requests
 import os
 from config import Config
 from .http_session import get_session
+from .prompt_log import maybe_log_llm_chat_kwargs
 
 class QianfanLLM:
     def __init__(self, model: str = None):
@@ -269,6 +270,7 @@ class QianfanLLM:
                 "POST", url, headers=headers, json=payload, timeout=timeout
             )
 
+        maybe_log_llm_chat_kwargs("qianfan", payload, tag="chat_completion_messages")
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(None, _do_request)
         if response.status_code != 200:

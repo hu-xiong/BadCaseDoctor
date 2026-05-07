@@ -39,6 +39,33 @@
 
     <!-- pane-body 必须作为 monaco-workbench 的子节点，否则 integratedTerminalPanel.css 里大量选择器不生效（会话列会变成系统默认按钮白底） -->
     <div class="pane-body integrated-terminal etw-terminal-pane-fill">
+    <!-- 补全弹窗（覆盖在终端区域内） -->
+    <div v-if="showAutocomplete" class="etw-autocomplete-host" @mousedown.self="closeAutocomplete()">
+      <div class="etw-autocomplete-panel" @mousedown.stop>
+        <div class="etw-autocomplete-head">
+          <span class="codicon codicon-symbol-keyword etw-autocomplete-icon" />
+          <span class="etw-autocomplete-title">{{ t('embeddedTerminal.autocompleteTitle') || '命令补全' }}</span>
+          <span class="etw-autocomplete-hint">{{ t('embeddedTerminal.autocompleteHint') || '↑↓ 选择，Enter 填入，Esc 关闭（Ctrl+Space 打开）' }}</span>
+        </div>
+        <div class="etw-autocomplete-divider" />
+        <div ref="acListRef" class="etw-autocomplete-list">
+          <button
+            v-for="(opt, idx) in autocompleteOptions"
+            :key="opt + '-' + idx"
+            type="button"
+            class="etw-autocomplete-item"
+            :class="{ 'is-active': idx === autocompleteSelected }"
+            @mouseenter="autocompleteSelected = idx"
+            @click="applyAutocomplete(idx)"
+          >
+            {{ opt }}
+          </button>
+          <div v-if="!autocompleteOptions.length" class="etw-autocomplete-empty">
+            {{ t('embeddedTerminal.autocompleteEmpty') || '没有可用补全项' }}
+          </div>
+        </div>
+      </div>
+    </div>
     <!-- VS Code panel title strip + 业务：代理条 / 白名单 -->
     <div class="etw-panel-title">
       <div class="etw-panel-title-left">
@@ -56,6 +83,22 @@
             :title="t('embeddedTerminal.newTab')"
             @click="addTab()"
           />
+          <div class="etw-plus-chevron-anchor etw-vscode-menu-anchor">
+            <button
+              type="button"
+              class="action-item codicon codicon-chevron-down"
+              :title="t('common.more')"
+              @click.stop="togglePlusMenu"
+            />
+            <div v-if="showPlusMenu" class="etw-vscode-menu etw-vscode-menu-wide" @click="showPlusMenu = false">
+              <button type="button" class="etw-vscode-menu-item" @click.stop="openTerminalSettingsTabFromPlusMenu()">
+                {{ t('embeddedTerminal.terminalSettingsMenu') }}
+              </button>
+              <button type="button" class="etw-vscode-menu-item" @click.stop="openQuickEditorFromPlusMenu()">
+                {{ t('embeddedTerminal.editQuickCommands') }}
+              </button>
+            </div>
+          </div>
           <div class="etw-terminal-menu-anchor etw-vscode-menu-anchor">
             <button
               type="button"
@@ -66,10 +109,6 @@
             <div v-if="showMoreMenu" class="etw-vscode-menu etw-vscode-menu-wide" @click="showMoreMenu = false">
               <button type="button" class="etw-vscode-menu-item" :disabled="!activeTabId" @click.stop="clearActive()">
                 {{ t('embeddedTerminal.clearScreen') }}
-              </button>
-              <div class="etw-vscode-menu-sep" />
-              <button type="button" class="etw-vscode-menu-item" @click.stop="openQuickEditor()">
-                {{ t('embeddedTerminal.editQuickCommands') }}
               </button>
               <div class="etw-vscode-menu-sep" />
               <button type="button" class="etw-vscode-menu-item" :disabled="!activeTabId" @click.stop="scrollHistoryUp()">
@@ -106,6 +145,7 @@
               :ssh-config="t.ssh"
               :working-directory="effectiveWorkingDirectory"
               :project-id="projectId"
+              :font-size="fontSize"
               :rail-resize-tick="sessionRailResizeTick"
               :rail-dragging="sessionRailDragging"
               :pane-active="activeTabId === t.id"
@@ -152,9 +192,18 @@
                 @click="selectTerminalTab(tab.id)"
                 @keydown.enter.prevent="selectTerminalTab(tab.id)"
                 @keydown.space.prevent="selectTerminalTab(tab.id)"
+                @dblclick.prevent.stop="startRenameTab(tab.id)"
               >
                 <span class="codicon" :class="embeddedTerminalTabCodicon(tab)" aria-hidden="true" />
-                <span class="terminal-tab-label">{{ tab.label }}</span>
+                <span v-if="renamingTabId !== tab.id" class="terminal-tab-label">{{ tab.label }}</span>
+                <input
+                  v-else
+                  v-model="renamingTabLabel"
+                  class="etw-tab-rename-input"
+                  @keydown.enter.prevent.stop="commitRenameTab()"
+                  @keydown.esc.prevent.stop="cancelRenameTab()"
+                  @blur="commitRenameTab()"
+                />
               </button>
               <div class="etw-terminal-tab-row-actions">
                 <button
@@ -251,6 +300,8 @@ import { localGoProxyOk } from '../composables/useLocalGoProxyStatus'
 
 const { t } = useI18n()
 
+const openTerminalSettingsWorkbenchTab = inject('openTerminalSettingsWorkbenchTab', null)
+
 const rootWorkbenchStyle = computed(() => integratedTerminalWorkbenchDarkVars())
 const tabsListMinW = TerminalTabsListSizes.WideViewMinimumWidth
 const tabsListMaxW = TerminalTabsListSizes.MaximumWidth
@@ -258,6 +309,31 @@ const tabsListMaxW = TerminalTabsListSizes.MaximumWidth
 const props = defineProps({
   workingDirectory: { type: String, default: '' },
   projectId: { type: [Number, String], default: null }
+})
+
+// 卡片上下文：有卡片时终端会话随卡片恢复；无卡片时退化为按项目作用域（仍在项目详情页内）
+const terminalCardContext = inject('terminalCardContext', ref({ cardId: null, cardTitle: '', type: '' }))
+// 保留注入点以兼容上层 provide，但本组件不再使用 plan 作为 fallback
+inject('terminalPlanContext', null)
+
+function toPositiveIntOrNull(v) {
+  const raw = Array.isArray(v) ? v[0] : v
+  if (raw == null || raw === '') return null
+  const x = typeof raw === 'object' && raw !== null && 'value' in raw ? raw.value : raw
+  const n = parseInt(String(x), 10)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/**
+ * 终端会话持久化键：优先绑定卡片，其次绑定当前项目（否则列表视图无 cardId，根本不会创建 tab → WS 无 term_start 帧）
+ */
+const sessionScopeKey = computed(() => {
+  const ctx = terminalCardContext?.value || terminalCardContext || {}
+  const cid = toPositiveIntOrNull(ctx.cardId)
+  if (cid) return `c:${cid}`
+  const pid = toPositiveIntOrNull(props.projectId)
+  if (pid) return `p:${pid}`
+  return null
 })
 
 /** Electron：主进程推断的默认 cwd（permissions.workspace_root 或 process.cwd），在 onMounted 里异步填入 */
@@ -279,6 +355,8 @@ const effectiveWorkingDirectory = computed(() => {
 const terminalCtl = inject('terminalCtl', null)
 const openAiComposerPrefill = inject('openAiComposerPrefill', null)
 const openNewBadcaseFromTerminal = inject('openNewBadcaseFromTerminal', null)
+const openNewBugFromTerminal = inject('openNewBugFromTerminal', null)
+const openNewTestcaseFromTerminal = inject('openNewTestcaseFromTerminal', null)
 
 const socketRef = ref(null)
 const terminalPasteRef = ref({ token: 0, csid: '', text: '' })
@@ -375,6 +453,116 @@ const termRegistry = {
   }
 }
 provide('termRegistry', termRegistry)
+
+// 终端补全：由子组件（EmbeddedPtyTerminal）发起打开请求，Workspace 负责渲染候选并把命令写回 xterm
+const showAutocomplete = ref(false)
+const autocompleteOptions = ref([])
+const autocompleteSelected = ref(0)
+const autocompleteForSessionId = ref('')
+const acListRef = ref(null)
+
+function closeAutocomplete() {
+  showAutocomplete.value = false
+  autocompleteOptions.value = []
+  autocompleteSelected.value = 0
+  autocompleteForSessionId.value = ''
+}
+
+function buildAutocompleteOptions(csid, prefix) {
+  const pfx = String(prefix || '').trim()
+  const out = []
+  const seen = new Set()
+
+  // 1) 本会话历史命令（优先）
+  const hist = termCommandRegistry.getCommands(csid) || []
+  for (const h of hist) {
+    const s = String(h || '')
+    if (!s.trim()) continue
+    if (pfx && !s.toLowerCase().startsWith(pfx.toLowerCase())) continue
+    if (seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+    if (out.length >= 40) return out
+  }
+
+  // 2) 快速命令（作为补充：支持多行，写入时会自动 \r）
+  for (const cmd of quickCommands.value || []) {
+    const s = String(cmd || '').trim()
+    if (!s) continue
+    if (pfx && !s.toLowerCase().startsWith(pfx.toLowerCase())) continue
+    if (seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+    if (out.length >= 60) return out
+  }
+
+  return out
+}
+
+function openAutocomplete(payload) {
+  const csid = String(payload?.client_session_id || '').trim() || activeTabId.value
+  if (!csid) return
+  const prefix = String(payload?.prefix || '')
+  autocompleteForSessionId.value = csid
+  autocompleteOptions.value = buildAutocompleteOptions(csid, prefix)
+  autocompleteSelected.value = 0
+  showAutocomplete.value = true
+  nextTick(() => {
+    try {
+      acListRef.value?.scrollTo?.({ top: 0 })
+    } catch (_) {
+      /* ignore */
+    }
+  })
+}
+
+function applyAutocomplete(idx) {
+  const csid = autocompleteForSessionId.value || activeTabId.value
+  if (!csid) return
+  const term = termRegistry.get(csid)
+  const opt = autocompleteOptions.value[idx]
+  if (!term || !opt) return
+  // 写入命令（不回车，让用户可再编辑；回车可直接按 Enter）
+  try {
+    // 先尽量清掉当前行输入：用 \x15 (Ctrl+U) 在大多数 shell 中清行；不支持时也不会破坏
+    term.write('\x15')
+  } catch (_) {
+    /* ignore */
+  }
+  term.write(String(opt))
+  closeAutocomplete()
+  focusEmbeddedTerminalArea()
+}
+
+function onAutocompleteKeydown(e) {
+  if (!showAutocomplete.value) return
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    closeAutocomplete()
+    focusEmbeddedTerminalArea()
+    return
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    e.stopPropagation()
+    autocompleteSelected.value = Math.max(0, autocompleteSelected.value - 1)
+    return
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    e.stopPropagation()
+    autocompleteSelected.value = Math.min(autocompleteOptions.value.length - 1, autocompleteSelected.value + 1)
+    return
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    applyAutocomplete(autocompleteSelected.value)
+  }
+}
+
+provide('onRequestAutocomplete', openAutocomplete)
 
 // 注入父组件的全局命令历史弹框方法（需在 termCommandRegistry 定义之后）
 const openGlobalCmdHistory = inject('openGlobalCmdHistory', null)
@@ -583,6 +771,24 @@ function loadHistory() {
   return new Map()
 }
 
+function cmdHistDebugEnabled() {
+  try {
+    return String(localStorage.getItem('badcase_cmd_hist_debug') || '').trim() === '1'
+  } catch (_) {
+    return false
+  }
+}
+
+function cmdHistLog(...args) {
+  if (!cmdHistDebugEnabled()) return
+  try {
+    // eslint-disable-next-line no-console
+    console.log('[cmd-hist]', ...args)
+  } catch (_) {
+    /* ignore */
+  }
+}
+
 // 保存历史到 localStorage
 function saveHistory(map) {
   try {
@@ -594,9 +800,12 @@ function saveHistory(map) {
 const termCommandRegistry = {
   _map: loadHistory(),
   pushCommand(csid, cmd) {
+    const sid = String(csid ?? '').trim()
+    console.log('[termCommandRegistry.pushCommand]', sid, cmd)
+    if (!sid) return
     if (!cmd || !cmd.trim()) return
-    if (!this._map.has(csid)) this._map.set(csid, [])
-    const hist = this._map.get(csid)
+    if (!this._map.has(sid)) this._map.set(sid, [])
+    const hist = this._map.get(sid)
     // 去重：将相同命令移到最前面
     const idx = hist.indexOf(cmd.trim())
     if (idx !== -1) hist.splice(idx, 1)
@@ -608,17 +817,25 @@ const termCommandRegistry = {
       this._map.delete(oldest)
     }
     saveHistory(this._map)
+    cmdHistLog('push', { sid, len: hist.length, cmd: String(cmd).slice(0, 200) })
   },
   getCommands(csid) {
-    return this._map.get(csid) || []
+    const sid = String(csid ?? '').trim()
+    if (!sid) return []
+    const out = this._map.get(sid) || []
+    cmdHistLog('get', { sid, len: out.length })
+    return out
   },
   unregister(csid) {
-    // 不删除，只清空该 session 的历史
-    this._map.set(csid, [])
-    saveHistory(this._map)
+    const sid = String(csid ?? '').trim()
+    if (!sid) return
+    // 不在组件卸载时清空历史：否则“搜索命令/最近命令”会经常变成空。
+    // 若需要清空，应由显式的“清空历史”操作来做。
+    return
   }
 }
 provide('termCommandRegistry', termCommandRegistry)
+console.log('[EmbeddedTerminalWorkspace] providing termCommandRegistry:', typeof termCommandRegistry === 'object')
 
 // 暴露到全局，供 ProjectDetail 的全局命令历史弹框使用
 globalThis.__termCommandRegistry__ = termCommandRegistry
@@ -643,11 +860,79 @@ const hasTerminalSelection = computed(() => {
 })
 
 const SESSION_RAIL_W_KEY = 'embeddedTerminalSessionRailW'
+const FONT_SIZE_KEY = 'embeddedTerminalFontSizePx'
+const FONT_SIZE_SYNC_EVENT = 'badcase-embedded-terminal-font-size'
+const fontSize = ref(14)
+function loadFontSize() {
+  try {
+    const raw = localStorage.getItem(FONT_SIZE_KEY)
+    if (raw != null) {
+      const n = parseInt(String(raw), 10)
+      if (Number.isFinite(n)) fontSize.value = Math.max(10, Math.min(26, n))
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}
+function persistFontSize() {
+  try {
+    localStorage.setItem(FONT_SIZE_KEY, String(fontSize.value))
+  } catch (_) {
+    /* ignore */
+  }
+}
+function increaseFontSize() {
+  fontSize.value = Math.min(26, (fontSize.value || 14) + 1)
+  persistFontSize()
+  showMoreMenu.value = false
+}
+function decreaseFontSize() {
+  fontSize.value = Math.max(10, (fontSize.value || 14) - 1)
+  persistFontSize()
+  showMoreMenu.value = false
+}
+function resetFontSize() {
+  fontSize.value = 14
+  persistFontSize()
+  showMoreMenu.value = false
+}
 
 const tabs = ref([])
 const activeTabId = ref(null)
+// sessionScopeKey -> { tabs, activeTabId }
+const _tabsByScope = new Map()
+
+function saveTerminalStateForScope(key) {
+  const k = key != null ? String(key).trim() : ''
+  if (!k) return
+  _tabsByScope.set(k, { tabs: tabs.value, activeTabId: activeTabId.value })
+}
+
+function restoreTerminalStateForScope(key) {
+  const k = key != null ? String(key).trim() : ''
+  if (!k) {
+    tabs.value = []
+    activeTabId.value = null
+    return
+  }
+  const st = _tabsByScope.get(k)
+  if (st && Array.isArray(st.tabs)) {
+    tabs.value = st.tabs
+    activeTabId.value = st.activeTabId
+    return
+  }
+  tabs.value = []
+  activeTabId.value = null
+}
 const ptySessionMeta = ref({})
 const sessionRailResizeTick = ref(0)
+
+const activeTabLabel = computed(() => {
+  const id = activeTabId.value
+  if (!id) return ''
+  const tab = tabs.value.find((x) => x.id === id)
+  return tab?.label ? String(tab.label) : ''
+})
 
 provide('onPtySessionMeta', (meta) => {
   if (!meta || typeof meta !== 'object') return
@@ -864,8 +1149,8 @@ function findPrevPromptLine(buffer, fromY) {
     const line = buffer.getLine(y)
     if (!line) continue
     const text = line.translateToString()
-    // 匹配各种命令提示符格式
-    if (/^[A-Za-z]:[\\\/]/.test(text) || /^\$/.test(text) || /^#/.test(text) || /^\[[^\]]+\]/.test(text)) {
+    // 匹配各种命令提示符格式（Windows / PowerShell / 常见 *nix）
+    if (isPromptLine(text)) {
       return y
     }
   }
@@ -878,7 +1163,7 @@ function findNextPromptLine(buffer, fromY) {
     const line = buffer.getLine(y)
     if (!line) continue
     const text = line.translateToString()
-    if (/^[A-Za-z]:[\\\/]/.test(text) || /^\$/.test(text) || /^#/.test(text) || /^\[[^\]]+\]/.test(text)) {
+    if (isPromptLine(text)) {
       return y
     }
   }
@@ -887,7 +1172,16 @@ function findNextPromptLine(buffer, fromY) {
 
 // 辅助函数：检测一行是否是命令提示符
 function isPromptLine(text) {
-  return /^[A-Za-z]:[\\\/]/.test(text) || /^\$/.test(text) || /^#/.test(text) || /^\[[^\]]+\]/.test(text)
+  const s = String(text || '').trimStart()
+  // PowerShell 常见：提示符 + 命令在同一行
+  // 例：PS C:\Path> dir
+  //     (venv) PS C:\Path> python -V
+  if (/^(?:\([^)]*\)\s*)*PS\s+[A-Za-z]:[^\r\n>]*>\s*/.test(s)) return true
+  // cmd 常见：C:\Path> dir
+  if (/^[A-Za-z]:[^\r\n>]*>\s*/.test(s)) return true
+  // *nix：极简提示符（仅 $/# 开头）或 [tag]... 这种前缀
+  if (/^\$/.test(s) || /^#/.test(s) || /^\[[^\]]+\]/.test(s)) return true
+  return false
 }
 
 // 辅助函数：扫描当前屏幕可见范围内的所有命令提示符行号
@@ -920,7 +1214,7 @@ function scrollHistoryUp() {
   if (prevPromptY !== null && prevPromptY < viewportY) {
     // 计算需要滚动的行数
     const scrollLines = prevPromptY - viewportY
-    term.scrollLines(scrollLines)
+    if (scrollLines !== 0) term.scrollLines(scrollLines)
     return
   }
   
@@ -929,19 +1223,13 @@ function scrollHistoryUp() {
     const earlierPromptY = findPrevPromptLine(buffer, prevPromptY - 1)
     if (earlierPromptY !== null) {
       const scrollLines = earlierPromptY - viewportY
-      term.scrollLines(scrollLines)
+      if (scrollLines !== 0) term.scrollLines(scrollLines)
       return
     }
   }
-  
-  // 再 fallback: 从缓冲区开头找
-  const promptY = findPrevPromptLine(buffer, buffer.length - 1)
-  if (promptY !== null) {
-    const scrollLines = promptY - viewportY
-    term.scrollLines(scrollLines)
-  } else {
-    term.scrollToTop()
-  }
+
+  // 没有更早的提示符：直接到最顶（旧逻辑会从末尾找，反而把视口拉回去）
+  term.scrollToTop()
 }
 
 function scrollHistoryDown() {
@@ -955,7 +1243,7 @@ function scrollHistoryDown() {
   if (nextPromptY !== null) {
     // 计算需要滚动的行数
     const scrollLines = nextPromptY - viewportY
-    term.scrollLines(scrollLines)
+    if (scrollLines !== 0) term.scrollLines(scrollLines)
     return
   }
   
@@ -1018,6 +1306,7 @@ const quickCommands = computed(() => {
 })
 
 function newTabId() {
+  if (!sessionScopeKey.value) return ''
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
   return `t-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
@@ -1029,13 +1318,16 @@ function selectTerminalTab(id) {
 }
 
 function addTab() {
+  if (!sessionScopeKey.value) return
   const id = newTabId()
+  if (!id) return
   const mode = 'local'
   const ssh = {}
   const kind = 'local'
-  const label = t('embeddedTerminal.tabLocal')
+  const label = (t('embeddedTerminal.tabLocal') || 'Local').trim()
   tabs.value.push({ id, mode, ssh, label, kind })
   activeTabId.value = id
+  persistTabLabels()
 }
 
 function addAgentTab() {
@@ -1048,10 +1340,132 @@ function addAgentTab() {
     kind: 'agent'
   })
   activeTabId.value = id
+  persistTabLabels()
   return id
 }
 
+const TAB_LABELS_KEY = 'embeddedTerminalTabLabels'
+const TAB_LABELS_USER_KEY = 'embeddedTerminalTabLabelsUserRenamed'
+function loadTabLabels() {
+  try {
+    const raw = localStorage.getItem(TAB_LABELS_KEY)
+    if (!raw) return {}
+    const obj = JSON.parse(raw)
+    return obj && typeof obj === 'object' ? obj : {}
+  } catch (_) {
+    return {}
+  }
+}
+function persistTabLabels() {
+  try {
+    const out = {}
+    for (const t0 of tabs.value) {
+      if (!t0?.id) continue
+      if (t0.label && String(t0.label).trim()) out[String(t0.id)] = String(t0.label).trim()
+    }
+    localStorage.setItem(TAB_LABELS_KEY, JSON.stringify(out))
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function loadUserRenamedSet() {
+  try {
+    const raw = localStorage.getItem(TAB_LABELS_USER_KEY)
+    if (!raw) return new Set()
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return new Set()
+    return new Set(arr.map((x) => String(x)))
+  } catch (_) {
+    return new Set()
+  }
+}
+
+function persistUserRenamedSet(set) {
+  try {
+    const arr = Array.from(set || [])
+    localStorage.setItem(TAB_LABELS_USER_KEY, JSON.stringify(arr))
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+const userRenamedTabIds = ref(loadUserRenamedSet())
+
+function markTabUserRenamed(id) {
+  const sid = String(id || '').trim()
+  if (!sid) return
+  const next = new Set(userRenamedTabIds.value || [])
+  next.add(sid)
+  userRenamedTabIds.value = next
+  persistUserRenamedSet(next)
+}
+
+function shortenLabelFromCommand(cmd, maxLen = 22) {
+  const s = String(cmd || '').replace(/\s+/g, ' ').trim()
+  if (!s) return ''
+  if (s.length <= maxLen) return s
+  return s.slice(0, Math.max(8, maxLen - 1)) + '…'
+}
+
+function autoUpdateTabLabelFromCommand(csid, cmd, source = 'user') {
+  const sid = String(csid || '').trim()
+  if (!sid) return
+  const idx = tabs.value.findIndex((x) => x.id === sid)
+  if (idx < 0) return
+  const renamed = userRenamedTabIds.value && userRenamedTabIds.value.has && userRenamedTabIds.value.has(sid)
+  if (renamed) return
+  const base = shortenLabelFromCommand(cmd)
+  if (!base) return
+  console.log('[EmbeddedTerminalWorkspace] auto title:', sid, source, '=>', base)
+  const nextLabel = source === 'ai' ? `AI: ${base}` : base
+  const old = tabs.value[idx]
+  tabs.value = [
+    ...tabs.value.slice(0, idx),
+    { ...old, label: nextLabel },
+    ...tabs.value.slice(idx + 1)
+  ]
+  persistTabLabels()
+}
+
+const renamingTabId = ref(null)
+const renamingTabLabel = ref('')
+function startRenameTab(id) {
+  const tab = tabs.value.find((x) => x.id === id)
+  if (!tab) return
+  renamingTabId.value = id
+  renamingTabLabel.value = String(tab.label || '').trim()
+  nextTick(() => {
+    try {
+      const root = etwRootRef.value
+      const inp = root?.querySelector?.('.etw-tab-rename-input')
+      inp?.focus?.()
+      inp?.select?.()
+    } catch (_) {
+      /* ignore */
+    }
+  })
+}
+function commitRenameTab() {
+  const id = renamingTabId.value
+  if (!id) return
+  const tab = tabs.value.find((x) => x.id === id)
+  if (!tab) {
+    renamingTabId.value = null
+    return
+  }
+  const nextLabel = String(renamingTabLabel.value || '').trim()
+  tab.label = nextLabel || tab.label
+  renamingTabId.value = null
+  if (nextLabel) markTabUserRenamed(id)
+  persistTabLabels()
+}
+function cancelRenameTab() {
+  renamingTabId.value = null
+}
+
 const showMoreMenu = ref(false)
+const showPlusMenu = ref(false)
 
 // 命令历史弹窗
 const showCmdHistory = ref(false)
@@ -1076,8 +1490,11 @@ const filteredCmdHistory = computed(() => {
 
 function openCmdHistory() {
   const csid = activeTabId.value
+  console.log('[openCmdHistory] csid:', csid, 'termCommandRegistry:', typeof termCommandRegistry, termCommandRegistry)
   if (!csid) return
-  cmdHistoryList.value = termCommandRegistry.getCommands(csid)
+  const cmds = termCommandRegistry.getCommands(csid)
+  console.log('[openCmdHistory] commands:', cmds)
+  cmdHistoryList.value = cmds
   cmdHistorySelected.value = 0
   cmdSearchText.value = ''
   showCmdHistory.value = true
@@ -1171,10 +1588,35 @@ function goToRecentCmd() {
 
 function closeAllMenus() {
   showMoreMenu.value = false
+  showPlusMenu.value = false
 }
 
 function toggleMoreMenu() {
   showMoreMenu.value = !showMoreMenu.value
+}
+
+function togglePlusMenu() {
+  showPlusMenu.value = !showPlusMenu.value
+  if (showPlusMenu.value) showMoreMenu.value = false
+}
+
+function openTerminalSettingsTabFromPlusMenu() {
+  showPlusMenu.value = false
+  openTerminalSettingsTab()
+}
+
+function openQuickEditorFromPlusMenu() {
+  showPlusMenu.value = false
+  openQuickEditor()
+}
+
+function openTerminalSettingsTab() {
+  showMoreMenu.value = false
+  try {
+    openTerminalSettingsWorkbenchTab?.()
+  } catch (_) {
+    /* ignore */
+  }
 }
 
 function onDocPointerDown(e) {
@@ -1195,11 +1637,13 @@ function closeTabById(id) {
   tabs.value = tabs.value.filter((x) => x.id !== id)
   if (!tabs.value.length) {
     activeTabId.value = null
+    persistTabLabels()
     return
   }
   if (wasActive) {
     activeTabId.value = tabs.value[tabs.value.length - 1].id
   }
+  persistTabLabels()
 }
 
 function closeActiveTab() {
@@ -1239,6 +1683,8 @@ function injectCommand(cmd, opts = {}) {
   const raw = String(cmd || '')
   const line = raw.includes('\n') && !raw.endsWith('\r') ? raw.replace(/\n/g, '\r\n') + '\r' : `${raw}\r`
   terminalPasteRef.value = { token: Date.now(), csid: targetId, text: line }
+  // 该命令由对话/AI 注入到终端：自动用它更新右侧会话标题（用户手动改过的不会覆盖）
+  autoUpdateTabLabelFromCommand(targetId, raw, 'ai')
 }
 
 function onOpenChatForCommands() {
@@ -1254,6 +1700,20 @@ function createBadcaseFromTerminal() {
   const raw = getActiveSelection().trim()
   if (!raw) return
   openNewBadcaseFromTerminal(`【终端选中输出】\n${raw}`)
+}
+
+function createBugFromTerminal() {
+  if (!openNewBugFromTerminal) return
+  const raw = getActiveSelection().trim()
+  if (!raw) return
+  openNewBugFromTerminal(`【终端选中输出】\n${raw}`)
+}
+
+function createTestcaseFromTerminal() {
+  if (!openNewTestcaseFromTerminal) return
+  const raw = getActiveSelection().trim()
+  if (!raw) return
+  openNewTestcaseFromTerminal(`【终端选中输出】\n${raw}`)
 }
 
 async function loadTerminalConfig() {
@@ -1292,8 +1752,14 @@ watch(
   { deep: true, flush: 'post' }
 )
 
+function onExternalFontSizeSync() {
+  loadFontSize()
+}
+
 onMounted(async () => {
+  loadFontSize()
   if (typeof window !== 'undefined') {
+    window.addEventListener(FONT_SIZE_SYNC_EVENT, onExternalFontSizeSync)
     window.addEventListener('pointerdown', onDocPointerDown, { capture: true })
     try {
       const raw = localStorage.getItem(SESSION_RAIL_W_KEY)
@@ -1332,8 +1798,26 @@ onMounted(async () => {
       /* ignore */
     }
   }
-  if (!tabs.value.length) {
-    addTab()
+  // tabs 初始化由 sessionScopeKey watch 控制：无作用域（无项目/卡片）不创建
+  
+  // 恢复自定义 session 标题
+  try {
+    const labels = loadTabLabels()
+    if (labels && typeof labels === 'object' && tabs.value.length) {
+      tabs.value = tabs.value.map((x) => {
+        const v = labels[String(x.id)]
+        return v ? { ...x, label: String(v) } : x
+      })
+    }
+  } catch (_) {
+    /* ignore */
+  }
+
+  // 恢复“手动重命名过”的标记集合
+  try {
+    userRenamedTabIds.value = loadUserRenamedSet()
+  } catch (_) {
+    /* ignore */
   }
 
   nextTick(() => {
@@ -1351,6 +1835,29 @@ onMounted(async () => {
       focusTerminal: focusEmbeddedTerminalArea
     }
   }
+  document.addEventListener('keydown', onAutocompleteKeydown, true)
+})
+
+watch(
+  sessionScopeKey,
+  (next, prev) => {
+    if (prev && prev !== next) saveTerminalStateForScope(prev)
+    restoreTerminalStateForScope(next)
+    // 进入某一作用域时，确保至少有一个 terminal tab（才会向 /pty 发送 term_start）
+    if (next && (!tabs.value.length || !activeTabId.value)) {
+      addTab()
+    }
+    // 切换卡片时关闭悬浮菜单/弹框，避免串卡操作
+    closeAllMenus()
+    showCmdHistory.value = false
+    closeAutocomplete()
+  },
+  { immediate: true }
+)
+
+// 子组件通知：用户在某个终端会话里按回车执行了命令
+provide('onTermCommandExecuted', ({ client_session_id, command, source }) => {
+  autoUpdateTabLabelFromCommand(client_session_id, command, source || 'user')
 })
 
 onBeforeUnmount(() => {
@@ -1369,6 +1876,7 @@ onBeforeUnmount(() => {
     tabsListResizeObserver = null
   }
   if (typeof window !== 'undefined') {
+    window.removeEventListener(FONT_SIZE_SYNC_EVENT, onExternalFontSizeSync)
     window.removeEventListener('pointerdown', onDocPointerDown, { capture: true })
   }
   if (socketRef.value) {
@@ -1382,6 +1890,14 @@ onBeforeUnmount(() => {
   if (terminalCtl) {
     terminalCtl.value = null
   }
+  document.removeEventListener('keydown', onAutocompleteKeydown, true)
+})
+
+defineExpose({
+  openQuickEditor,
+  createBadcaseFromTerminal,
+  createBugFromTerminal,
+  createTestcaseFromTerminal
 })
 </script>
 
@@ -1394,6 +1910,126 @@ onBeforeUnmount(() => {
   min-height: 0;
   height: 100%;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+.etw-vscode-menu-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.etw-plus-chevron-anchor :deep(.action-item.codicon-chevron-down) {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+/* 下拉菜单定位：确保新加的“⌄”与“⋯”一致可见 */
+.etw-vscode-menu {
+  position: absolute;
+  right: 0;
+  z-index: 3000;
+}
+
+/* + 右侧的 ⌄：向上弹出 */
+.etw-plus-chevron-anchor .etw-vscode-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+/* ⋯ 更多：向下弹出 */
+.etw-terminal-menu-anchor .etw-vscode-menu {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+.etw-tab-rename-input {
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  padding: 2px 6px;
+  color: #d4d4d4;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  outline: none;
+}
+
+.etw-autocomplete-host {
+  position: absolute;
+  inset: 60px 12px 12px 12px;
+  z-index: 2050;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  pointer-events: auto;
+}
+
+.etw-autocomplete-panel {
+  width: min(720px, calc(100% - 24px));
+  max-height: min(420px, calc(100% - 24px));
+  background: #252526;
+  border: 1px solid #3e3e42;
+  border-radius: 10px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.etw-autocomplete-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px 8px;
+  color: #d4d4d4;
+}
+
+.etw-autocomplete-icon {
+  font-size: 14px;
+  color: #4ec9b0;
+}
+
+.etw-autocomplete-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.etw-autocomplete-hint {
+  font-size: 11px;
+  color: #9aa0a6;
+}
+
+.etw-autocomplete-divider {
+  height: 1px;
+  background: #3e3e42;
+}
+
+.etw-autocomplete-list {
+  padding: 8px;
+  overflow: auto;
+  max-height: 360px;
+}
+
+.etw-autocomplete-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: #d4d4d4;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.etw-autocomplete-item:hover,
+.etw-autocomplete-item.is-active {
+  background: #0e639c;
+}
+
+.etw-autocomplete-empty {
+  padding: 16px 10px;
+  color: #9aa0a6;
+  font-size: 12px;
 }
 
 /* VS Code 风格 hover tooltip（会话条目） */

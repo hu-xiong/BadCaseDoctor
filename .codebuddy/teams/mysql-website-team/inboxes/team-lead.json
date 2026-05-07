@@ -1,0 +1,38 @@
+[
+  {
+    "id": "msg-1777282648679-7hr2pt",
+    "from": "backend-dev",
+    "to": "team-lead",
+    "type": "message",
+    "content": "MySQL 官网项目后端已完成开发。以下是完成的内容：\n\n## 项目路径\n`c:\\Users\\h2629\\PycharmProjects\\PythonProject\\BadCaseDoctor\\mysql-website\\backend`\n\n## 已实现功能\n\n### 1. 项目结构\n```\nbackend/\n├── config/\n│   ├── config.go       # 配置加载器\n│   └── config.yaml     # 配置文件\n├── handlers/\n│   ├── auth.go         # 用户认证 (注册/登录/登出/当前用户)\n│   ├── download.go     # 下载管理\n│   ├── docs.go         # 文档系统\n│   ├── community.go    # 社区系统 (帖子/评论)\n│   └── news.go         # 新闻系统\n├── middleware/\n│   └── auth.go         # JWT 认证中间件\n├── models/\n│   ├── models.go       # 数据模型 (User, Download, DocCategory, Doc, Post, Comment, News)\n│   └── database.go     # 数据库连接\n├── routes/\n│   └── routes.go       # 路由配置\n├── migrations/\n│   └── 001_init_schema.sql  # 数据库建表脚本\n├── main.go             # 应用入口\n├── go.mod              # Go 模块\n└── README.md           # 文档\n```\n\n### 2. API 端点\n\n**认证系统 (POST /api/v1/auth/)**\n- `/register` - 用户注册\n- `/login` - 用户登录\n- `/logout` - 用户登出\n- `/me` - 获取当前用户 (需认证)\n\n**下载管理 (GET/POST /api/v1/downloads)**\n- 列表、详情、记录下载\n- 按版本/操作系统筛选\n\n**文档系统 (GET /api/v1/docs)**\n- `/categories` - 文档分类\n- `/pages` - 文档列表\n- `/pages/:id` - 文档详情\n- `/search` - 搜索文档\n\n**社区系统 (GET/POST /api/v1/community)**\n- `/posts` - 帖子列表/创建\n- `/posts/:id` - 帖子详情/更新/删除\n- `/posts/:id/comments` - 评论列表/创建\n\n**新闻系统 (GET /api/v1/news)**\n- 列表、最新新闻、详情\n\n### 3. 技术特性\n- Gin 框架 RESTful API\n- JWT 认证 (带可选认证中间件)\n- GORM ORM (支持自动迁移)\n- 统一响应格式\n- CORS 支持\n- 分页功能\n- 初始化数据 (MySQL 下载、文档、新闻示例数据)\n\n### 4. 配置文件\n修改 `config/config.yaml` 中的数据库 DSN 连接到你指定的 MySQL。\n\n### 5. 运行方式\n```bash\ncd backend\ngo mod download\ngo run main.go\n```\n\n服务将在 http://localhost:8080 启动。",
+    "timestamp": "2026-04-27T09:37:28.679Z",
+    "read": true
+  },
+  {
+    "id": "msg-1777282799464-en33rp",
+    "from": "frontend-dev",
+    "to": "team-lead",
+    "type": "message",
+    "content": "MySQL 官网 Vue3 前端项目开发完成！\n\n## 已完成的工作\n\n### 1. 项目基础配置\n- `package.json` - 依赖配置（Vue 3, Vite, TypeScript, Element Plus 等）\n- `vite.config.ts` - Vite 构建配置\n- `tsconfig.json` - TypeScript 配置\n- `index.html` - 入口 HTML 文件\n\n### 2. 核心文件\n- `src/main.ts` - 应用入口\n- `src/App.vue` - 根组件（NavBar + RouterView + Footer）\n- `src/vite-env.d.ts` - TypeScript 声明\n- `src/assets/styles/main.css` - 全局样式（MySQL 蓝色主题）\n\n### 3. 路由系统\n- `src/router/index.ts` - 路由配置，包含导航守卫\n\n### 4. 状态管理 (Pinia)\n- `src/stores/auth.ts` - 用户认证状态（登录、注册、登出）\n- `src/stores/index.ts` - 全局应用状态\n\n### 5. API 服务层\n- `src/api/axios.ts` - Axios 实例（拦截器、API 基础配置）\n- `src/api/auth.ts` - 认证 API\n- `src/api/downloads.ts` - 下载 API\n- `src/api/news.ts` - 新闻 API\n- `src/api/community.ts` - 社区 API\n\n### 6. 可复用组件\n- `NavBar.vue` - 导航栏（Logo、菜单、搜索、用户菜单）\n- `Footer.vue` - 页脚\n- `HeroSection.vue` - Hero 区域\n- `FeatureCard.vue` - 特性卡片\n- `SectionHeader.vue` - 区块标题\n- `NewsCard.vue` - 新闻卡片\n- `DownloadCard.vue` - 下载卡片\n\n### 7. 页面视图\n- `HomeView.vue` - 首页（Hero、统计、特性、性能数据、客户案例、新闻、CTA）\n- `DownloadsView.vue` - 下载页（版本选择、操作系统筛选、下载列表）\n- `DocsView.vue` - 文档页（左侧导航树、文档内容区）\n- `CommunityView.vue` - 社区页（帖子列表、分类筛选、发帖功能）\n- `NewsView.vue` - 新闻页（新闻列表、分类筛选、精选新闻）\n- `LoginView.vue` - 登录页（表单验证、记住登录）\n- `RegisterView.vue` - 注册页（表单验证、密码确认）\n\n### 8. 文档\n- `README.md` - 项目说明文档\n\n## 技术亮点\n- 使用 TypeScript 和 Composition API\n- 响应式设计（适配桌面和移动端）\n- Element Plus UI 组件库\n- MySQL 蓝色主题设计\n- JWT Token 认证流程\n- 路由守卫保护\n\n## 启动项目\n```bash\ncd mysql-website/frontend\nnpm install\nnpm run dev\n```\n\n项目结构已完整创建，可以立即开始开发！",
+    "timestamp": "2026-04-27T09:39:59.464Z",
+    "read": true
+  },
+  {
+    "id": "msg-1777283293301-nl2nut",
+    "from": "frontend-dev",
+    "to": "team-lead",
+    "type": "message",
+    "content": "## MySQL 官网前端 - 第二阶段开发完成\n\n### 新增内容\n\n#### 1. 新增组件\n- `LoadingSpinner.vue` - 加载动画组件\n- `BreadCrumb.vue` - 面包屑导航组件\n- `Pagination.vue` - 分页组件\n\n#### 2. 新增页面\n- `ProductsView.vue` - 产品对比页面（展示 Community/Enterprise/Cluster 三个版本）\n- `NewsDetailView.vue` - 新闻详情页面\n- `ProfileView.vue` - 用户资料页面（需登录）\n- `NotFoundView.vue` - 404 错误页面\n\n#### 3. 路由更新\n- `/products` - 产品页面\n- `/news/:id` - 新闻详情\n- `/profile` - 个人中心（需认证）\n- `/*` - 404 捕获\n\n#### 4. 工具函数和配置\n- `src/utils/format.ts` - 格式化工具（日期、数字、截断等）\n- `src/composables/useLoading.ts` - 组合式函数（加载状态、窗口大小、滚动位置等）\n- `src/constants/index.ts` - 常量配置\n- `src/types/index.ts` - TypeScript 类型定义\n- `src/mock/index.ts` - 开发环境模拟数据\n\n#### 5. 资源文件\n- `/public/mysql-logo.svg` - MySQL Logo\n- `/public/vite.svg` - Vite Logo\n\n#### 6. API 扩展\n- `src/api/docs.ts` - 文档 API\n\n### 完整项目结构\n\n```\nfrontend/\n├── src/\n│   ├── api/           # API 服务（auth, downloads, news, community, docs）\n│   ├── assets/        # 样式文件\n│   ├── components/    # 组件（NavBar, Footer, Hero, FeatureCard, LoadingSpinner 等）\n│   ├── composables/   # 组合式函数\n│   ├── constants/      # 常量配置\n│   ├── mock/          # 模拟数据\n│   ├── router/        # 路由（含守卫）\n│   ├── stores/        # Pinia 状态管理\n│   ├── types/         # TypeScript 类型\n│   ├── utils/         # 工具函数\n│   ├── views/         # 页面（9个）\n│   ├── App.vue\n│   └── main.ts\n├── public/\n├── package.json\n├── vite.config.ts\n└── tsconfig.json\n```\n\n### 启动命令\n```bash\ncd mysql-website/frontend\nnpm install\nnpm run dev\n```\n\n前端开发已完成！",
+    "timestamp": "2026-04-27T09:48:13.301Z",
+    "read": true
+  },
+  {
+    "id": "msg-1777283311560-e5ck6k",
+    "from": "backend-dev",
+    "to": "team-lead",
+    "type": "message",
+    "content": "后端开发已完成！所有功能已实现并可运行。\n\n## 后端状态：已完成 ✓\n\n**已创建文件：**\n- `mysql-website/backend/` - 完整的 Go 后端项目\n- 支持 Gin RESTful API\n- JWT 认证\n- 5大模块：用户、下载、文档、社区、新闻\n\n**API 端口：** http://localhost:8080\n\n**待确认事项：**\n请确认数据库配置 DSN 是否正确？配置文件位于：\n`mysql-website/backend/config/config.yaml`\n\n前端如果需要与后端对接，可以使用已实现的 API 接口。",
+    "timestamp": "2026-04-27T09:48:31.560Z",
+    "read": true
+  }
+]

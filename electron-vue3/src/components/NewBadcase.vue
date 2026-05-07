@@ -739,6 +739,11 @@ export default {
       type: [String, Number],
       default: null
     },
+    /** 创建时关联的卡片ID，用于类型校验 */
+    card_id: {
+      type: [String, Number],
+      default: null
+    },
     edit: {
       type: Boolean,
       default: false
@@ -752,7 +757,7 @@ export default {
       default: false
     }
   },
-  emits: ['close'],
+  emits: ['close', 'titleLoaded'],
   setup(props, { emit }) {
     const { t } = useI18n()
     const router = useRouter()
@@ -855,7 +860,7 @@ export default {
     
     const badcase = reactive({
       title: '',
-      case_category: '',
+      case_category: '功能缺陷', // 默认问题分类为"功能缺陷"
       base_problem: '',
       badcase_result: '',
       answer: '',
@@ -994,14 +999,13 @@ export default {
           if (plan.status === 'active') {
             const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
 
-            if (plan.plan_type === 'badcase' || children.length > 0) {
+            if (children.length > 0 || plan.status === 'active') {
               const planOption = {
                 value: plan.id.toString(),
                 label: plan.name,
                 level,
                 is_pinned: plan.is_pinned || false,
                 icon: plan.icon || '📁',
-                plan_type: plan.plan_type,
                 badcase_count: plan.badcase_count || 0
               }
               if (children.length > 0) planOption.children = children
@@ -1291,6 +1295,10 @@ export default {
           goBack()
         } finally {
           loading.value = false
+          // 编辑模式下通知父组件更新Tab标题
+          if (isEdit.value && badcase.title) {
+            emit('titleLoaded', badcase.title)
+          }
         }
         } else if (pendingDiff.value?.targetId) {
           // 兜底：如果上面没走编辑分支，但存在 pendingDiff.targetId，仍然强制按编辑逻辑处理
@@ -1315,6 +1323,10 @@ export default {
               goBack()
             } finally {
               loading.value = false
+              // 编辑模式下通知父组件更新Tab标题
+              if (isEdit.value && badcase.title) {
+                emit('titleLoaded', badcase.title)
+              }
             }
           }
         } else if (query.project_id || props.project_id) {
@@ -1416,6 +1428,8 @@ export default {
           const n = parseInt(String(rawPlanKey), 10)
           if (!Number.isNaN(n)) plan_id = n
         }
+        // 仅新建模式添加 card_id，用于后端校验卡片类型
+        const cardIdValue = !isEdit.value && props.card_id ? parseInt(props.card_id) : null
         const badcaseData = {
           title: badcase.title,
           case_category: badcase.case_category,
@@ -1439,6 +1453,10 @@ export default {
             name: att.name,
             size: att.size
           }))
+        }
+        // 新建时添加卡片ID
+        if (cardIdValue) {
+          badcaseData.card_id = cardIdValue
         }
         
         console.log('准备发送的BadCase数据:', badcaseData)

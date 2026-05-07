@@ -138,6 +138,16 @@ export function applyTailPayloadV1(aiMessage, payload) {
     plan_snapshot: chunk.plan_snapshot,
     t: Date.now()
   }
+  // 同时更新 agentResult，供「总结 Xs」等 UI 显示使用
+  if (chunk.duration != null) {
+    aiMessage.agentResult.execution_time = chunk.duration
+  }
+  if (chunk.thinking_time != null) {
+    aiMessage.agentResult.thinking_time = chunk.thinking_time
+  }
+  if (chunk.steps_count != null) {
+    aiMessage.agentResult.steps_count = chunk.steps_count
+  }
   if (chunk.react_phase) aiMessage.lastReactPhase = chunk.react_phase
   if (
     aiMessage._planMemoRevealReady === false &&

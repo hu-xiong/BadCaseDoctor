@@ -325,7 +325,9 @@ def react_unified_final_summary_prompt(
         return (
             "You MUST write the entire summary in clear English (the UI language is English).\n"
             "Summarize the execution below in one short paragraph (2–4 sentences), like a Cursor Thought summary: "
-            "natural English, no emoji, no bullet symbols.\n\n"
+            "natural English, no emoji, no bullet symbols.\n"
+            "State **outcomes that matter to the user** (what was found, changed, or not found). "
+            "Do not only list which tools ran.\n\n"
             f"Key findings / results:\n{findings_lines}\n\n"
             f"Stats: {steps_count} step(s) completed in {duration_sec:.2f}s."
         )
@@ -339,7 +341,7 @@ def react_unified_final_summary_prompt(
 
 执行统计：完成 {steps_count} 步，耗时 {duration_sec:.2f}s。
 
-要求：纯中文、无 emoji、无列表符号，直接一段话。"""
+要求：纯中文、无 emoji、无列表符号，直接一段话；须写清**用户关心的结果与结论**（查到什么、改动了什么、未命中什么等），不要只罗列「用了哪些工具」。"""
     )
 
 
@@ -503,6 +505,7 @@ def modify_tool_progress(key: str, locale: Optional[str], **kw: Any) -> str:
             "natural_query_lookup": "Resolving target via natural language…",
             "orm_fallback": "Text2SQL missed; trying ORM title match…",
             "located_validate": "Target located: target_id={target_id}, validating changes…",
+            "readonly_snapshot": "No modifications requested; loading current row as read-only snapshot…",
             "fields_mapped": "Fields mapped: {keys}",
             "status_norm": "Status normalized: {orig} -> {norm}",
             "sandbox_enter": "Sandbox preview: loading original row…",
@@ -525,6 +528,7 @@ def modify_tool_progress(key: str, locale: Optional[str], **kw: Any) -> str:
             "natural_query_lookup": "根据自然语言查询定位目标记录…",
             "orm_fallback": "Text2SQL 未定位到记录，尝试 ORM 标题模糊匹配…",
             "located_validate": "已定位目标: target_id={target_id}，开始校验修改内容…",
+            "readonly_snapshot": "未填写修改字段，正在读取当前记录（只读快照）…",
             "fields_mapped": "字段映射完成：{keys}",
             "status_norm": "状态值归一化：{orig} -> {norm}",
             "sandbox_enter": "进入沙箱预览：读取原始数据…",
@@ -556,28 +560,52 @@ def modify_error_target_id_bad(target_id: Any, locale: Optional[str]) -> str:
     return f"target_id 格式错误: {target_id}"
 
 
+def modify_summary_readonly_snapshot(target: str, target_id: int, locale: Optional[str]) -> str:
+    name = modify_target_display_name(target, locale)
+    if is_english_locale(locale):
+        return f"Current {name} record (ID={target_id}); no field changes."
+    return f"当前{name}（ID={target_id}）快照，未修改任何字段。"
+
+
+def modify_message_readonly_no_modifications(locale: Optional[str]) -> str:
+    """modify 已定位 target_id 但 modifications 为空：视为查看快照，非错误。"""
+    if is_english_locale(locale):
+        return (
+            "No modification fields were provided; returning the current record as-is. "
+            "To edit, pass a non-empty modifications dict; to search, use grep."
+        )
+    return (
+        "未填写 modifications，已返回该条目的当前内容（未做任何写入）。"
+        "若要修改请传入非空的 modifications；若仅需检索列表请用 grep。"
+    )
+
+
+def modify_error_batch_requires_modifications(locale: Optional[str]) -> str:
+    if is_english_locale(locale):
+        return "Batch modify requires a non-empty modifications dict."
+    return "批量修改时必须提供非空的 modifications。"
+
+
 def modify_error_missing_params(
     target_id: Any, modifications: Any, target: str, project_id: Any, locale: Optional[str]
 ) -> tuple[str, str]:
     if is_english_locale(locale):
-        err = f"Missing required parameters: target_id={target_id} or modifications={modifications}"
-        hint = "Run grep first to locate rows, then call modify with a concrete target_id and modifications dict."
-        if not target_id:
-            hint += (
-                "\n\nExample:\n"
-                f"1. grep(target=\"{target}\", project_id={project_id})\n"
-                "2. Read target_id from grep results\n"
-                f"3. modify(target=\"{target}\", target_id=<id from grep>, modifications={{...}})"
-            )
+        err = f"Missing target_id (cannot locate the row). target_id={target_id}"
+        hint = "Run grep first to locate rows, then call modify with target_id and (if editing) a non-empty modifications dict."
+        hint += (
+            "\n\nExample:\n"
+            f"1. grep(target=\"{target}\", project_id={project_id})\n"
+            "2. Read target_id from grep results\n"
+            f"3. modify(target=\"{target}\", target_id=<id>, modifications={{...}}) — omit or leave modifications empty only to view the current row."
+        )
     else:
-        err = f"缺少必要参数：target_id={target_id}或modifications={modifications}"
-        hint = "请先使用 grep 工具查询并定位目标记录，然后再使用 modify 工具修改。"
-        if not target_id:
-            hint += (
-                f"\n\n示例流程：\n1. 使用 grep 工具查询 {target}：grep(target=\"{target}\", project_id={project_id})\n"
-                "2. 从 grep 结果中获取 target_id\n"
-                f"3. 使用 modify 工具修改：modify(target=\"{target}\", target_id=<从grep获取的ID>, modifications={modifications})"
-            )
+        err = f"缺少目标 ID，无法定位记录（target_id={target_id}）"
+        hint = "请先使用 grep 定位记录，再调用 modify；若仅需查看某条详情，可传 target_id 并将 modifications 留空。"
+        hint += (
+            f"\n\n示例：\n1. grep(target=\"{target}\", project_id={project_id})\n"
+            "2. 从结果中取 target_id\n"
+            f"3. modify(target=\"{target}\", target_id=<id>, modifications={{...}})"
+        )
     return err, hint
 
 
@@ -649,6 +677,8 @@ def grep_tool_progress(key: str, locale: Optional[str], **kw: Any) -> str:
             "phase1_bug_done": "Bug candidates: {n}",
             "phase1_tc": "Phase 1: loading test case candidates…",
             "phase1_tc_done": "Test case candidates: {n}",
+            "phase1_card": "Phase 1: loading unified card (Card) candidates…",
+            "phase1_card_done": "Card candidates: {n}",
             "phase2_assoc": "Phase 2: analyzing ownership / links…",
             "phase2_done": "Phase 2: analysis done",
             "phase3_compare": "Phase 3: building comparison report…",
@@ -674,6 +704,8 @@ def grep_tool_progress(key: str, locale: Optional[str], **kw: Any) -> str:
             "phase1_bug_done": "Bug 候选获取完成：{n} 条",
             "phase1_tc": "阶段1：检索 TestCase 候选…",
             "phase1_tc_done": "TestCase 候选获取完成：{n} 条",
+            "phase1_card": "阶段1：检索统一卡片 Card 候选…",
+            "phase1_card_done": "Card 候选获取完成：{n} 条",
             "phase2_assoc": "阶段2：分析关联归属…",
             "phase2_done": "阶段2：关联分析完成",
             "phase3_compare": "阶段3：生成对比报告…",
@@ -712,11 +744,16 @@ def grep_generate_locate_summary(
     badcase_count: int,
     bug_count: int,
     testcase_count: int,
+    card_count: int = 0,
     related_badcase_count: int,
     related_bug_count: int,
     related_testcase_count: int,
+    related_card_count: int = 0,
     attribution_count: int,
     bug_location: Optional[List[Dict[str, Any]]],
+    total_plans: int = 0,
+    plan_material_loaded: bool = False,
+    plan_material_root_name: Optional[str] = None,
 ) -> str:
     parts: List[str] = []
     is_query_all = not keywords or str(keywords).strip() == "" or keywords == "*"
@@ -783,12 +820,57 @@ def grep_generate_locate_summary(
                 else f"📋 定位 {testcase_count} 条测试用例（关键词：{keywords}）"
             )
 
+    if card_count > 0:
+        if is_query_all:
+            parts.append(
+                f"🗂️ Found {card_count} card(s) (Card)"
+                if en
+                else f"🗂️ 找到 {card_count} 张统一卡片（Card）"
+            )
+        elif related_card_count > 0:
+            parts.append(
+                f"🗂️ Located {related_card_count} card(s) (keywords: {keywords})"
+                if en
+                else f"🗂️ 定位 {related_card_count} 张卡片（关键词：{keywords}）"
+            )
+        else:
+            parts.append(
+                f"🗂️ Located {card_count} card(s) (keywords: {keywords})"
+                if en
+                else f"🗂️ 定位 {card_count} 张卡片（关键词：{keywords}）"
+            )
+
     if attribution_count > 0:
         parts.append(
             f"🎯 Generated {attribution_count} plan attribution suggestion(s)"
             if en
             else f"🎯 生成 {attribution_count} 条计划归属调整建议"
         )
+
+    # 仅有迭代计划 / 计划材料、无三类工作项命中时仍视为有效检索结果
+    if not parts and total_plans > 0:
+        root = (plan_material_root_name or "").strip()
+        if plan_material_loaded and root:
+            parts.append(
+                f'📅 Loaded iteration plan "{root}" and materials under it / sub-plans '
+                f"(no BadCase/Bug/test case hits for current keywords)"
+                if en
+                else f"📅 已加载迭代计划「{root}」及子计划下的材料（当前关键词下无 BadCase/Bug/测试用例/卡片命中）"
+            )
+        elif plan_material_loaded:
+            parts.append(
+                f"📅 Loaded iteration plan materials ({total_plans} plan(s) in project; "
+                f"no BadCase/Bug/test case/card hits for current keywords)"
+                if en
+                else f"📅 已加载当前迭代计划树材料（项目共 {total_plans} 个计划；当前关键词下无 BadCase/Bug/测试用例/卡片命中）"
+            )
+        else:
+            parts.append(
+                f"📅 Retrieved {total_plans} iteration plan(s) in project "
+                f"(no BadCase/Bug/test case/card hits for current keywords)"
+                if en
+                else f"📅 已检索项目内 {total_plans} 个迭代计划（当前关键词下无 BadCase/Bug/测试用例/卡片命中）"
+            )
 
     if parts:
         return "\n".join(parts)
@@ -865,6 +947,61 @@ def react_summarize_grep_done_hits(n: int, bug_n: int, bc_n: int, tc_n: int, loc
         f"grep 完成：命中约 {n} 条（bug {bug_n} / badcase {bc_n} / testcase {tc_n}）。"
         "调度将据此定位下一步 modify/create。"
     )
+
+
+def grep_plan_names_line_for_observation(
+    plan_tree: Optional[Dict[str, Any]], locale: Optional[str]
+) -> str:
+    """从 grep 返回的 plan_tree 抽取计划名称一行，供观察文案与增量总结「已确认」引用。"""
+    if not plan_tree or not isinstance(plan_tree, dict):
+        return ""
+    names: List[str] = []
+    seen = set()
+    for p in plan_tree.get("root_plans") or []:
+        if isinstance(p, dict):
+            n = (p.get("name") or "").strip()
+            if n and n not in seen:
+                seen.add(n)
+                names.append(n)
+    if not names:
+        for p in plan_tree.get("plans") or []:
+            if isinstance(p, dict):
+                n = (p.get("name") or "").strip()
+                if n and n not in seen:
+                    seen.add(n)
+                    names.append(n)
+    if not names:
+        return ""
+    en = is_english_locale(locale)
+    max_show = 15
+    shown = names[:max_show]
+    more = len(names) - max_show
+    if en:
+        line = "Iteration plan names: " + ", ".join(shown)
+        if more > 0:
+            line += f" (+{more} more)"
+        return line + "."
+    line = "迭代计划名称：" + "、".join(f"「{s}」" for s in shown)
+    if more > 0:
+        line += f" 等共 {len(names)} 个"
+    return line + "。"
+
+
+def enrich_grep_observation_nl_with_plan_names(
+    base: Optional[str],
+    data: Optional[Dict[str, Any]],
+    locale: Optional[str],
+) -> str:
+    """在 grep 的 summary_nl 末尾追加计划名称行（避免整段重复）。"""
+    extra = grep_plan_names_line_for_observation((data or {}).get("plan_tree"), locale)
+    b = (base or "").strip()
+    if not extra:
+        return b[:2000] if b else ""
+    if b and extra in b:
+        return b[:2000]
+    if b:
+        return f"{b}\n{extra}"[:2000]
+    return extra[:2000]
 
 
 def react_summarize_modify_done(ok: Any, confirmation_required: Any, diff_n: int, locale: Optional[str]) -> str:
@@ -1043,6 +1180,10 @@ Required format:
 - Use "- " bullets; empty section: "- None"
 - Keep facts, no invention
 
+Rules for "## Confirmed":
+- Each bullet must reflect **substantive outcomes** from **Observation** (what was found, counts, plan names, hits vs misses, errors). At least one bullet must restate facts from Observation.
+- Do **not** write bullets that only say you "successfully used tool X" / "tool ran OK" without the observation content. Tool names may appear as extra detail, not as the sole finding.
+
 Previous summary:
 {prev_block}
 
@@ -1064,6 +1205,11 @@ Output only the new summary."""
 ## 风险与阻塞
 - 每块用 "- " 列表；空块写 "- 无"
 - 忠实合并，不编造
+
+「已确认」写法（重要）：
+- 必须写出**本步业务结论**：从上方「观察」提炼事实（例如：检索到哪个迭代计划、命中几条 Bug/BadCase/测试用例、仅计划树无三类命中、报错信息等），至少一条。
+- **禁止**仅在「已确认」写「成功使用某工具」而无实质结论；工具名只可附带，不能代替观察要点。
+- 若「观察」已是完整结论文案，将其要点并入「已确认」列表，勿丢弃。
 
 已有总览：
 {prev_block}

@@ -6,12 +6,15 @@ from typing import Dict, Any, List, Callable, Optional, Tuple
 import json
 import os
 import time
+
+from sqlalchemy import or_
 from agents.tool_registry import BaseTool
 from agents.locale_prompts import (
     normalize_locale,
     grep_tool_progress,
     grep_plan_material_progress,
     grep_generate_locate_summary,
+    enrich_grep_observation_nl_with_plan_names,
     grep_associate_summary,
     grep_compare_summary,
 )
@@ -33,10 +36,11 @@ class GrepTool(BaseTool):
         self._plan_tree_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
         super().__init__(
             name="grep",
-            description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位BadCase/Bug/测试用例的归属关系和业务场景。"
-                         "必须参数：project_id(项目ID)。可选：keywords(标题关键词，支持拆分模糊匹配), target(bug/badcase/testcase/all)，status，plan_id(当前迭代计划ID)。"
+            description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位 BadCase/Bug/测试用例/统一卡片(Card)的归属关系和业务场景。"
+                         "必须参数：project_id(项目ID)。可选：keywords(标题关键词，拆分后默认「任一词命中」OR；需全部命中可设环境变量 GREP_KEYWORDS_MATCH_MODE=and), "
+                         "target(bug/badcase/testcase/card/all；card=仅查卡片层 Card 表标题与描述；all=四类均检索)，status，plan_id(当前迭代计划ID)，card_id(可选)。"
                          "代码结构分析可选：code_paths（逗号/分号分隔的 .py 文件路径）、prefer_ast_structure=true 或 mode=code_ast 时优先 Python AST 解析，结果写入 data.code_ast。"
-                         "返回 plan_tree、badcase_analysis、bug_location、testcase_location。建议先用 plan_id 限定迭代计划，再把候选记录交给大模型逐条阅读判断。"
+                         "返回 plan_tree、badcase_analysis、bug_location、testcase_location、card_location（Card 表）。建议先用 plan_id 限定迭代计划，再把候选记录交给大模型逐条阅读判断。"
         )
     
     async def execute(
@@ -44,10 +48,11 @@ class GrepTool(BaseTool):
         keywords: str = None,
         project_id: str = None,
         plan_id: str = None,  # 当前迭代计划ID，传入则只检索该计划下的记录
+        card_id: str = None,  # 当前卡片ID（可选；用于将 navigation.record_id 对齐到卡片列表）
         plan_context: str = None,
         evidence: Dict[str, Any] = None,
         mode: str = "locate",  # locate/associate/compare
-        target: str = "all",  # all/bug/badcase/testcase
+        target: str = "all",  # all/bug/badcase/testcase/card
         status: str = None,
         **kwargs
     ) -> Dict[str, Any]:
@@ -63,10 +68,9 @@ class GrepTool(BaseTool):
                 - locate: 定位归属计划（默认）
                 - associate: 三向关联分析（BadCase↔Bug↔TestCase）
                 - compare: 修改前后对比
-            target: 分析目标（新增）
-                - all: 分析BadCase和Bug（默认）
-                - bug: 只分析Bug
-                - badcase: 只分析BadCase
+            target: 分析目标
+                - all: BadCase / Bug / TestCase / Card（默认）
+                - bug / badcase / testcase / card: 仅分析对应一类；card 查 Card 表标题与描述
             status: 按状态过滤（如 "closed", "new", "pending" 等）
             **kwargs: 其他参数
             
@@ -144,6 +148,7 @@ class GrepTool(BaseTool):
                     badcase_list = []
                     bug_list = []
                     testcase_list = []
+                    card_list: List[Dict[str, Any]] = []
                     if target in ['all', 'badcase']:
                         _progress(grep_tool_progress("phase1_badcase", loc))
                         badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
@@ -156,6 +161,69 @@ class GrepTool(BaseTool):
                         _progress(grep_tool_progress("phase1_tc", loc))
                         testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
                         _progress(grep_tool_progress("phase1_tc_done", loc, n=len(testcase_list)))
+                    # 卡片层：target=all|card 照常拉取；单独查 bug/badcase/testcase 时也拉取，
+                    # 否则 navigation 无法合并为「统一卡片」跳转，迭代下列表里卡片命中也不会出现。
+                    if target in ('all', 'card', 'bug', 'badcase', 'testcase'):
+                        _progress(grep_tool_progress("phase1_card", loc))
+                        card_list = await self._get_card_list(project_id, keywords, plan_id=plan_id)
+                        _progress(grep_tool_progress("phase1_card_done", loc, n=len(card_list)))
+
+                    # 卡片层适配：为导航补充 card_id（优先按 Card.source_type/source_id 映射）
+                    try:
+                        from app import db as _db, Card as _Card
+
+                        def _attach_card_ids(items: List[Dict[str, Any]], st: str) -> None:
+                            if not items:
+                                return
+                            ids = []
+                            for it in items:
+                                try:
+                                    iid = int(it.get("id"))
+                                    ids.append(iid)
+                                except Exception:
+                                    pass
+                            if not ids:
+                                return
+                            st_variants = [st]
+                            if st == "badcase":
+                                st_variants = ["badcase", "bad_case"]
+                            elif st == "testcase":
+                                st_variants = ["testcase", "test_case"]
+                            rows = (
+                                _db.session.query(_Card)
+                                .filter(_Card.project_id == int(project_id))
+                                .filter(_Card.source_type.in_(st_variants))
+                                .filter(_Card.source_id.in_(list(set(ids))))
+                                .all()
+                            )
+                            m = {int(r.source_id): int(r.id) for r in rows if getattr(r, "source_id", None) is not None}
+                            titles = {
+                                int(r.source_id): (getattr(r, "title", None) or "").strip()
+                                for r in rows
+                                if getattr(r, "source_id", None) is not None
+                            }
+                            for it in items:
+                                if it.get("card_id") is not None:
+                                    continue
+                                try:
+                                    sid = int(it.get("id"))
+                                except Exception:
+                                    continue
+                                cid = m.get(sid)
+                                if cid is not None:
+                                    it["card_id"] = cid
+                                ct = titles.get(sid)
+                                if ct:
+                                    it["card_title"] = ct
+                                    # 源表 title 为空时，用卡片层标题便于导航/模型阅读
+                                    if not (it.get("title") or "").strip():
+                                        it["title"] = ct
+
+                        _attach_card_ids(bug_list, "bug")
+                        _attach_card_ids(badcase_list, "badcase")
+                        _attach_card_ids(testcase_list, "testcase")
+                    except Exception:
+                        pass
                     
                     # 【阶段2】分析关联
                     _progress(grep_tool_progress("phase2_assoc", loc))
@@ -165,8 +233,10 @@ class GrepTool(BaseTool):
                         badcase_list=badcase_list,
                         bug_list=bug_list,
                         testcase_list=testcase_list,
+                        card_list=card_list,
                         evidence=evidence,
                         ui_locale=loc,
+                        plan_records_tree=plan_records_tree,
                     )
                     _progress(grep_tool_progress("phase2_done", loc))
                     
@@ -178,18 +248,22 @@ class GrepTool(BaseTool):
                     # 生成导航指令（Bug / BadCase / TestCase，随 grep target 过滤；all 时合并多类）
                     navigation = None
                     navigation_list = self._build_grep_navigation_items(
-                        plan_tree, target, badcase_list, bug_list, testcase_list
+                        plan_tree,
+                        target,
+                        badcase_list,
+                        bug_list,
+                        testcase_list,
+                        card_list,
+                        scope_plan_id=plan_id,
                     )
                     if navigation_list:
                         _progress(grep_tool_progress("nav_build", loc))
-                        navigation = (
-                            navigation_list[0]
-                            if len(navigation_list) == 1
-                            else {'type': 'multiple', 'items': navigation_list}
-                        )
+                        # 始终使用 type=multiple + items，与前端 SimpleChatPanel / AgentTaskRun 一致；
+                        # 单条时若只返回 expand_and_locate，界面不渲染「点击跳转」列表。
+                        navigation = {'type': 'multiple', 'items': navigation_list}
                         print(
                             f"[GREP] ✅ 定位完成: Bug={len(bug_list)} BadCase={len(badcase_list)} "
-                            f"TestCase={len(testcase_list)}，导航条目={len(navigation_list)}"
+                            f"TestCase={len(testcase_list)} Card={len(card_list)}，导航条目={len(navigation_list)}"
                         )
                         print(
                             f"[MODIFY-TRACE] grep_tool: grep_target={target!r}, nav_len={len(navigation_list)} "
@@ -203,6 +277,7 @@ class GrepTool(BaseTool):
                         'badcase_analysis': analysis_result['badcase_analysis'],
                         'bug_location': analysis_result['bug_location'],
                         'testcase_location': analysis_result.get('testcase_location', []),
+                        'card_location': analysis_result.get('card_location', []),
                         'plan_attribution': analysis_result['plan_attribution'],
                         'comparison_report': comparison['markdown'],
                         'summary': analysis_result['summary'],
@@ -325,7 +400,6 @@ class GrepTool(BaseTool):
                 'id': p.id,
                 'name': p.name,
                 'description': getattr(p, 'description', ''),
-                'plan_type': getattr(p, 'plan_type', None),
                 'status': getattr(p, 'status', None),
                 'priority': getattr(p, 'priority', None),
                 'is_pinned': getattr(p, 'is_pinned', None),
@@ -392,7 +466,6 @@ class GrepTool(BaseTool):
             plan_data = {
                 'id': plan.id,
                 'name': plan.name,
-                'type': plan.plan_type,
                 'status': plan.status,
                 'parent_id': plan.parent_id,
                 'description': getattr(plan, 'description', ''),
@@ -430,6 +503,223 @@ class GrepTool(BaseTool):
                 return (p.get('name') or '').strip()
         return ''
 
+    @staticmethod
+    def _grep_nav_target_priority(target: str) -> int:
+        """同一 record_id 合并时优先保留「统一卡片」跳转，避免 target=all 下列四条重复。"""
+        t = (target or "").strip().lower()
+        return {"card": 0, "bug": 1, "badcase": 2, "testcase": 3}.get(t, 9)
+
+    def _collapse_navigation_merge_keys(
+        self,
+        best_by_rid: Dict[int, Tuple[int, Dict[str, Any]]],
+        card_list: List[Dict[str, Any]],
+        plan_tree: Optional[Dict[str, Any]],
+    ) -> Dict[int, Tuple[int, Dict[str, Any]]]:
+        """
+        源表 Bug/BadCase/TestCase 与 Card 指向同一业务对象时，grep 会同时命中两行；
+        按 Card.source_type/source_id 合并为一条 target=card（与迭代卡片列表一致）。
+        """
+        card_list = card_list or []
+        bug_sid_to_cid: Dict[int, int] = {}
+        bc_sid_to_cid: Dict[int, int] = {}
+        tc_sid_to_cid: Dict[int, int] = {}
+        cid_meta: Dict[int, Dict[str, Any]] = {}
+
+        def _npid(raw: Any) -> Any:
+            if raw is None or raw == "":
+                return None
+            try:
+                n = int(raw)
+                return n if n > 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        for c in card_list:
+            raw_cid = c.get("card_id") if c.get("card_id") is not None else c.get("id")
+            if raw_cid is None:
+                continue
+            try:
+                cid = int(raw_cid)
+            except (TypeError, ValueError):
+                continue
+            cid_meta[cid] = c
+            sid = c.get("source_id")
+            if sid is None:
+                continue
+            try:
+                sid_i = int(sid)
+            except (TypeError, ValueError):
+                continue
+            st = str(c.get("source_type") or "").lower()
+            if st == "bug":
+                bug_sid_to_cid[sid_i] = cid
+            elif st in ("bad_case", "badcase"):
+                bc_sid_to_cid[sid_i] = cid
+            elif st in ("test_case", "testcase"):
+                tc_sid_to_cid[sid_i] = cid
+
+        merged: Dict[int, Tuple[int, Dict[str, Any]]] = {}
+
+        def merge_entry(canon_rid: int, pri: int, ent: Dict[str, Any]) -> None:
+            if canon_rid not in merged:
+                merged[canon_rid] = (pri, ent)
+                return
+            old_pri, old_ent = merged[canon_rid]
+            if pri < old_pri:
+                merged[canon_rid] = (pri, ent)
+            elif pri == old_pri:
+                nt = str(ent.get("target") or "").lower()
+                ot = str(old_ent.get("target") or "").lower()
+                if nt == "card" and ot != "card":
+                    merged[canon_rid] = (pri, ent)
+                elif nt == ot == "card":
+                    # 同一张卡片：纯关键词命中的 Card 行 vs 源表升级行；优先保留带 legacy_row_id（对应具体 Bug/用例）
+                    el = ent.get("legacy_row_id")
+                    ol = old_ent.get("legacy_row_id")
+                    if el and not ol:
+                        merged[canon_rid] = (pri, ent)
+
+        for rid, (pri, ent) in best_by_rid.items():
+            try:
+                rid_int = int(rid)
+            except (TypeError, ValueError):
+                continue
+            t = str(ent.get("target") or "").lower()
+            canon = rid_int
+            upgraded = False
+            if t == "bug":
+                bid = ent.get("bug_id")
+                try:
+                    bi = int(bid) if bid is not None else None
+                except (TypeError, ValueError):
+                    bi = None
+                if bi is not None and bi in bug_sid_to_cid:
+                    canon = bug_sid_to_cid[bi]
+                    upgraded = True
+            elif t == "badcase":
+                si = ent.get("source_id")
+                try:
+                    si_i = int(si) if si is not None else None
+                except (TypeError, ValueError):
+                    si_i = None
+                if si_i is not None and si_i in bc_sid_to_cid:
+                    canon = bc_sid_to_cid[si_i]
+                    upgraded = True
+            elif t == "testcase":
+                si = ent.get("source_id")
+                try:
+                    si_i = int(si) if si is not None else None
+                except (TypeError, ValueError):
+                    si_i = None
+                if si_i is not None and si_i in tc_sid_to_cid:
+                    canon = tc_sid_to_cid[si_i]
+                    upgraded = True
+
+            if upgraded:
+                cm = cid_meta.get(canon) or {}
+                # 导航文案必须与 grep 命中的源表行一致；Card.title 可能滞后或与另一条 Bug 共用卡片展示名，勿优先用 cm
+                title = (ent.get("title") or cm.get("title") or "").strip()
+                pid = _npid(cm.get("plan_id"))
+                if pid is None:
+                    pid = _npid(ent.get("plan_id"))
+                legacy_row_id = None
+                try:
+                    if t == "bug" and ent.get("bug_id") is not None:
+                        legacy_row_id = int(ent.get("bug_id"))
+                    elif ent.get("source_id") is not None:
+                        legacy_row_id = int(ent.get("source_id"))
+                except (TypeError, ValueError):
+                    legacy_row_id = None
+                ent2 = {
+                    "type": "expand_and_locate",
+                    "target": "card",
+                    "record_id": canon,
+                    "title": title or ent.get("title", ""),
+                    "plan_id": pid,
+                    "plan_name": self._plan_display_name(plan_tree, pid) if pid else "未计划",
+                    "card_id": canon,
+                    "merged_from_legacy": t,
+                    # 前端钻进类型列表后，列表行 data-bug-id 为源表 id；合并后 record_id 为卡片 id，须用此项高亮具体行
+                    "legacy_row_id": legacy_row_id,
+                }
+                merge_entry(canon, self._grep_nav_target_priority("card"), ent2)
+            else:
+                merge_entry(canon, pri, ent)
+
+        return merged
+
+    def _plan_branch_ids_from_tree(
+        self, plan_tree: Optional[Dict[str, Any]], root_plan_id: Any
+    ) -> Optional[set]:
+        """当前迭代 scope：root 及其子树内所有 plan_id（用于导航排序，优先展示本迭代内命中）。"""
+        if not plan_tree or root_plan_id is None or root_plan_id == "":
+            return None
+        try:
+            rid = int(root_plan_id)
+        except (TypeError, ValueError):
+            return None
+        pm = plan_tree.get("plan_map") or {}
+        root = pm.get(rid)
+        ids: set = set()
+
+        def dfs(node: Dict[str, Any]) -> None:
+            pid = node.get("id")
+            if pid is not None:
+                try:
+                    ids.add(int(pid))
+                except (TypeError, ValueError):
+                    pass
+            for ch in node.get("children") or []:
+                if isinstance(ch, dict):
+                    dfs(ch)
+
+        if root and isinstance(root, dict):
+            dfs(root)
+        else:
+            ids.add(rid)
+        return ids if ids else {rid}
+
+    def _finalize_grep_navigation_items(
+        self,
+        items: List[Dict[str, Any]],
+        plan_tree: Optional[Dict[str, Any]],
+        scope_plan_id: Any,
+    ) -> List[Dict[str, Any]]:
+        """去重后排序：优先当前 plan_id 子树内条目，再限幅（GREP_NAVIGATION_MAX_ITEMS）。"""
+        try:
+            max_n = int(os.getenv("GREP_NAVIGATION_MAX_ITEMS", "12") or "12")
+        except ValueError:
+            max_n = 12
+        max_n = max(1, min(max_n, 50))
+
+        branch = self._plan_branch_ids_from_tree(plan_tree, scope_plan_id)
+
+        def _pid_int(entry: Dict[str, Any]) -> int:
+            raw = entry.get("plan_id")
+            if raw is None or raw == "":
+                return -1
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return -1
+
+        def _in_scope(entry: Dict[str, Any]) -> int:
+            if branch is None:
+                return 0
+            p = _pid_int(entry)
+            if p < 0:
+                return 1
+            return 0 if p in branch else 1
+
+        def sort_key(entry: Dict[str, Any]):
+            title = (entry.get("title") or "").strip()
+            return (_in_scope(entry), _pid_int(entry), title)
+
+        items.sort(key=sort_key)
+        if len(items) <= max_n:
+            return items
+        return items[:max_n]
+
     def _build_grep_navigation_items(
         self,
         plan_tree: Optional[Dict[str, Any]],
@@ -437,13 +727,29 @@ class GrepTool(BaseTool):
         badcase_list: List[Dict[str, Any]],
         bug_list: List[Dict[str, Any]],
         testcase_list: List[Dict[str, Any]],
+        card_list: Optional[List[Dict[str, Any]]] = None,
+        scope_plan_id: Any = None,
     ) -> List[Dict[str, Any]]:
         """
         生成前端「点击跳转」列表项；与 bug 一致带 type=expand_and_locate，并统一 record_id/title，
-        同时保留 bug_id/bug_title 兼容旧前端。
+        同时保留 bug_id/bug_title 兼容旧前端。card 的 record_id 为 Card.id，target=card。
+        target=all 时同一卡片会在多类列表中重复出现，这里按 record_id 合并，优先保留 target=card。
         """
         gt = (grep_target or 'all').strip().lower()
-        items: List[Dict[str, Any]] = []
+        raw_items: List[Dict[str, Any]] = []
+        card_list = card_list or []
+        # record_id -> (priority, entry) 取最优一条
+        best_by_rid: Dict[int, Tuple[int, Dict[str, Any]]] = {}
+
+        def _nav_push(entry: Dict[str, Any]) -> None:
+            rid = entry.get("record_id")
+            try:
+                rid_int = int(rid)
+            except (TypeError, ValueError):
+                return
+            pri = self._grep_nav_target_priority(str(entry.get("target") or ""))
+            if rid_int not in best_by_rid or pri < best_by_rid[rid_int][0]:
+                best_by_rid[rid_int] = (pri, entry)
 
         def _normalize_nav_plan_id(raw: Any) -> Any:
             """None / 0 / '' 视为未计划，仍要进导航（否则未计划 Bug 点击查询不到、navigation 为空）。"""
@@ -458,16 +764,20 @@ class GrepTool(BaseTool):
         def append_bug(bug: Dict[str, Any]) -> None:
             pid = _normalize_nav_plan_id(bug.get('plan_id'))
             title = (bug.get('title') or '').strip()
+            card_id = bug.get('card_id') or bug.get('cardId')
             bid = bug.get('id')
-            if bid is None:
+            # record_id 必须用源 Bug.id：同一卡片下多条 Bug 时若用 card_id，前端列表 data-bug-id 重复会导致高亮永远落在第一行
+            rid = bid
+            if rid is None:
                 return
-            items.append({
+            _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'bug',
-                'record_id': bid,
+                'record_id': rid,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
+                'card_id': card_id,
                 'bug_id': bid,
                 'bug_title': title,
             })
@@ -475,31 +785,59 @@ class GrepTool(BaseTool):
         def append_badcase(bc: Dict[str, Any]) -> None:
             pid = _normalize_nav_plan_id(bc.get('plan_id'))
             title = (bc.get('title') or '').strip()
-            rid = bc.get('id')
+            card_id = bc.get('card_id') or bc.get('cardId')
+            src_id = bc.get('id')
+            rid = src_id
             if rid is None:
                 return
-            items.append({
+            _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'badcase',
                 'record_id': rid,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
+                'card_id': card_id,
+                'source_id': src_id,
             })
 
         def append_tc(tc: Dict[str, Any]) -> None:
             pid = _normalize_nav_plan_id(tc.get('plan_id'))
             title = (tc.get('title') or '').strip()
-            rid = tc.get('id')
+            card_id = tc.get('card_id') or tc.get('cardId')
+            src_id = tc.get('id')
+            rid = src_id
             if rid is None:
                 return
-            items.append({
+            _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'testcase',
                 'record_id': rid,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
+                'card_id': card_id,
+                'source_id': src_id,
+            })
+
+        def append_card(card: Dict[str, Any]) -> None:
+            pid = _normalize_nav_plan_id(card.get('plan_id'))
+            cid = card.get('card_id') if card.get('card_id') is not None else card.get('id')
+            title = (card.get('title') or '').strip()
+            if cid is None:
+                return
+            try:
+                rid = int(cid)
+            except (TypeError, ValueError):
+                return
+            _nav_push({
+                'type': 'expand_and_locate',
+                'target': 'card',
+                'record_id': rid,
+                'title': title,
+                'plan_id': pid,
+                'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
+                'card_id': rid,
             })
 
         if gt in ('bug', 'all'):
@@ -511,8 +849,15 @@ class GrepTool(BaseTool):
         if gt in ('testcase', 'all'):
             for tc in testcase_list or []:
                 append_tc(tc)
+        # 任意 target：卡片层关键词命中也进入导航（与源表命中合并去重）
+        for c in card_list:
+            append_card(c)
 
-        return items
+        best_by_rid = self._collapse_navigation_merge_keys(best_by_rid, card_list, plan_tree)
+
+        for _rid in sorted(best_by_rid.keys()):
+            raw_items.append(best_by_rid[_rid][1])
+        return self._finalize_grep_navigation_items(raw_items, plan_tree, scope_plan_id)
     
     def _extract_keywords(self, text: str) -> List[str]:
         """从计划名称中提取关键词"""
@@ -550,8 +895,9 @@ class GrepTool(BaseTool):
     
     def _normalize_keywords_for_match(self, keywords: str) -> List[str]:
         """
-        人类式关键词拆分：支持「雪碧和七喜」「雪碧 七喜」「雪碧的七喜」都拆成 [雪碧，七喜]，用于模糊 AND 匹配。
-        按 和、与、的、为、空格 拆分，去掉停用字（的、为、与、和等单字连接词），保留有意义的词。
+        人类式关键词拆分：支持「雪碧和七喜」等拆成多词；**与库检索配合时默认 OR**（任一词命中），
+        需整句各词都命中时设 GREP_KEYWORDS_MATCH_MODE=and。
+        按 和、与、的、为、空格 拆分，去掉停用字，保留有意义的词。
         """
         if not keywords or not keywords.strip():
             return []
@@ -583,6 +929,50 @@ class GrepTool(BaseTool):
                 seen.add(stem)
                 out.append(stem)
         return out[:10]  # 最多 10 个词，避免过长
+
+    def _grep_keyword_match_mode(self) -> str:
+        """默认 or；GREP_KEYWORDS_MATCH_MODE=and 为逐词 AND。其它取值视为 or。"""
+        m = (os.getenv("GREP_KEYWORDS_MATCH_MODE") or "or").strip().lower()
+        return "and" if m == "and" else "or"
+
+    def _apply_title_ilike_keywords(self, query, column, keyword_list: List[str]):
+        if not keyword_list:
+            return query
+        mode = self._grep_keyword_match_mode()
+        if mode == "and":
+            for kw in keyword_list:
+                query = query.filter(column.ilike(f"%{kw}%"))
+        else:
+            query = query.filter(or_(*[column.ilike(f"%{kw}%") for kw in keyword_list]))
+        return query
+
+    def _apply_card_title_desc_ilike(self, query, card_model, keyword_list: List[str]):
+        """Card.title / Card.description：默认 OR；AND 时每词须在标题或描述其一命中。"""
+        if not keyword_list:
+            return query
+        title_c = card_model.title
+        desc_c = card_model.description
+        mode = self._grep_keyword_match_mode()
+        if mode == "and":
+            for kw in keyword_list:
+                query = query.filter(or_(title_c.ilike(f"%{kw}%"), desc_c.ilike(f"%{kw}%")))
+        else:
+            query = query.filter(
+                or_(*[or_(title_c.ilike(f"%{kw}%"), desc_c.ilike(f"%{kw}%")) for kw in keyword_list])
+            )
+        return query
+
+    def _text_matches_normalized_keywords(self, text: str, keywords: Optional[str]) -> bool:
+        if not keywords or not str(keywords).strip():
+            return False
+        kw_list = self._normalize_keywords_for_match(keywords)
+        hay = (text or "").lower()
+        if not kw_list:
+            return str(keywords).strip().lower() in hay
+        mode = self._grep_keyword_match_mode()
+        if mode == "and":
+            return all(kw.lower() in hay for kw in kw_list)
+        return any(kw.lower() in hay for kw in kw_list)
     
     async def _get_badcase_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
         """逐行定位引擎（优化版）"""
@@ -618,14 +1008,12 @@ class GrepTool(BaseTool):
             except ValueError:
                 print(f"[GREP] 无效的 status 值: {status}")
         
-        # 关键词：支持拆分模糊匹配（人类式，和/与/空格拆词，每个词都匹配即可）
+        # 关键词：拆分后默认 OR（任一词命中 title）；GREP_KEYWORDS_MATCH_MODE=and 时逐词 AND
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
         is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
         if not is_query_all and keyword_list:
-            from sqlalchemy import and_
-            for kw in keyword_list:
-                query = query.filter(BadCase.title.ilike(f'%{kw}%'))
-            print(f"[GREP] 拆分关键词模糊匹配: {keyword_list} (原: {keywords})")
+            query = self._apply_title_ilike_keywords(query, BadCase.title, keyword_list)
+            print(f"[GREP] BadCase 关键词 mode={self._grep_keyword_match_mode()}: {keyword_list} (原: {keywords})")
         elif not is_query_all and keywords and not keyword_list:
             # 拆分后为空（全是停用字）则整句匹配
             query = query.filter(BadCase.title.ilike(f'%{keywords.strip()}%'))
@@ -698,13 +1086,11 @@ class GrepTool(BaseTool):
             except ValueError:
                 print(f"[GREP] 无效的 status 值: {status}")
         
-        # 关键词：拆分模糊匹配（与 BadCase 一致）
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
         is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
         if not is_query_all and keyword_list:
-            for kw in keyword_list:
-                query = query.filter(Bug.title.ilike(f'%{kw}%'))
-            print(f"[GREP] Bug 拆分关键词模糊匹配: {keyword_list}")
+            query = self._apply_title_ilike_keywords(query, Bug.title, keyword_list)
+            print(f"[GREP] Bug 关键词 mode={self._grep_keyword_match_mode()}: {keyword_list}")
         elif not is_query_all and keywords and not keyword_list:
             query = query.filter(Bug.title.ilike(f'%{keywords.strip()}%'))
         
@@ -726,6 +1112,7 @@ class GrepTool(BaseTool):
                 'priority': getattr(bug, 'priority', 'medium'),
                 'assignee_id': bug.assignee_id,
                 'plan_id': bug.plan_id,
+                'card_id': getattr(bug, 'card_id', None),
                 'created_at': bug.created_at.isoformat() if bug.created_at else None,
                 'business_scenario': self._infer_business_scenario(bug.title, keywords),
                 'extracted_keywords': self._extract_keywords(bug.title),
@@ -759,8 +1146,7 @@ class GrepTool(BaseTool):
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
         is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
         if not is_query_all and keyword_list:
-            for kw in keyword_list:
-                query = query.filter(TestCase.title.ilike(f'%{kw}%'))
+            query = self._apply_title_ilike_keywords(query, TestCase.title, keyword_list)
         elif not is_query_all and keywords and not keyword_list:
             query = query.filter(TestCase.title.ilike(f'%{keywords.strip()}%'))
         testcases = query.order_by(TestCase.created_at.desc()).limit(100 if is_query_all else 20).all()
@@ -775,7 +1161,61 @@ class GrepTool(BaseTool):
                 'business_scenario': self._infer_business_scenario(tc.title, keywords),
             })
         return result
+
+    async def _get_card_list(
+        self, project_id: str, keywords: str = None, plan_id: str = None
+    ) -> List[Dict[str, Any]]:
+        """统一卡片层 Card：按 title / description 检索（多词默认 OR）。"""
+        from app import db, Card
+
+        try:
+            project_id_int = int(project_id)
+        except (ValueError, TypeError):
+            project_id_int = 1
+
+        query = db.session.query(Card).filter(Card.project_id == project_id_int)
+        if plan_id:
+            try:
+                query = query.filter(Card.plan_id == int(plan_id))
+            except (ValueError, TypeError):
+                pass
+
+        keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
+        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
+        if not is_query_all and keyword_list:
+            query = self._apply_card_title_desc_ilike(query, Card, keyword_list)
+            print(f"[GREP] Card 关键词 mode={self._grep_keyword_match_mode()}: {keyword_list}")
+        elif not is_query_all and keywords and not keyword_list:
+            k = keywords.strip()
+            query = query.filter(or_(Card.title.ilike(f"%{k}%"), Card.description.ilike(f"%{k}%")))
+
+        limit_n = 100 if is_query_all else 20
+        cards = query.order_by(Card.updated_at.desc()).limit(limit_n).all()
+        out: List[Dict[str, Any]] = []
+        for c in cards:
+            out.append({
+                'id': c.id,
+                'title': c.title,
+                'description': (c.description or '')[:800],
+                'plan_id': c.plan_id,
+                'source_type': c.source_type,
+                'source_id': c.source_id,
+                'card_id': c.id,
+                'created_at': c.created_at.isoformat() if c.created_at else None,
+            })
+        print(f"[GREP] Card 命中 {len(out)} 条")
+        return out
     
+    @staticmethod
+    def _plan_records_root_name(plan_records_tree: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not plan_records_tree or not isinstance(plan_records_tree, dict):
+            return None
+        p = plan_records_tree.get("plan")
+        if isinstance(p, dict):
+            name = (p.get("name") or "").strip()
+            return name or None
+        return None
+
     async def _analyze_associations(
         self,
         keywords: str,
@@ -783,24 +1223,38 @@ class GrepTool(BaseTool):
         badcase_list: List[Dict[str, Any]],
         bug_list: List[Dict[str, Any]],
         testcase_list: List[Dict[str, Any]] = None,
+        card_list: List[Dict[str, Any]] = None,
         evidence: Dict[str, Any] = None,
         ui_locale: Optional[str] = None,
+        plan_records_tree: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """分析关联关系（含 BadCase/Bug/TestCase）"""
+        """分析关联关系（含 BadCase/Bug/TestCase/Card）"""
         testcase_list = testcase_list or []
+        card_list = card_list or []
         badcase_analysis = []
         bug_location = []
         testcase_location = []
+        card_location = []
         plan_attribution = []
         plan_map = plan_tree.get('plan_map', {})
-        
-        # 分析 BadCase（列表已是按 keywords 过滤后的结果，故均视为匹配）
-        keyword_list = [k.strip() for k in (keywords or '').split() if k.strip()] if keywords else []
+
+        kw_norm = self._normalize_keywords_for_match(keywords) if keywords else []
+        is_query_all = (not kw_norm) and (
+            not keywords or str(keywords).strip() == '' or str(keywords).strip() == '*'
+        )
+
+        def _related_title(keywords_arg: Optional[str], *parts: str) -> bool:
+            if is_query_all:
+                return True
+            hay = " ".join(p for p in parts if p)
+            return self._text_matches_normalized_keywords(hay, keywords_arg)
+
         for bc in badcase_list:
-            if keyword_list:
-                is_related = all(kw in (bc.get('title') or '') for kw in keyword_list)
-            else:
-                is_related = bool(keywords and (keywords.lower() in (bc.get('title') or '').lower()))
+            is_related = _related_title(
+                keywords,
+                bc.get('title') or '',
+                bc.get('card_title') or '',
+            )
             analysis_item = {
                 'id': bc['id'],
                 'title': bc['title'],
@@ -808,21 +1262,21 @@ class GrepTool(BaseTool):
                 'keywords': bc.get('extracted_keywords', []),
                 'severity': self._assess_severity(bc),
                 'related_to_evidence': is_related,
-                'plan_id': bc.get('plan_id'),  # 使用 plan_id 以便后续处理
-                'current_plan_id': bc.get('plan_id')  # 保留兼容性
+                'plan_id': bc.get('plan_id'),
+                'current_plan_id': bc.get('plan_id')
             }
             print(f"[GREP-ANALYSIS] BadCase ID={bc['id']}, plan_id={bc.get('plan_id')}, item.plan_id={analysis_item['plan_id']}")
             badcase_analysis.append(analysis_item)
-        
-        # 分析 Bug（同上，按关键词过滤后的结果均视为匹配）
+
         for bug in bug_list:
-            if keyword_list:
-                is_related = all(kw in (bug.get('title') or '') for kw in keyword_list)
-            else:
-                is_related = bool(keywords and (keywords.lower() in (bug.get('title') or '').lower()))
+            is_related = _related_title(
+                keywords,
+                bug.get('title') or '',
+                bug.get('card_title') or '',
+            )
             plan_id = bug.get('plan_id')
             plan_name = plan_map.get(plan_id, {}).get('name', '') if plan_id else ''
-            
+
             bug_location.append({
                 'id': bug['id'],
                 'title': bug['title'],
@@ -832,13 +1286,13 @@ class GrepTool(BaseTool):
                 'current_plan_id': plan_id,
                 'plan_name': plan_name
             })
-        
+
         for tc in testcase_list:
-            keyword_list = [k.strip() for k in (keywords or '').split() if k.strip()] if keywords else []
-            if keyword_list:
-                is_related = all(kw in (tc.get('title') or '') for kw in keyword_list)
-            else:
-                is_related = bool(keywords and (keywords.lower() in (tc.get('title') or '').lower()))
+            is_related = _related_title(
+                keywords,
+                tc.get('title') or '',
+                tc.get('card_title') or '',
+            )
             plan_id = tc.get('plan_id')
             plan_name = plan_map.get(plan_id, {}).get('name', '') if plan_id else ''
             testcase_location.append({
@@ -849,24 +1303,59 @@ class GrepTool(BaseTool):
                 'current_plan_id': plan_id,
                 'plan_name': plan_name
             })
-        
+
+        for c in card_list:
+            is_related = _related_title(
+                keywords,
+                c.get('title') or '',
+                c.get('description') or '',
+            )
+            plan_id = c.get('plan_id')
+            plan_name = plan_map.get(plan_id, {}).get('name', '') if plan_id else ''
+            card_location.append({
+                'id': c['id'],
+                'title': c['title'],
+                'business_scenario': '',
+                'related_to_evidence': is_related,
+                'current_plan_id': plan_id,
+                'plan_name': plan_name
+            })
+
+        try:
+            tp = int(plan_tree.get("total_plans") or 0)
+        except (TypeError, ValueError):
+            tp = 0
+        if tp <= 0 and isinstance(plan_tree.get("plans"), list):
+            tp = len(plan_tree["plans"])
+
         summary = grep_generate_locate_summary(
             ui_locale,
             keywords=keywords,
             badcase_count=len(badcase_list),
             bug_count=len(bug_list),
             testcase_count=len(testcase_list),
+            card_count=len(card_list),
             related_badcase_count=sum(1 for bc in badcase_analysis if bc['related_to_evidence']),
             related_bug_count=sum(1 for bug in bug_location if bug['related_to_evidence']),
             related_testcase_count=sum(1 for tc in testcase_location if tc['related_to_evidence']),
+            related_card_count=sum(1 for x in card_location if x['related_to_evidence']),
             attribution_count=len(plan_attribution),
             bug_location=bug_location,
+            total_plans=tp,
+            plan_material_loaded=plan_records_tree is not None,
+            plan_material_root_name=self._plan_records_root_name(plan_records_tree),
         )
-        
+        summary = enrich_grep_observation_nl_with_plan_names(
+            summary,
+            {"plan_tree": plan_tree},
+            ui_locale,
+        )
+
         return {
             'badcase_analysis': badcase_analysis,
             'bug_location': bug_location,
             'testcase_location': testcase_location,
+            'card_location': card_location,
             'plan_attribution': plan_attribution,
             'summary': summary
         }

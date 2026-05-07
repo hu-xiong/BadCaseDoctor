@@ -28,8 +28,30 @@ from utils.metrics import (
 from agents.evidence_extractor import deep_sse_json_safe as _sse_sanitize_for_json
 from agents.sse_react_v1 import engine_dict_to_wire_packets, is_wire_v1_packet
 import logging
+from llm.model_registry import choose_auto_model, supports_vision
+from llm.model_registry import get_model
 
 logger = logging.getLogger(__name__)
+
+# Auto 路由：前端可能传 model="auto"（或误传 gpt/claude 等），但上游 LLM 不认识这些字符串。
+# 这里将其解析为“实际可调用”的模型名，避免 invalid_model。
+def _resolve_auto_model(model_name: str | None, *, has_images: bool) -> str | None:
+    m = (model_name or "").strip()
+    if not m:
+        return None
+    ml = m.lower()
+    if ml == "auto":
+        return choose_auto_model(has_images=has_images)
+    return m
+
+def model_supports_images(model_name: str) -> bool:
+    """判断模型是否支持图片输入"""
+    if not model_name:
+        return False
+    # Auto 模式视为支持
+    if model_name == 'auto':
+        return True
+    return supports_vision(model_name)
 
 
 def _sse_json_dumps(obj, **kwargs) -> str:
@@ -117,7 +139,7 @@ def execute_agent():
         user_input = data.get('user_input', '')
         conversation_history = data.get('conversation_history', [])
         agent_mode = data.get('agent_mode', 'auto')
-        model_name = data.get('model')
+        model_name = _resolve_auto_model(data.get('model'), has_images=False)
         project_id = data.get('project_id')  # 获取项目ID
         ui_locale = data.get('locale') or data.get('ui_locale')
         
@@ -543,9 +565,12 @@ def react_agent():
         user_input = data.get('user_input', '')
         images = data.get('images') or []
         stream_mode = data.get('stream', True)
-        model_name = data.get('model')
+        raw_model_name = data.get('model')
+        model_name = _resolve_auto_model(raw_model_name, has_images=bool(images))
         project_id = data.get('project_id')
         plan_id = data.get('plan_id')
+        card_id = data.get('card_id') or data.get('cardId')
+        card_type = data.get('card_type') or data.get('cardType')
         ui_locale = data.get('locale') or data.get('ui_locale')
         pending_diff_context = data.get('pending_diff_context') or []
         long_memory_context = data.get('long_memory_context') or data.get('longMemoryContext')
@@ -554,10 +579,25 @@ def react_agent():
 
         logger.info("[REACT] 请求参数:")
         logger.info("  - user_input 长度: %s", len(user_input))
-        logger.info("  - model: %s", model_name)
+        logger.info("  - model(raw): %s", raw_model_name)
+        logger.info("  - model(resolved): %s", model_name or "__default__")
+        try:
+            if str(raw_model_name or "").strip().lower() == "auto":
+                ms = get_model(model_name or "")
+                logger.info(
+                    "  - model(auto_pick): %s provider=%s vision=%s enabled=%s",
+                    (ms.id if ms else (model_name or "__default__")),
+                    (ms.provider if ms else "unknown"),
+                    (ms.vision if ms else supports_vision(model_name or "")),
+                    (ms.enabled if ms else None),
+                )
+        except Exception:
+            pass
         logger.info("  - stream: %s", stream_mode)
         logger.info("  - project_id: %s", project_id)
         logger.info("  - plan_id: %s", plan_id)
+        logger.info("  - card_id: %s", card_id)
+        logger.info("  - card_type: %s", card_type)
         try:
             logger.info(
                 "  - pending_diff_context: %s",
@@ -647,7 +687,7 @@ def react_agent():
 
         def generate():
             t_first_yield0 = time.perf_counter()
-            # 发送初始字节以“破解”代理缓冲 (2KB 空白)
+            # 发送初始字节以"破解"代理缓冲 (2KB 空白)
             yield ":" + " " * 2048 + "\n\n"
             # 首包 hello 由 Agent 流内发出（协议 v1），此处不再发送旧 type=status
             if perf:
@@ -659,11 +699,30 @@ def react_agent():
             
             q = queue.Queue()
             done = object()
-            # 关键：立刻推一个可见 JSON 首包，避免“只有注释首字节但 UI 无变化”造成的卡顿错觉
+            # 关键：立刻推一个可见 JSON 首包，避免"只有注释首字节但 UI 无变化"造成的卡顿错觉
             # 前端 consumeAgentSseV1Chunk 会消费 hello 并确保 understanding 有值
             q.put({"type": "hello"})
             # 可选：在 Agent 真正产出 phase 之前先告知进入 think，避免首包阶段空白
             q.put({"type": "phase", "payload": {"name": "think", "n": 1}})
+            # Auto 选模结果：默认不写入 SSE（避免污染对话框）。
+            # 如需排查，可设置环境变量 REACT_SSE_AUTO_MODEL_HINT=1 才向前端流里发提示。
+            try:
+                if (
+                    str(raw_model_name or "").strip().lower() == "auto"
+                    and (os.getenv("REACT_SSE_AUTO_MODEL_HINT", "0") or "0").strip().lower()
+                    in ("1", "true", "yes", "on")
+                ):
+                    q.put({
+                        "type": "stream",
+                        "payload": {
+                            "lane": "think",
+                            "delta": f"[AUTO] model={model_name or 'default'}\n",
+                            "react_phase": "think",
+                            "stream_channel": "content",
+                        },
+                    })
+            except Exception:
+                pass
             if perf:
                 logger.info(
                     "[PERF][react_api][%s] queued_hello_phase_ms=%.1f react_request_id=%s",
@@ -684,7 +743,7 @@ def react_agent():
                                 _ms_since(t_req0),
                             )
                         logger.info("[REACT] 开始异步任务循环")
-                        # 图片理解放到异步线程里执行，避免阻塞 SSE 连接建立（否则前端会“卡住”）
+                        # 图片理解放到异步线程里执行，避免阻塞 SSE 连接建立（否则前端会"卡住"）
                         _effective_input = user_input
                         # 图片意图路由：
                         # - ocr: 读字/图片说了什么 → 只做视觉，不进 ReAct（避免触发 grep/modify 等工具链）
@@ -694,7 +753,7 @@ def react_agent():
                             t = (_text or '').strip()
                             if not t:
                                 return 'ocr'
-                            # 原型图 / 测试用例优先（避免被“图片”关键词误判成 ocr）
+                            # 原型图 / 测试用例优先（避免被"图片"关键词误判成 ocr）
                             prototype_keys = (
                                 '原型', '原型图', '界面原型', 'ui', '页面', '交互', '按钮', '输入框',
                                 '生成测试', '测试用例', '用例', '用例生成', '测试点', '测试步骤'
@@ -708,65 +767,92 @@ def react_agent():
                             )
                             if any(k in t for k in ocr_keys):
                                 return 'ocr'
-                            # 泛化：仅仅包含“图片/图上/这张图”但未提测试/原型时，也更像“解释图片”
+                            # 泛化：仅仅包含"图片/图上/这张图"但未提测试/原型时，也更像"解释图片"
                             if any(k in t for k in ('图片', '图上', '这张图', '图里')):
                                 return 'ocr'
                             return 'react'
 
                         _image_intent = _classify_image_intent(user_input) if images else 'react'
+                        _model_has_vision = model_supports_images(model_name)
                         if images:
-                            # 走 think/content 轨，让前端立刻出现可见文本（否则仅 heartbeat 也会“看起来卡住”）
-                            q.put({
-                                'type': 'stream',
-                                'payload': {
-                                    'lane': 'think',
-                                    'delta': '正在解析图片内容…\n',
-                                    'react_phase': 'think',
-                                    'stream_channel': 'content',
-                                }
-                            })
-                            try:
-                                from agents.locale_prompts import vision_image_block_labels
-                                from agents.vision_describe import VisionDescribeService
+                            # 判断模型是否支持图片输入
+                            if _model_has_vision:
+                                # 模型支持图片：直接使用原始输入（图片数据将在后续 LLM 调用中处理）
+                                q.put({
+                                    'type': 'stream',
+                                    'payload': {
+                                        'lane': 'think',
+                                        'delta': f'🌄 检测到 {len(images)} 张图片，模型 {model_name} 支持图片输入，将直接发送至模型处理…\n',
+                                        'react_phase': 'think',
+                                        'stream_channel': 'content',
+                                    }
+                                })
+                                # OCR 场景下，如果模型支持图片，也进入 ReAct 主循环（而不是直接返回）
+                                if _image_intent == 'ocr':
+                                    logger.info("[REACT] 模型支持图片，OCR 场景也进入 ReAct 主循环")
+                                    _effective_input = user_input
+                                q.put({
+                                    'type': 'stream',
+                                    'payload': {
+                                        'lane': 'think',
+                                        'delta': '图片处理完成，开始推理…\n',
+                                        'react_phase': 'think',
+                                        'stream_channel': 'content',
+                                    }
+                                })
+                            else:
+                                # 模型不支持图片：先调用图片描述服务生成文本描述
+                                q.put({
+                                    'type': 'stream',
+                                    'payload': {
+                                        'lane': 'think',
+                                        'delta': '正在解析图片内容（模型不支持图片，先生成描述）…\n',
+                                        'react_phase': 'think',
+                                        'stream_channel': 'content',
+                                    }
+                                })
+                                try:
+                                    from agents.locale_prompts import vision_image_block_labels
+                                    from agents.vision_describe import VisionDescribeService
 
-                                def _describe_sync():
-                                    vision_svc = VisionDescribeService()
-                                    descriptions = []
-                                    for img in images[:5]:
-                                        data_field = img.get('data') or img.get('url', '')
-                                        if not data_field:
-                                            continue
+                                    def _describe_sync():
+                                        vision_svc = VisionDescribeService()
+                                        descriptions = []
+                                        for img in images[:5]:
+                                            data_field = img.get('data') or img.get('url', '')
+                                            if not data_field:
+                                                continue
+                                            if _image_intent == 'ocr':
+                                                desc = vision_svc.describe_image(
+                                                    data_field, user_intent=user_input or '', context=''
+                                                )
+                                            else:
+                                                desc = vision_svc.describe_prototype_for_testcase(
+                                                    data_field, user_input or '', locale=ui_locale
+                                                )
+                                            if desc:
+                                                descriptions.append(desc)
+                                        return descriptions
+
+                                    # 放到线程池，避免卡住事件循环；同时让 SSE 心跳/状态可以先发出去
+                                    descriptions = await loop.run_in_executor(None, _describe_sync)
+                                    if descriptions:
                                         if _image_intent == 'ocr':
-                                            desc = vision_svc.describe_image(
-                                                data_field, user_intent=user_input or '', context=''
-                                            )
-                                        else:
-                                            desc = vision_svc.describe_prototype_for_testcase(
-                                                data_field, user_input or '', locale=ui_locale
-                                            )
-                                        if desc:
-                                            descriptions.append(desc)
-                                    return descriptions
-
-                                # 放到线程池，避免卡住事件循环；同时让 SSE 心跳/状态可以先发出去
-                                descriptions = await loop.run_in_executor(None, _describe_sync)
-                                if descriptions:
-                                    if _image_intent == 'ocr':
-                                        # OCR 结果也走流式：边到边出，避免一次性渲染“看起来卡住/突变”
-                                        for i, d in enumerate(descriptions):
-                                            piece = (str(d).strip() + "\n\n") if str(d).strip() else ""
-                                            if piece:
-                                                q.put({
-                                                    'type': 'stream',
-                                                    'payload': {
-                                                        'lane': 'think',
-                                                        'delta': piece,
-                                                        'react_phase': 'think',
-                                                        'stream_channel': 'content',
-                                                    }
-                                                })
-                                                # 让出事件循环，促使前端及时刷新（避免短时间内堆积成一次性 DOM 更新）
-                                                await asyncio.sleep(0)
+                                            # OCR 结果也走流式：边到边出，避免一次性渲染"看起来卡住/突变"
+                                            for i, d in enumerate(descriptions):
+                                                piece = (str(d).strip() + "\n\n") if str(d).strip() else ""
+                                                if piece:
+                                                    q.put({
+                                                        'type': 'stream',
+                                                        'payload': {
+                                                            'lane': 'think',
+                                                            'delta': piece,
+                                                            'react_phase': 'think',
+                                                            'stream_channel': 'content',
+                                                        }
+                                                    })
+                                                    # 让出事件循环，促使前端及时刷新（避免短时间内堆积成一次性 DOM 更新）
+                                                    await asyncio.sleep(0)
                                         # 直接返回视觉结论，不进入 ReAct 主循环
                                         q.put({
                                             'type': 'bye',
@@ -793,22 +879,24 @@ def react_agent():
                                             len(descriptions),
                                             len(_effective_input),
                                         )
-                            except Exception as ve:
-                                logger.exception("[REACT] 视觉描述失败，将使用原始输入: %s", ve)
-                            finally:
-                                q.put({
-                                    'type': 'stream',
-                                    'payload': {
-                                        'lane': 'think',
-                                        'delta': '图片解析完成，开始推理…\n',
-                                        'react_phase': 'think',
-                                        'stream_channel': 'content',
-                                    }
-                                })
+                                except Exception as ve:
+                                    logger.exception("[REACT] 视觉描述失败，将使用原始输入: %s", ve)
+                                finally:
+                                    q.put({
+                                        'type': 'stream',
+                                        'payload': {
+                                            'lane': 'think',
+                                            'delta': '图片解析完成，开始推理…\n',
+                                            'react_phase': 'think',
+                                            'stream_channel': 'content',
+                                        }
+                                    })
                         async for chunk in agent.handle_user_request_stream(
                             _effective_input,
                             project_id=project_id,
                             plan_id=plan_id,
+                            card_id=card_id,
+                            card_type=card_type,
                             locale=ui_locale,
                             pending_diff_context=pending_diff_context,
                             agent_session_id=react_request_id,
@@ -871,7 +959,7 @@ def react_agent():
                 o['seq'] = _sse_seq[0]
                 return o
 
-            # 心跳间隔：默认 1 秒，避免“无 chunk 时前端 10 秒无感知”
+            # 心跳间隔：默认 1 秒，避免"无 chunk 时前端 10 秒无感知"
             try:
                 heartbeat_timeout = float(os.getenv("REACT_SSE_HEARTBEAT_TIMEOUT", "1"))
             except Exception:
@@ -896,7 +984,7 @@ def react_agent():
                                 "message": f"SSE internal error: non-JSON item in queue ({bad_t})"
                             },
                         }
-                    # 每条 data 后带一个注释，促使部分 WSGI 服务器尽快刷新，避免“修改中”长时间不更新
+                    # 每条 data 后带一个注释，促使部分 WSGI 服务器尽快刷新，避免"修改中"长时间不更新
                     payload = _sse_json_dumps(_with_seq(item))
                     if perf and not getattr(generate, "_first_data_logged", False):
                         setattr(generate, "_first_data_logged", True)
@@ -923,7 +1011,7 @@ def react_agent():
         response.headers['X-Accel-Buffering'] = 'no'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         # 注意：不再显式设置 Connection 头，避免在 waitress 等严格 WSGI 服务器下触发
-        # “hop-by-hop header” 的断言错误；是否 keep-alive 由服务器 / 反向代理自行控制。
+        # "hop-by-hop header" 的断言错误；是否 keep-alive 由服务器 / 反向代理自行控制。
         return response
         
     except Exception as e:

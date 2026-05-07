@@ -615,12 +615,11 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
 import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import user from '../store/user.js'
-import { defineAsyncComponent } from 'vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
@@ -641,6 +640,11 @@ export default {
       type: [String, Number],
       default: null
     },
+    /** 创建时关联的卡片ID，用于类型校验 */
+    card_id: {
+      type: [String, Number],
+      default: null
+    },
     edit: {
       type: Boolean,
       default: false
@@ -654,10 +658,11 @@ export default {
       default: false
     }
   },
-  emits: ['close'],
+  emits: ['close', 'titleLoaded'],
   setup(props, { emit }) {
     const router = useRouter()
     const route = useRoute()
+    console.log('[NewBug] props.card_id:', props.card_id, 'props:', props)
     const loading = ref(false)
     const saveLoading = ref(false)
     const isEdit = ref(false)
@@ -668,6 +673,7 @@ export default {
     const toggleLeftPanel = () => {
       isLeftCollapsed.value = !isLeftCollapsed.value
     }
+    console.log('[NewBug] isLeftCollapsed defined:', typeof isLeftCollapsed)
     
     const projectInfo = ref({})
     const availableProjects = ref([])
@@ -756,7 +762,7 @@ export default {
       severity: 'medium',
       priority: 'p3',
       status: 'new',
-      case_category: '',
+      case_category: '功能缺陷', // 默认问题分类为"功能缺陷"
       environment: '',
       browser: '',
       os: '',
@@ -887,7 +893,7 @@ export default {
         ;(planList || []).forEach(plan => {
           const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
 
-          const isBugPlan = plan.plan_type === 'bug'
+          const isBugPlan = true
           const isSelected = bug.plan && bug.plan.toString() === plan.id.toString()
           const hasVisibleChildren = children.length > 0
 
@@ -898,7 +904,6 @@ export default {
               level,
               is_pinned: plan.is_pinned || false,
               icon: plan.icon || '📁',
-              plan_type: plan.plan_type,
               bug_count: plan.bug_count || 0,
               status: plan.status
             }
@@ -1210,6 +1215,10 @@ export default {
           goBack()
         } finally {
           loading.value = false
+          // 编辑模式下通知父组件更新Tab标题
+          if (isEdit.value && bug.title) {
+            emit('titleLoaded', bug.title)
+          }
         }
       } else if (query.project_id || props.project_id) {
         console.log('新建模式，项目ID:', query.project_id)
@@ -1314,6 +1323,9 @@ export default {
 
       saveLoading.value = true
       try {
+        // 仅新建模式添加 card_id，用于后端校验卡片类型
+        const cardIdValue = !isEdit.value && props.card_id ? parseInt(props.card_id) : null
+        console.log('[saveBug] cardIdValue:', cardIdValue, 'props.card_id:', props.card_id, 'isEdit:', isEdit.value)
         const bugData = {
           title: bug.title,
           bug_type: bug.case_category, // 对应后端的 bug_type
@@ -1330,6 +1342,10 @@ export default {
             name: att.name,
             size: att.size
           }))) // 后端 attachments 是文本字段，通常存 JSON
+        }
+        // 新建时添加卡片ID
+        if (cardIdValue) {
+          bugData.card_id = cardIdValue
         }
         
         console.log('准备发送的Bug数据:', bugData)
@@ -1417,6 +1433,8 @@ export default {
       commentEditorActive.value = false
     }
 
+    const bugDraftPreset = inject('bugDraftPreset', null)
+
     const htmlToPlain = (html) => {
       if (!html) return ''
       const d = document.createElement('div')
@@ -1427,6 +1445,25 @@ export default {
     const reproductionStepsPlain = computed(() => htmlToPlain(bug.reproduction_steps))
 
     const stepsLength = computed(() => reproductionStepsPlain.value.length)
+    
+    const _escHtml = (s) =>
+      String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    watch(
+      () => bugDraftPreset?.value?.token ?? 0,
+      async (tok) => {
+        if (!tok || !bugDraftPreset?.value?.description) return
+        if (isEdit.value) return
+        const block = String(bugDraftPreset.value.description).trim()
+        if (!block) return
+        const fragment = `<p><strong>【终端关联】</strong></p><pre style="white-space:pre-wrap;word-break:break-all;">${_escHtml(block)}</pre>`
+        await nextTick()
+        const cur = (bug.reproduction_steps || '').trim()
+        bug.reproduction_steps = cur ? `${cur}<p><br></p>${fragment}` : fragment
+      }
+    )
     
     // 计算评论文本（去除HTML标签）
     const commentText = computed(() => {
@@ -1778,7 +1815,9 @@ export default {
       commentText,
       commentEditorActive,
       activateCommentEditor,
-      finishCommentEditor
+      finishCommentEditor,
+      isLeftCollapsed,
+      toggleLeftPanel
     }
   }
 }

@@ -21,8 +21,8 @@
     <!-- 分隔线 -->
     <div class="nav-divider"></div>
 
-    <!-- 插件机制预留入口 -->
-    <div class="nav-item nav-item-disabled" :title="t('narrowNav.pluginPlaceholder')">
+    <!-- 插件入口 -->
+    <div class="nav-item" :title="t('narrowNav.pluginPlaceholder')" @click="handleOpenPlugins">
       <span class="nav-icon">🧩</span>
     </div>
 
@@ -44,7 +44,8 @@ const emit = defineEmits([
   'return-to-plans',
   'open-search',
   'open-settings',
-  'open-archive'
+  'open-archive',
+  'open-plugins'
 ])
 
 const handleReturnToPlans = () => {
@@ -61,6 +62,10 @@ const handleOpenSettings = () => {
 
 const handleOpenArchive = () => {
   emit('open-archive')
+}
+
+const handleOpenPlugins = () => {
+  emit('open-plugins')
 }
 </script>
 
@@ -99,14 +104,6 @@ const handleOpenArchive = () => {
   background: #dee2e6;
 }
 
-.nav-item-disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.nav-item-disabled:hover {
-  background: transparent;
-}
 
 .nav-icon {
   font-size: 18px;

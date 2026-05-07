@@ -4,14 +4,13 @@
 整合 ReAct 推理 + 多工具编排 + 上下文管理
 """
 
-import asyncio
 import time
 import os
 from typing import Any, Dict
 
 from .react_simplified import SimplifiedReActEngine
 from .tool_registry import ToolRegistry
-from .tools import BrowserTestTool, DatabaseTool, LogAnalyzerTool, AccuracyTesterTool
+from .tools import BrowserTestTool, LogAnalyzerTool, AccuracyTesterTool
 from .tools.search_tool import SearchTool
 from .tools.login_state_tool import LoginStateTool
 from .tools.layered_tool_factory import LayeredToolFactory
@@ -102,8 +101,6 @@ class IntelligentDevOpsAgent:
         # 注册业务工具（BrowserTestTool 依赖 playwright，可能未安装）
         if BrowserTestTool is not None:
             self.tool_registry.register(BrowserTestTool(self.llm))
-        execution_mode = (os.getenv("TEXT2SQL_EXECUTION_MODE", "direct") or "direct").strip().lower()
-        self.tool_registry.register(DatabaseTool(self.llm, self.db, execution_mode=execution_mode))
         self.tool_registry.register(LogAnalyzerTool(self.llm))
         self.tool_registry.register(AccuracyTesterTool(self.llm))
         self.tool_registry.register(SearchTool(self.llm))
@@ -153,7 +150,7 @@ class IntelligentDevOpsAgent:
             
         if os.getenv("QUIET_LOG") != "1":
             print(f"[AGENT]工具注册完成，共 {len(self.tool_registry)} 个工具")
-            print(f"[AGENT]   - 业务工具: 6 (browser_test, database_query, log_analyzer, accuracy_tester, search, grep)")
+            print(f"[AGENT]   - 业务工具: 5 (browser_test, log_analyzer, accuracy_tester, search, grep)")
             print(f"[AGENT]   - 分层工具: {len(layered_tools)}")
             print(f"[AGENT]      - L1 (原子操作): 4 个")
             print(f"[AGENT]      - L2 (复合操作): 2 个") 
@@ -164,7 +161,7 @@ class IntelligentDevOpsAgent:
         """允许复用 Agent 实例时更新 db session 引用。"""
         self.db = db_session
         try:
-            for tool_name in ("database_query", "modify", "create"):
+            for tool_name in ("modify", "create"):
                 tool = self.tool_registry.get(tool_name)
                 if tool is not None and hasattr(tool, "db"):
                     setattr(tool, "db", db_session)
@@ -176,6 +173,8 @@ class IntelligentDevOpsAgent:
         user_input: str,
         project_id: int = None,
         plan_id: int = None,
+        card_id: int = None,
+        card_type: str = None,
         locale: str = None,
         pending_diff_context: list = None,
         agent_session_id: str = None,
@@ -195,18 +194,27 @@ class IntelligentDevOpsAgent:
             print(f"[AGENT] Project ID: {project_id}")
         if plan_id is not None:
             print(f"[AGENT] Plan ID (当前迭代): {plan_id}")
+        if card_id is not None:
+            print(f"[AGENT] Card ID (当前卡片): {card_id} card_type={card_type!r}")
         
         # 0. 协议 v1：连接就绪（不再使用 type=status / 双写 step）
         yield {'type': 'hello', 'payload': {}}
 
         # 不推假的 reasoning 占位：深度思考区块仅在有实质思考内容时由前端展示（见 SimpleChatPanel substantiveReasoning）。
 
-        # 1. 分类意图（不阻塞主屏；不再下发 intent SSE，避免非协议类型）
-        intent_task = asyncio.create_task(self._classify_intent(user_input))
+        # ReAct：run_stream 已在引擎出口转为 v1（type/payload），此处只透传
+        # 卡片层适配：将卡片上下文注入 user_input，避免改动引擎签名的同时让模型“以卡片为主”决策工具参数
+        _effective_input = user_input
+        if card_id is not None and str(card_id).strip():
+            try:
+                _ct = str(card_type).strip() if card_type is not None else ""
+            except Exception:
+                _ct = ""
+            _hint = f"[上下文] 当前卡片(card) id={card_id}" + (f", type={_ct}" if _ct else "")
+            _effective_input = f"{_hint}\n{user_input}"
 
-        # 2. ReAct：run_stream 已在引擎出口转为 v1（type/payload），此处只透传
         async for pkt in self.react_engine.run_stream(
-            user_input,
+            _effective_input,
             project_id=project_id,
             plan_id=plan_id,
             locale=locale,
@@ -219,13 +227,7 @@ class IntelligentDevOpsAgent:
         ):
             yield pkt
 
-        try:
-            if intent_task.done():
-                intent_task.result()
-        except Exception:
-            pass
-        
-        # 3. 获取最终结果并格式化
+        # 获取最终结果并格式化
         # 这里从 react_engine 的状态中获取最终结果可能更好，但目前 SimplifiedReActEngine 是无状态的
         # 我们让 run_stream 最后 yield 一个 summary
         
@@ -263,58 +265,57 @@ class IntelligentDevOpsAgent:
         
         return final_output
     
+    def _classify_intent_rule_fallback(self, user_input: str) -> str:
+        """
+        纯关键词意图标签（不调 LLM）。
+        仅影响非流式 handle_user_request 的 _format_output 推荐文案；与 ReAct 工具选择无关。
+        """
+        text = (user_input or "").strip()
+        modify_keywords = (
+            "修改",
+            "编辑",
+            "改为",
+            "改成",
+            "更新",
+            "把",
+            "的答案",
+            "复现步骤",
+            "标题",
+            "期望结果",
+            "预期结果",
+        )
+        if any(kw in text for kw in modify_keywords):
+            return "diagnose"
+        if any(k in text for k in ("自动化测试", "执行测试", "跑测试", "运行测试")):
+            return "run_test"
+        if any(k in text for k in ("准确率", "准确率低", "对话准确率")):
+            return "test_accuracy"
+        if any(k in text for k in ("失败用例", "生成 badcase", "生成 BadCase")):
+            return "generate_badcase"
+        if any(k in text for k in ("日志", "根因", "定位原因", "定位问题")):
+            return "locate_bug"
+        query_markers = (
+            "查询",
+            "列出",
+            "有哪些",
+            "搜索",
+            "查找",
+            "检索",
+            "看一下",
+            "迭代计划",
+            "计划列表",
+            "当前计划",
+        )
+        if any(m in text for m in query_markers):
+            return "find_bugs"
+        return "diagnose"
+
     async def _classify_intent(self, user_input: str) -> str:
         """
-        分类用户意图
-        
-        使用 LLM 自动识别用户意图；对「修改/编辑」类请求做关键词兜底，避免千问等误判为 find_bugs/run_test。
-        
-        Returns:
-            意图代码: run_test / find_bugs / locate_bug / test_accuracy / generate_badcase / diagnose
+        意图标签（无 LLM）：供非流式 _format_output 使用。
+        流式对话的决策完全由 ReAct 统一流完成，不再并行浪费一次 parse_intent。
         """
-        # 关键词兜底：明确出现修改/编辑/更新或具体字段修改时直接判为 diagnose，不依赖模型（千问/GLM 易误判）
-        modify_keywords = ('修改', '编辑', '改为', '改成', '更新', '把', '的答案', '复现步骤', '标题', '期望结果', '预期结果')
-        text = (user_input or '').strip()
-        if any(kw in text for kw in modify_keywords):
-            return 'diagnose'
-
-        prompt = f"""
-分析用户请求，归类为以下之一（只返回一个代号或英文名）：
-1. run_test - 执行自动化测试，获取 Bug 列表
-2. find_bugs - 查询数据库中已有的 Bug（仅查询、列出，不修改）
-3. locate_bug - 根据日志定位问题根因
-4. test_accuracy - 测试功能/对话准确率
-5. generate_badcase - 生成失败用例列表
-6. diagnose - 修改/编辑数据：改 BadCase/Bug/测试用例 的答案、复现步骤、标题等，或定位并编辑某条记录
-
-用户请求: {user_input}
-
-只返回一个：数字 6 表示修改或编辑数据，数字 1-5 表示其他。或直接返回英文：diagnose / run_test / find_bugs 等。
-"""
-        
-        response = await self.llm.parse_intent(prompt)
-        raw = str(response).strip().lower()
-        
-        # 先按英文意图名匹配（兼容模型直接返回 diagnose、run_test 等）
-        intent_names = ['run_test', 'find_bugs', 'locate_bug', 'test_accuracy', 'generate_badcase', 'diagnose']
-        for name in intent_names:
-            if name in raw:
-                return name
-        
-        # 再按数字代号匹配
-        intent_map = {
-            '1': 'run_test',
-            '2': 'find_bugs',
-            '3': 'locate_bug',
-            '4': 'test_accuracy',
-            '5': 'generate_badcase',
-            '6': 'diagnose'
-        }
-        for num, intent in intent_map.items():
-            if num in raw:
-                return intent
-        
-        return 'diagnose'  # 默认：拿不准时走 diagnose
+        return self._classify_intent_rule_fallback(user_input)
     
     async def _format_output(self, result: Dict[str, Any], intent: str) -> Dict[str, Any]:
         """

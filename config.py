@@ -1,7 +1,12 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# 固定从项目根目录加载 .env（与 config.py 同目录），避免从别的 cwd 启动时读不到密钥
+_PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(_PROJECT_ROOT / ".env")
+load_dotenv()  # 仍尝试当前工作目录，兼容旧习惯
 
 class Config:
     SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-here')
@@ -43,6 +48,11 @@ class Config:
     # - qwen-turbo / qwen-plus / qwen-max / qwen3.5-plus 等
     # 千问 Max 思考：模型 id qwen3-max-2026-01-23，enable_thinking 开启思考
     QWEN3_MAX_THINKING_MODEL = os.getenv('QWEN3_MAX_THINKING_MODEL', 'qwen3-max-2026-01-23')
+    # 逗号分隔 model id：不对这些模型请求 enable_thinking（减少冗长 reasoning）；默认含 qwen3.5-plus；置空则谁都不禁用
+    QWEN_THINKING_DISABLE_MODELS = os.getenv('QWEN_THINKING_DISABLE_MODELS', 'qwen3.5-plus').strip()
+    # 百炼部分模型即使不传也可能默认思考链；未开启思考时对请求显式 extra_body enable_thinking=false（默认开）
+    _qedb = (os.getenv('QWEN_EXPLICIT_DISABLE_THINKING_BODY') or '1').strip().lower()
+    QWEN_EXPLICIT_DISABLE_THINKING_BODY = _qedb not in ('0', 'false', 'no', 'off', '')
     
     # ==================== Qianfan (百度/文心一言) ====================
     QIANFAN_API_KEY = os.getenv(
@@ -69,6 +79,18 @@ class Config:
     DEFAULT_LLM = os.getenv('DEFAULT_LLM', 'qianfan')  # 默认文心；千问需配置 DASHSCOPE_API_KEY
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
     OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+
+    # ==================== DeepSeek（官方 OpenAI 兼容 API）====================
+    # 环境变量 DEEPSEEK_API_KEY 优先；未设置时用下方默认（与 Qwen/千帆 同项目习惯，提交 Git 前请改回空或仅放 .env）
+    DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY', 'sk-fb38f3d033be4f2bb949bd6765d64157').strip()
+    DEEPSEEK_API_BASE_URL = os.getenv('DEEPSEEK_API_BASE_URL', 'https://api.deepseek.com').strip().rstrip('/')
+    # 默认 deepseek-v4-pro；可用 DEEPSEEK_V4_MODEL 覆盖
+    DEEPSEEK_V4_MODEL = os.getenv('DEEPSEEK_V4_MODEL', 'deepseek-v4-pro').strip()
+    # 思考模式强度：high / max（见 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode ）
+    DEEPSEEK_REASONING_EFFORT = os.getenv('DEEPSEEK_REASONING_EFFORT', 'high').strip().lower()
+    DEEPSEEK_TEMPERATURE = float(os.getenv('DEEPSEEK_TEMPERATURE', '0.7'))
+    # 可选：同一账号内 KV/前缀缓存隔离键（官方 request.user_id）；固定为产品实例 id 可提高同前缀命中稳定性
+    DEEPSEEK_KV_USER_ID = os.getenv('DEEPSEEK_KV_USER_ID', '').strip()
     
     REDIS_DATABASE=int(os.getenv('REDIS_DATABASE', 0))
     REDIS_USERNAME=os.getenv('REDIS_USERNAME', None)
@@ -134,6 +156,15 @@ class Config:
     LONG_MEMORY_TOP_K = int(os.getenv("LONG_MEMORY_TOP_K", "10"))
     LONG_MEMORY_USE_N = int(os.getenv("LONG_MEMORY_USE_N", "4"))
     LONG_MEMORY_MIN_SCORE = float(os.getenv("LONG_MEMORY_MIN_SCORE", "0.0"))
+
+    # 调试：是否在控制台打印发往 LLM 的完整请求（messages 等）。.env 写 LLM_LOG_PROMPTS=1 后须重启 python
+    _llp_raw = (
+        os.getenv("LLM_LOG_PROMPTS")
+        or os.getenv("LLM_DEBUG_PROMPTS")
+        or os.getenv("LLM_PROMPT_DEBUG")
+        or ""
+    ).strip().lower()
+    LLM_LOG_PROMPTS = _llp_raw in ("1", "true", "yes", "on")
 
     # 嵌入式终端：AI 生成命令白名单（仅约束 /api/terminal/ai_suggest 返回值，不拦截用户手动键入）
     TERMINAL_AI_WHITELIST_ENABLED = os.getenv("TERMINAL_AI_WHITELIST_ENABLED", "false").lower() in (

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "msg-1777282346652-z5tkht",
+    "from": "team-lead",
+    "to": "backend-dev",
+    "type": "message",
+    "content": "请更新进度，你目前完成到什么阶段了？",
+    "timestamp": "2026-04-27T09:32:26.652Z",
+    "read": true
+  },
+  {
+    "id": "msg-1777283299978-qqf2po",
+    "from": "team-lead",
+    "to": "backend-dev",
+    "type": "message",
+    "content": "前端已完成，请更新你的进度。后端开发进展如何？",
+    "timestamp": "2026-04-27T09:48:19.978Z",
+    "read": true
+  }
+]

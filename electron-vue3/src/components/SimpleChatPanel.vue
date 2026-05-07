@@ -58,7 +58,19 @@
               v-else
               class="inline-composer"
             >
-            <div class="input-box-wrapper">
+            <div
+              class="input-box-wrapper"
+              :class="{ 'input-box-wrapper--dragover': inlineDragOver }"
+              @dragover.prevent="inlineDragOver = true"
+              @dragleave.prevent="inlineDragOver = false"
+              @drop.prevent="handleInlineImageDrop"
+            >
+              <div v-if="inlinePendingImages.length > 0" class="pending-images-row">
+                <div v-for="(img, idx) in inlinePendingImages" :key="idx" class="pending-image-item">
+                  <img :src="img.data" class="pending-thumb" :alt="t('chat.imagePreview')" @click="openImagePreview(img.data)" />
+                  <button type="button" class="pending-image-remove" @click.stop="removeInlinePendingImage(idx)" :title="t('chat.removeImage')">×</button>
+                </div>
+              </div>
               <textarea
                 ref="inlineTextareaRef"
                 v-model="inlineInputMessage"
@@ -66,7 +78,9 @@
                 @keydown.enter.exact="handleInlineSend"
                 @keydown.enter.shift.exact="addNewLineInline"
                 @keydown.esc.exact="cancelEditUserMessage"
-                :placeholder="t('chat.placeholder')"
+                @compositionstart="isComposing = true"
+                @compositionend="isComposing = false"
+                :placeholder="t('chat.placeholderWithImage')"
                 class="message-input"
                 rows="1"
               ></textarea>
@@ -74,47 +88,52 @@
               <div class="input-footer">
                 <div class="footer-left">
                   <div class="selector-item">
-                    <select v-model="selectedAgent" class="footer-select">
+                    <select v-model="inlineEditAgent" class="footer-select">
                       <option value="agent">{{ t('chat.agentMode') }}</option>
                       <option value="chat">{{ t('chat.chatMode') }}</option>
                     </select>
                   </div>
                   <div class="selector-item model-select-wrapper">
-                    <img
-                      v-if="isQwenModel"
-                      :src="qwenIcon"
-                      alt="Qwen"
-                      class="model-icon"
-                    />
-                    <img
-                      v-else-if="isErnieModel"
-                      :src="ernieIcon"
-                      alt="Ernie"
-                      class="model-icon model-icon--ernie"
-                    />
-                    <img
-                      v-else-if="isGlmModel"
-                      :src="glmIcon"
-                      alt="GLM"
-                      class="model-icon"
-                    />
-                    <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
-                      <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
-                      <option value="qwen-max-thinking">Qwen-Max</option>
-                      <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
-                      <option value="ernie-x1-turbo-32k">Ernie-X1</option>
-                      <option value="glm-4-flash">GLM-4-Flash</option>
-                      <option value="glm-5">GLM-5</option>
+                    <select
+                      v-model="inlineEditModel"
+                      class="footer-select model-select"
+                      :class="{ 'is-auto': inlineEditModel === 'auto' }"
+                    >
+                      <option value="auto">{{ t('chat.modelAutoOption') }}</option>
+                      <option
+                        v-for="m in enabledModelOptions"
+                        :key="m.id"
+                        :value="m.id"
+                      >
+                        {{ formatModelOptionLabel(m) }}
+                      </option>
                     </select>
                   </div>
                 </div>
 
                 <div class="footer-right">
+                  <input
+                    ref="inlineImageFileInputRef"
+                    type="file"
+                    accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
+                    multiple
+                    style="display: none"
+                    @change="handleInlineImageSelect"
+                  />
+                  <button
+                    type="button"
+                    class="image-upload-button"
+                    :class="{ 'image-upload-button--active': inlinePendingImages.length > 0 }"
+                    :title="t('chat.uploadImageAlt')"
+                    @click="triggerInlineImageSelect"
+                  >
+                    <img :src="imageUploadIcon" :alt="t('chat.uploadImageAlt')" class="image-upload-icon" />
+                  </button>
                   <button
                     v-if="!isSending"
                     @click="handleInlineSend"
                     class="send-icon-button"
-                    :disabled="!inlineInputMessage.trim()"
+                    :disabled="!inlineInputMessage.trim() && inlinePendingImages.length === 0"
                     :title="t('chat.send')"
                   >
                     <img class="send-icon-img" :src="sendCursorIcon" alt="send" />
@@ -597,17 +616,46 @@
                   <span class="card-count">{{ t('chat.navRecords', { n: message.navigation.items.length }) }}</span>
                   <span class="card-arrow">→</span>
                 </summary>
-                <div class="collapsible-content bug-navigation-list">
+                <div class="collapsible-content bug-navigation-list grep-nav-list-root">
                   <div
-                    v-for="(item, idx) in message.navigation.items"
-                    :key="idx"
-                    class="bug-nav-item"
-                    @click="handleNavigation(item)"
+                    class="grep-nav-list-shell"
+                    :class="{
+                      'grep-nav-list-shell--collapsed': grepNavListCollapsed(message, messageIdx)
+                    }"
                   >
-                    <span class="bug-nav-icon">→</span>
-                    <span class="bug-nav-title">{{ item.title || item.bug_title }}</span>
-                    <span v-if="item.plan_name" class="bug-nav-plan">{{ item.plan_name }}</span>
+                    <div class="grep-nav-list-inner">
+                      <div
+                        v-for="(item, idx) in message.navigation.items"
+                        :key="idx"
+                        class="bug-nav-item"
+                        @click="handleNavigation(item)"
+                      >
+                        <span class="bug-nav-icon">→</span>
+                        <span class="bug-nav-title">{{ item.title || item.bug_title }}</span>
+                        <span v-if="item.plan_name" class="bug-nav-plan">{{ item.plan_name }}</span>
+                      </div>
+                    </div>
+                    <div
+                      v-if="grepNavListCollapsed(message, messageIdx)"
+                      class="grep-nav-list-fade"
+                      aria-hidden="true"
+                    />
                   </div>
+                  <button
+                    v-if="grepNavNeedsCollapse(message)"
+                    type="button"
+                    class="grep-nav-expand-toggle"
+                    @click.stop="toggleGrepNavExpand(messageIdx)"
+                  >
+                    <span>{{
+                      grepNavListExpandedForMessage(messageIdx)
+                        ? t('chat.navCollapseList')
+                        : t('chat.navExpandAll')
+                    }}</span>
+                    <span class="grep-nav-expand-chevron" aria-hidden="true">{{
+                      grepNavListExpandedForMessage(messageIdx) ? '▾' : '▸'
+                    }}</span>
+                  </button>
                 </div>
               </details>
             </div>
@@ -620,18 +668,21 @@
             </div>
           </div>
           
-          <!-- 统一总结：标题秒数 = 整轮 wall time（execution_time），与正文里「总耗时」一致；勿用 thinking_time（仅首轮规划） -->
+          <!-- 统一总结：标题秒数 = 整轮 wall time（execution_time），非「总结 LLM 耗时」；勿用 thinking_time（仅首轮规划） -->
             <div v-if="hasUnifiedSummary(message)" class="unified-summary-section">
             <div class="unified-summary-header">
               {{
                 message.unifiedSummaryLoading
                   ? t('chat.summaryHeaderLoading')
-                  : t('chat.summarySeconds', { s: (message.agentResult.execution_time ?? message.agentResult.thinking_time ?? 0).toFixed(2) })
+                  : t('chat.summaryRoundSeconds', { s: (message.agentResult.execution_time ?? message.agentResult.thinking_time ?? 0).toFixed(2) })
               }}
             </div>
             <div class="unified-summary-content reasoning-content">
-              <!-- 仅等「终局/统一总结」流（summary_stream 或 running_summary_stream 首包前）：勿调 getUnifiedSummaryBody，否则增 runningSummaryDraft 一直非空会挡掉三点 -->
-              <div v-if="message.unifiedSummaryLoading && !String((message.summaryStreamDraft || '')).trim()" class="unified-summary-loading">
+              <!-- 终局 running_summary：首包前草稿可能被 reset 清空，需同时判断 runningSummaryDraft -->
+              <div
+                v-if="message.unifiedSummaryLoading && !String((message.summaryStreamDraft || '')).trim() && !String((message.runningSummaryDraft || '')).trim()"
+                class="unified-summary-loading"
+              >
                 <span class="loading-dots loading-dots--solo" aria-hidden="true">
                   <span class="dot"></span>
                   <span class="dot"></span>
@@ -664,8 +715,8 @@
       </div>
     </div>
     
-    <!-- 输入区域 -->
-    <div class="input-container">
+    <!-- 输入区域（与内联编辑解耦：点击此处不触发「点外部退出编辑」） -->
+    <div class="input-container main-chat-composer">
       <div 
         class="input-box-wrapper"
         :class="{ 'input-box-wrapper--dragover': isDragOver }"
@@ -703,31 +754,20 @@
             </div>
             <!-- 移除 ReAct/执行选择器 - 统一使用 ReAct 模式 -->
           <div class="selector-item model-select-wrapper">
-            <img
-              v-if="isQwenModel"
-              :src="qwenIcon"
-              alt="Qwen"
-              class="model-icon"
-            />
-            <img
-              v-else-if="isErnieModel"
-              :src="ernieIcon"
-              alt="Ernie"
-              class="model-icon model-icon--ernie"
-            />
-            <img
-              v-else-if="isGlmModel"
-              :src="glmIcon"
-              alt="GLM"
-              class="model-icon"
-            />
-            <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
-              <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
-              <option value="qwen-max-thinking">Qwen-Max</option>
-              <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
-              <option value="ernie-x1-turbo-32k">Ernie-X1</option>
-              <option value="glm-4-flash">GLM-4-Flash</option>
-              <option value="glm-5">GLM-5</option>
+            <select
+              v-model="selectedModel"
+              @change="saveModelSelection"
+              class="footer-select model-select"
+              :class="{ 'is-auto': selectedModel === 'auto' }"
+            >
+              <option value="auto">{{ t('chat.modelAutoOption') }}</option>
+              <option
+                v-for="m in enabledModelOptions"
+                :key="m.id"
+                :value="m.id"
+              >
+                {{ formatModelOptionLabel(m) }}
+              </option>
             </select>
           </div>
           </div>
@@ -823,6 +863,18 @@ const props = defineProps({
     type: Number,
     required: false,
     default: null
+  },
+  /** 当前“卡片层”上下文（卡片列表/详情对话时传入），用于 /api/agent/react 以卡片类型为主驱动工具 */
+  cardId: {
+    type: [Number, String],
+    required: false,
+    default: null
+  },
+  /** 当前卡片类型：bug / badcase / testcase（或后端可识别的 code） */
+  cardType: {
+    type: String,
+    required: false,
+    default: ''
   },
   /** 已由项目页拉取时传入，后端 gather 可跳过 Redis/MySQL 查项目名（压低首包延迟） */
   projectDisplayName: {
@@ -931,7 +983,7 @@ function isPlaceholderSessionTitle(title) {
       'plan_id',
       'version'
     ]),
-    plan: new Set(['name', 'title', 'plan_type', 'status', 'priority', 'parent_id', 'start_date', 'end_date', 'cycle'])
+    plan: new Set(['name', 'title', 'status', 'priority', 'parent_id', 'start_date', 'end_date', 'cycle'])
   }
 
   const filterCreatePreviewDiff = (diff, target) => {
@@ -1020,7 +1072,12 @@ function isPlaceholderSessionTitle(title) {
     const items = message?.navigation?.items
     if (!items?.length) return '点击跳转到列表'
     const ts = [...new Set(items.map((i) => (i?.target || 'bug').toString().toLowerCase()))]
-    const labelKey = { bug: 'chat.navLabelBug', badcase: 'chat.navLabelBadcase', testcase: 'chat.navLabelTestcase' }
+    const labelKey = {
+      bug: 'chat.navLabelBug',
+      badcase: 'chat.navLabelBadcase',
+      testcase: 'chat.navLabelTestcase',
+      card: 'chat.navLabelCard'
+    }
     if (ts.length === 1) {
       const k = ts[0]
       return t('chat.grepJumpTo', { type: t(labelKey[k] || 'chat.navLabelBug') })
@@ -1036,8 +1093,26 @@ function isPlaceholderSessionTitle(title) {
       if (ts[0] === 'bug') return '🐛'
       if (ts[0] === 'badcase') return '📋'
       if (ts[0] === 'testcase') return '📝'
+      if (ts[0] === 'card') return '🗂️'
     }
     return '📍'
+  }
+
+  /** grep 导航条数较多时默认收起，底部渐变 + 展开（与 IDE diff 折叠体验类似） */
+  const GREP_NAV_COLLAPSE_AFTER = 5
+  const grepNavExpandedMap = reactive({})
+  const grepNavCollapseKey = (messageIdx) => `n-${messageIdx}`
+  const grepNavNeedsCollapse = (message) => {
+    const n = message?.navigation?.items?.length || 0
+    return n > GREP_NAV_COLLAPSE_AFTER
+  }
+  const grepNavListExpandedForMessage = (messageIdx) =>
+    !!grepNavExpandedMap[grepNavCollapseKey(messageIdx)]
+  const grepNavListCollapsed = (message, messageIdx) =>
+    grepNavNeedsCollapse(message) && !grepNavListExpandedForMessage(messageIdx)
+  const toggleGrepNavExpand = (messageIdx) => {
+    const k = grepNavCollapseKey(messageIdx)
+    grepNavExpandedMap[k] = !grepNavExpandedMap[k]
   }
 
   const detectClientOS = () => {
@@ -1179,8 +1254,11 @@ const unwrapTextareaEl = (raw) => {
   return raw && raw.nodeType === 1 ? raw : null
 }
 const imageFileInputRef = ref(null)
+const inlineImageFileInputRef = ref(null)
 const pendingImages = ref([])
+const inlinePendingImages = ref([])
 const isDragOver = ref(false)
+const inlineDragOver = ref(false)
 const imagePreviewSrc = ref(null)
 const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024
@@ -1190,10 +1268,21 @@ const triggerImageSelect = () => {
   imageFileInputRef.value?.click?.()
 }
 
+const triggerInlineImageSelect = () => {
+  inlineImageFileInputRef.value?.click?.()
+}
+
 const handleImageSelect = (e) => {
   const files = e.target?.files
   if (!files?.length) return
-  addImageFiles(Array.from(files))
+  addImageFilesTo(pendingImages, Array.from(files))
+  e.target.value = ''
+}
+
+const handleInlineImageSelect = (e) => {
+  const files = e.target?.files
+  if (!files?.length) return
+  addImageFilesTo(inlinePendingImages, Array.from(files))
   e.target.value = ''
 }
 
@@ -1201,21 +1290,32 @@ const handleImageDrop = (e) => {
   isDragOver.value = false
   const files = e.dataTransfer?.files
   if (!files?.length) return
-  addImageFiles(Array.from(files))
+  addImageFilesTo(pendingImages, Array.from(files))
 }
 
-const addImageFiles = async (files) => {
+const handleInlineImageDrop = (e) => {
+  inlineDragOver.value = false
+  const files = e.dataTransfer?.files
+  if (!files?.length) return
+  addImageFilesTo(inlinePendingImages, Array.from(files))
+}
+
+const addImageFilesTo = async (bucketRef, files) => {
   for (const file of files) {
-    if (pendingImages.value.length >= MAX_IMAGES) break
+    if (bucketRef.value.length >= MAX_IMAGES) break
     if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) continue
     if (file.size > MAX_IMAGE_SIZE) continue
     try {
       const data = await fileToBase64(file)
-      pendingImages.value.push({ data, filename: file.name })
+      bucketRef.value.push({ data, filename: file.name })
     } catch (err) {
       console.warn('图片读取失败:', err)
     }
   }
+}
+
+const addImageFiles = async (files) => {
+  await addImageFilesTo(pendingImages, files)
 }
 
 const fileToBase64 = (file) => {
@@ -1229,6 +1329,10 @@ const fileToBase64 = (file) => {
 
 const removePendingImage = (idx) => {
   pendingImages.value = pendingImages.value.filter((_, i) => i !== idx)
+}
+
+const removeInlinePendingImage = (idx) => {
+  inlinePendingImages.value = inlinePendingImages.value.filter((_, i) => i !== idx)
 }
 
 const openImagePreview = (src) => {
@@ -1250,6 +1354,8 @@ const handleDocumentPointerDown = (e) => {
   if (!target) return
   // 点击在内联编辑器内部则不处理
   if (target.closest && target.closest('.inline-composer')) return
+  // 底部主输入区（含 Agent/模型下拉）：与内联编辑独立，点此处不应退出编辑，否则易误判为「内联模型跟着底部变」
+  if (target.closest && target.closest('.main-chat-composer')) return
   // 点到另一条用户气泡时不要在这里 cancel：同步卸载/重排会导致随后的 click 丢失，表现为“点了没反应”
   if (target.closest && target.closest('.user-message-bubble')) return
   cancelEditUserMessage()
@@ -1257,10 +1363,70 @@ const handleDocumentPointerDown = (e) => {
 const selectedAgent = ref('agent')
 // 从 localStorage 读取上次选择的模型，如果没有则使用默认值
 const savedModel = localStorage.getItem('selectedChatModel')
-const selectedModel = ref(savedModel || 'ernie-4.5-turbo-128k')  // 默认文心；可选 qwen3.5-plus / ernie-4.5-turbo-128k / glm-5
-const isQwenModel = computed(() => selectedModel.value && selectedModel.value.startsWith('qwen'))
-const isErnieModel = computed(() => selectedModel.value && selectedModel.value.startsWith('ernie'))
-const isGlmModel = computed(() => selectedModel.value && selectedModel.value.startsWith('glm'))
+const selectedModel = ref(savedModel || 'ernie-4.5-turbo-128k')  // 默认文心；可选 qwen3.5-plus / ernie-4.5-turbo-128k / glm-5 / auto
+/** 内联编辑气泡：与底部输入框的 Agent/模型解耦，进入编辑时从底部快照，不随底部后续改动 */
+const inlineEditAgent = ref('agent')
+const inlineEditModel = ref(savedModel || 'ernie-4.5-turbo-128k')
+// Auto 模式：根据任务自动选择模型
+const isAutoModel = computed(() => selectedModel.value === 'auto')
+const isQwenModel = computed(() => !isAutoModel.value && selectedModel.value && selectedModel.value.startsWith('qwen'))
+const isErnieModel = computed(() => !isAutoModel.value && selectedModel.value && selectedModel.value.startsWith('ernie'))
+const isGlmModel = computed(() => !isAutoModel.value && selectedModel.value && selectedModel.value.startsWith('glm'))
+
+// 后端模型注册表（下拉框 + 能力 + 价格）
+const modelOptions = ref([])
+const enabledModelOptions = computed(() => {
+  // 后端默认只返回 enabled；这里再做一次防御过滤
+  return (modelOptions.value || []).filter(m => m && m.enabled !== false && m.id && m.id !== 'auto')
+})
+const modelOptionById = computed(() => {
+  const m = new Map()
+  for (const it of (modelOptions.value || [])) {
+    if (it && it.id) m.set(it.id, it)
+  }
+  return m
+})
+
+const formatModelOptionLabel = (m) => {
+  if (!m) return ''
+  const label = m.label || m.id
+  const vision = m.vision ? '（视觉）' : ''
+  const p = m.pricing || {}
+  const c = p.currency || ''
+  const inP = (p.input_per_million != null) ? `${p.input_per_million}` : null
+  const outP = (p.output_per_million != null) ? `${p.output_per_million}` : null
+  const price =
+    (inP || outP)
+      ? ` ${c}${inP || '-'} / ${c}${outP || '-'}（每百万 tokens）`
+      : ''
+  return `${label}${vision}${price}`
+}
+
+const fetchModelOptions = async () => {
+  try {
+    const resp = await fetch(`${BACKEND_BASE_URL}/api/models`)
+    const j = await resp.json()
+    if (j && j.success && Array.isArray(j.models)) {
+      modelOptions.value = j.models
+      // 若 localStorage 里保存了已下线/未启用的模型，自动回退
+      const current = selectedModel.value
+      if (current && current !== 'auto' && !modelOptionById.value.has(current)) {
+        const fallback = (enabledModelOptions.value[0] && enabledModelOptions.value[0].id) || 'auto'
+        selectedModel.value = fallback
+        saveModelSelection()
+      }
+    }
+  } catch (e) {
+    console.warn('[MODEL] 拉取 /api/models 失败，将保留本地选择:', e)
+  }
+}
+
+const modelSupportsImages = computed(() => {
+  const model = selectedModel.value
+  if (isAutoModel.value) return true  // Auto 模式会用视觉模型
+  const spec = modelOptionById.value.get(model)
+  return !!spec?.vision
+})
 const messagesContainer = ref(null)
 const textareaRef = ref(null)
 const isSending = ref(false)
@@ -2063,20 +2229,20 @@ const getFieldNewValue = (fieldDiff) => {
 }
 
 /**
- * 首轮 THINK 标题：仅当已有可见正文后再显示 Thought for Xs；流式中尚无正文时用 Thinking…，避免「几秒但空白」
+ * 首轮 THINK 标题：流式无正文时用「思考中 / thinking」；结束后用语义化「Thought for Xs / 思考」等（走 i18n）
  */
 const thoughtSummaryLabel = (message) => {
   const hasBody = substantiveThinkPhase(message)
-  if (!hasBody) return 'Thinking…'
+  if (!hasBody) return t('agentTask.thinking')
   const ms = message.reasoningUiDurationMs
   const kind = message.reasoningUiKind
   const thr = message.reasoningBriefThresholdMs ?? 800
-  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return 'Thought briefly'
-  if (ms != null && ms >= 0) return `Thought for ${(ms / 1000).toFixed(1)}s`
+  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return t('agentTask.thoughtBriefly')
+  if (ms != null && ms >= 0) return t('agentTask.thoughtFor', { s: (ms / 1000).toFixed(1) })
   const tt = message.agentResult?.thinking_time
-  if (tt != null && tt >= 0 && Number(tt) < 0.8) return 'Thought briefly'
-  if (tt != null && tt >= 0) return `Thought for ${Number(tt).toFixed(1)}s`
-  return 'Thought'
+  if (tt != null && tt >= 0 && Number(tt) < 0.8) return t('agentTask.thoughtBriefly')
+  if (tt != null && tt >= 0) return t('agentTask.thoughtFor', { s: Number(tt).toFixed(1) })
+  return t('agentTask.thought')
 }
 
 // 是否显示「统一总结」块（关键发现 + 执行统计合并，Cursor 式耗时 Xs）
@@ -2089,6 +2255,8 @@ const hasUnifiedSummary = (message) => {
   if (_afterLoop && message.runningSummaryDraft && String(message.runningSummaryDraft).trim()) return true
   const r = message.agentResult
   if (!r || r.status !== 'success') return false
+  // 历史会话：落库的 summaryText 可能仅有正文而无 execution_time，否则整块「关键发现」不显示
+  if (r.summaryText && String(r.summaryText).trim()) return true
   return (r.findings && r.findings.length > 0) || r.execution_time != null || (r.steps_count != null && r.steps_count > 0)
 }
 
@@ -2155,12 +2323,19 @@ const handleNavigation = (navigation) => {
   const navTarget = (navigation.target || 'bug').toString().toLowerCase()
   
   // 发送自定义事件给父组件ProjectDetail
+  // 仅定位到左侧迭代「卡片」列表行并高亮，不打开 Bug/BadCase/用例编辑页（与「点击跳转到卡片」文案一致）
   const event = new CustomEvent('grep-navigate', {
     detail: {
       planId: navigation.plan_id,
-      bugId: recordId,
+      bugId: navigation.bug_id ?? recordId,
       recordId,
-      target: navTarget === 'test_case' ? 'testcase' : navTarget
+      target: navTarget === 'test_case' ? 'testcase' : navTarget,
+      openDetail: false,
+      merged_from_legacy: navigation.merged_from_legacy,
+      title: navigation.title,
+      card_id: navigation.card_id,
+      legacy_row_id: navigation.legacy_row_id,
+      source_id: navigation.source_id
     }
   })
   window.dispatchEvent(event)
@@ -2492,7 +2667,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
         executed: false,
         messageId: payload.messageId,
         batchIndex: index,
-        peerTargetIds
+        peerTargetIds,
+        natural_query: getUserQueryForAssistantMessage(payload.messageId ?? messageId)
       })
     }
   }
@@ -2605,7 +2781,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
           executed: false,
           messageId: payload.messageId ?? messageId,
           batchIndex: index,
-          peerTargetIds
+          peerTargetIds,
+          natural_query: getUserQueryForAssistantMessage(payload.messageId ?? messageId)
         })
       }
     }
@@ -2704,7 +2881,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         modifications: payload.modifications,
         plan_id: payload.plan_id,
         executed: alreadyProcessed,
-        messageId: payload.messageId ?? messageId
+        messageId: payload.messageId ?? messageId,
+        natural_query: getUserQueryForAssistantMessage(payload.messageId ?? messageId)
       },
       bubbles: true
     })
@@ -3024,6 +3202,7 @@ function rawApiMessageToUi(msg) {
       id: msg.id,
       isUser: true,
       content: msg.content,
+      llmModel: msg.llm_model || null,
       time: new Date(msg.created_at).toLocaleTimeString(),
       isHistorical: true
     }
@@ -3095,15 +3274,22 @@ function rawApiMessageToUi(msg) {
     Array.isArray(_histAgent.react_plan_steps) && _histAgent.react_plan_steps.length > 0
       ? _histAgent.react_plan_steps
       : null
+  const _histSummaryText = String(_histAgent.summaryText || '').trim()
+  const _histHasUnifiedMetrics =
+    (_histAgent.findings && _histAgent.findings.length > 0) ||
+    _histAgent.execution_time != null ||
+    (_histAgent.steps_count != null && Number(_histAgent.steps_count) > 0)
   return {
     id: msg.id,
     isUser: false,
     content: msg.content,
+    llmModel: msg.llm_model || null,
     understanding: msg.understanding,
     reasoningContent: msg.reasoning,
     hadAgentThinkPhase: substantiveReasoning(msg.reasoning || ''),
     steps: _histSteps,
-    thoughtCollapsed: true,
+    // 有 reasoning 的历史消息默认展开（否则看起来像“最后被隐藏/没有展示”）
+    thoughtCollapsed: !substantiveReasoning(msg.reasoning || ''),
     reactDirectChatReply: _histDirectChat,
     reactPlanSteps: _histPlanSteps,
     reactPlanPanelSuppressed: computeHistoricalReactPlanPanelSuppressed(_histSteps, _histAgent),
@@ -3115,7 +3301,10 @@ function rawApiMessageToUi(msg) {
     modifyGroups: modifyGroups,
     finalResponse: _histFr || msg.final_response || '',
     time: new Date(msg.created_at).toLocaleTimeString(),
-    isHistorical: true
+    isHistorical: true,
+    // 刷新后恢复统一总结正文：流式阶段写在 runningSummaryDraft，旧数据可能只在 summaryText
+    runningSummaryDraft: _histSummaryText,
+    reactMainLoopFinished: !!(_histSummaryText || _histHasUnifiedMetrics)
   }
 }
 
@@ -3238,6 +3427,27 @@ const normalizeModifyTarget = (target) => {
   return t
 }
 
+/** 根据助手消息 id 取紧邻的上一条用户输入，供 POST /modify 传入 natural_query，避免采纳时误写 title */
+const getUserQueryForAssistantMessage = (assistantMessageId) => {
+  if (assistantMessageId == null || assistantMessageId === '') return ''
+  const list = messages.value
+  const idx = list.findIndex((m) => m.id === assistantMessageId)
+  if (idx <= 0) return ''
+  for (let i = idx - 1; i >= 0; i--) {
+    const m = list[i]
+    if (!m || !m.isUser) continue
+    const c = m.content
+    if (Array.isArray(c)) {
+      return c
+        .map((p) => (typeof p === 'string' ? p : (p && p.text) ? p.text : ''))
+        .join('')
+        .trim()
+    }
+    return typeof c === 'string' ? c.trim() : String(c ?? '').trim()
+  }
+  return ''
+}
+
 // 沙箱是否仍「待列表确认」：pending 表命中则一定待确认；表未命中时历史消息视为已处理，实时消息回退 JSON（与 resolveAlreadyProcessedByPersisted 一致）
 const isSandboxModifyItemPending = (item, message = null) => {
   if (!item || typeof item !== 'object') return false
@@ -3334,7 +3544,8 @@ const handleRequestPendingModifyForPlan = async (event) => {
             messageId: merged.messageId,
             batchIndex: 0,
             peerTargetIds,
-            suppressAutoOpenDetail
+            suppressAutoOpenDetail,
+            natural_query: getUserQueryForAssistantMessage(msg.id)
           })
         }
       }
@@ -3370,7 +3581,8 @@ const handleRequestPendingModifyForPlan = async (event) => {
           messageId: merged.messageId,
           batchIndex: 0,
           peerTargetIds,
-          suppressAutoOpenDetail
+          suppressAutoOpenDetail,
+          natural_query: getUserQueryForAssistantMessage(msg.id)
         })
       }
       continue
@@ -3398,7 +3610,8 @@ const handleRequestPendingModifyForPlan = async (event) => {
         executed: false,
         messageId: merged.messageId,
         peerTargetIds: [intTargetId],
-        suppressAutoOpenDetail
+        suppressAutoOpenDetail,
+        natural_query: getUserQueryForAssistantMessage(msg.id)
       })
     }
   }
@@ -3448,9 +3661,9 @@ const saveMessageToDb = async (messageData) => {
   }
 }
 
-const sendText = async (rawText, imagesToSend = null) => {
+const sendText = async (rawText, imagesOverride = undefined, opts = {}) => {
   const text = (rawText || '').trim()
-  const images = imagesToSend ?? pendingImages.value
+  const images = imagesOverride !== undefined ? imagesOverride : pendingImages.value
   const hasImages = images && images.length > 0
   if ((!text && !hasImages) || isSending.value) return
 
@@ -3460,22 +3673,35 @@ const sendText = async (rawText, imagesToSend = null) => {
   abortController.value = new AbortController()
   isSending.value = true
 
+  const effectiveAgent =
+    opts.agentOverride !== undefined ? opts.agentOverride : selectedAgent.value
+  const effectiveModel =
+    opts.modelOverride !== undefined ? opts.modelOverride : selectedModel.value
+
   try {
-    if (hasImages) clearPendingImages()
+    if (hasImages) {
+      if (opts.fromInlineEdit) {
+        inlinePendingImages.value = []
+      } else {
+        clearPendingImages()
+      }
+    }
 
     const userMessage = {
       id: Date.now(),
       content: effectiveText,
       isUser: true,
       time: new Date().toLocaleTimeString(),
-      images: hasImages ? images : undefined
+      images: hasImages ? images : undefined,
+      llmModel: effectiveModel
     }
     messages.value.push(userMessage)
 
     await saveMessageToDb({
       is_user: true,
       content: userMessage.content,
-      images: hasImages ? JSON.stringify(imagesPayload) : undefined
+      images: hasImages ? JSON.stringify(imagesPayload) : undefined,
+      llm_model: effectiveModel
     })
 
     // 默认标题（如 newchat）时根据首条/当前用户消息生成标题；后端曾因 await async chat 导致失败
@@ -3512,7 +3738,7 @@ const sendText = async (rawText, imagesToSend = null) => {
 
     scrollToBottom()
 
-    if (selectedAgent.value === 'agent' && !isElectronPtyAvailable()) {
+    if (effectiveAgent === 'agent' && !isElectronPtyAvailable()) {
       try {
         if (typeof pingLocalGoProxy === 'function') await pingLocalGoProxy()
       } catch (_) {
@@ -3525,10 +3751,10 @@ const sendText = async (rawText, imagesToSend = null) => {
     }
 
     // Agent 模式一律走后端 /api/agent/react，由后端统一做意图识别与分流
-    if (selectedAgent.value === 'agent') {
-      await handleReactAgentMode(messageContent, imagesPayload)
+    if (effectiveAgent === 'agent') {
+      await handleReactAgentMode(messageContent, imagesPayload, effectiveModel)
     } else {
-      await handleChatMode(messageContent, imagesPayload)
+      await handleChatMode(messageContent, imagesPayload, effectiveModel)
     }
   } catch (e) {
     console.error('[CHAT] sendText 流程异常:', e)
@@ -3545,13 +3771,29 @@ const handleSend = async (e) => {
   if (isComposing.value) return
   const text = inputMessage.value
   const imgs = [...pendingImages.value]
-  await sendText(text, imgs)
+  await sendText(text, imgs, {})
 }
 
 const beginEditUserMessage = (msg) => {
   if (!msg) return
+  const alreadyEditingThis =
+    editingUserMessageId.value != null &&
+    String(editingUserMessageId.value) === String(msg.id)
   editingUserMessageId.value = msg.id
+  // 仅在新进入另一条消息编辑时快照；避免重复 enter/pointer 再次写入当前底部选择，把内联模型「刷成」底部
+  if (!alreadyEditingThis) {
+    inlineEditAgent.value = selectedAgent.value
+    inlineEditModel.value =
+      msg.llmModel != null && msg.llmModel !== '' ? msg.llmModel : selectedModel.value
+  }
   inlineInputMessage.value = msg.content || ''
+  inlinePendingImages.value =
+    Array.isArray(msg.images) && msg.images.length > 0
+      ? msg.images.map((img) => ({
+          data: img.data,
+          filename: img.filename || 'image'
+        }))
+      : []
   nextTick(() => {
     try {
       unwrapTextareaEl(inlineTextareaRef.value)?.focus?.()
@@ -3576,15 +3818,21 @@ const onUserBubblePointerDown = (e, msg) => {
 const cancelEditUserMessage = () => {
   editingUserMessageId.value = null
   inlineInputMessage.value = ''
+  inlinePendingImages.value = []
 }
 
 const handleInlineSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
   const text = inlineInputMessage.value
+  const imgs = [...inlinePendingImages.value]
   inlineInputMessage.value = ''
   // 先发送消息，再退出编辑态：避免 key 变化与新消息添加同一 tick 导致 Vue patch 冲突
-  await sendText(text)
+  await sendText(text, imgs, {
+    fromInlineEdit: true,
+    agentOverride: inlineEditAgent.value,
+    modelOverride: inlineEditModel.value
+  })
   editingUserMessageId.value = null
 }
 
@@ -3634,11 +3882,13 @@ const handleStop = () => {
 }
 
 // ReAct Agent 模式 - 调用后端 ReAct 接口 (流式处理)
-const handleReactAgentMode = async (userMessage, images = []) => {
-  console.log('[MODEL-DEBUG] 当前选择的模型', selectedModel.value)
+const handleReactAgentMode = async (userMessage, images = [], modelForRequest = null) => {
+  const reactModel = modelForRequest ?? selectedModel.value
+  console.log('[MODEL-DEBUG] 当前选择的模型', reactModel)
   
   const aiMessage = reactive(createReactAiMessageState(Date.now() + 1))
-  
+  aiMessage.llmModel = reactModel
+
   messages.value.push(aiMessage)
   scrollToBottom()
 
@@ -3648,7 +3898,7 @@ const handleReactAgentMode = async (userMessage, images = []) => {
   
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
-    console.log('[MODEL-DEBUG] 请求参数 model:', selectedModel.value)
+    console.log('[MODEL-DEBUG] 请求参数 model:', reactModel)
     const response = await fetch(`${BACKEND_BASE_URL}/api/agent/react`, {
       method: 'POST',
       headers: {
@@ -3658,9 +3908,12 @@ const handleReactAgentMode = async (userMessage, images = []) => {
       signal: stopSignal,
       body: JSON.stringify({
         user_input: userMessage,
-        model: selectedModel.value,
+        model: reactModel,
         stream: true,
         project_id: currentProjectId.value || props.projectId,
+        // 卡片层适配：若聊天发生在某个卡片列表/详情上下文，透传 card_id 与 type 让后端以“卡片类型”为主
+        ...(props.cardId ? { card_id: props.cardId } : {}),
+        ...(props.cardType ? { card_type: props.cardType } : {}),
         images: images || [],
         locale: localeForApi(),
         ...(String(props.projectDisplayName || '').trim()
@@ -3806,6 +4059,22 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     }
   }
 
+  // 终局总结常留在 runningSummaryDraft / summaryStream，done 里 summaryText 可能未含全文；合并后再落库，避免二次打开丢失「关键发现」
+  try {
+    const dRun = String(aiMessage.runningSummaryDraft || '').trim()
+    const dSum = String(aiMessage.summaryStreamDraft || '').trim()
+    const fromDraft = dRun.length >= dSum.length ? dRun : dSum
+    const st0 = String(_persistAgent.summaryText || '').trim()
+    const best =
+      fromDraft.length >= st0.length && fromDraft ? fromDraft : st0 || fromDraft
+    if (best) {
+      _persistAgent.summaryText = best
+      if (aiMessage.agentResult) aiMessage.agentResult.summaryText = best
+    }
+  } catch {
+    /* ignore */
+  }
+
   // 保存最终结果到数据库（toRaw + 安全 stringify，避免 reactive 循环引用导致整段失败）
   await saveMessageToDb({
     is_user: false,
@@ -3819,7 +4088,8 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     navigation: safeJsonForDb(aiMessage.navigation ?? null, 'navigation'),
     modify_navigation: safeJsonForDb(aiMessage.modifyNavigation ?? null, 'modify_navigation'),
     modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
-    final_response: aiMessage.finalResponse
+    final_response: aiMessage.finalResponse,
+    llm_model: reactModel
   })
 }
 
@@ -3912,13 +4182,15 @@ const handleAgentMode = async (userMessage) => {
     content: aiMessage.finalResponse || aiMessage.understanding || '正在处理...', // 可按需补全落库字段
     understanding: aiMessage.understanding,
     steps: JSON.stringify(aiMessage.steps),
-    final_response: aiMessage.finalResponse
+    final_response: aiMessage.finalResponse,
+    llm_model: selectedModel.value
   })
   
   scrollToBottom()
 }
 
-const handleChatMode = async (userMessage, images = []) => {
+const handleChatMode = async (userMessage, images = [], modelForRequest = null) => {
+  const chatModel = modelForRequest ?? selectedModel.value
   const aiMessage = {
     id: Date.now() + 1,
     isUser: false,
@@ -3926,7 +4198,8 @@ const handleChatMode = async (userMessage, images = []) => {
     time: new Date().toLocaleTimeString(),
     understanding: '...',
     steps: [],
-    finalResponse: ''
+    finalResponse: '',
+    llmModel: chatModel
   }
   
   messages.value.push(aiMessage)
@@ -3945,7 +4218,7 @@ const handleChatMode = async (userMessage, images = []) => {
       signal: chatStopSignal,
       body: JSON.stringify({
         inputMessage: userMessage,
-        model: selectedModel.value,
+        model: chatModel,
         projectId: currentProjectId.value || props.projectId,
         images: images || [],
         locale: localeForApi()
@@ -4034,7 +4307,8 @@ const handleChatMode = async (userMessage, images = []) => {
     content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
     understanding: aiMessage.understanding,
     steps: JSON.stringify(aiMessage.steps),
-    final_response: aiMessage.finalResponse
+    final_response: aiMessage.finalResponse,
+    llm_model: chatModel
   })
 }
 
@@ -4134,6 +4408,8 @@ onMounted(() => {
   nextTick(() => {
     autoResize()
   })
+  // 拉取后端模型注册表（下拉框/能力/价格）
+  fetchModelOptions()
   // 加载会话消息
   loadSessionMessages()
   
@@ -5602,6 +5878,50 @@ watch(() => props.sessionId, (newSessionId) => {
   margin-left: 8px;
 }
 
+.grep-nav-list-root {
+  position: relative;
+}
+.grep-nav-list-shell {
+  position: relative;
+}
+.grep-nav-list-shell--collapsed .grep-nav-list-inner {
+  max-height: 132px;
+  overflow: hidden;
+}
+.grep-nav-list-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 44px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #fff);
+}
+.grep-nav-expand-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #4f46e5;
+  background: rgba(79, 70, 229, 0.06);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.grep-nav-expand-toggle:hover {
+  background: rgba(79, 70, 229, 0.12);
+}
+.grep-nav-expand-chevron {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
 /* 修改导航区域 */
 .modify-navigation-section {
   margin: 12px 0;
@@ -6352,6 +6672,15 @@ watch(() => props.sessionId, (newSessionId) => {
 .model-icon--ernie {
   width: 16px;
   height: 16px;
+}
+
+/* 模型选择器 */
+.model-select {
+  min-width: 140px;
+}
+
+.model-select option {
+  padding: 4px 8px;
 }
 </style>
 

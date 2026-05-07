@@ -15,6 +15,7 @@ from sqlalchemy import Result
 
 from config import Config
 from .dashscope_compat import get_dashscope_compat_client
+from .prompt_log import maybe_log_llm_chat_kwargs
 
 
 def _log_compat_stream_first(
@@ -54,6 +55,10 @@ def _delta_content(delta) -> Optional[str]:
     return None
 
 
+def _norm_qwen_model_id(s: Optional[str]) -> str:
+    return (s or "").strip().lower().replace("_", "-")
+
+
 class QwenLLM:
     def _supports_deep_thinking(self) -> bool:
         """只对明确支持 enable_thinking 的模型启用深度思考策略。"""
@@ -76,10 +81,12 @@ class QwenLLM:
                 f"用户任务：{t}"
             )
             client = get_dashscope_compat_client()
-            resp = client.chat.completions.create(
-                model="qwen-max",
-                messages=[{"role": "user", "content": judge_prompt}],
-            )
+            _judge_kw = {
+                "model": "qwen-max",
+                "messages": [{"role": "user", "content": judge_prompt}],
+            }
+            maybe_log_llm_chat_kwargs("qwen", _judge_kw, tag="assess_task_difficulty")
+            resp = client.chat.completions.create(**_judge_kw)
             out = (resp.choices[0].message.content or "").strip().lower()
             if "hard" in out:
                 return "hard"
@@ -116,6 +123,8 @@ class QwenLLM:
     def _thinking_enabled_for(self, text: str) -> bool:
         if getattr(self, "force_disable_thinking", False):
             return False
+        if self._is_qwen_thinking_disabled_for_model():
+            return False
         if self.enable_thinking:
             return True
         model = (self.model or "").strip().lower()
@@ -128,6 +137,25 @@ class QwenLLM:
             if mode == "never":
                 return False
             return self._assess_task_difficulty(text) == "hard"
+        return False
+
+    def _is_qwen_thinking_disabled_for_model(self) -> bool:
+        """名单内模型不启用 thinking（含自动难度开的 qwen-max / glm-5 分支）。"""
+        raw = getattr(Config, "QWEN_THINKING_DISABLE_MODELS", "") or ""
+        raw = str(raw).strip()
+        if not raw:
+            return False
+        mid = _norm_qwen_model_id(self.model)
+        for part in raw.split(","):
+            pat = _norm_qwen_model_id(part)
+            if not pat:
+                continue
+            if pat.endswith("*"):
+                p = pat[:-1]
+                if p and mid.startswith(p):
+                    return True
+            elif mid == pat:
+                return True
         return False
 
     def __init__(self, model: str = None):
@@ -150,6 +178,10 @@ class QwenLLM:
                 self.enable_thinking = True
 
         print(f"[QWEN-LLM-INIT] 最终使用的模型：{self.model}（OpenAI 兼容 /chat/completions）")
+        if self._is_qwen_thinking_disabled_for_model():
+            print(
+                "[QWEN-LLM-INIT] 本模型在 QWEN_THINKING_DISABLE_MODELS 中，已关闭思考链（reasoning）"
+            )
 
         self.conversation_history = []
         self.executor = ThreadPoolExecutor(max_workers=3)
@@ -158,6 +190,14 @@ class QwenLLM:
         if self._oa is None:
             self._oa = get_dashscope_compat_client()
         return self._oa
+
+    def _apply_qwen_thinking_extra_body(
+        self, kwargs: Dict[str, Any], *, enable_thinking: bool
+    ) -> None:
+        if enable_thinking:
+            kwargs["extra_body"] = {"enable_thinking": True}
+        elif getattr(Config, "QWEN_EXPLICIT_DISABLE_THINKING_BODY", True):
+            kwargs["extra_body"] = {"enable_thinking": False}
 
     def _chat_create(
         self,
@@ -170,10 +210,14 @@ class QwenLLM:
         kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
         if max_tokens is not None and max_tokens > 0:
             kwargs["max_tokens"] = max_tokens
-        if enable_thinking:
-            kwargs["extra_body"] = {"enable_thinking": True}
+        self._apply_qwen_thinking_extra_body(kwargs, enable_thinking=enable_thinking)
         if stream:
             kwargs["stream"] = True
+        maybe_log_llm_chat_kwargs(
+            "qwen",
+            kwargs,
+            tag=f"_chat_create thinking={enable_thinking}",
+        )
         return self._get_client().chat.completions.create(**kwargs)
 
     def chat_completion_with_tools(
@@ -199,6 +243,8 @@ class QwenLLM:
         }
         if max_tokens is not None and max_tokens > 0:
             kwargs["max_tokens"] = max_tokens
+        self._apply_qwen_thinking_extra_body(kwargs, enable_thinking=False)
+        maybe_log_llm_chat_kwargs("qwen", kwargs, tag="chat_completion_with_tools")
         return self._get_client().chat.completions.create(**kwargs)
 
     def chat_completion_with_tools_stream(
@@ -224,6 +270,8 @@ class QwenLLM:
         }
         if max_tokens is not None and max_tokens > 0:
             kwargs["max_tokens"] = max_tokens
+        self._apply_qwen_thinking_extra_body(kwargs, enable_thinking=False)
+        maybe_log_llm_chat_kwargs("qwen", kwargs, tag="chat_completion_with_tools_stream")
         stream = self._get_client().chat.completions.create(**kwargs)
         for chunk in stream:
             yield chunk
@@ -232,9 +280,14 @@ class QwenLLM:
         """
         仅 messages、非流式；用于 FC 第二轮（user + assistant.tool_calls + tool + user）等，不传 tools。
         """
-        return self._get_client().chat.completions.create(
-            model=self.model, messages=messages, stream=False
-        )
+        _kw: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        self._apply_qwen_thinking_extra_body(_kw, enable_thinking=False)
+        maybe_log_llm_chat_kwargs("qwen", _kw, tag="chat_completion_messages")
+        return self._get_client().chat.completions.create(**_kw)
 
     async def parse_intent(
         self, user_input: str, history: list = None, locale: Optional[str] = None

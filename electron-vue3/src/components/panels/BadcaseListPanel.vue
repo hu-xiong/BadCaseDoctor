@@ -10,7 +10,7 @@
 
     <div class="content-toolbar">
       <div class="toolbar-left">
-        <button class="quick-create-btn" @click="createNewBadcase">
+        <button class="quick-create-btn" @click="handleCreateClick">
           {{ t('list.quickCreate', { type: listTypeLabel }) }}
         </button>
       </div>
@@ -84,8 +84,8 @@
           <!-- 待确认新建（create 沙箱）：暗绿显示新值，✓ 采纳 ✗ 拒绝 -->
           <div
             v-for="pc in (pendingCreates || [])"
-            :key="pc.tempId"
-            :data-create-id="pc.tempId"
+            :key="pc?.tempId"
+            :data-create-id="pc?.tempId"
             class="table-row pending-create-row"
             @click.stop
           >
@@ -112,9 +112,9 @@
               <span v-else class="assignee-text">{{ getAssigneeDisplayText(pc.preview?.assignee_id) }}</span>
             </div>
             <div class="row-date"><span class="date-text">{{ t('list.pendingConfirm') }}</span></div>
-            <div v-if="!pc.executed && confirmCreate && cancelCreate" class="row-actions" @click.stop>
-              <button class="btn-icon-approve" :title="t('list.approveCreate')" @click="confirmCreate(pc.tempId)">✓</button>
-              <button class="btn-icon-reject" :title="t('list.reject')" @click="cancelCreate(pc.tempId)">✗</button>
+            <div v-if="!pc?.executed && confirmCreate && cancelCreate" class="row-actions" @click.stop>
+              <button class="btn-icon-approve" :title="t('list.approveCreate')" @click="confirmCreate(pc?.tempId)">✓</button>
+              <button class="btn-icon-reject" :title="t('list.reject')" @click="cancelCreate(pc?.tempId)">✗</button>
             </div>
           </div>
           <div v-if="filteredBadcases.length === 0 && !(pendingCreates || []).length" class="empty-row">
@@ -122,10 +122,12 @@
           </div>
         </template>
         <template v-if="!badcaseLoading">
+        <!-- data-bug-id 必须为源表主键（Bug/BadCase/TestCase id）。同一 card 下多行若用 card_id 会重复，grep/高亮永远命中首行 -->
         <div
-          v-for="badcase in filteredBadcases"
+          v-for="badcase in ((filteredBadcases || []).filter(b => b && b.id))"
           :key="badcase.id"
           :data-bug-id="badcase.id"
+          :data-card-id="badcase.card_id ?? badcase.cardId ?? ''"
           class="table-row"
           :class="{
             selected: selectedTasks.includes(badcase.id),
@@ -201,7 +203,7 @@ export default {
   name: 'BadcaseListPanel',
   props: {
     // header（多标签工作区下由顶栏 Tab 展示计划名，可关闭长面包屑）
-    generateBreadcrumb: { type: Function, required: true },
+    generateBreadcrumb: { type: Function, default: () => () => [] },
     showLongBreadcrumb: { type: Boolean, default: true },
     currentPlanType: { type: String, default: 'badcase' },
     totalBadcases: { type: Number, default: 0 },
@@ -211,46 +213,52 @@ export default {
     selectedAssignee: { type: [String, Number], default: '' },
     selectedStatus: { type: String, default: '' },
     projectMembers: { type: Array, default: () => [] },
-    applyFilters: { type: Function, required: true },
-    refreshBadcases: { type: Function, required: true },
+    applyFilters: { type: Function, default: () => {} },
+    refreshBadcases: { type: Function, default: () => {} },
 
     // table
     badcaseLoading: { type: Boolean, default: false },
     filteredBadcases: { type: Array, default: () => [] },
     selectedTasks: { type: Array, default: () => [] },
     selectAll: { type: Boolean, default: false },
-    toggleSelectAll: { type: Function, required: true },
-    toggleTaskSelection: { type: Function, required: true },
+    toggleSelectAll: { type: Function, default: () => {} },
+    toggleTaskSelection: { type: Function, default: () => {} },
     // 兼容：历史上叫 editBadcase，但实际上适用于 BadCase/Bug/TestCase
     editBadcase: { type: Function, required: false, default: null },
     editItem: { type: Function, required: false, default: null },
     pendingModifications: { type: Object, default: () => ({}) },
     expandedDetailRows: { type: Array, default: () => [] },
-    hasDetailFieldModifications: { type: Function, required: true },
-    toggleDetailExpand: { type: Function, required: true },
-    isLastInConsecutiveGroup: { type: Function, required: true },
-    getConsecutiveGroupSize: { type: Function, required: true },
-    confirmModify: { type: Function, required: true },
-    cancelModify: { type: Function, required: true },
-    getBadcaseStatusText: { type: Function, required: true },
-    getAssigneeDisplayText: { type: Function, required: true },
+    hasDetailFieldModifications: { type: Function, default: () => false },
+    toggleDetailExpand: { type: Function, default: () => {} },
+    isLastInConsecutiveGroup: { type: Function, default: () => false },
+    getConsecutiveGroupSize: { type: Function, default: () => 1 },
+    confirmModify: { type: Function, default: () => {} },
+    cancelModify: { type: Function, default: () => {} },
+    getBadcaseStatusText: { type: Function, default: (s) => s },
+    getAssigneeDisplayText: { type: Function, default: (a) => a },
 
     // actions
-    createNewBadcase: { type: Function, required: true },
+    createNewBadcase: { type: Function, default: () => {} },
     /** 待确认新建（来自对话 create 沙箱） */
     pendingCreates: { type: Array, default: () => [] },
     confirmCreate: { type: Function, default: null },
     cancelCreate: { type: Function, default: null }
   },
-  emits: ['update:searchText', 'update:selectedAssignee', 'update:selectedStatus'],
-  setup(props) {
+  emits: ['update:searchText', 'update:selectedAssignee', 'update:selectedStatus', 'openCreate'],
+  setup(props, { emit }) {
     const { t } = useI18n()
     const listTypeLabel = computed(() => {
       if (props.currentPlanType === 'bug') return t('list.types.bug')
       if (props.currentPlanType === 'test_case') return t('list.types.testCase')
       return t('list.types.badcase')
     })
-    return { t, listTypeLabel }
+    
+    // 处理新建按钮点击
+    const handleCreateClick = () => {
+      emit('openCreate', props.currentPlanType)
+    }
+    
+    return { t, listTypeLabel, handleCreateClick }
   },
   data() {
     return {

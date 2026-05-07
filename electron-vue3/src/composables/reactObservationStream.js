@@ -84,15 +84,17 @@ export const buildStepResultSummary = (outputData, toolName, toolData) => {
     (typeof outer.error === 'string' && outer.error.trim()) ||
     ''
   if (combinedErr) return t('chat.stepErr', { msg: combinedErr })
-  if (tool === 'grep' || d.testcase_location || d.bug_location || d.badcase_analysis || d.plan_tree) {
+  if (tool === 'grep' || d.testcase_location || d.bug_location || d.badcase_analysis || d.card_location || d.plan_tree) {
     const tc = d.testcase_location?.length ?? 0
     const bugs = d.bug_location?.length ?? 0
     const bc = d.badcase_analysis?.length ?? 0
+    const cards = d.card_location?.length ?? 0
     if (d.summary && typeof d.summary === 'string') return d.summary.slice(0, 400)
     const parts = []
     if (tc) parts.push(t('chat.stepNTestcases', { n: tc }))
     if (bugs) parts.push(t('chat.stepNBugs', { n: bugs }))
     if (bc) parts.push(t('chat.stepNBadcases', { n: bc }))
+    if (cards) parts.push(t('chat.stepNCards', { n: cards }))
     if (d.plan_tree?.total_plans) parts.push(t('chat.stepNPlans', { n: d.plan_tree.total_plans }))
     return parts.length ? `${t('chat.stepLocatePrefix')}${parts.join(listSep)}` : t('chat.stepLocateDone')
   }
@@ -664,6 +666,12 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         }
         if (toolData.bug_location) {
           parts.push(`🔍 Bug: ${toolData.bug_location.length || 0}条`)
+        }
+        if (toolData.testcase_location?.length) {
+          parts.push(`📋 用例: ${toolData.testcase_location.length}条`)
+        }
+        if (toolData.card_location?.length) {
+          parts.push(`🗂️ 卡片: ${toolData.card_location.length}条`)
         }
         summaryText = parts.join(' | ')
       }

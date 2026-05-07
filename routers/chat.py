@@ -10,8 +10,18 @@ from agents.redis_agent import RedisAgent
 from agents.scriptAgent import scriptAgengt
 from agents.bug_management_agent import BugManagementAgent
 from llm.factory import get_llm
+from llm.model_registry import choose_auto_model
 
 chat_bp = Blueprint('chat', __name__)
+
+def _resolve_auto_model(model_name: str | None, *, has_images: bool) -> str | None:
+    m = (model_name or "").strip()
+    if not m:
+        return None
+    ml = m.lower()
+    if ml == "auto":
+        return choose_auto_model(has_images=has_images)
+    return m
 
 
 @chat_bp.route('/chat', methods=['POST'])
@@ -21,7 +31,7 @@ def chat_stream():
     user_input = data.get("inputMessage", "")
     images = data.get("images") or []
     project_id = data.get("projectId")
-    model_name = data.get("model")
+    model_name = _resolve_auto_model(data.get("model"), has_images=bool(images))
     ui_locale = data.get("locale") or data.get("ui_locale")
 
     if images:

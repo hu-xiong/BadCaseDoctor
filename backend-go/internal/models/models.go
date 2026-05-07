@@ -83,7 +83,6 @@ type Plan struct {
 	ID          uint      `gorm:"primary_key" json:"id"`
 	Name        string    `gorm:"size:100;not null" json:"name"`
 	Description string    `gorm:"type:text" json:"description"`
-	PlanType    string    `gorm:"size:20;not null" json:"plan_type"`
 	StartDate   time.Time `json:"start_date"`
 	EndDate     time.Time `json:"end_date"`
 	Progress    float64   `gorm:"default:0.0" json:"progress"`

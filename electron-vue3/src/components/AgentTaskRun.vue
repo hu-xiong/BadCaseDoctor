@@ -228,17 +228,42 @@
                 <span class="agent-grep-nav-title">{{ grepNavSectionTitle(s.grepNavigation.items) }}</span>
                 <span class="agent-grep-nav-count">{{ t('chat.navRecords', { n: s.grepNavigation.items.length }) }}</span>
               </summary>
-              <div class="agent-grep-nav-list">
-                <button
-                  v-for="(navItem, ni) in s.grepNavigation.items"
-                  :key="ni"
-                  type="button"
-                  class="agent-grep-nav-item"
-                  @click="emit('grep-bug-click', navItem)"
+              <div class="agent-grep-nav-list-wrap">
+                <div
+                  class="agent-grep-nav-list-shell"
+                  :class="{ 'is-collapsed': grepNavStepListCollapsed(s, i) }"
                 >
-                  <span class="agent-grep-nav-icon" aria-hidden="true">➤</span>
-                  <span class="agent-grep-nav-item-title">{{ grepNavItemTitle(navItem) }}</span>
-                  <span v-if="navItem.plan_name" class="agent-grep-nav-plan">{{ navItem.plan_name }}</span>
+                  <div class="agent-grep-nav-list-inner">
+                    <button
+                      v-for="(navItem, ni) in s.grepNavigation.items"
+                      :key="ni"
+                      type="button"
+                      class="agent-grep-nav-item"
+                      @click="emit('grep-bug-click', navItem)"
+                    >
+                      <span class="agent-grep-nav-icon" aria-hidden="true">➤</span>
+                      <span class="agent-grep-nav-item-title">{{ grepNavItemTitle(navItem) }}</span>
+                      <span v-if="navItem.plan_name" class="agent-grep-nav-plan">{{ navItem.plan_name }}</span>
+                    </button>
+                  </div>
+                  <div
+                    v-if="grepNavStepListCollapsed(s, i)"
+                    class="agent-grep-nav-list-fade"
+                    aria-hidden="true"
+                  />
+                </div>
+                <button
+                  v-if="grepNavNeedsCollapseForStep(s)"
+                  type="button"
+                  class="agent-grep-nav-expand"
+                  @click.stop="toggleGrepNavStepExpand(i)"
+                >
+                  <span>{{
+                    grepNavStepListExpanded(i) ? t('chat.navCollapseList') : t('chat.navExpandAll')
+                  }}</span>
+                  <span class="agent-grep-nav-expand-chevron" aria-hidden="true">{{
+                    grepNavStepListExpanded(i) ? '▾' : '▸'
+                  }}</span>
                 </button>
               </div>
             </details>
@@ -272,7 +297,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onUnmounted, computed } from 'vue'
+import { ref, watch, onUnmounted, computed, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
 import todoListIcon from '../assets/todo-list-icon.svg'
@@ -355,7 +380,12 @@ const showPlanMemoBlock = computed(
 const grepNavSectionTitle = (items) => {
   if (!items?.length) return t('chat.grepJumpList')
   const ts = [...new Set(items.map((i) => (i?.target || 'bug').toString().toLowerCase()))]
-  const labelKey = { bug: 'chat.navLabelBug', badcase: 'chat.navLabelBadcase', testcase: 'chat.navLabelTestcase' }
+  const labelKey = {
+    bug: 'chat.navLabelBug',
+    badcase: 'chat.navLabelBadcase',
+    testcase: 'chat.navLabelTestcase',
+    card: 'chat.navLabelCard'
+  }
   if (ts.length === 1) {
     const k = ts[0]
     return t('chat.grepJumpTo', { type: t(labelKey[k] || 'chat.navLabelBug') })
@@ -364,6 +394,18 @@ const grepNavSectionTitle = (items) => {
 }
 
 const grepNavItemTitle = (navItem) => (navItem && (navItem.title || navItem.bug_title)) || ''
+
+/** 步骤内 grep 导航：条数多时默认收起 + 底部渐变，与 SimpleChatPanel 一致 */
+const GREP_NAV_COLLAPSE_AFTER = 5
+const grepNavStepExpandedMap = reactive({})
+const grepNavNeedsCollapseForStep = (s) =>
+  (s?.grepNavigation?.items?.length || 0) > GREP_NAV_COLLAPSE_AFTER
+const grepNavStepListExpanded = (stepIdx) => !!grepNavStepExpandedMap[stepIdx]
+const grepNavStepListCollapsed = (s, stepIdx) =>
+  grepNavNeedsCollapseForStep(s) && !grepNavStepListExpanded(stepIdx)
+const toggleGrepNavStepExpand = (stepIdx) => {
+  grepNavStepExpandedMap[stepIdx] = !grepNavStepExpandedMap[stepIdx]
+}
 
 const planIcon = (s) => {
   if (s.status === 'completed') return '✅'
@@ -1828,11 +1870,53 @@ const showLogBlock = (s, i = 0) => {
   color: #93c5fd;
 }
 
-.agent-grep-nav-list {
+.agent-grep-nav-list-wrap {
   padding: 4px 8px 8px;
+}
+.agent-grep-nav-list-shell {
+  position: relative;
+}
+.agent-grep-nav-list-shell.is-collapsed .agent-grep-nav-list-inner {
+  max-height: 120px;
+  overflow: hidden;
+}
+.agent-grep-nav-list-inner {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.agent-grep-nav-list-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, rgba(15, 23, 42, 0.92));
+}
+.agent-grep-nav-expand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.12);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.agent-grep-nav-expand:hover {
+  background: rgba(59, 130, 246, 0.22);
+}
+.agent-grep-nav-expand-chevron {
+  font-size: 10px;
+  opacity: 0.9;
 }
 
 .agent-grep-nav-item {

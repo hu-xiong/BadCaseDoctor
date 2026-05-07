@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" width="200" height="60">
+  <defs>
+    <linearGradient id="mysqlGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00758f"/>
+      <stop offset="100%" style="stop-color:#00a8cc"/>
+    </linearGradient>
+  </defs>
+  <!-- MySQL Dolphin -->
+  <g transform="translate(10, 5)">
+    <!-- Dolphin body -->
+    <path d="M35 25 Q45 15 55 20 Q65 25 70 35 Q75 45 65 50 Q55 55 45 50 Q35 45 30 35 Q25 25 35 25" 
+          fill="url(#mysqlGrad)"/>
+    <!-- Dolphin tail -->
+    <path d="M30 35 Q20 30 15 35 Q10 40 15 45 Q20 40 30 40" 
+          fill="url(#mysqlGrad)"/>
+    <!-- Dolphin fin -->
+    <path d="M50 30 Q55 25 60 30 Q55 32 50 30" 
+          fill="#004d5c"/>
+    <!-- Eye -->
+    <circle cx="62" cy="32" r="2" fill="white"/>
+  </g>
+  <!-- MySQL Text -->
+  <text x="95" y="40" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#00758f">
+    MySQL
+  </text>
+</svg>

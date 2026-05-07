@@ -304,6 +304,13 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
           aiMessage.thinkReasoningDraft = (aiMessage.thinkReasoningDraft || '') + pieceVisible
           aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + pieceVisible
           scheduleReasoningTypewriter(aiMessage)
+          // 有 reasoning 时自动展开（避免“最后隐藏/折叠导致看不到”）
+          try {
+            const vis = String(pieceVisible || '').replace(/[\u200B-\u200D\uFEFF\u2060]/g, '').trim()
+            if (vis && aiMessage.thoughtCollapsed === true) aiMessage.thoughtCollapsed = false
+          } catch {
+            // ignore
+          }
         } else if (inThinkDraftPhase && sc === 'content') {
           aiMessage.thinkContentDraft = (aiMessage.thinkContentDraft || '') + pieceVisible
           aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + pieceVisible

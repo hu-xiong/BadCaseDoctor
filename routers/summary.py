@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterator, List
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from llm.factory import get_llm
+from config import Config
 
 
 summary_bp = Blueprint("summary", __name__, url_prefix="/api/summary")
@@ -118,6 +119,13 @@ def generate_summary():
     """
     data = request.get_json(silent=True) or {}
     model_name = (data.get("model") or "").strip()
+    if model_name.lower() == "auto":
+        # summary 不涉及图片；auto 回退到“默认 provider 的默认模型”
+        model_name = (
+            Config.QIANFAN_MODEL
+            if (getattr(Config, "DEFAULT_LLM", "") or "").strip().lower() == "qianfan"
+            else Config.DASHSCOPE_MODEL
+        )
     turns = data.get("turns") or []
     meta: Dict[str, Any] = data.get("meta") or {}
     use_stream = _coerce_bool(data.get("stream"), default=True)

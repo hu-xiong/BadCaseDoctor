@@ -125,6 +125,7 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     return {}
   }
   if (stepEvent.event === 'running_summary_done') {
+    aiMessage.unifiedSummaryLoading = false
     if (stepEvent.version != null) aiMessage.runningSummaryVersion = stepEvent.version
     return {}
   }

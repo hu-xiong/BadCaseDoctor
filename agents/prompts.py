@@ -48,6 +48,7 @@ REACT_SYSTEM_STATIC = """<system>
 
 **决策规则：**
 - 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）
+- **仅查看**卡片/Bug/用例详情、用户未要求改字段时：用 grep（或已有 observation 里的列表）直接回答，**不要**调用 modify 当「读详情」
 - create/modify 预览用 confirm=false，禁止直接落库
 - 目标已达成则 execute=false，tool 留空
 - 纯聊天/问候场景：execute=false，不调用工具
@@ -55,10 +56,12 @@ REACT_SYSTEM_STATIC = """<system>
 - 不确定参数时可简写，服务端会补全
 
 **modify 工具参数格式（重要）：**
-- target: "bug" 或 "badcase" 或 "testcase"
+- target: "bug" 或 "badcase" 或 "testcase"（须与**真实记录类型**一致）
+- **禁止从卡片标题推断 target**：标题里出现「testcase」「Bug」「badcase」等字样**不等于**类型；须以 grep 结果中的 **Card.source_type / navigation.merged_from_legacy / bug_list·testcase_list 的类型字段**或当前迭代视图类型为准。**合并导航若 target=card**，modify 请传 **card_id**（与服务端 Card 表一致），不要把标题里的英文误判成 testcase。
 - target_id: 单条记录的 ID（整数）
 - target_ids: 多条同一修改时传 ID 数组，如 [9,8]，**一次调用**批量预览（与「各调一次 modify」等价但 UI 稳定为一张卡片多条 diff）
 - modifications: {"字段名": "新值"}  # 必须嵌套在 modifications 里！
+- **禁止误写 title**：用户用语义里的 Bug/卡片名称（如「一个测试的bug」）**只做定位**，除非用户明确说「改标题/重命名/标题改为」等，否则 **modifications 不要包含 title**。改状态/优先级/负责人时只传对应字段；否则服务端会把 Bug.title 镜像到左侧卡片标题，造成「卡片标题被改掉」。
 - confirm: false  # 预览模式
 </system>
 
@@ -381,16 +384,37 @@ class ReactPromptTemplates:
             for k, v in context.items()
         ])
         
+        # 顺序：固定规则与 examples 置于前半段，便于 LLM 前缀缓存命中；用户请求/工具/上下文置尾（每轮变化）
         return f"""{_gate_block}任务规划：据用户请求生成 Todo（≤3 条），每项对应一个工具。
 
 <system>
 两段（顺序固定）1) 规划说明 **简短** 中文（目标与约束 + 路径与步骤，**逐步对应每个 item，含后续 modify 等**；**不写**泛泛风险与备选，除非重大不确定性），无 XML。2) 仅 <todo_list>…</todo_list>，每步 <item>。
 
 规则：有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。技能匹配则跟技能流（阈值约 0.3）。
-查询→一步 grep。修改→两步 grep 再 modify（禁止只 modify）。创建→一步 create。browser_test→一步。本机命令→一步 terminal（command 必填）。
-grep：keywords=记录**标题原文**；勿把「期望结果/步骤」等**字段名**当 keywords；target∈bug/badcase/testcase/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
+查询→一步 grep。仅**查看**详情（未要求修改）→一步 grep 或基于已有 grep 结果直接回答，**禁止**为展示而调用 modify。修改→两步 grep 再 modify（禁止只 modify）。创建→一步 create。browser_test→一步。本机命令→一步 terminal（command 必填）。
+grep：keywords 可按记录标题原文；**多词默认 OR**（任一词命中）；须全部词命中时由环境 GREP_KEYWORDS_MATCH_MODE=and（一般不写）。**主界面迭代列表即 Card 表**；泛查、不确定类型时用 **target=all**（同时检索 Card + 各源表）；**用户明确说「查卡片/查询卡片/卡片列表/迭代卡片」等时，必须用 target=card（只查 Card 表标题与描述），禁止用 bug/badcase/testcase/all**，否则会混入源表口径。**勿**在无明确用户意图时填 target=bug/badcase/testcase（会跳过 Card 表导致「无卡片命中」）。勿把「期望结果/步骤」等字段名当 keywords；target∈bug/badcase/testcase/card/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
 modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
 </system>
+
+<examples>
+<good_example><request>界面</request><todo_list><item>grep 界面相关 Bug，keywords=界面，target=bug</item></todo_list></good_example>
+<good_example><request>改登录 Bug 关闭</request><todo_list><item>grep keywords=登录，target=bug</item><item>modify 状态 closed</item></todo_list></good_example>
+<good_example><request>全部 BadCase 关闭</request><todo_list><item>grep keywords=""，target=badcase</item><item>modify 批量 closed</item></todo_list></good_example>
+<good_example><request>查迭代里的卡片</request><todo_list><item>grep keywords="" 或用户给出的关键词，target=card，plan_id=当前迭代</item></todo_list></good_example>
+<good_example><request>查看一下测试bug的卡片</request><todo_list><item>grep keywords=测试bug，target=card，plan_id=当前迭代；根据 card_location 向用户说明详情，勿再调用 modify</item></todo_list></good_example>
+<good_example><request>改创建测试用例7负责人33</request><todo_list><item>grep keywords=创建测试用例7，target=testcase</item><item>modify 负责人=33</item></todo_list></good_example>
+<good_example><request>新建登录失败 Bug</request><todo_list><item>create 标题登录失败</item></todo_list></good_example>
+<good_example><request>测登录</request><todo_list><item>browser_test 登录</item></todo_list></good_example>
+<bad_example><request>界面</request><todo_list><item>界面</item></todo_list>原因：应 grep</bad_example>
+<bad_example><request>改 Bug 状态</request><todo_list><item>仅 modify</item></todo_list>原因：缺 grep</bad_example>
+<bad_example><request>看看某张卡片详情</request><todo_list><item>grep …</item><item>modify 预览拉详情</item></todo_list>原因：只读查看应用 grep 返回字段作答，禁止用 modify 当查询</bad_example>
+</examples>
+
+<format>第二段仅 <todo_list><item>…</item></todo_list></format>
+请先掌握上文 <system> 与 <examples>；再结合文末本轮输入生成 Todo。先规划说明再 <todo_list>：
+
+---
+本轮输入（以下内容每轮变化）
 
 <user_request>
 {user_input}
@@ -405,19 +429,6 @@ modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。�
 {context_str if context_str else "无"}
 </context>
 
-<examples>
-<good_example><request>界面</request><todo_list><item>grep 界面相关 Bug，keywords=界面，target=bug</item></todo_list></good_example>
-<good_example><request>改登录 Bug 关闭</request><todo_list><item>grep keywords=登录，target=bug</item><item>modify 状态 closed</item></todo_list></good_example>
-<good_example><request>全部 BadCase 关闭</request><todo_list><item>grep keywords=""，target=badcase</item><item>modify 批量 closed</item></todo_list></good_example>
-<good_example><request>改创建测试用例7负责人33</request><todo_list><item>grep keywords=创建测试用例7，target=testcase</item><item>modify 负责人=33</item></todo_list></good_example>
-<good_example><request>新建登录失败 Bug</request><todo_list><item>create 标题登录失败</item></todo_list></good_example>
-<good_example><request>测登录</request><todo_list><item>browser_test 登录</item></todo_list></good_example>
-<bad_example><request>界面</request><todo_list><item>界面</item></todo_list>原因：应 grep</bad_example>
-<bad_example><request>改 Bug 状态</request><todo_list><item>仅 modify</item></todo_list>原因：缺 grep</bad_example>
-</examples>
-
-<format>第二段仅 <todo_list><item>…</item></todo_list></format>
-先规划说明再 <todo_list>：
 现在请生成 Todo 列表：
 """
 
@@ -732,9 +743,10 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 9. create 工具：**params 中 confirm 必须为 false**（仅生成预览与 diff）；禁止在对话首轮直接落库，采纳由用户在左侧列表完成。
 
 ⭐ 人类式先检索再阅读（modify 前必读）：
-- 流程：先 grep 检索出候选列表（badcase_list/bug_list/testcase_location），对候选做 rerank，**分高的**作为 target_id；支持 BadCase、Bug、测试用例( testcase )。
-- 若 context 中尚无列表，必须先 grep：grep(keywords="用户话里的标题或关键词", target="badcase"或"bug"或"testcase"或"all", project_id=当前项目)。可选 plan_id 限定当前迭代。grep 支持关键词拆分模糊匹配。
-- 选 target_id 时：系统会对候选按与关键词的匹配度 rerank，分高的即可；修改目标类型由 target 指定（bug/badcase/testcase）。
+- 流程：先 grep 检索出候选列表（badcase_analysis/bug_location/testcase_location/**card_location**），对候选做 rerank，**分高的**作为 target_id；支持 BadCase、Bug、测试用例、**统一卡片 Card**。
+- **只读「查看详情」禁止误用 modify**：用户仅「查看/看看/展示/介绍下」某张**卡片**或某条 Bug/BadCase/用例的详情、**没有说要改字段或状态**时，**只用 grep 返回结果中的条目作答**（优先 **card_location** 及其中 title、plan、类型相关字段），整理成对话里的结构化说明即可。**禁止**为「展示详情」再调用 modify（modify 用于**修改**预览，不是只读查询接口）。信息不够时允许**再 grep** 缩小关键词或 target，仍不要用 modify 充当读详情。
+- 若 context 中尚无列表，必须先 grep：grep(keywords="用户话里的标题或关键词", target="badcase"|"bug"|"testcase"|"card"|"all", project_id=当前项目)。**多词默认 OR**；**用户只要「查卡片/卡片列表」→ target 必须是 card**；**只要统一卡片层、不要 bug/源表并行结果时，必须用 target=card**（避免与 target=all 下历史 Bug 行重复）。**target=all** 时服务端会将同源「源表行 + Card」**合并为一条卡片导航**。**务必传 plan_id=当前侧栏选中的迭代**，否则命中面过大；导航列表会去重并限条数，仍以 plan 限定为准。
+- 选 target_id 时：系统会对候选按与关键词的匹配度 rerank，分高的即可；修改目标类型 **target 必须与源实体一致**。grep 命中的是**卡片**时优先传 **card_id**；**切勿**仅因标题含「testcase」就把 target 设为 testcase。
 - 字段命名统一（避免混淆）：**答案用 answer**，**正确答案用 correct_answer**（由 modify 工具映射到数据库字段）。
 - 不要在 params 里编造数字 id；若 context 中已有上一步 grep 结果，你可写出 target_id；**若不确定，params 可只含 target / 或留空，真实执行以服务端补参为准**（见下条）。
 
@@ -1129,15 +1141,23 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
         todo: str = "",
         scheduled_plan: Optional[List[str]] = None,
         first_round_task_plan: bool = False,
+        ui_locale: Optional[str] = None,
     ) -> str:
         """三段式：一次输出 observation + thinking + decision（供流式主路径使用）。"""
+        # 工具列表按 id 排序：同一项目内各轮 prompt 前缀更易字节级一致（利于服务端前缀缓存）
+        _tools_for_prompt = sorted(
+            (available_tools or [])[:20],
+            key=lambda t: str((t or {}).get("name") or ""),
+        )
         tools_info = "\n".join([
             f"  <tool id=\"{t['name']}\" description=\"{t['description'][:150]}\"/>"
-            for t in available_tools[:20]
+            for t in _tools_for_prompt
         ])
+        # context 键按名字排序，避免 dict 插入顺序变化导致每轮字符串漂移
+        _ctx_items = sorted((context or {}).items(), key=lambda kv: str(kv[0]))[:15]
         context_str = "\n".join([
             f"  - {k}: {str(v)[:300]}"
-            for k, v in list((context or {}).items())[:15]
+            for k, v in _ctx_items
         ]) if context else "无"
 
         if scheduled_plan:
@@ -1181,7 +1201,13 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
                 else prev_observation
             )
             try:
-                raw = json.dumps(_obs_for_json, ensure_ascii=False, indent=2, default=str)
+                raw = json.dumps(
+                    _obs_for_json,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                    sort_keys=True,
+                )
                 obs_str = raw[:8000] + ("…" if len(raw) > 8000 else "")
             except Exception:
                 obs_str = str(prev_observation)[:6000]
@@ -1196,15 +1222,27 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
                     _params_safe,
                     ensure_ascii=False,
                     default=str,
+                    sort_keys=True,
                 )
             except Exception:
                 _ap = str(prev_action.get("params", {}))
             action_str = f"工具: {prev_action.get('tool')}，参数: {_ap}"
 
+        if is_english_locale(ui_locale):
+            _unified_lang_block = """**UI language (strict):** The user is on the **English** UI. All human-readable prose inside `<observation>`, `<thinking>`, `<reason>`, and any `<task_plan>` step lines must be **clear English**. Keep tool names, XML tag names, JSON keys, code, and direct quotes of non-English user text as needed; do not add English-only scaffolding if the user wrote in another language unless you are explaining that quote.
+
+"""
+        else:
+            _unified_lang_block = """**界面语言（须严格遵守）：** 当前为**简体中文**界面。`<observation>`、`<thinking>`、`<reason>` 以及 `<task_plan>` 内步骤说明等**所有面向人的自然语言**须使用**简体中文**；勿用「Thinking Process」「Analyze the Request」等英文小节标题或英文模板化推理（工具名、XML 标签名、JSON 字段名、代码、用户原文引用除外）。
+
+"""
+
+        # 段落顺序：先固定长度模板（system / user_request / tools / format），再追加每轮变化的字段，
+        # 使同一用户请求下多轮请求的可缓存前缀更长（利于 DeepSeek 等前缀/KV 缓存命中）。
         return f"""你是 ReAct 任务执行引擎。一次输出三段：观察分析 → 思考规划 → 决策行动。
 
 <system>
-**输出前自检（在心里完成即可）：** 三个根标签是否按顺序写全、每个标签是否都有闭合、`<params>` 是否为合法 JSON；再开始打字。
+{_unified_lang_block}**输出前自检（在心里完成即可）：** 三个根标签是否按顺序写全、每个标签是否都有闭合、`<params>` 是否为合法 JSON；再开始打字。
 
 **三段式输出格式（顺序固定，缺一不可）：**
 
@@ -1249,6 +1287,22 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 {user_input}
 </user_request>
 
+<available_tools>
+{tools_info}
+</available_tools>
+
+<format>
+<decision>
+<goal_done>true 或 false</goal_done>
+<execute>true 或 false</execute>
+<tool>工具名（execute=false 时可为空）</tool>
+<params>{{"key": "value"}}</params>
+<reason>一句决策理由（须与 goal_done、execute 一致）</reason>
+</decision>
+</format>
+
+以下为本轮动态上下文（轮次、待办、项目上下文、上一轮动作与观察；每轮都会变，须结合决策）：
+
 <round_index>{round_idx + 1}</round_index>
 
 <current_todo>
@@ -1266,20 +1320,6 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 <prev_observation>
 {obs_str}
 </prev_observation>
-
-<available_tools>
-{tools_info}
-</available_tools>
-
-<format>
-<decision>
-<goal_done>true 或 false</goal_done>
-<execute>true 或 false</execute>
-<tool>工具名（execute=false 时可为空）</tool>
-<params>{{"key": "value"}}</params>
-<reason>一句决策理由（须与 goal_done、execute 一致）</reason>
-</decision>
-</format>
 
 请按三段式输出（observation → thinking → decision）：
 """
@@ -1556,12 +1596,13 @@ def parse_xml_decision(text: Any) -> dict:
             result['reason'] = '检测到搜索参数，自动执行 search 工具'
             return result
         
-        if 'test_case' in text or 'steps' in text:
+        # 仅 test_case 明确时才自动映射为 browser_test；单独出现 steps 时常见于「执行步骤/计划」JSON，易误判
+        if "test_case" in text:
             # 这是 browser_test 工具的参数
-            result['execute'] = True
-            result['tool'] = 'browser_test'
-            result['params'] = text
-            result['reason'] = '检测到测试参数，自动执行 browser_test 工具'
+            result["execute"] = True
+            result["tool"] = "browser_test"
+            result["params"] = text
+            result["reason"] = "检测到测试参数，自动执行 browser_test 工具"
             return result
         
         if 'sql' in text or 'query_type' in text:

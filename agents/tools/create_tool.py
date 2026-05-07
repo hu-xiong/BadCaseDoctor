@@ -399,7 +399,6 @@ class CreateTool(BaseTool):
         validated = {
             'name': fields.get('name', ''),
             'description': fields.get('description', ''),
-            'plan_type': fields.get('plan_type', 'bug'),
             'status': fields.get('status', 'active'),
             'project_id': project_id,
             'parent_id': fields.get('parent_id'),
@@ -407,6 +406,8 @@ class CreateTool(BaseTool):
             'start_date': fields.get('start_date'),
             'end_date': fields.get('end_date')
         }
+
+        # 计划表字段已收敛：不再接收/使用“类型”字段。
         
         if not validated['name']:
             raise ValueError('计划名称不能为空')
@@ -540,19 +541,61 @@ class CreateTool(BaseTool):
             # 线程池落库同样需要 Flask app context
             with flask_app.app_context():
                 if target == 'bug':
-                    from app import Bug
+                    from app import Bug, Card, CardType
                     bug = Bug(**fields)
                     self.db.add(bug)
                     self.db.commit()
                     self.db.refresh(bug)
+                    # 卡片层适配：创建 Card 映射（source_type/source_id），并回写 bug.card_id（若列存在）
+                    try:
+                        card = Card(
+                            title=getattr(bug, "title", "") or fields.get("title", ""),
+                            type=CardType.BUG,
+                            priority=getattr(bug, "priority", None) or fields.get("priority", "p3"),
+                            assignee_id=getattr(bug, "assignee_id", None),
+                            project_id=int(project_id),
+                            creator_id=getattr(bug, "creator_id", None) or int(fields.get("creator_id") or 0) or 0,
+                            plan_id=getattr(bug, "plan_id", None),
+                            description=getattr(bug, "description", None) or fields.get("description"),
+                            source_type="bug",
+                            source_id=int(bug.id),
+                        )
+                        self.db.add(card)
+                        self.db.commit()
+                        self.db.refresh(card)
+                        try:
+                            setattr(bug, "card_id", int(card.id))
+                            self.db.commit()
+                        except Exception:
+                            self.db.rollback()
+                    except Exception:
+                        self.db.rollback()
                     return bug.id
                 
                 elif target == 'badcase':
-                    from app import BadCase
+                    from app import BadCase, Card, CardType
                     badcase = BadCase(**fields)
                     self.db.add(badcase)
                     self.db.commit()
                     self.db.refresh(badcase)
+                    # 卡片层适配：创建 Card 映射（source_type/source_id）
+                    try:
+                        card = Card(
+                            title=getattr(badcase, "title", "") or fields.get("title", ""),
+                            type=CardType.BADCASE,
+                            priority=getattr(badcase, "priority", None) or fields.get("priority", "p3"),
+                            assignee_id=None,
+                            project_id=int(project_id),
+                            creator_id=getattr(badcase, "creator_id", None) or int(fields.get("creator_id") or 0) or 0,
+                            plan_id=getattr(badcase, "plan_id", None),
+                            description=getattr(badcase, "base_problem", None) or fields.get("description"),
+                            source_type="badcase",
+                            source_id=int(badcase.id),
+                        )
+                        self.db.add(card)
+                        self.db.commit()
+                    except Exception:
+                        self.db.rollback()
                     return badcase.id
                 
                 elif target == 'plan':
@@ -564,11 +607,29 @@ class CreateTool(BaseTool):
                     return plan.id
                 
                 elif target == 'testcase':
-                    from app import TestCase
+                    from app import TestCase, Card, CardType
                     testcase = TestCase(**fields)
                     self.db.add(testcase)
                     self.db.commit()
                     self.db.refresh(testcase)
+                    # 卡片层适配：创建 Card 映射（source_type/source_id）
+                    try:
+                        card = Card(
+                            title=getattr(testcase, "title", "") or fields.get("title", ""),
+                            type=CardType.TESTCASE,
+                            priority=getattr(testcase, "priority", None) or fields.get("priority", "P3"),
+                            assignee_id=getattr(testcase, "assignee_id", None),
+                            project_id=int(project_id),
+                            creator_id=getattr(testcase, "creator_id", None) or int(fields.get("creator_id") or 0) or 0,
+                            plan_id=getattr(testcase, "plan_id", None),
+                            description=getattr(testcase, "remark", None) or fields.get("description"),
+                            source_type="testcase",
+                            source_id=int(testcase.id),
+                        )
+                        self.db.add(card)
+                        self.db.commit()
+                    except Exception:
+                        self.db.rollback()
                     return testcase.id
                 
                 return None
@@ -631,7 +692,6 @@ class CreateTool(BaseTool):
             'requirement_id': '关联需求',
             'remaining_time': '剩余工时',
             # Plan 字段
-            'plan_type': '计划类型',
             'start_date': '开始日期',
             'end_date': '结束日期',
         }

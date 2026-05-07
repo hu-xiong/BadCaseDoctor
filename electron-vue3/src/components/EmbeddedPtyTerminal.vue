@@ -220,6 +220,7 @@ const props = defineProps({
   sshConfig: { type: Object, default: () => ({}) },
   workingDirectory: { type: String, default: '' },
   projectId: { type: [Number, String], default: null },
+  fontSize: { type: Number, default: 14 },
   railResizeTick: { type: Number, default: 0 },
   railDragging: { type: Boolean, default: false },
   /** 与 v-show 配合：从隐藏切到显示时宿主宽高才非 0，需重新 fit，否则 xterm 黑屏 */
@@ -300,6 +301,10 @@ const openAiComposerPrefill = inject('openAiComposerPrefill', null)
 const termRegistry = inject('termRegistry', null)
 const termHistoryRegistry = inject('termHistoryRegistry', null)
 const termCommandRegistry = inject('termCommandRegistry', null)
+console.log('[EmbeddedPtyTerminal] termCommandRegistry injected:', termCommandRegistry !== null, 'csid:', props.clientSessionId)
+const onTermFontSizeApplied = inject('onTermFontSizeApplied', null)
+const onRequestAutocomplete = inject('onRequestAutocomplete', null)
+const onTermCommandExecuted = inject('onTermCommandExecuted', null)
 
 const addToChatVisible = ref(false)
 const addToChatLeft = ref(0)
@@ -371,6 +376,55 @@ let webglLoadStarted = false
 /** mountVscodeIntegratedTerminal 完成前就可能收到 term_output（尤其新建标签）；此前直接丢弃会导致永久无提示符。 */
 let pendingPtyOutput = []
 const PENDING_PTY_OUTPUT_MAX_BYTES = 256 * 1024
+
+// 从输出缓冲区解析“最近一次执行的命令”（用于自动更新右侧会话标题，不依赖 stdin onData）
+let detectCmdTimer = null
+let lastDetectedCmd = ''
+
+function clearDetectCmdTimer() {
+  if (detectCmdTimer != null) {
+    try {
+      clearTimeout(detectCmdTimer)
+    } catch {
+      /* ignore */
+    }
+    detectCmdTimer = null
+  }
+}
+
+function tryDetectLastCommandFromBuffer() {
+  if (!term || !onTermCommandExecuted || typeof onTermCommandExecuted !== 'function') return
+  try {
+    const buf = term.buffer?.active
+    if (!buf) return
+    const cy = Number(buf.cursorY)
+    const start = Number.isFinite(cy) ? Math.max(0, cy - 40) : Math.max(0, buf.length - 40)
+    const end = Number.isFinite(cy) ? cy : buf.length - 1
+    for (let y = end; y >= start; y -= 1) {
+      const line = buf.getLine(y)
+      if (!line || line.isWrapped) continue
+      const text = String(line.translateToString?.() || '').trimEnd()
+      if (!text) continue
+      // PowerShell/cmd/*nix：统一用 normalizeCommandText 剥离提示符/控制残片/长前缀
+      const cmd = normalizeCommandText(text)
+      if (cmd && cmd !== lastDetectedCmd) {
+        lastDetectedCmd = cmd
+        onTermCommandExecuted({ client_session_id: props.clientSessionId, command: cmd, source: 'user' })
+        return
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function scheduleDetectCommandFromBuffer() {
+  clearDetectCmdTimer()
+  detectCmdTimer = setTimeout(() => {
+    detectCmdTimer = null
+    tryDetectLastCommandFromBuffer()
+  }, 120)
+}
 
 /** PS 常在报错前单发 0x0D 回到行首再写错误，盖住「PS> 命令」；若下一包像 PS 错误则在写入前插 0x0A。 */
 let ptyHoldLoneCr = false
@@ -816,6 +870,23 @@ function attachIntegratedTerminalKeyChordHandler() {
       ev.preventDefault()
       ev.stopPropagation()
       openFind()
+      return false
+    }
+
+    // Ctrl+Space：打开补全（使用 Workspace 层候选）
+    if ((ev.ctrlKey || ev.metaKey) && ev.code === 'Space') {
+      ev.preventDefault()
+      ev.stopPropagation()
+      try {
+        if (onRequestAutocomplete && typeof onRequestAutocomplete === 'function') {
+          onRequestAutocomplete({
+            client_session_id: props.clientSessionId,
+            prefix: pendingCommand || ''
+          })
+        }
+      } catch {
+        /* ignore */
+      }
       return false
     }
 
@@ -1324,6 +1395,8 @@ function onPtyTermOutput(payload) {
     writePtyStdoutTransformed(u8)
     scheduleCursorTrace('post-term-output')
     flushWebglAttach('term_output')
+    // 输出回显后尝试从 buffer 里解析最近命令（适配 Win32 输入模式等 stdin 不可见的情况）
+    scheduleDetectCommandFromBuffer()
   } catch (e) {
     badcasePtyLog('term_output write error', e)
   }
@@ -1378,6 +1451,21 @@ function setupTerminal() {
   }).then(({ term: xterm, fit: f, serializeAddon: sa }) => {
     term = xterm
     fit = f
+    // 字体大小：在首次 mount 后立即应用；后续由 watch 触发
+    try {
+      if (props.fontSize && typeof term.setOption === 'function') {
+        term.setOption('fontSize', props.fontSize)
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (onTermFontSizeApplied && typeof onTermFontSizeApplied === 'function') {
+        onTermFontSizeApplied({ client_session_id: props.clientSessionId, fontSize: props.fontSize })
+      }
+    } catch {
+      /* ignore */
+    }
     serializeAddon = sa
     searchAddon = null
     hasSerializeAddon.value = !!sa
@@ -1450,53 +1538,270 @@ function setupTerminal() {
       uaWindows: navIsWindowsHost()
     })
 
-    // 记录用户当前输入的命令，供"执行最近命令"使用
+    // 记录用户当前输入的命令，供“自动会话标题/历史”等使用
+    // 注意：Win32 输入模式下 onData 可能主要是控制序列，因此以 onKey 为主，onData 仅做兜底/调试
     let pendingCommand = ''
-    term.onData((data) => {
-      // 记录输入字符（可打印字符、退格、Enter）
-      if (data === '\r') {
-        // Enter：保存命令到历史
-        const cmd = pendingCommand.trim()
-        if (cmd && termCommandRegistry) {
-          termCommandRegistry.pushCommand(props.clientSessionId, cmd)
+    let _lastSubmitAt = 0
+    let _dbgOnDataN = 0
+    const _DBG_ONDATA_MAX = 20
+
+    function dbgPreviewOnData(str) {
+      const s = String(str || '')
+      let out = ''
+      for (let i = 0; i < Math.min(s.length, 80); i += 1) {
+        const ch = s[i]
+        const code = ch.charCodeAt(0)
+        if (ch === '\r') out += '\\\\r'
+        else if (ch === '\n') out += '\\\\n'
+        else if (ch === '\t') out += '\\\\t'
+        else if (code === 0x1b) out += '\\\\e'
+        else if (code < 32) out += `\\\\x${code.toString(16).padStart(2, '0')}`
+        else out += ch
+      }
+      if (s.length > 80) out += '…'
+      return out
+    }
+
+    // 过滤掉 ANSI 控制序列（CSI/OSC/DCS 等）与不可见控制字符，只保留纯文本命令
+    // 参考：ECMA-48 / xterm 控制序列；此处宁可“多删”控制码，避免把残片（如 [[0]）写入最近命令/会话标题
+    function filterCommand(raw) {
+      const s = String(raw || '')
+      if (!s) return ''
+      // CSI: ESC [ ... final(@-~)
+      // OSC: ESC ] ... (BEL | ESC \)
+      // DCS/SOS/PM/APC: ESC P/X/^/_ ... ESC \
+      // 以及一些单字节 ESC 序列（尽量覆盖常见场景）
+      let withoutAnsi = s
+        .replace(
+          /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_].*?(?:\x1b\\)|[()][0-2AB]|[=><])/gs,
+          ''
+        )
+        // 去掉剩余的 C0 控制字符（保留 \t 也没意义，命令里通常不需要）
+        .replace(/[\x00-\x1F\x7F]/g, '')
+
+      // 若上游把 ESC(0x1b) 吃掉了，可能会残留“裸 CSI/OSC 碎片”（例如 `[[0m`、`[?25l`、`]0;title`）。
+      // 这些应当主要出现在字符串开头；这里仅剥离“前缀”以避免误删用户命令里合法的 `[`。
+      try {
+        for (let guard = 0; guard < 12; guard += 1) {
+          const before = withoutAnsi
+          // 裸 CSI（无 ESC）：[ ... final
+          withoutAnsi = withoutAnsi.replace(/^(?:\[[0-?]*[ -/]*[@-~])+/s, '')
+          // 裸 OSC（无 ESC）：] ... (BEL | ST)；ST 用 `\` 近似表示（极少见）
+          withoutAnsi = withoutAnsi.replace(/^\][^\x07\\]*(?:\x07|\\)/s, '')
+          // 常见残片：连续的 `[`（如 `[[0`）
+          withoutAnsi = withoutAnsi.replace(/^(?:\[{2,}[0-9;?]*)+/s, '')
+          if (withoutAnsi === before) break
         }
-        // 延迟读取 buffer（避免在 onData 回调中直接访问 term.buffer 导致状态冲突）
-        if (termHistoryRegistry) {
-          nextTick(() => {
-            try {
-              const buf = term.buffer.active
-              const cursorY = buf.cursorY
-              let prevDir = null
-              for (let y = cursorY - 1; y >= 0; y--) {
-                const line = buf.getLine(y)
-                if (!line || line.isWrapped) continue
-                const text = line.translateToString().trim()
-                if (!text) continue
-                // 匹配 Windows PowerShell 提示符: PS C:\Users\...>
-                const psPrompt = text.match(/PS ([A-Za-z]:[^\s>]+)/)
-                if (psPrompt) {
-                  prevDir = psPrompt[1]
-                  break
-                }
-              }
-              if (prevDir) termHistoryRegistry.pushDir(props.clientSessionId, prevDir)
-              // 注册命令位置到滚动位置栈
-              const termScrollRegistry = globalThis.__termScrollRegistry__
-              if (termScrollRegistry) {
-                termScrollRegistry.pushCommandPos(props.clientSessionId, cursorY)
-              }
-            } catch (e) {
-              // ignore
-            }
-          })
+      } catch {
+        /* ignore */
+      }
+      return withoutAnsi
+    }
+
+    function normalizeCommandText(raw) {
+      let s = filterCommand(raw).trim()
+      if (!s) return ''
+      // 去掉提示符前缀（如果命令被错误地带上了 prompt）
+      s = s.replace(/^(?:\([^)]*\)\s*)*PS\s+[A-Za-z]:[^\r\n>]*>\s*/i, '')
+      s = s.replace(/^[A-Za-z]:[^\r\n>]*>\s*/i, '')
+      s = s.replace(/^[#$>]\s+/, '')
+      // 若出现“链式启动命令”（常见：cd ...; node ... / && ...），只保留最后一段，避免最近命令/标题被长前缀污染
+      try {
+        const parts = s.split(/(?:\s*&&\s*|\s*;\s*)/g).map((x) => String(x || '').trim()).filter(Boolean)
+        if (parts.length > 1) s = parts[parts.length - 1]
+        // 连续的 `cd ...` / `pushd ...` 前缀（某些拼接会出现多段），也尝试剥离到最后一段
+        for (let guard = 0; guard < 4; guard += 1) {
+          const before = s
+          s = s.replace(/^(?:cd|pushd)\s+[^&;]+(?:\s*&&\s*|\s*;\s*)/i, '').trim()
+          if (s === before) break
         }
+      } catch {
+        /* ignore */
+      }
+      return s.trim()
+    }
+
+    function submitPendingCommand(reason) {
+      const now = Date.now()
+      const rawCmd = pendingCommand.trim()
+      // 过滤掉 CSI/ESC 序列 + 裸残片 + 可能混入的提示符，只保留实际输入的命令
+      const cmd = normalizeCommandText(rawCmd)
+      // 详细日志：显示每个字符的 charCode
+      const charCodes = Array.from(rawCmd).map(c => c.charCodeAt(0)).join(',')
+      console.log('[submitPendingCommand]', reason, 'rawCmd:', JSON.stringify(rawCmd), 'len:', rawCmd.length, 'codes:', charCodes, 'filtered:', JSON.stringify(cmd))
+
+      // 可能出现：onKey 只捕获到 Enter，但字符在 onData 才到。
+      // 若这里先提交了空命令并刷新 _lastSubmitAt，会把紧随其后的真实命令提交“防抖”掉。
+      if (!cmd) {
         pendingCommand = ''
-      } else if (data === '\x7f') {
-        // Backspace
-        pendingCommand = pendingCommand.slice(0, -1)
-      } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-        // 可打印字符
-        pendingCommand += data
+        return
+      }
+      // 防抖：某些平台 Enter 可能触发 \r\n 两次回调
+      if (now - _lastSubmitAt < 120) {
+        pendingCommand = ''
+        return
+      }
+      _lastSubmitAt = now
+      if (cmd && termCommandRegistry) {
+        termCommandRegistry.pushCommand(props.clientSessionId, cmd)
+      }
+      try {
+        if (cmd && onTermCommandExecuted && typeof onTermCommandExecuted === 'function') {
+          console.log('[EmbeddedPtyTerminal] submit:', reason, props.clientSessionId, 'cmd=', cmd)
+          onTermCommandExecuted({ client_session_id: props.clientSessionId, command: cmd, source: 'user' })
+        } else if (!cmd) {
+          console.log('[EmbeddedPtyTerminal] submit:', reason, props.clientSessionId, '(empty cmd)')
+        }
+      } catch {
+        /* ignore */
+      }
+
+      // 延迟读取 buffer（避免在 onData 回调中直接访问 term.buffer 导致状态冲突）
+      if (termHistoryRegistry) {
+        nextTick(() => {
+          try {
+            const buf = term.buffer.active
+            const cursorY = buf.cursorY
+            let prevDir = null
+            for (let y = cursorY - 1; y >= 0; y--) {
+              const line = buf.getLine(y)
+              if (!line || line.isWrapped) continue
+              const text = line.translateToString().trim()
+              if (!text) continue
+              // 匹配 Windows PowerShell 提示符: PS C:\Users\...>
+              const psPrompt = text.match(/PS ([A-Za-z]:[^\s>]+)/)
+              if (psPrompt) {
+                prevDir = psPrompt[1]
+                break
+              }
+            }
+            if (prevDir) termHistoryRegistry.pushDir(props.clientSessionId, prevDir)
+            // 注册命令位置到滚动位置栈
+            const termScrollRegistry = globalThis.__termScrollRegistry__
+            if (termScrollRegistry) {
+              termScrollRegistry.pushCommandPos(props.clientSessionId, cursorY)
+            }
+          } catch (e) {
+            // ignore
+          }
+        })
+      }
+
+      pendingCommand = ''
+    }
+
+    // 优先 onKey：它提供 xterm 处理后的字符（更接近用户真实输入）
+    try {
+      if (typeof term.onKey !== 'function') {
+        console.warn('[EmbeddedPtyTerminal] term.onKey is not a function; key capture disabled', props.clientSessionId)
+      }
+      let _dbgOnKeyN = 0
+      const _DBG_ONKEY_MAX = 30
+      term.onKey(({ key, domEvent }) => {
+        if (_dbgOnKeyN < _DBG_ONKEY_MAX) {
+          _dbgOnKeyN += 1
+          console.log(
+            '[EmbeddedPtyTerminal] onKey#' + _dbgOnKeyN,
+            props.clientSessionId,
+            dbgPreviewOnData(key),
+            domEvent?.code || domEvent?.key || ''
+          )
+        }
+        const k = typeof key === 'string' ? key : ''
+      
+        if (!k) return
+        // Win32 Input Mode: 解析 CSI 序列提取实际字符
+        // 格式: \e[<VK>;<SC>;<UC>;<KD>;<CS>;<RS>_  (VK=虚拟键码, SC=扫描码, UC=Unicode码点)
+        const win32Match = k.match(/^\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_$/)
+        if (win32Match) {
+          const vk = parseInt(win32Match[1], 10)
+          const uc = parseInt(win32Match[3], 10)
+          const kd = parseInt(win32Match[4], 10) // 1=按下, 0=释放
+          // 只处理按下事件
+          if (kd !== 1) return
+          // Enter 键 (VK_RETURN = 13)
+          if (vk === 13) {
+            submitPendingCommand('Win32Key_Enter')
+            return
+          }
+          // Backspace (VK_BACK = 8)
+          if (vk === 8) {
+            pendingCommand = pendingCommand.slice(0, -1)
+            return
+          }
+          // 可打印字符 (Unicode 码点 >= 32)
+          if (uc >= 32) {
+            pendingCommand += String.fromCharCode(uc)
+          }
+          return
+        }
+        // 普通模式处理
+        // Enter
+        if (k === '\r' || k === '\n') {
+          submitPendingCommand('onKey')
+          return
+        }
+        // Backspace（不同平台可能是 \x7f 或 \b）
+        if (k === '\x7f' || k === '\b') {
+          pendingCommand = pendingCommand.slice(0, -1)
+          return
+        }
+        // Ctrl+U 清行
+        if (domEvent && (domEvent.ctrlKey || domEvent.metaKey) && (domEvent.code === 'KeyU' || domEvent.key === 'u')) {
+          pendingCommand = ''
+          return
+        }
+        // 可打印字符（包含空格）
+        if (k.length === 1 && k.charCodeAt(0) >= 32) {
+          pendingCommand += k
+        }
+      })
+    } catch {
+      /* ignore */
+    }
+
+    // onData：保留作兜底（某些环境 onKey 不完整）+ 调试
+    term.onData((data) => {
+      if (_dbgOnDataN < _DBG_ONDATA_MAX) {
+        _dbgOnDataN += 1
+        console.log('[EmbeddedPtyTerminal] onData#' + _dbgOnDataN, props.clientSessionId, dbgPreviewOnData(data))
+      }
+      // 记录输入字符（可打印字符、退格、Enter）
+      // 说明：xterm 的 onData 可能一次回调多个字符（如一次回调 "ls"、或 "\r\n"），这里逐字符解析更稳
+      // 注意：Win32 Input Mode 下，字符和 Enter 都是 CSI 序列（如 \e[68;32;100;1;0;1_），需要跳过
+      const s = typeof data === 'string' ? data : ''
+      for (let i = 0; i < s.length; i += 1) {
+        const ch = s[i]
+        // Win32 Input Mode: 检测 CSI 序列（以 ESC[ 开头，以 _ 结尾）
+        if (ch === '\x1b' && s[i + 1] === '[') {
+          // 跳过整个 CSI 序列
+          const endIdx = s.indexOf('_', i)
+            if (endIdx !== -1) {
+            // 检查是否是 Enter 键的 CSI 序列 (ESC[13;...)
+            const seq = s.slice(i, endIdx + 1)
+            if (seq.startsWith('\x1b[13;')) {
+              submitPendingCommand('Win32_Enter')
+            }
+            i = endIdx
+            continue
+          }
+        }
+        if (ch === '\r') {
+          submitPendingCommand('\\r')
+          continue
+        }
+        if (ch === '\n') {
+          submitPendingCommand('\\n')
+          continue
+        }
+        if (ch === '\x7f') {
+          pendingCommand = pendingCommand.slice(0, -1)
+          continue
+        }
+        const code = ch.charCodeAt(0)
+        if (code >= 32) {
+          pendingCommand += ch
+        }
       }
       emitPtyTermInput(data)
     })
@@ -1583,6 +1888,12 @@ function connectFlow() {
 let onWinResize = null
 
 onMounted(() => {
+  // 用于确认 HMR/缓存是否命中最新组件代码（仅一次）
+  try {
+    console.log('[EmbeddedPtyTerminal] mounted:', props.clientSessionId, 'mode=', props.mode)
+  } catch {
+    /* ignore */
+  }
   setupTerminal()
 
   try {
@@ -1656,7 +1967,10 @@ onMounted(() => {
         if (!sig || !socket || !socket.connected || sig.csid !== props.clientSessionId) return
         const line = String(sig.text || '')
         if (!line) return
-        const nl = line.endsWith('\n') ? line : `${line}\r`
+        // 统一为“至少一个换行触发执行”，但避免重复追加导致 `\r\r`（清屏会出现双提示符）
+        const nl = /(\r\n|\n|\r)$/.test(line) ? line : `${line}\r`
+
+ 
         emitPtyTermInput(nl)
       },
       { deep: true }
@@ -1689,6 +2003,28 @@ onMounted(() => {
     termHostVisibilityObserver.observe(termHost.value)
   }
 })
+
+watch(
+  () => props.fontSize,
+  (n) => {
+    if (!term) return
+    const next = Number(n)
+    if (!Number.isFinite(next) || next < 8) return
+    try {
+      term.setOption('fontSize', next)
+    } catch {
+      /* ignore */
+    }
+    nextTick(() => fitNowRecoverRender())
+    try {
+      if (onTermFontSizeApplied && typeof onTermFontSizeApplied === 'function') {
+        onTermFontSizeApplied({ client_session_id: props.clientSessionId, fontSize: next })
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+)
 
 watch(() => props.railResizeTick, () => scheduleLayoutWithRecover(80))
 
@@ -1740,6 +2076,7 @@ onBeforeUnmount(() => {
     }
     cursorTraceRaf = 0
   }
+  clearDetectCmdTimer()
   pendingPtyOutput = []
   resetPtyStdoutCrHold()
   clearPtyLayoutResizeEmitTimer()

@@ -702,6 +702,11 @@ export default {
       type: [String, Number],
       default: null
     },
+    /** 创建时关联的卡片ID，用于类型校验 */
+    card_id: {
+      type: [String, Number],
+      default: null
+    },
     edit: {
       type: Boolean,
       default: false
@@ -715,30 +720,34 @@ export default {
       default: false
     }
   },
-  emits: ['close'],
+  emits: ['close', 'titleLoaded'],
   setup(props, { emit }) {
     const route = useRoute()
     const router = useRouter()
 
+    const toPositiveIntOrNull = (v) => {
+      const raw = Array.isArray(v) ? v[0] : v
+      if (raw == null || raw === '') return null
+      // 兼容父组件误传 ref 对象（极少见），优先取 value
+      const x = (typeof raw === 'object' && raw !== null && 'value' in raw) ? raw.value : raw
+      const n = parseInt(String(x), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+
     /** 与路由、props 同步解析项目 ID（避免 NaN、数组 query、路由复用时丢参） */
     const readProjectIdFromRoute = () => {
-      const q = route.query.project_id
-      const rawQ = Array.isArray(q) ? q[0] : q
-      if (rawQ != null && rawQ !== '') {
-        const n = Number(rawQ)
-        if (Number.isFinite(n) && n > 0) return n
-      }
-      if (props.project_id != null && props.project_id !== '') {
-        const n = Number(props.project_id)
-        if (Number.isFinite(n) && n > 0) return n
-      }
-      return null
+      return (
+        toPositiveIntOrNull(route.query.project_id) ??
+        toPositiveIntOrNull(props.project_id)
+      )
     }
+
 
     const testcaseId = props.id ? Number(props.id) : (route.query.id ? Number(route.query.id) : null)
     const isEdit = !!testcaseId
 
     const openDiagnosticTerminal = inject('openDiagnosticTerminal', null)
+    const testcaseDraftPreset = inject('testcaseDraftPreset', null)
 
     const loading = ref(false)
     const saving = ref(false)
@@ -788,6 +797,34 @@ export default {
       document_type: '',
       attachments: [],
       comment: ''
+    })
+
+    const _escHtml = (s) =>
+      String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    watch(
+      () => testcaseDraftPreset?.value?.token ?? 0,
+      async (tok) => {
+        if (!tok || !testcaseDraftPreset?.value?.description) return
+        if (isEdit) return
+        const block = String(testcaseDraftPreset.value.description).trim()
+        if (!block) return
+        const fragment = `<p><strong>【终端关联】</strong></p><pre style="white-space:pre-wrap;word-break:break-all;">${_escHtml(block)}</pre>`
+        await nextTick()
+        const cur = (testcase.remark || '').trim()
+        testcase.remark = cur ? `${cur}<p><br></p>${fragment}` : fragment
+      }
+    )
+
+    /** 当前页面应使用的 project_id（编辑/新建/嵌入都兜底） */
+    const currentProjectId = computed(() => {
+      return (
+        toPositiveIntOrNull(route.query.project_id) ??
+        toPositiveIntOrNull(props.project_id) ??
+        toPositiveIntOrNull(testcase.project_id)
+      )
     })
 
     const currentUser = ref(null)
@@ -906,8 +943,8 @@ export default {
         if (response.data.success) {
           const allPlans = response.data.plans || []
           console.log('fetchProjectPlans: 所有计划:', allPlans)
-          const plans = allPlans.filter(p => isTestCasePlanType(p.plan_type))
-          console.log('fetchProjectPlans: 过滤后的test_case类型计划:', plans)
+          const plans = allPlans
+          console.log('fetchProjectPlans: 计划列表:', plans)
           testcasePlans.value = [
             { value: 'unplanned', label: '未计划', icon: '📋' },
             ...plans.map(p => ({
@@ -927,7 +964,7 @@ export default {
       const result = []
       const walk = (nodes) => {
         ;(nodes || []).forEach(p => {
-          if (isTestCasePlanType(p.plan_type)) result.push(p)
+          result.push(p)
           if (p.children && p.children.length) walk(p.children)
         })
       }
@@ -1139,7 +1176,7 @@ export default {
           
           // 递归处理计划树
           const processPlanTree = (plans) => {
-            return plans.filter(p => p.plan_type === 'bug').map(p => ({
+            return plans.map(p => ({
               value: p.id.toString(),
               label: p.name,
               icon: '📋',
@@ -1255,8 +1292,15 @@ export default {
 
       saving.value = true
       try {
-        // 处理 related_defects：提取 bug id 数组
-        const relatedDefectIds = testcase.related_defects.map(d => d.id)
+        // 处理 related_defects：提取 bug id 数组（兼容元素为对象/数字/字符串，且过滤空值）
+        const relatedDefectIds = Array.isArray(testcase.related_defects)
+          ? testcase.related_defects
+              .filter(Boolean)
+              .map(d => (typeof d === 'object' ? d?.id : d))
+              .filter(v => v != null && String(v).trim() !== '')
+              .map(v => parseInt(v, 10))
+              .filter(v => Number.isFinite(v) && v > 0)
+          : []
         
         // 处理 assignee：取第一个作为 assignee_id
         const assigneeId = testcase.assignee && testcase.assignee.length > 0 
@@ -1280,9 +1324,17 @@ export default {
           const pid = parseInt(testcase.plan)
           if (testcasePlans.value.some(p => p.value !== 'unplanned' && parseInt(p.value) === pid)) planId = pid
         }
+        // 兜底：嵌入在 ProjectDetail 的创建 Tab 时可能只通过 props.plan_id 传入
+        if (!isEdit && (planId == null)) {
+          const fallbackPid = props.plan_id != null && props.plan_id !== '' ? parseInt(String(props.plan_id), 10) : null
+          if (fallbackPid && !isNaN(fallbackPid)) {
+            planId = fallbackPid
+          }
+        }
 
-        // 创建时 project_id：关联项目时用选中的，否则用路由的 project_id；后端必填
-        const rawProjectId = testcase.associate_project ? (testcase.project_id || projectId) : projectId
+        // 创建/编辑时 project_id：统一走兜底解析，避免引用未定义变量 projectId
+        const pidFallback = currentProjectId.value
+        const rawProjectId = testcase.associate_project ? (testcase.project_id || pidFallback) : pidFallback
         const finalProjectId = rawProjectId != null && rawProjectId !== '' ? parseInt(rawProjectId) : null
         if (!isEdit && (!finalProjectId || isNaN(finalProjectId))) {
           alert('请选择所属项目，或从项目详情页进入新建')
@@ -1305,9 +1357,13 @@ export default {
           estimated_time: testcase.estimated_time,
           version: testcase.version,
           plan_id: planId,
-          project_id: isEdit ? (projectId || testcase.project_id) : finalProjectId,
+          project_id: isEdit ? (pidFallback || testcase.project_id) : finalProjectId,
           assignee_id: assigneeId || null,
           execution_result: (testcase.execution_result && String(testcase.execution_result).trim()) ? testcase.execution_result : null
+        }
+        // 新建时添加卡片ID，用于后端校验卡片类型
+        if (!isEdit && props.card_id) {
+          payload.card_id = parseInt(props.card_id)
         }
 
         if (isEdit) {
@@ -1342,7 +1398,8 @@ export default {
         return
       }
       
-      router.push(`/project-detail/${projectId}`)
+      const pid = currentProjectId.value || testcase.project_id
+      router.push(`/project-detail/${pid || ''}`)
     }
     
     // 确认字段修改
@@ -1399,13 +1456,14 @@ export default {
       const target = pendingDiff.value?.target || 'testcase'
       const newValue = pendingDiff.value.modifications[field]?.new
 
-      if (!projectId || !targetId) {
-        console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId, targetId })
+      const pid = currentProjectId.value || testcase.project_id
+      if (!pid || !targetId) {
+        console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId: pid, targetId })
         return
       }
 
       try {
-        const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
+        const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${pid}/modify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -1447,7 +1505,7 @@ export default {
     onMounted(async () => {
       console.log('=== NewTestCase onMounted 开始 ===')
       console.log('route.query:', route.query)
-      console.log('projectId:', projectId)
+      console.log('props.project_id:', props.project_id, 'props.plan_id:', props.plan_id)
       console.log('testcase.project_id:', testcase.project_id)
       
       loading.value = true
@@ -1473,13 +1531,12 @@ export default {
         await loadProjectWorkspace(testcase.project_id)
 
         // 新建且带 plan_id：优先 route.query，其次 props.plan_id（嵌入在 ProjectDetail 的 Tab 新建）
-        if (!isEdit && (route.query.plan_id || props.plan_id)) {
-          const rid = String(route.query.plan_id || props.plan_id)
-          const planIdNum = parseInt(rid, 10)
-          if (!isNaN(planIdNum)) {
-            testcase.plan = rid
-            testcase.plan_id = planIdNum
-            await ensurePlanOptionVisible(rid)
+        if (!isEdit) {
+          const pid = toPositiveIntOrNull(route.query.plan_id) ?? toPositiveIntOrNull(props.plan_id)
+          if (pid != null) {
+            testcase.plan = String(pid)
+            testcase.plan_id = pid
+            await ensurePlanOptionVisible(String(pid))
           }
         }
         
@@ -1565,6 +1622,10 @@ export default {
         console.error('加载失败:', error)
       } finally {
         loading.value = false
+        // 编辑模式下通知父组件更新Tab标题
+        if (isEdit.value && testcase.title) {
+          emit('titleLoaded', testcase.title)
+        }
         console.log('=== NewTestCase onMounted 完成 ===')
       }
     })
@@ -1612,6 +1673,10 @@ export default {
         console.error('watch id 加载测试用例失败:', e)
       } finally {
         loading.value = false
+        // 编辑模式下通知父组件更新Tab标题
+        if (isEdit.value && testcase.title) {
+          emit('titleLoaded', testcase.title)
+        }
       }
     }, { immediate: false })
 

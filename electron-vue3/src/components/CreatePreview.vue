@@ -73,7 +73,8 @@ const PREVIEW_LIST_KEYS = {
     'plan_id',
     'version'
   ]),
-  plan: new Set(['name', 'title', 'plan_type', 'status', 'priority', 'parent_id', 'start_date', 'end_date', 'cycle'])
+  // 计划“类型”字段已废弃，不再展示
+  plan: new Set(['name', 'title', 'status', 'priority', 'parent_id', 'start_date', 'end_date', 'cycle'])
 }
 
 const props = defineProps({
@@ -136,7 +137,6 @@ const getFieldLabel = (key) => {
     'priority': '优先级',
     'severity': '严重程度',
     'status': '状态',
-    'plan_type': '计划类型',
     'plan_id': '所属计划',
     'parent_id': '父计划',
     'assignee_id': '负责人',

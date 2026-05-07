@@ -176,6 +176,7 @@ from .locale_prompts import (
     react_unified_partial_max_rounds_message,
     react_unified_plan_step_skip_failures_message,
     react_summarize_grep_done_hits,
+    enrich_grep_observation_nl_with_plan_names,
     react_summarize_modify_done,
     react_summarize_tool_done_ok,
     react_executing_modify_about_to,
@@ -724,14 +725,14 @@ def _normalize_plan_rows_for_sse(plan_rows: List[Dict[str, Any]]) -> List[Dict[s
 
 
 def _grep_observation_empty_lists(observation: Dict[str, Any]) -> bool:
-    """grep locate 成功但三类列表均为空时视为无命中。"""
+    """grep locate 成功但四类工作项列表均为空时视为无命中。"""
     if not isinstance(observation, dict):
         return True
     data = observation.get("data") or {}
     if not isinstance(data, dict):
         return True
     n = 0
-    for k in ("bug_location", "badcase_analysis", "testcase_location"):
+    for k in ("bug_location", "badcase_analysis", "testcase_location", "card_location"):
         x = data.get(k)
         if isinstance(x, list):
             n += len(x)
@@ -2205,6 +2206,50 @@ class SimplifiedReActEngine:
             if isinstance(item, str):
                 yield item
 
+    async def _stream_llm_text_with_reasoning(self, prompt: str):
+        """
+        流式收集 LLM 输出（content + reasoning），边收边 yield 结构化事件：
+          {"type":"content","delta":"..."} / {"type":"reasoning","delta":"..."} / {"type":"error","message":"..."}
+        仅用于需要呈现 reasoning 的链路（如 unified 流）；避免改动旧调用方对 _stream_llm_text 的假设（只产出 str）。
+        """
+        q: asyncio.Queue = asyncio.Queue()
+        DONE = object()
+        main_loop = asyncio.get_running_loop()
+
+        def _sync_producer():
+            try:
+                for item in self._resolve_chat_stream_iter(prompt):
+                    if not isinstance(item, dict):
+                        continue
+                    t = item.get("type")
+                    if t == "content_delta":
+                        d = item.get("delta") or ""
+                        if d:
+                            asyncio.run_coroutine_threadsafe(
+                                q.put({"type": "content", "delta": str(d)}), main_loop
+                            )
+                    elif t == "reasoning_delta":
+                        d = item.get("delta")
+                        if isinstance(d, str) and d:
+                            asyncio.run_coroutine_threadsafe(
+                                q.put({"type": "reasoning", "delta": d}), main_loop
+                            )
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(
+                    q.put({"type": "error", "message": f"{e}"}), main_loop
+                )
+            finally:
+                asyncio.run_coroutine_threadsafe(q.put(DONE), main_loop)
+
+        threading.Thread(target=_sync_producer, daemon=True).start()
+
+        while True:
+            item = await q.get()
+            if item is DONE:
+                break
+            if isinstance(item, dict):
+                yield item
+
     async def _collect_llm_text_content_only(
         self, prompt: str, max_tokens: Optional[int] = None
     ) -> str:
@@ -2875,7 +2920,16 @@ class SimplifiedReActEngine:
 
             def _worker():
                 try:
-                    _use_co = stream_kind in ("observe", "summary")
+                    # 是否在该流阶段保留模型 reasoning_delta：
+                    # - 历史默认：observe/summary 走 content-only（会 force_disable_thinking），因此不会有 reasoning_delta
+                    # - 新策略：允许 observe/decide/think 呈现 reasoning（若模型支持），summary 仍默认 content-only
+                    _show_reasoning = (os.getenv("REACT_SHOW_REASONING", "1") or "1").strip().lower() not in (
+                        "0",
+                        "false",
+                        "no",
+                        "off",
+                    )
+                    _use_co = (stream_kind in ("summary",)) or (stream_kind == "observe" and not _show_reasoning)
                     _think_mt = (
                         react_think_max_tokens() if stream_kind == "think" else None
                     )
@@ -3018,6 +3072,16 @@ class SimplifiedReActEngine:
                         if step_index is not None:
                             ev['index'] = step_index
                         yield ev
+            # 流结束收口：显式通知前端本段 agent_thought/reasoning 已完成（用于收敛等待态/冻结耗时/自动折叠等）
+            # 注意：不同模型 reasoning/content 先后不一，靠“没新 token”会造成 UI 误判；用 done 事件更稳。
+            try:
+                if stream_kind in ("think", "decide", "observe"):
+                    ev_done: Dict[str, Any] = {"event": "agent_thought_done", "segment": stream_kind}
+                    if step_index is not None:
+                        ev_done["index"] = step_index
+                    yield ev_done
+            except Exception:
+                pass
             if stream_kind in _timing_kinds and not _reasoning_timing_sent_fb and _reasoning_buf_fb.strip():
                 if _t_first_reasoning_fb is not None:
                     duration_ms = int((time.time() - _t_first_reasoning_fb) * 1000)
@@ -3660,6 +3724,8 @@ class SimplifiedReActEngine:
             ver = int(state.get("version") or 0)
         except Exception:
             ver = 1
+        # 终局运行总览切片下发前有清空 reset + 分片间隔，前端先发 loading 避免长时间空白像「卡住」
+        yield {"event": "unified_summary_loading", "active": True}
         yield {"event": "running_summary_stream_reset", "version": ver}
         try:
             _slice = int((os.getenv("REACT_SUMMARY_STREAM_SLICE_CHARS") or "24").strip())
@@ -4039,10 +4105,23 @@ class SimplifiedReActEngine:
             if why:
                 return react_summarize_observation_nl_skipped_gate(why, loc)
             return react_summarize_observation_nl_skipped_generic(loc)
-        if isinstance(observation.get("summary"), str) and observation["summary"].strip():
-            return observation["summary"].strip()[:2000]
+        top_sum = observation.get("summary")
+        data_sum = (observation.get("data") or {}).get("summary") if isinstance(observation.get("data"), dict) else None
+        _data_dict = observation.get("data") if isinstance(observation.get("data"), dict) else {}
+        base_nl = None
+        for _s in (top_sum, data_sum):
+            if isinstance(_s, str) and _s.strip():
+                base_nl = _s.strip()
+                break
+        if base_nl is not None:
+            if (tool or "").lower() == "grep":
+                base_nl = enrich_grep_observation_nl_with_plan_names(base_nl, _data_dict, loc)
+            return base_nl[:2000]
         if isinstance(observation.get("message"), str) and observation["message"].strip():
-            return observation["message"].strip()[:2000]
+            msg = observation["message"].strip()
+            if (tool or "").lower() == "grep":
+                msg = enrich_grep_observation_nl_with_plan_names(msg, _data_dict, loc)
+            return msg[:2000]
         ok = observation.get("success")
         err = str(observation.get("error") or "").strip()
         if ok is False:
@@ -4059,8 +4138,22 @@ class SimplifiedReActEngine:
             tc_n = len(data.get("testcase_location") or []) if isinstance(data.get("testcase_location"), list) else 0
             n = bug_n + bc_n + tc_n
             if n == 0:
+                pt = data.get("plan_tree") or {}
+                try:
+                    plan_n = int(pt.get("total_plans") or 0)
+                except (TypeError, ValueError):
+                    plan_n = 0
+                if plan_n <= 0 and isinstance(pt.get("plans"), list):
+                    plan_n = len(pt["plans"])
+                has_plan_material = plan_n > 0 or data.get("plan_records_tree") is not None
+                if not has_plan_material:
+                    return react_summarize_grep_done_empty(loc)
+                ds = data.get("summary")
+                if isinstance(ds, str) and ds.strip():
+                    return enrich_grep_observation_nl_with_plan_names(ds.strip(), data, loc)[:2000]
                 return react_summarize_grep_done_empty(loc)
-            return react_summarize_grep_done_hits(n, bug_n, bc_n, tc_n, loc)
+            hit_nl = react_summarize_grep_done_hits(n, bug_n, bc_n, tc_n, loc)
+            return enrich_grep_observation_nl_with_plan_names(hit_nl, data, loc)
         if (tool or "").lower() == "modify":
             diff_n = len(observation.get("diff") or []) if isinstance(observation.get("diff"), list) else 0
             return react_summarize_modify_done(
@@ -4175,6 +4268,8 @@ class SimplifiedReActEngine:
         self._tool_task_event_buffer = []
         self.project_id = project_id
         self.plan_id = plan_id
+        # grep 纠偏：泛查时若模型窄化 target 会跳过 Card 表，导致「无卡片命中」
+        self._react_stream_user_input = user_input or ""
         self._index_pending_context(pending_diff_context or [])
         _t0 = time.time()
         _total_think_time = 0.0
@@ -4395,6 +4490,7 @@ class SimplifiedReActEngine:
                         todo="",
                         scheduled_plan=unified_plan_steps if unified_plan_steps else None,
                         first_round_task_plan=_unified_first_round_task_plan_enabled(),
+                        ui_locale=getattr(self, "_ui_locale", None),
                     )
                 )
                 yield {
@@ -4644,7 +4740,28 @@ class SimplifiedReActEngine:
                         "processType": PROCESS_TYPE_STREAMING,
                         "react_phase": REACT_PHASE_THINK,
                     }
-                    async for chunk in self._stream_llm_text(unified_prompt):
+                    async for it in self._stream_llm_text_with_reasoning(unified_prompt):
+                        if not isinstance(it, dict):
+                            continue
+                        if it.get("type") == "reasoning":
+                            d = it.get("delta") or ""
+                            if d:
+                                yield {
+                                    "event": "reasoning",
+                                    "content": str(d),
+                                    "react_phase": REACT_PHASE_THINK,
+                                    "index": round_idx,
+                                }
+                            continue
+                        if it.get("type") == "error":
+                            em = it.get("message") or "unknown"
+                            llm_parts.append(f"Error: {em}")
+                            break
+                        if it.get("type") != "content":
+                            continue
+                        chunk = it.get("delta") or ""
+                        if not chunk:
+                            continue
                         llm_parts.append(chunk)
                         for piece, d_pw in _think_san.feed(chunk):
                             for _ev in _emit_sanitizer_piece(piece, d_pw):
@@ -4693,7 +4810,28 @@ class SimplifiedReActEngine:
                     _think_sse_parts.clear()
                     _unified_seg = None
                     try:
-                        async for chunk in self._stream_llm_text(unified_prompt):
+                        async for it in self._stream_llm_text_with_reasoning(unified_prompt):
+                            if not isinstance(it, dict):
+                                continue
+                            if it.get("type") == "reasoning":
+                                d = it.get("delta") or ""
+                                if d:
+                                    yield {
+                                        "event": "reasoning",
+                                        "content": str(d),
+                                        "react_phase": REACT_PHASE_THINK,
+                                        "index": round_idx,
+                                    }
+                                continue
+                            if it.get("type") == "error":
+                                em = it.get("message") or "unknown"
+                                llm_parts.append(f"Error: {em}")
+                                break
+                            if it.get("type") != "content":
+                                continue
+                            chunk = it.get("delta") or ""
+                            if not chunk:
+                                continue
                             llm_parts.append(chunk)
                             for piece, d_pw in _think_san.feed(chunk):
                                 for _ev in _emit_sanitizer_piece(piece, d_pw):
@@ -4861,51 +4999,43 @@ class SimplifiedReActEngine:
                     yield {"event": "direct_reply_prepare", "active": True}
                     yield {"event": "summary_stream_reset"}
 
-                    _th0 = (parsed.get("thinking") or "").strip()
                     _sgap = _summary_stream_yield_gap_s()
                     _stream_parts: List[str] = []
-                    _from_thinking = bool(_th0) and not _unified_thinking_is_tool_meta_only(_th0)
-
-                    if _from_thinking:
-                        for _delta in _iter_direct_chat_reply_stream_chunks(_th0):
+                    # 纯闲聊不要把模型的「thinking」当成最终答案（用户会看到“任务理解/推理模板”而非直接回复）。
+                    # 一律走 chitchat 工具生成自然语言；若工具不可用再用 fallback。
+                    _ct = self.tools.get("chitchat")
+                    _got_body = False
+                    if _ct is not None and callable(getattr(_ct, "stream_execute", None)):
+                        try:
+                            async for _delta in _ct.stream_execute(message=user_input):
+                                if isinstance(_delta, str) and _delta:
+                                    _stream_parts.append(_delta)
+                                    yield {"event": "summary_stream", "delta": _delta}
+                            _got_body = bool("".join(_stream_parts).strip())
+                        except Exception as _ce:
+                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                print(f"[REACT-UNIFIED] chitchat 流式失败: {_ce}", flush=True)
+                    if not _got_body:
+                        _fallback = ""
+                        if _ct is not None:
+                            try:
+                                _obs = await _ct.execute(message=user_input)
+                                if isinstance(_obs, dict) and _obs.get("success"):
+                                    _fallback = (
+                                        (_obs.get("summary") or _obs.get("message") or "")
+                                        .strip()
+                                    )
+                            except Exception as _ce2:
+                                if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                    print(f"[REACT-UNIFIED] chitchat 兜底失败: {_ce2}", flush=True)
+                        if not _fallback:
+                            _fallback = _unified_chitchat_fallback_summary(llm_response, "")
+                        _stream_parts.clear()
+                        for _delta in _iter_direct_chat_reply_stream_chunks(_fallback):
                             _stream_parts.append(_delta)
                             yield {"event": "summary_stream", "delta": _delta}
                             if _sgap > 0:
                                 await asyncio.sleep(_sgap)
-                    else:
-                        _ct = self.tools.get("chitchat")
-                        _got_body = False
-                        if _ct is not None and callable(getattr(_ct, "stream_execute", None)):
-                            try:
-                                async for _delta in _ct.stream_execute(message=user_input):
-                                    if isinstance(_delta, str) and _delta:
-                                        _stream_parts.append(_delta)
-                                        yield {"event": "summary_stream", "delta": _delta}
-                                _got_body = bool("".join(_stream_parts).strip())
-                            except Exception as _ce:
-                                if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
-                                    print(f"[REACT-UNIFIED] chitchat 流式失败: {_ce}", flush=True)
-                        if not _got_body:
-                            _fallback = ""
-                            if _ct is not None:
-                                try:
-                                    _obs = await _ct.execute(message=user_input)
-                                    if isinstance(_obs, dict) and _obs.get("success"):
-                                        _fallback = (
-                                            (_obs.get("summary") or _obs.get("message") or "")
-                                            .strip()
-                                        )
-                                except Exception as _ce2:
-                                    if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
-                                        print(f"[REACT-UNIFIED] chitchat 兜底失败: {_ce2}", flush=True)
-                            if not _fallback:
-                                _fallback = _unified_chitchat_fallback_summary(llm_response, "")
-                            _stream_parts.clear()
-                            for _delta in _iter_direct_chat_reply_stream_chunks(_fallback):
-                                _stream_parts.append(_delta)
-                                yield {"event": "summary_stream", "delta": _delta}
-                                if _sgap > 0:
-                                    await asyncio.sleep(_sgap)
 
                     _summary = "".join(_stream_parts)
                     yield {
@@ -6381,6 +6511,32 @@ class SimplifiedReActEngine:
             return 'badcase'
         return 'badcase'
 
+    def _widen_grep_target_to_include_cards_unless_explicit(
+        self, params: Dict[str, Any], user_input: str, todo: str
+    ) -> None:
+        """
+        主界面列表数据在 Card 表；模型常误填 target=bug 等仅查源表，导致 Card 命中为 0。
+        若用户话术未**明确**限定 Bug/BadCase/测例源表，则将 target 升为 all（含 Card）。
+        """
+        if not isinstance(params, dict):
+            return
+        t = str(params.get("target") or "").strip().lower()
+        if not t:
+            params["target"] = "all"
+            return
+        if t in ("all", "card"):
+            return
+        if t not in ("bug", "badcase", "testcase"):
+            return
+        exp = self._infer_modify_target_explicit(user_input or "", todo or "")
+        if exp is not None:
+            return
+        print(
+            f"[REACT-execution] grep.params.target 泛查放宽: {t!r} -> all "
+            f"（用户未明确仅限某一源表类型，需检索 Card 层）"
+        )
+        params["target"] = "all"
+
     def _coerce_grep_target_for_user_intent(
         self, decision: Dict[str, Any], user_input: str, todo: str
     ) -> None:
@@ -6405,6 +6561,60 @@ class SimplifiedReActEngine:
         elif exp == 'badcase' and t not in ('badcase', 'all'):
             print(f"[REACT-execution] grep.params.target 按用户 BadCase 意图纠正: {t!r} -> badcase")
             params['target'] = 'badcase'
+
+    def _force_grep_card_layer_only_if_requested(
+        self, params: Dict[str, Any], user_input: str, todo: str
+    ) -> None:
+        """
+        用户明确要「查卡片 / 搜迭代列表上的卡片」时，只查 Card 表（target=card），
+        不要 bug/badcase/testcase 源表与 all（避免出现「只查 bug 记录」而看不到卡片层口径）。
+        本规则在 _coerce、_widen 之后执行，覆盖模型误填的 all/bug。
+        """
+        if not isinstance(params, dict):
+            return
+        raw = f"{user_input or ''} {todo or ''}".strip()
+        if not raw:
+            return
+        raw_lower = raw.lower()
+        # 中文：查/搜/找/列出 + 卡片；迭代列表上的卡片；仅卡片层
+        markers_cn = (
+            '查卡片',
+            '查询卡片',
+            '搜卡片',
+            '找卡片',
+            '卡片搜索',
+            '列出卡片',
+            '卡片列表',
+            '统一卡片',
+            '仅查卡片',
+            '只看卡片',
+            '只要卡片',
+            '卡片层',
+            '迭代里的卡片',
+            '迭代卡片',
+            '列表里的卡片',
+            '主界面卡片',
+        )
+        markers_en = (
+            'query card',
+            'list card',
+            'search card',
+            'card list',
+            'cards only',
+            'only cards',
+        )
+        if not any(m in raw for m in markers_cn) and not any(
+            m in raw_lower for m in markers_en
+        ):
+            return
+        print(
+            "[REACT-execution] grep 用户意图为「仅卡片层 Card 表」: "
+            f"target {params.get('target')!r} -> card"
+        )
+        params['target'] = 'card'
+        # 与 prompts 一致：查当前迭代卡片时带上 plan_id
+        if getattr(self, 'plan_id', None) and not params.get('plan_id'):
+            params['plan_id'] = self.plan_id
 
     def _extract_title_keywords_for_grep(self, user_input: str, todo: str) -> str:
         """
@@ -7375,12 +7585,19 @@ class SimplifiedReActEngine:
                 decision["tool"] = _tn_low
         
         # 增加模糊匹配映射
-        if 'bug' in tool_name.lower() and 'management' in tool_name.lower():
-            tool_name = 'bug_management'
-        elif 'browser' in tool_name.lower():
-            tool_name = 'browser_test'
-        elif 'search' in tool_name.lower():
-            tool_name = 'search'
+        # 注意：browser_assert / browser_click 等 L1 工具名也含 "browser"，不可一律映射到 browser_test（会缺少 test_case）
+        _browser_subtools = frozenset(
+            ("browser_assert", "browser_click", "browser_input", "browser_wait")
+        )
+        _tn = tool_name.lower() if isinstance(tool_name, str) else ""
+        if "bug" in _tn and "management" in _tn:
+            tool_name = "bug_management"
+        elif _tn in _browser_subtools:
+            pass
+        elif "browser" in _tn:
+            tool_name = "browser_test"
+        elif "search" in _tn:
+            tool_name = "search"
         
         print(f"[REACT] 正在执行工具: {original_tool_name} -> {tool_name}")
 
@@ -7420,6 +7637,22 @@ class SimplifiedReActEngine:
             if self.project_id and 'project_id' not in params:
                 params['project_id'] = self.project_id
             params["ui_locale"] = normalize_locale(getattr(self, "_ui_locale", None))
+
+            if tool_name == "grep":
+                _grep_ui = (
+                    getattr(self, "_react_stream_user_input", None)
+                    or params.get("natural_query")
+                    or ""
+                )
+                self._coerce_grep_target_for_user_intent(
+                    {"execute": True, "tool": "grep", "params": params},
+                    _grep_ui,
+                    "",
+                )
+                self._widen_grep_target_to_include_cards_unless_explicit(
+                    params, _grep_ui, ""
+                )
+                self._force_grep_card_layer_only_if_requested(params, _grep_ui, "")
             
             if tool_name != "modify":
                 print(f"[REACT] 工具参数: {params}")

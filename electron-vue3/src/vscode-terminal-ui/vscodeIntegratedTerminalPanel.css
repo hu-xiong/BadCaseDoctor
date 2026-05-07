@@ -19,7 +19,8 @@
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
-  overflow: hidden;
+  /* 允许顶栏按钮下拉菜单向上溢出显示 */
+  overflow: visible;
   /* 顶栏「终端 / 本地代理」与下方编辑区分隔，避免首行输出贴顶栏（少一行栅格后行高变高时更明显） */
   row-gap: 8px;
   /* flex row-gap 区域用终端底色填充，否则透明会透出外层纯黑 */
@@ -176,7 +177,8 @@
   display: flex;
   flex-direction: row;
   align-items: stretch;
-  overflow: hidden;
+  /* 允许顶栏按钮下拉菜单向上溢出显示 */
+  overflow: visible;
   background-color: var(--vscode-terminal-background, #1e1e1e);
 }
 

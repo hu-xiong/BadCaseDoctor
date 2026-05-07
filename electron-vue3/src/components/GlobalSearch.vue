@@ -15,7 +15,7 @@
         />
         <button v-if="searchQuery" class="clear-btn" @click="clearSearch">✕</button>
       </div>
-      <button class="close-btn" @click="handleClose">✕</button>
+      <button v-if="showClose" class="close-btn" @click="handleClose">✕</button>
     </div>
 
     <!-- 搜索结果 -->
@@ -84,7 +84,12 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
-import { getProjectBadcases, getProjectBugs, getProjectTestCases } from '../api'
+import { getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectPlans, getProjectCards } from '../api'
+
+const props = defineProps({
+  projectId: { type: [String, Number, null], default: null },
+  showClose: { type: Boolean, default: true }
+})
 
 const emit = defineEmits(['close', 'select-card', 'select-detail'])
 
@@ -113,15 +118,73 @@ const handleSearch = () => {
     loading.value = true
     try {
       const query = searchQuery.value.toLowerCase().trim()
+
+      const pid = Number(props.projectId)
+      if (!pid || Number.isNaN(pid)) {
+        searchResults.value = []
+        loading.value = false
+        return
+      }
       
-      // 并行获取所有数据（projectId=1 为示例，后续可从props传入）
-      const [badcasesRes, bugsRes, testcasesRes] = await Promise.allSettled([
-        getProjectBadcases(1, 1, 100).catch(() => ({ data: { data: [] } })),
-        getProjectBugs(1, 1, 100).catch(() => ({ data: { data: [] } })),
-        getProjectTestCases(1, 1, 100).catch(() => ({ data: { data: [] } }))
+      // 并行获取所有数据（按当前 projectId）
+      const [plansRes, cardsRes, badcasesRes, bugsRes, testcasesRes] = await Promise.allSettled([
+        getProjectPlans(pid).catch(() => ({ data: { data: [] } })),
+        getProjectCards(pid).catch(() => ({ data: { data: [] } })),
+        getProjectBadcases(pid, 1, 200).catch(() => ({ data: { data: [] } })),
+        getProjectBugs(pid, 1, 200).catch(() => ({ data: { data: [] } })),
+        getProjectTestCases(pid, 1, 200).catch(() => ({ data: { data: [] } }))
       ])
 
       const results = []
+
+      // 处理 Plans（迭代计划）
+      const plans = plansRes.value?.data?.data || []
+      plans.forEach(item => {
+        if ((item.title || item.name || '').toLowerCase().includes(query)) {
+          results.push({
+            type: 'plan',
+            id: item.id,
+            title: item.title || item.name || `Plan#${item.id}`,
+            status: item.status || '',
+            status_text: item.status_text || '',
+            details: []
+          })
+        }
+      })
+
+      // 处理 Cards（卡片）
+      const cards = cardsRes.value?.data?.data || []
+      cards.forEach(item => {
+        if ((item.title || '').toLowerCase().includes(query)) {
+          results.push({
+            type: 'card',
+            id: item.id,
+            title: item.title,
+            status: item.status || '',
+            status_text: item.status_text || '',
+            details: item.details || []
+          })
+        }
+        if (item.details && item.details.length > 0) {
+          const matchedDetails = item.details.filter(d =>
+            (d.description || '').toLowerCase().includes(query) ||
+            (d.title || '').toLowerCase().includes(query)
+          )
+          if (matchedDetails.length > 0) {
+            const alreadyAdded = results.some(r => r.type === 'card' && r.id === item.id)
+            if (!alreadyAdded) {
+              results.push({
+                type: 'card',
+                id: item.id,
+                title: item.title,
+                status: item.status || '',
+                status_text: item.status_text || '',
+                details: matchedDetails
+              })
+            }
+          }
+        }
+      })
 
       // 处理 Badcase
       const badcases = badcasesRes.value?.data?.data || []

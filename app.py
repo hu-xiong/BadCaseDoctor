@@ -88,6 +88,7 @@ from routers.summary import summary_bp
 from routers.memory import memory_bp
 from routers.terminal_api import terminal_bp
 from routers.client_scripts import client_scripts_bp
+from routers.models import models_bp
 
 # 导入终端日志记录器
 from agents.tools.terminal_logger import terminal_logger
@@ -133,6 +134,7 @@ class CardType(enum.Enum):
     BUG = 'bug'
     BADCASE = 'badcase'
     TESTCASE = 'testcase'
+    CARD = 'card'
 
 class ExecutionResult(enum.Enum):
     PASS = 'pass'
@@ -244,6 +246,7 @@ app.register_blueprint(summary_bp)
 app.register_blueprint(memory_bp)
 app.register_blueprint(terminal_bp)
 app.register_blueprint(client_scripts_bp)
+app.register_blueprint(models_bp)
 
 # MinIO 配置：与 config.Config 及环境变量一致（见 config.py）
 MINIO_CONFIG = {
@@ -588,6 +591,17 @@ def get_image_cache_key(filename):
     return f"avatar:{filename}"
 
 db = SQLAlchemy(app)
+
+# 预热数据库连接池：启动时建立 min(50, pool_size) 个连接，避免第一个请求冷启动
+try:
+    _warmup_size = min(50, app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_size', 100))
+    with app.app_context():
+        for _ in range(_warmup_size):
+            db.session.execute(db.text('SELECT 1'))
+        print(f"[DB] 连接池预热完成，已建立 {_warmup_size} 个连接", flush=True)
+except Exception as e:
+    print(f"[DB] 连接池预热失败: {e}", flush=True)
+
 mail = Mail(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -818,7 +832,6 @@ class Plan(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200), nullable=False)  # 计划名称
     description = db.Column(db.Text)  # 计划描述
-    plan_type = db.Column(db.String(20), nullable=False)  # 'badcase' 或 'bug'
     status = db.Column(db.String(20), default='active')  # active, archived, completed
     priority = db.Column(db.String(10), default='medium')  # low, medium, high
     is_pinned = db.Column(db.Boolean, default=False)  # 是否置顶
@@ -857,6 +870,7 @@ class Bug(db.Model):
     creator_id = db.Column(db.Integer, nullable=False)
     assignee_id = db.Column(db.Integer)  # 负责人
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
+    card_id = db.Column(db.Integer, nullable=True)  # 关联的卡片ID
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1255,6 +1269,8 @@ class ChatMessage(db.Model):
     modify_navigation = db.Column(db.Text)  # JSON格式存储modifyNavigation（修改预览导航）
     modify_groups = db.Column(db.Text)  # JSON格式存储modifyGroups（分组修改预览）
     final_response = db.Column(db.Text)
+    # 本条消息发起请求时选用的模型 id（用户消息=所选模型；助手消息=生成该条回复的请求模型，便于排查效果问题）
+    llm_model = db.Column(db.String(128))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # 不使用 backref，避免依赖外键
@@ -1292,8 +1308,6 @@ class BugComment(db.Model):
     user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    # 不使用 backref，避免依赖外键
 
 class PromptTemplate(db.Model):
     __tablename__ = 'prompt_template'
@@ -1550,7 +1564,11 @@ def _schedule_workflow_notify(
     actor_id,
     actor_name,
 ):
-    """异步：飞书/钉钉 CLI + 邮件；无收件人则跳过。actor / project_name 须在请求线程内传入。"""
+    """异步：站内通知落库 + 飞书/钉钉 CLI + 邮件；无收件人则跳过。
+
+    站内通知落库若在请求线程中 commit，会明显拉长接口耗时，因此这里统一后台化。
+    actor / project_name 须在请求线程内传入（避免后台线程再查 DB）。
+    """
     if not recipients:
         return
     payload = {
@@ -1568,14 +1586,30 @@ def _schedule_workflow_notify(
     }
     payload["email_subject"] = build_email_subject_cn(payload)
     payload["email_body"] = build_email_body_cn(payload)
+
+    # 站内通知落库：后台线程，避免阻塞 HTTP 请求
     try:
-        _persist_workflow_inapp_rows(payload)
-    except Exception as _pe:
-        try:
-            db.session.rollback()
-        except Exception:
-            pass
-        print(f"[workflow_notify] 站内通知落库失败: {_pe}")
+        from flask import current_app
+        import threading
+
+        app_obj = current_app._get_current_object()
+
+        def _persist_job():
+            try:
+                with app_obj.app_context():
+                    _persist_workflow_inapp_rows(payload)
+            except Exception as _pe:
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+                print(f"[workflow_notify] 站内通知落库失败: {_pe}")
+
+        threading.Thread(target=_persist_job, daemon=True).start()
+    except Exception as _e:
+        print(f"[workflow_notify] 站内通知异步调度失败: {_e}")
+
+    # 外部通知（CLI/邮件）本身已异步
     schedule_workflow_notification(payload, send_email_fn=send_email)
 
 
@@ -1586,10 +1620,15 @@ def generate_verification_code():
 # 检查用户是否有项目权限
 def has_project_permission(user_id, project_id, required_role='collaborator'):
     """
-    权限检查要尽量轻量，避免每个接口重复两次数据库查询导致整体慢。
-    - 先用标量查询判断是否项目 owner
-    - 再用 EXISTS 查询判断权限是否满足
+    权限检查带 2 秒缓存，同一用户对同一项目的权限在短时间内不会变。
     """
+    # 先检查缓存
+    cache_key = (user_id, project_id, required_role)
+    cache_hit, cached = _cache_get(('perm',) + cache_key, ttl_s=2.0)
+    if cache_hit:
+        print(f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}) cache_hit", flush=True)
+        return cached
+    
     # 尽量只做 1 次查询：同时拿到 owner_id + 当前用户在该项目的权限 role
     from sqlalchemy import and_
 
@@ -1604,39 +1643,36 @@ def has_project_permission(user_id, project_id, required_role='collaborator'):
         .first()
     )
     dt_ms = (time.perf_counter() - t0) * 1000
-    try:
-        # 强制 flush，避免在某些环境下日志缓冲导致看不到
-        print(
-            f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}, required_role={required_role}) db={dt_ms:.1f}ms",
-            flush=True,
-        )
-    except Exception:
-        pass
+    print(
+        f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}, required_role={required_role}) db={dt_ms:.1f}ms",
+        flush=True,
+    )
     if not row:
+        _cache_set(('perm',) + cache_key, False)
         return False
     owner_id, role = row
-    if owner_id == user_id:
-        return True
-    if not role:
-        return False
-    if required_role == 'admin':
-        return role == 'admin'
-    return role in ['admin', 'collaborator']
+    result = True if owner_id == user_id else (role in (['admin', 'collaborator'] if required_role != 'admin' else ['admin']))
+    _cache_set(('perm',) + cache_key, result)
+    return result
 
 
 # 轻量缓存：降低同页重复请求的耗时（plans/members 变更不频繁，短 TTL 足够）
 _PROJECT_CTX_CACHE = {}
 
 def _cache_get(key, ttl_s: float):
+    """返回 (hit: bool, value: any)"""
     try:
-        ts, value = _PROJECT_CTX_CACHE.get(key, (None, None))
-        if ts is None:
-            return None
+        entry = _PROJECT_CTX_CACHE.get(key)
+        if entry is None:
+            return False, None
+        ts, value = entry
         if (time.time() - ts) <= ttl_s:
-            return value
+            return True, value
+        # 已过期，删除并返回 miss
+        _PROJECT_CTX_CACHE.pop(key, None)
+        return False, None
     except Exception:
-        return None
-    return None
+        return False, None
 
 def _cache_set(key, value):
     _PROJECT_CTX_CACHE[key] = (time.time(), value)
@@ -2717,25 +2753,43 @@ def api_resolve_diff_review(project_id):
 @app.route('/api/projects/<int:project_id>/diff-reviews', methods=['GET'])
 @login_required
 def api_list_diff_reviews(project_id):
+    t0 = time.perf_counter()
     try:
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '无权访问此项目'}), 403
         status_raw = (request.args.get('status') or 'pending').strip().lower()
         status_filter = {s.strip() for s in status_raw.split(',') if s and s.strip()}
+        
+        # 使用子查询获取每个 (target, target_id) 组合的最新记录，避免全量查询
+        t_sql0 = time.perf_counter()
+        latest_subq = (
+            db.session.query(
+                DiffReviewState.target,
+                DiffReviewState.target_id,
+                db.func.max(DiffReviewState.updated_at).label('max_updated'),
+                db.func.max(DiffReviewState.id).label('max_id')
+            )
+            .filter(DiffReviewState.project_id == project_id)
+            .group_by(DiffReviewState.target, DiffReviewState.target_id)
+            .subquery()
+        )
+        
         rows = (
             DiffReviewState.query
-            .filter_by(project_id=project_id)
-            .order_by(DiffReviewState.target.asc(), DiffReviewState.target_id.asc(), DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
+            .join(latest_subq,
+                  db.and_(
+                      DiffReviewState.target == latest_subq.c.target,
+                      DiffReviewState.target_id == latest_subq.c.target_id,
+                      DiffReviewState.updated_at == latest_subq.c.max_updated,
+                      DiffReviewState.id == latest_subq.c.max_id
+                  ))
+            .filter(DiffReviewState.project_id == project_id)
             .all()
         )
-        # 同记录只取最新一条；仅当最新状态命中筛选状态才返回
-        latest_by_key = {}
-        for r in rows:
-            k = (r.target, r.target_id)
-            if k not in latest_by_key:
-                latest_by_key[k] = r
+        t_sql1 = time.perf_counter()
+        
         result = []
-        for r in latest_by_key.values():
+        for r in rows:
             if status_filter and r.status not in status_filter:
                 continue
             if r.status in ('pending', 'rejected'):
@@ -2762,6 +2816,8 @@ def api_list_diff_reviews(project_id):
                 'session_id': r.source_session_id,
                 'operator_id': r.operator_id,
             })
+        t_total = (time.perf_counter() - t0) * 1000
+        print(f"[PERF] GET /api/projects/{project_id}/diff-reviews sql={((t_sql1-t_sql0)*1000):.0f}ms total={t_total:.0f}ms rows={len(rows)}", flush=True)
         return jsonify({'success': True, 'items': result})
     except Exception as e:
         print(f"[DIFF-LIST] 失败: {e}")
@@ -2814,7 +2870,9 @@ def _nullify_chat_message_modify_preview(message_id):
         db.session.rollback()
 
 
-def _run_modify_in_background(project_id, target, target_id, modifications, message_id, db_uri):
+def _run_modify_in_background(
+    project_id, target, target_id, modifications, message_id, db_uri, natural_query=None
+):
     """后台线程执行采纳落库，使用独立 app_context 和 db.session，避免阻塞主请求"""
     import asyncio
     import json
@@ -2827,7 +2885,8 @@ def _run_modify_in_background(project_id, target, target_id, modifications, mess
                 target_id=int(target_id),
                 modifications=modifications,
                 project_id=project_id,
-                confirm=True
+                confirm=True,
+                natural_query=natural_query,
             ))
             if result.get('success') and message_id:
                 _nullify_chat_message_modify_preview(message_id)
@@ -2848,6 +2907,7 @@ def _run_modify_batch_in_background(project_id, target, items, message_id, db_ur
             for it in items:
                 tid = int(it["target_id"])
                 modifications = dict(it["modifications"])
+                nq = it.get("natural_query")
                 result = asyncio.run(
                     modify_tool.execute(
                         target=target,
@@ -2855,6 +2915,7 @@ def _run_modify_batch_in_background(project_id, target, items, message_id, db_ur
                         modifications=modifications,
                         project_id=project_id,
                         confirm=True,
+                        natural_query=nq,
                     )
                 )
                 if result.get("success"):
@@ -2883,6 +2944,11 @@ def api_project_modify(project_id):
         confirm = data.get('confirm', True)
         message_id = _normalize_chat_message_id(data.get('message_id'))
         db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
+        natural_query_top = data.get("natural_query")
+        if isinstance(natural_query_top, str):
+            natural_query_top = natural_query_top.strip() or None
+        else:
+            natural_query_top = None
 
         # ---------- 批量采纳：单次 HTTP，body.items = [{ target_id, modifications }, ...] ----------
         raw_items = data.get('items')
@@ -2900,7 +2966,20 @@ def api_project_modify(project_id):
                 mods = it.get('modifications')
                 if tid is None or not mods:
                     return jsonify({"success": False, "error": "每项需含 target_id 与 modifications"}), 400
-                normalized.append({"target_id": int(tid), "modifications": dict(mods)})
+                nq_item = it.get("natural_query")
+                if isinstance(nq_item, str):
+                    nq_item = nq_item.strip() or None
+                else:
+                    nq_item = None
+                if nq_item is None and natural_query_top:
+                    nq_item = natural_query_top
+                normalized.append(
+                    {
+                        "target_id": int(tid),
+                        "modifications": dict(mods),
+                        "natural_query": nq_item,
+                    }
+                )
             for it in normalized:
                 tid = it['target_id']
                 pend = (
@@ -2955,7 +3034,15 @@ def api_project_modify(project_id):
             # 采纳即落库：后台异步执行 ModifyTool，立即返回（diff 行已同步删除）
             thread = threading.Thread(
                 target=_run_modify_in_background,
-                args=(project_id, target, target_id, dict(modifications), message_id, db_uri),
+                args=(
+                    project_id,
+                    target,
+                    target_id,
+                    dict(modifications),
+                    message_id,
+                    db_uri,
+                    natural_query_top,
+                ),
                 daemon=True
             )
             thread.start()
@@ -3403,20 +3490,23 @@ def api_test_minio():
 @app.route('/api/project/<int:project_id>/members', methods=['GET'])
 @login_required
 def api_project_members(project_id):
+    t0 = time.perf_counter()
     project = Project.query.get_or_404(project_id)
     if not has_project_permission(current_user.id, project_id):
         return jsonify({'success': False, 'error': '无权访问'}), 403
-    permissions = ProjectPermission.query.filter_by(project_id=project_id).all()
-    members = []
-    for p in permissions:
-        user = User.query.get(p.user_id)
-        if user:
-            members.append({
-                'id': user.id,
-                'name': user.name,
-                'email': user.email,
-                'role': p.role
-            })
+    
+    # 使用 JOIN 一次性查询，避免 N+1 问题
+    rows = (
+        db.session.query(User.id, User.name, User.email, ProjectPermission.role)
+        .join(ProjectPermission, User.id == ProjectPermission.user_id)
+        .filter(ProjectPermission.project_id == project_id)
+        .all()
+    )
+    
+    members = [{'id': r.id, 'name': r.name, 'email': r.email, 'role': r.role} for r in rows]
+    
+    t_total = (time.perf_counter() - t0) * 1000
+    print(f"[PERF] GET /api/project/{project_id}/members total={t_total:.1f}ms count={len(members)}", flush=True)
     return jsonify({'success': True, 'data': members})
 
 # 邀请成员
@@ -3756,9 +3846,11 @@ def _safe_parse_project_login_configs(raw):
 @app.route('/api/projects', methods=['GET'])
 @login_required
 def api_get_projects():
+    t0 = time.perf_counter()
     try:
         # 使用更简单的查询方式，避免复杂的UNION操作
         # 首先获取用户创建的项目，限制返回字段
+        t1 = time.perf_counter()
         owned_projects = db.session.query(
             Project.id,
             Project.name,
@@ -3768,8 +3860,10 @@ def api_get_projects():
             Project.status,
             Project.created_at
         ).filter(Project.user_id == current_user.id).limit(100).all()  # 限制数量避免过多数据
+        t_q1 = (time.perf_counter() - t1) * 1000
         
         # 获取用户参与的项目（通过权限表），限制数量
+        t2 = time.perf_counter()
         permission_projects = db.session.query(
             Project.id,
             Project.name,
@@ -3785,6 +3879,7 @@ def api_get_projects():
             ProjectPermission.user_id == current_user.id,
             Project.user_id != current_user.id  # 排除用户自己创建的项目
         ).limit(100).all()  # 限制数量避免过多数据
+        t_q2 = (time.perf_counter() - t2) * 1000
         
         # 合并项目列表
         user_projects = []
@@ -3820,6 +3915,8 @@ def api_get_projects():
         # 按创建时间排序
         user_projects.sort(key=lambda x: x['created_at'], reverse=True)
         
+        t_total = (time.perf_counter() - t0) * 1000
+        print(f"[PERF] GET /api/projects total={t_total:.1f}ms q1={t_q1:.1f}ms({len(owned_projects)}) q2={t_q2:.1f}ms({len(permission_projects)})", flush=True)
         return jsonify({'success': True, 'projects': user_projects})
         
     except Exception as e:
@@ -3869,7 +3966,6 @@ def api_create_project():
         default_plan = Plan(
             name='迭代 1',
             description='项目默认迭代',
-            plan_type='badcase',
             status='active',
             project_id=project.id,
             creator_id=current_user.id,
@@ -3979,7 +4075,9 @@ def api_get_project_detail(project_id):
 @login_required
 def api_get_project_edit_context(project_id):
     """编辑页专用：一次性返回最小必要上下文（project + plans + members）"""
+    t0 = time.perf_counter()
     try:
+        t1 = time.perf_counter()
         project = Project.query.get(project_id)
         if not project:
             return jsonify({'success': False, 'error': '项目不存在'}), 404
@@ -3991,6 +4089,7 @@ def api_get_project_edit_context(project_id):
             if not has_perm:
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
 
+        t2 = time.perf_counter()
         # plans：沿用 /plans 的批量统计逻辑（无 N+1）
         plans = Plan.query.filter_by(project_id=project_id).all()
         children_map = {}
@@ -4004,6 +4103,7 @@ def api_get_project_edit_context(project_id):
         badcase_counts = {}
         bug_counts = {}
         testcase_counts = {}
+        t3 = time.perf_counter()
         if plan_ids:
             badcase_counts = dict(
                 db.session.query(BadCase.plan_id, func.count(BadCase.id))
@@ -4048,7 +4148,6 @@ def api_get_project_edit_context(project_id):
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
-                'plan_type': plan.plan_type,
                 'status': plan.status,
                 'priority': plan.priority,
                 'is_pinned': plan.is_pinned,
@@ -4069,6 +4168,7 @@ def api_get_project_edit_context(project_id):
         root_plans = sorted(children_map.get(None, []), key=_sort_key)
         plans_tree = [build_plan_tree(p) for p in root_plans]
 
+        t5 = time.perf_counter()
         # members：JOIN 批量取（无 N+1）
         direct_rows = (
             db.session.query(User.id, User.name, User.email, ProjectPermission.role)
@@ -4105,6 +4205,8 @@ def api_get_project_edit_context(project_id):
                 'source': f'team_{team_name}',
             })
 
+        t_total = (time.perf_counter() - t0) * 1000
+        print(f"[PERF] GET /api/projects/{project_id}/edit-context total={t_total:.1f}ms project={t1-t0:.1f}ms plans={t2-t1:.1f}ms counts={t3-t2:.1f}ms members={t5-t3:.1f}ms", flush=True)
         return jsonify({
             'success': True,
             'project': {
@@ -4606,6 +4708,27 @@ def api_create_badcase():
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '无权在此项目中创建BadCase'}), 403
         
+        # 如果提供了 card_id，按卡片类型校验（卡片分类型，计划不分类型）
+        raw_card = data.get('card_id')
+        card_id_val = None
+        if raw_card is not None and str(raw_card).strip() != '':
+            try:
+                ci = int(raw_card)
+                if ci != 0:
+                    card_id_val = ci
+            except (TypeError, ValueError):
+                card_id_val = None
+        
+        if card_id_val is not None:
+            # 按卡片类型校验
+            card = Card.query.get(card_id_val)
+            if not card:
+                return jsonify({'success': False, 'error': '卡片不存在'}), 404
+            # 检查卡片类型是否为 badcase
+            card_type_value = card.type.value if hasattr(card.type, 'value') else str(card.type)
+            if card_type_value != 'badcase':
+                return jsonify({'success': False, 'error': '只能在badcase类型卡片中创建badcase'}), 400
+        
         # 处理附件数据
         import json
         attachments_json = json.dumps(data.get('attachments', [])) if data.get('attachments') else None
@@ -5090,7 +5213,7 @@ def api_create_card():
         
         # 获取参数
         title = data.get('title', '').strip()
-        card_type = data.get('type', 'badcase')
+        card_type_str = data.get('type', 'badcase')
         project_id = data.get('project_id')
         
         if not title:
@@ -5103,6 +5226,12 @@ def api_create_card():
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '无权访问此项目'}), 403
         
+        # 将字符串转换为枚举
+        try:
+            card_type = CardType(card_type_str)
+        except ValueError:
+            return jsonify({'success': False, 'error': f'无效的卡片类型: {card_type_str}'}), 400
+        
         # 创建卡片
         card = Card(
             title=title,
@@ -5111,9 +5240,19 @@ def api_create_card():
             creator_id=current_user.id,
             priority='p3'
         )
+        # 与前端「当前选中迭代」对齐（可选）
+        raw_pid = data.get('plan_id')
+        if raw_pid is not None and raw_pid != '':
+            try:
+                pid = int(raw_pid)
+                card.plan_id = pid if pid > 0 else None
+            except (TypeError, ValueError):
+                card.plan_id = None
+        else:
+            card.plan_id = None
         
         # 根据类型设置特定字段
-        if card_type == 'bug':
+        if card_type == CardType.BUG:
             card.severity = data.get('severity', 'medium')
             card.steps_to_reproduce = data.get('steps_to_reproduce')
             card.expected_result = data.get('expected_result')
@@ -5122,7 +5261,7 @@ def api_create_card():
             card.environment = data.get('environment')
             card.browser = data.get('browser')
             card.os = data.get('os')
-        elif card_type == 'badcase':
+        elif card_type == CardType.BADCASE:
             card.case_category = data.get('case_category')
             card.base_problem = data.get('base_problem')
             card.reproduction_steps = data.get('reproduction_steps')
@@ -5131,7 +5270,7 @@ def api_create_card():
             card.correct_answer = data.get('correct_answer')
             card.problem_reason = data.get('problem_reason')
             card.solution = data.get('solution')
-        elif card_type == 'testcase':
+        elif card_type == CardType.TESTCASE:
             card.case_type_test = data.get('case_type_test')
             card.test_type = data.get('test_type')
             card.preconditions = data.get('preconditions')
@@ -5156,11 +5295,37 @@ def api_create_card():
         print(f"❌ 创建卡片失败: {e}")
         return jsonify({'success': False, 'error': f'创建卡片失败: {str(e)}'}), 500
 
+
+def _plan_subtree_ids_for_project(project_id: int, root_plan_id: int):
+    """
+    返回某项目下，以 root_plan_id 为根的迭代子树中全部计划 id（含根自身）。
+    列表页选中顶层「迭代」时，前端传的是根计划 id；卡片 plan_id 往往在子计划下，
+    仅用 Card.plan_id == 根 id 会漏数据。
+    """
+    rows = db.session.query(Plan.id, Plan.parent_id).filter(Plan.project_id == project_id).all()
+    children_map = {}
+    for pid, parent_id in rows:
+        if parent_id is not None:
+            children_map.setdefault(parent_id, []).append(pid)
+    out = []
+    stack = [root_plan_id]
+    seen = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append(pid)
+        for cid in children_map.get(pid, ()):
+            stack.append(cid)
+    return out
+
+
 @app.route('/api/projects/<int:project_id>/cards', methods=['GET'])
 @login_required
 def api_get_project_cards(project_id):
     """获取项目的卡片列表"""
-    print(f"=== 获取项目卡片列表 {project_id} ===")
+    t0 = time.perf_counter()
     
     try:
         # 检查权限
@@ -5173,13 +5338,32 @@ def api_get_project_cards(project_id):
         
         # 获取卡片类型参数
         card_type = request.args.get('type')
+        # 迭代计划下卡片列表：与前端 selectedPlan 对齐
+        plan_id_param = request.args.get('plan_id', type=int)
+        
+        # 短期缓存 key（须包含 plan 维度，避免错命中）
+        cache_key = ('cards', project_id, card_type or '', plan_id_param if plan_id_param is not None else '', page, per_page)
+        cache_hit, cached = _cache_get(cache_key, ttl_s=0.5)
+        if cache_hit:
+            t_total = (time.perf_counter() - t0) * 1000
+            print(f"[PERF] GET /api/projects/{project_id}/cards cache_hit total={t_total:.1f}ms", flush=True)
+            return jsonify(cached)
         
         # 构建查询条件
         query = Card.query.filter_by(project_id=project_id)
         
+        if plan_id_param is not None and plan_id_param > 0:
+            plan_ids = _plan_subtree_ids_for_project(project_id, plan_id_param)
+            if plan_ids:
+                query = query.filter(Card.plan_id.in_(plan_ids))
+        
         # 根据类型过滤
         if card_type:
-            query = query.filter(Card.type == card_type)
+            try:
+                ct = CardType(card_type) if isinstance(card_type, str) else card_type
+                query = query.filter(Card.type == ct)
+            except Exception:
+                query = query.filter(Card.type == card_type)
         
         # 分页查询
         pagination = query.order_by(Card.created_at.desc()).paginate(
@@ -5188,7 +5372,7 @@ def api_get_project_cards(project_id):
         
         cards = [card.to_dict() for card in pagination.items]
         
-        return jsonify({
+        payload = {
             'success': True,
             'data': cards,
             'pagination': {
@@ -5197,7 +5381,12 @@ def api_get_project_cards(project_id):
                 'current_page': page,
                 'per_page': per_page
             }
-        })
+        }
+        _cache_set(cache_key, payload)
+        
+        t_total = (time.perf_counter() - t0) * 1000
+        print(f"[PERF] GET /api/projects/{project_id}/cards sql total={t_total:.1f}ms count={len(cards)}", flush=True)
+        return jsonify(payload)
     
     except Exception as e:
         print(f"❌ 获取卡片列表失败: {e}")
@@ -5250,6 +5439,17 @@ def api_update_card(card_id):
             card.plan_id = data['plan_id']
         if 'description' in data:
             card.description = data['description']
+        
+        # 更新类型字段
+        if 'type' in data:
+            try:
+                new_type_str = data['type']
+                # 转换下划线格式
+                if new_type_str == 'test_case':
+                    new_type_str = 'testcase'
+                card.type = CardType(new_type_str)
+            except ValueError:
+                return jsonify({'success': False, 'error': f'无效的卡片类型: {data["type"]}'}), 400
         
         # 根据类型更新特定字段
         if card.type == CardType.BUG:
@@ -5949,7 +6149,6 @@ def sync_database_schema():
                     'id INTEGER PRIMARY KEY AUTOINCREMENT',
                     'name VARCHAR(200) NOT NULL',
                     'description TEXT',
-                    'plan_type VARCHAR(20) NOT NULL',
                     'status VARCHAR(20) DEFAULT "active"',
                     'priority VARCHAR(10) DEFAULT "medium"',
                     'is_pinned BOOLEAN DEFAULT FALSE',
@@ -6095,6 +6294,7 @@ def sync_database_schema():
                     'modify_navigation TEXT',
                     'modify_groups TEXT',
                     'final_response TEXT',
+                    'llm_model VARCHAR(128)',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
@@ -6358,7 +6558,7 @@ def create_performance_indexes():
             # 计划表索引
             ("idx_plan_project_id", "CREATE INDEX idx_plan_project_id ON plan(project_id)"),
             ("idx_plan_parent_id", "CREATE INDEX idx_plan_parent_id ON plan(parent_id)"),
-            ("idx_plan_type", "CREATE INDEX idx_plan_type ON plan(plan_type)"),
+            # 计划类型字段已移除
             ("idx_plan_status", "CREATE INDEX idx_plan_status ON plan(status)"),
             ("idx_plan_creator_id", "CREATE INDEX idx_plan_creator_id ON plan(creator_id)"),
             ("idx_plan_assignee_id", "CREATE INDEX idx_plan_assignee_id ON plan(assignee_id)"),
@@ -6564,17 +6764,7 @@ def api_create_plan():
             parent_plan = Plan.query.get(data['parent_id'])
             if not parent_plan:
                 return jsonify({'success': False, 'error': '父计划不存在'}), 404
-            requested_type = (data.get('plan_type') or 'badcase')
-            if isinstance(requested_type, str):
-                requested_type = requested_type.strip().lower()
-            parent_type = (parent_plan.plan_type or 'badcase')
-            if isinstance(parent_type, str):
-                parent_type = parent_type.strip().lower()
-            if requested_type != parent_type:
-                return jsonify({
-                    'success': False,
-                    'error': '子计划内容类型必须与父计划一致，不可混用 BadCase / Bug / 测试用例'
-                }), 400
+            # 计划类型字段已移除：不再做“子计划类型必须与父计划一致”的校验
 
         # 验证日期格式
         try:
@@ -6587,7 +6777,6 @@ def api_create_plan():
         plan = Plan(
             name=data['name'],
             description=data.get('description', ''),
-            plan_type=data.get('plan_type', 'badcase'),  # 默认为badcase类型
             status=data.get('status', 'active'),
             priority=data.get('priority', 'medium'),
             start_date=start_date,
@@ -6611,7 +6800,6 @@ def api_create_plan():
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
-                'plan_type': plan.plan_type,
                 'status': plan.status,
                 'priority': plan.priority,
                 'is_default': plan.is_default,
@@ -6648,45 +6836,22 @@ def api_get_plan_detail(plan_id):
         if not has_project_permission(current_user.id, plan.project_id):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
-        # 获取子计划
-        children = []
-        for child in plan.children:
-            children.append({
+        # 获取子计划（Plan 模型未定义 children 关系，这里用 parent_id 反查）
+        child_rows = Plan.query.filter_by(parent_id=plan.id).all()
+        children = [
+            {
                 'id': child.id,
                 'name': child.name,
-                'plan_type': child.plan_type,
                 'status': child.status,
                 'progress': child.progress,
-                'created_at': child.created_at.isoformat()
-            })
-        
-        # 获取BadCase或Bug列表
+                'created_at': child.created_at.isoformat() if child.created_at else None,
+            }
+            for child in (child_rows or [])
+        ]
+
+        # 获取工作项列表（避免依赖 plan.badcases / plan.bugs 关系）
         items = []
-        if plan.plan_type == 'badcase':
-            for badcase in plan.badcases:
-                items.append({
-                    'id': badcase.id,
-                    'title': badcase.title,
-                    'case_category': badcase.case_category,
-                    'status': badcase.status.value if hasattr(badcase.status, 'value') else badcase.status,
-                    'priority': badcase.priority,
-                    'assignee': badcase.assignee,
-                    'created_at': badcase.created_at.isoformat(),
-                    'type': 'badcase'
-                })
-        else:  # bug类型
-            for bug in plan.bugs:
-                items.append({
-                    'id': bug.id,
-                    'title': bug.title,
-                    'bug_type': bug.bug_type,
-                    'status': bug.status,
-                    'priority': bug.priority,
-                    'severity': bug.severity,
-                    'assignee_id': bug.assignee_id,
-                    'created_at': bug.created_at.isoformat(),
-                    'type': 'bug'
-                })
+        # 计划类型字段已移除：计划详情不再按类型回填 items（卡片/列表视图负责按 card_id/type 展示）
         
         return jsonify({
             'success': True,
@@ -6694,7 +6859,6 @@ def api_get_plan_detail(plan_id):
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
-                'plan_type': plan.plan_type,
                 'status': plan.status,
                 'priority': plan.priority,
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
@@ -6758,7 +6922,6 @@ def api_update_plan(plan_id):
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
-                'plan_type': plan.plan_type,
                 'status': plan.status,
                 'priority': plan.priority,
                 'is_default': plan.is_default,
@@ -6796,15 +6959,17 @@ def api_delete_plan(plan_id):
         if plan.is_default:
             return jsonify({'success': False, 'error': '默认迭代不能删除'}), 400
         
-        # 检查是否有子计划
-        if plan.children:
+        # 检查是否有子计划（Plan 模型未定义 children 关系）
+        if Plan.query.filter_by(parent_id=plan.id).first() is not None:
             return jsonify({'success': False, 'error': '无法删除包含子计划的计划'}), 400
         
-        # 检查是否有关联的BadCase或Bug
-        if plan.plan_type == 'badcase' and plan.badcases:
+        # 计划“类型”字段已移除：统一检查是否有关联工作项（任意类型都阻止删除）
+        if BadCase.query.filter_by(plan_id=plan.id).first() is not None:
             return jsonify({'success': False, 'error': '无法删除包含BadCase的计划'}), 400
-        elif plan.plan_type == 'bug' and plan.bugs:
+        if Bug.query.filter_by(plan_id=plan.id).first() is not None:
             return jsonify({'success': False, 'error': '无法删除包含Bug的计划'}), 400
+        if TestCase.query.filter_by(plan_id=plan.id).first() is not None:
+            return jsonify({'success': False, 'error': '无法删除包含测试用例的计划'}), 400
         
         db.session.delete(plan)
         db.session.commit()
@@ -6897,10 +7062,14 @@ def api_get_project_plans(project_id):
     """获取项目的计划树"""
     try:
         t_total0 = time.perf_counter()
-        # 计划列表不再使用缓存，确保 test_case_count 等数量实时正确
-        # cached = _cache_get(('plans', project_id, current_user.id), ttl_s=3.0)
-        # if cached is not None:
-        #     return jsonify(cached)
+        # 短期缓存（0.5秒），减少频繁查询但保持实时性
+        cache_hit, cached = _cache_get(('plans', project_id), ttl_s=2.0)
+        if cache_hit:
+            print(
+                f"[PERF] GET /api/projects/{project_id}/plans cache_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
+                flush=True,
+            )
+            return jsonify(cached)
 
         # 检查项目权限
         t0 = time.perf_counter()
@@ -6945,7 +7114,7 @@ def api_get_project_plans(project_id):
 
         if not plan_rows:
             payload = {'success': True, 'plans': []}
-            _cache_set(('plans', project_id, current_user.id), payload)
+            _cache_set(('plans', project_id), payload)
             print(
                 f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build=0.0ms total={(time.perf_counter()-t_total0)*1000:.1f}ms (empty)",
                 flush=True,
@@ -6987,16 +7156,21 @@ def api_get_project_plans(project_id):
                     ts = 0
             return (-pinned, -ts)
 
+        # 预查询所有 plan 的 test_case 数量，避免 N+1 问题
+        tc_all = dict(
+            db.session.query(TestCase.plan_id, func.count(TestCase.id))
+            .filter(TestCase.plan_id.in_(plan_ids))
+            .group_by(TestCase.plan_id)
+            .all()
+        )
+
         def build_plan_tree(plan: Plan):
             """递归构建计划树（children 从 children_map 取）；数量含自身+所有子计划"""
             children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
             bc = count_map.get(plan.id, (0, 0, 0))[0]
             bug = count_map.get(plan.id, (0, 0, 0))[1]
-            tc = count_map.get(plan.id, (0, 0, 0))[2]
-            # 测试用例数：优先用直接查询结果（与「计划下测试用例列表」一致），避免 join/覆盖逻辑导致为 0
-            direct_tc = db.session.query(func.count(TestCase.id)).filter(TestCase.plan_id == plan.id).scalar()
-            direct_tc = int(direct_tc) if direct_tc is not None else 0
-            tc = max(int(tc), direct_tc)
+            # 使用预查询的数据
+            tc = tc_all.get(plan.id, 0)
             for c in children:
                 bc += c.get('badcase_count', 0)
                 bug += c.get('bug_count', 0)
@@ -7006,7 +7180,6 @@ def api_get_project_plans(project_id):
                 'id': plan.id,
                 'name': plan.name,
                 'description': plan.description,
-                'plan_type': plan.plan_type,
                 'status': st,
                 'status_type': st_type,
                 'priority': plan.priority,
@@ -7059,8 +7232,7 @@ def api_get_project_plans(project_id):
             'success': True,
             'plans': plans_tree
         }
-        # 不再写回缓存，保证数量实时
-        # _cache_set(('plans', project_id, current_user.id), payload)
+        _cache_set(('plans', project_id), payload)
         t_payload = (time.perf_counter() - t0) * 1000
         print(
             f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build={t_build:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms rows={len(plan_rows)}",
@@ -7246,8 +7418,8 @@ def api_get_project_members(project_id):
     """获取项目的所有成员（包括直接权限和团队成员）"""
     try:
         t_total0 = time.perf_counter()
-        cached = _cache_get(('members', project_id, current_user.id), ttl_s=3.0)
-        if cached is not None:
+        cache_hit, cached = _cache_get(('members', project_id), ttl_s=0.5)
+        if cache_hit:
             print(
                 f"[PERF] GET /api/projects/{project_id}/members cache_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
                 flush=True,
@@ -7313,7 +7485,7 @@ def api_get_project_members(project_id):
             'success': True,
             'members': all_members
         }
-        _cache_set(('members', project_id, current_user.id), payload)
+        _cache_set(('members', project_id), payload)
         t_payload = (time.perf_counter() - t0) * 1000
         print(
             f"[PERF] GET /api/projects/{project_id}/members perm={t_perm:.1f}ms sql1={t_sql1:.1f}ms build1={t_build1:.1f}ms sql2={t_sql2:.1f}ms build2={t_build2:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms direct={len(direct_rows)} team={len(team_rows)}",
@@ -7431,12 +7603,33 @@ def api_create_bug():
                     plan_id_val = pi
             except (TypeError, ValueError):
                 plan_id_val = None
-        if plan_id_val is not None:
+        
+        # 如果提供了 card_id，按卡片类型校验（卡片分类型，计划不分类型）
+        raw_card = data.get('card_id')
+        card_id_val = None
+        if raw_card is not None and str(raw_card).strip() != '':
+            try:
+                ci = int(raw_card)
+                if ci != 0:
+                    card_id_val = ci
+            except (TypeError, ValueError):
+                card_id_val = None
+        
+        if card_id_val is not None:
+            # 按卡片类型校验
+            card = Card.query.get(card_id_val)
+            if not card:
+                return jsonify({'success': False, 'error': '卡片不存在'}), 404
+            # 检查卡片类型是否为 bug
+            card_type_value = card.type.value if hasattr(card.type, 'value') else str(card.type)
+            if card_type_value != 'bug':
+                return jsonify({'success': False, 'error': '只能在bug类型卡片中创建bug'}), 400
+        elif plan_id_val is not None:
+            # 兜底：按计划类型校验（向后兼容）
             plan = Plan.query.get(plan_id_val)
             if not plan:
                 return jsonify({'success': False, 'error': '计划不存在'}), 404
-            if plan.plan_type != 'bug':
-                return jsonify({'success': False, 'error': '只能在bug类型计划中创建bug'}), 400
+            # 计划类型字段已移除：不再按计划类型限制创建 bug
         
         # 创建Bug
         bug = Bug(
@@ -7453,6 +7646,7 @@ def api_create_bug():
             browser=data.get('browser', ''),
             os=data.get('os', ''),
             plan_id=plan_id_val,
+            card_id=card_id_val,
             project_id=data['project_id'],
             creator_id=current_user.id,
             assignee_id=data.get('assignee_id'),
@@ -7493,6 +7687,7 @@ def api_create_bug():
                 'status': bug.status,
                 'bug_type': bug.bug_type,
                 'plan_id': bug.plan_id,
+                'card_id': bug.card_id,
                 'project_id': bug.project_id,
                 'creator_id': bug.creator_id,
                 'assignee_id': bug.assignee_id,
@@ -7522,14 +7717,20 @@ def api_get_project_bugs(project_id):
         # 获取计划ID参数
         plan_id = request.args.get('plan_id', type=int)
         
+        # 获取卡片ID参数（优先使用card_id过滤，因为卡片分类型）
+        card_id = request.args.get('card_id', type=int)
+        
         # 获取状态类型参数
         status_type = request.args.get('status_type')
         
         # 构建查询条件
         query = Bug.query.filter_by(project_id=project_id)
         
-        # 处理status_type参数
-        if status_type == 'unplanned':
+        # 处理card_id过滤（优先，因为卡片分类型，计划不分类型）
+        if card_id is not None:
+            query = query.filter_by(card_id=card_id)
+            print(f"按卡片ID过滤Bug: card_id={card_id}")
+        elif status_type == 'unplanned':
             # 未计划的Bug：没有关联计划的Bug
             query = query.filter(Bug.plan_id.is_(None))
             print(f"过滤未计划的Bug (status_type=unplanned)")
@@ -7558,6 +7759,7 @@ def api_get_project_bugs(project_id):
                 'status': bug.status,
                 'assignee': assignee_name,
                 'plan_id': bug.plan_id,
+                'card_id': bug.card_id,
                 'created_at': bug.created_at.isoformat()
             })
         
@@ -7591,14 +7793,16 @@ def api_bug_detail(bug_id):
             if not has_project_permission(current_user.id, bug.project_id):
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
-            # 获取评论
+            # 获取评论（直接查询，不使用外键关系）
             comments = []
-            for comment in bug.comments:
+            bug_comments = BugComment.query.filter_by(bug_id=bug_id).order_by(BugComment.created_at.asc()).all()
+            for comment in bug_comments:
+                user = User.query.get(comment.user_id)
                 comments.append({
                     'id': comment.id,
                     'content': comment.content,
                     'user_id': comment.user_id,
-                    'user_name': comment.user.name,
+                    'user_name': user.name if user else '未知',
                     'created_at': comment.created_at.isoformat()
                 })
             
@@ -7841,7 +8045,28 @@ def api_create_testcase():
         if not has_project_permission(current_user.id, data['project_id']):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
-        # plan_id：若存在则使用，不校验 plan_type（测试用例可挂任意类型计划）
+        # 如果提供了 card_id，按卡片类型校验（卡片分类型，计划不分类型）
+        raw_card = data.get('card_id')
+        card_id_val = None
+        if raw_card is not None and str(raw_card).strip() != '':
+            try:
+                ci = int(raw_card)
+                if ci != 0:
+                    card_id_val = ci
+            except (TypeError, ValueError):
+                card_id_val = None
+        
+        if card_id_val is not None:
+            # 按卡片类型校验
+            card = Card.query.get(card_id_val)
+            if not card:
+                return jsonify({'success': False, 'error': '卡片不存在'}), 404
+            # 检查卡片类型是否为 testcase
+            card_type_value = card.type.value if hasattr(card.type, 'value') else str(card.type)
+            if card_type_value != 'testcase':
+                return jsonify({'success': False, 'error': '只能在testcase类型卡片中创建测试用例'}), 400
+        
+        # plan_id：若存在则使用（不再校验计划类型）
         plan_id = data.get('plan_id')
         if plan_id:
             plan = Plan.query.get(plan_id)
@@ -8321,6 +8546,7 @@ def api_get_chat_session(session_id):
                 ChatMessage.is_user,
                 ChatMessage.content,
                 ChatMessage.final_response,
+                ChatMessage.llm_model,
                 ChatMessage.created_at,
             ).filter(ChatMessage.session_id == session_id)
         else:
@@ -8338,6 +8564,7 @@ def api_get_chat_session(session_id):
                 ChatMessage.modify_navigation,
                 ChatMessage.modify_groups,
                 ChatMessage.final_response,
+                ChatMessage.llm_model,
                 ChatMessage.created_at,
             ).filter(ChatMessage.session_id == session_id)
         if before_id:
@@ -8353,12 +8580,13 @@ def api_get_chat_session(session_id):
         messages = []
         if lite:
             # lite：只返回渲染“最新一屏”所需字段，避免无意义的 null 键占用 payload
-            for (mid, is_user, content, final_response, created_at) in msg_rows:
+            for (mid, is_user, content, final_response, llm_model, created_at) in msg_rows:
                 messages.append({
                     'id': mid,
                     'is_user': is_user,
                     'content': content,
                     'final_response': final_response,
+                    'llm_model': llm_model,
                     'created_at': created_at.isoformat() if created_at else None
                 })
         else:
@@ -8376,6 +8604,7 @@ def api_get_chat_session(session_id):
                 modify_navigation,
                 modify_groups,
                 final_response,
+                llm_model,
                 created_at,
             ) in msg_rows:
                 messages.append({
@@ -8392,6 +8621,7 @@ def api_get_chat_session(session_id):
                     'modify_navigation': modify_navigation,
                     'modify_groups': modify_groups,  # 添加 modify_groups
                     'final_response': final_response,
+                    'llm_model': llm_model,
                     'created_at': created_at.isoformat() if created_at else None
                 })
         t_build = (time.perf_counter() - t0) * 1000
@@ -8592,7 +8822,8 @@ def api_add_chat_message(session_id):
             navigation=data.get('navigation'),
             modify_navigation=data.get('modify_navigation'),
             modify_groups=data.get('modify_groups'),  # 添加 modify_groups
-            final_response=data.get('final_response')
+            final_response=data.get('final_response'),
+            llm_model=data.get('llm_model'),
         )
             
         db.session.add(message)

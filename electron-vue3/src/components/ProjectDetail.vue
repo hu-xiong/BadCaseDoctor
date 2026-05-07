@@ -52,21 +52,13 @@
   >
     <!-- 窄条导航栏和主内容容器 -->
     <div class="narrow-nav-and-main">
-      <!-- 搜索面板 -->
-      <div v-if="showGlobalSearch" class="narrow-search-panel">
-        <GlobalSearch
-          @close="showGlobalSearch = false"
-          @select-card="handleSearchResultSelect"
-          @select-detail="handleSearchResultSelect"
-        />
-      </div>
-      <!-- 窄条导航栏 -->
+      <!-- 窄条导航栏（始终显示） -->
       <NarrowNavBar
-        v-else
         @return-to-plans="handleReturnToPlans"
         @open-search="handleOpenGlobalSearch"
         @open-settings="openAppSettings"
         @open-archive="handleOpenArchive"
+        @open-plugins="activeLeftPanel='plugins'"
       />
 
       <div class="main-container">
@@ -74,131 +66,39 @@
       <div class="left-sidebar" :class="{ 'collapsed': planCollapsed }" v-show="!leftSidebarHidden" :style="{ width: !planCollapsed ? leftSidebarWidth + 'px' : '60px' }">
         <!-- 拖拽手柄 -->
         <div v-show="!planCollapsed" class="drag-handle-left" @mousedown="startDragLeftSidebar"></div>
-       
-      
-        
-        
-        <div class="sidebar-content" v-show="!planCollapsed">
-          <div class="sidebar-header">
-            <div class="header-top">
-              <button class="action-icon-btn" @click="showCreatePlanModal" :title="t('project.addPlan')">
-                <span class="icon">➕</span>
-                <span class="btn-text">新建迭代</span>
-              </button>
-            </div>
-          </div>
-          
-          <div class="plan-tree">
-            <!-- 扁平展示所有活跃迭代（排除已归档） -->
-            <div class="active-iterations">
-              <div v-if="loading" class="loading-state">
-                <span class="loading-text">{{ t('common.loading') }}</span>
-              </div>
-              
-              <div v-else-if="activePlans.length === 0" class="empty-state">
-                <span class="empty-text">{{ t('project.noActivePlans') }}</span>
-              </div>
-              
-              <div v-else class="plan-list">
-                <template v-for="plan in activePlans" :key="plan.id">
-                  <div 
-                    class="plan-item"
-                    :class="{ 'active': selectedPlan === plan.id }"
-                    @click="selectPlan(plan.id)"
-                    @mouseenter="showPlanActions(plan.id)"
-                    @mouseleave="hidePlanActions(plan.id)"
-                  >
-                    <span 
-                      v-if="plan.children && plan.children.length > 0" 
-                      class="expand-arrow"
-                      :class="{ 'expanded': expandedPlans.includes(plan.id) }"
-                      @click.stop="togglePlanExpansion(plan.id)"
-                    >▶</span>
-                    <span v-else class="expand-placeholder"></span>
-                    <span class="plan-icon">{{ getPlanIcon(plan.content_type || plan.plan_type || 'badcase') }}</span>
-                    <span class="plan-name">{{ plan.name }}</span>
-                    <span class="plan-date">{{ formatDate(plan.created_at) }}</span>
-                    
-                    <!-- 操作按钮 -->
-                    <div v-show="hoveredPlan === plan.id" class="plan-actions">
-                      <button class="action-btn" @click.stop="showContextMenu(plan, $event)">
-                        ⚙️
-                      </button>
-                    </div>
-                    
-                    <!-- 上下文菜单 -->
-                    <div 
-                      v-if="contextMenu.visible && contextMenu.planId === plan.id"
-                      class="context-menu"
-                      :class="{ 'is-dragging': contextMenuDragActive }"
-                      :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
-                      @mousedown.stop
-                    >
-                      <div
-                        class="context-menu-drag-handle"
-                        :title="t('project.contextMenuDragHint')"
-                        @mousedown.stop="onContextMenuDragStart"
-                      >
-                        <span class="drag-grip">⋮⋮</span>
-                        <span class="drag-label">{{ t('project.contextMenuDrag') }}</span>
-                      </div>
-                      <div class="context-menu-body">
-                        <div class="menu-item" @click="createSubPlan(plan)">
-                          <span class="menu-icon">➕</span>
-                          <span>{{ t('project.menuSubPlan') }}</span>
-                        </div>
-                        <div class="menu-item" @click="createSiblingPlan(plan)">
-                          <span class="menu-icon">📝</span>
-                          <span>{{ t('project.menuSiblingPlan') }}</span>
-                        </div>
-                        <div class="menu-item" @click="editPlan(plan)">
-                          <span class="menu-icon">✏️</span>
-                          <span>{{ t('project.menuEdit') }}</span>
-                        </div>
-                        <div class="menu-item" @click="archivePlan(plan)">
-                          <span class="menu-icon">📦</span>
-                          <span>{{ t('project.menuArchive') }}</span>
-                        </div>
-                        <div class="menu-item" @click="deletePlan(plan)">
-                          <span class="menu-icon">🗑️</span>
-                          <span>{{ t('project.menuDelete') }}</span>
-                        </div>
-                        <div class="menu-item" @click="pinPlan(plan)">
-                          <span class="menu-icon">📌</span>
-                          <span>{{ plan.is_pinned ? t('project.unpin') : t('project.pin') }}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <!-- 子计划 -->
-                  <div v-if="plan.children && plan.children.length > 0 && expandedPlans.includes(plan.id)" class="sub-plan-list">
-                    <div 
-                      v-for="childPlan in plan.children" 
-                      :key="childPlan.id"
-                      class="plan-item sub-plan"
-                      :class="{ 'active': selectedPlan === childPlan.id }"
-                      @click="selectPlan(childPlan.id)"
-                      @mouseenter="showPlanActions(childPlan.id)"
-                      @mouseleave="hidePlanActions(childPlan.id)"
-                    >
-                      <span class="expand-placeholder"></span>
-                      <span class="plan-icon">{{ getPlanIcon(childPlan.content_type || childPlan.plan_type || 'badcase') }}</span>
-                      <span class="plan-name">{{ childPlan.name }}</span>
-                      <span class="plan-date">{{ formatDate(childPlan.created_at) }}</span>
-                      
-                      <div v-show="hoveredPlan === childPlan.id" class="plan-actions">
-                        <button class="action-btn" @click.stop="showContextMenu(childPlan, $event)">
-                          ⚙️
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </div>
-        </div>
+
+        <LeftSidebarHost
+          :activeLeftPanel="activeLeftPanel"
+          :projectId="projectId"
+          :currentUser="currentUser"
+          :planCollapsed="planCollapsed"
+          :loading="loading"
+          :activePlans="activePlans"
+          :archivedPlans="archivedPlans"
+          :selectedPlan="selectedPlan"
+          :expandedPlans="expandedPlans"
+          :hoveredPlan="hoveredPlan"
+          :contextMenu="contextMenu"
+          :contextMenuDragActive="contextMenuDragActive"
+          :getPlanIcon="getPlanIcon"
+          :formatDate="formatDate"
+          :showCreatePlanModal="showCreatePlanModal"
+          :selectPlan="selectPlan"
+          :showPlanActions="showPlanActions"
+          :hidePlanActions="hidePlanActions"
+          :togglePlanExpansion="togglePlanExpansion"
+          :showContextMenu="showContextMenu"
+          :onContextMenuDragStart="onContextMenuDragStart"
+          :createSubPlan="createSubPlan"
+          :createSiblingPlan="createSiblingPlan"
+          :editPlan="editPlan"
+          :archivePlan="archivePlan"
+          :deletePlan="deletePlan"
+          :pinPlan="pinPlan"
+          @closeSearch="activeLeftPanel='plans'"
+          @selectSearchResult="handleSearchResultSelect"
+          @pluginAction="handlePluginAction"
+        />
       </div>
 
       <!-- 主内容区域 -->
@@ -259,17 +159,20 @@
         <div class="main-content-body">
         
         <!-- keep-alive：列表/详情切换时复用实例，减轻 Tab 来回切换的重复挂载与卡顿 -->
-        <keep-alive v-if="showMainEditor" :max="16">
+        <!-- 必须同时有组件引用：避免 showMainEditor 与 ref 短暂不一致时 :is="null" 触发 patch 报错 Cannot read properties of null (reading 'type') -->
+        <keep-alive v-if="showMainEditor && mainEditorComponent" :max="16">
           <component
             :is="mainEditorComponent"
             :key="mainEditorCacheKey"
             :project_id="projectId"
             :plan_id="mainEditorPlanId"
+            :card_id="mainEditorCardId"
             :id="mainEditorItemId"
             :edit="mainEditorEdit"
             :show_diff="mainEditorShowDiff"
             :embedded="true"
             @close="closeMainEditor"
+            @titleLoaded="handleTitleLoaded"
           />
         </keep-alive>
         <component
@@ -280,6 +183,11 @@
           :initial-pane="appSettingsInitialPane"
           :visible="isSettingsWorkbenchTab"
           @close="closeAppSettingsWorkbenchTab"
+        />
+        <component
+          :is="TerminalSettingsWorkbenchPanel"
+          v-else-if="isTerminalSettingsWorkbenchTab"
+          :visible="isTerminalSettingsWorkbenchTab"
         />
         <component
           :is="ProjectHelpPanel"
@@ -299,11 +207,123 @@
           @project-selected="handleProjectSelected"
         />
         <keep-alive v-else :max="16">
-          <component
+          <BadcaseListPanel
+            v-if="currentTypeFilter === 'badcase'"
+            :key="'badcase-' + selectedPlan"
+            :project_id="projectId"
+            :plan_id="selectedPlan"
+            :generateBreadcrumb="() => getTypeListBreadcrumb('badcase', activeWorkbenchTab?.meta?.cardTitle)"
+            :showLongBreadcrumb="true"
+            :currentPlanType="'badcase'"
+            :totalBadcases="totalBadcases"
+            :refreshBadcases="() => fetchBadcasesByPlan(selectedPlan)"
+            :filteredBadcases="filteredBadcases"
+            :badcaseLoading="badcaseLoading"
+            :selectedTasks="selectedTasks"
+            :selectAll="selectAll"
+            :toggleSelectAll="toggleSelectAll"
+            :toggleTaskSelection="toggleTaskSelection"
+            :editBadcase="editBadcase"
+            :searchText="searchText"
+            :selectedAssignee="selectedAssignee"
+            :selectedStatus="selectedStatus"
+            :projectMembers="projectMembers"
+            :applyFilters="applyFilters"
+            :pendingModifications="pendingModifications"
+            :expandedDetailRows="expandedDetailRows"
+            :hasDetailFieldModifications="hasDetailFieldModifications"
+            :toggleDetailExpand="toggleDetailExpand"
+            :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
+            :getConsecutiveGroupSize="getConsecutiveGroupSize"
+            :confirmModify="confirmModify"
+            :cancelModify="cancelModify"
+            :getBadcaseStatusText="getBadcaseStatusText"
+            :getAssigneeDisplayText="getAssigneeDisplayText"
+            :pendingCreates="pendingCreates"
+            :confirmCreate="confirmCreate"
+            :cancelCreate="cancelCreate"
+            @openCreate="handleOpenCreate"
+          />
+          <BugListPanel
+            v-else-if="currentTypeFilter === 'bug'"
+            :key="'bug-' + selectedPlan"
+            :project_id="projectId"
+            :plan_id="selectedPlan"
+            :generateBreadcrumb="() => getTypeListBreadcrumb('bug', activeWorkbenchTab?.meta?.cardTitle)"
+            :showLongBreadcrumb="true"
+            :currentPlanType="'bug'"
+            :totalBadcases="totalBadcases"
+            :refreshBadcases="() => fetchBadcasesByPlan(selectedPlan, 1, activeWorkbenchTab?.meta?.cardId)"
+            :filteredBadcases="filteredBadcases"
+            :badcaseLoading="badcaseLoading"
+            :selectedTasks="selectedTasks"
+            :selectAll="selectAll"
+            :toggleSelectAll="toggleSelectAll"
+            :toggleTaskSelection="toggleTaskSelection"
+            :editBadcase="editBadcase"
+            :searchText="searchText"
+            :selectedAssignee="selectedAssignee"
+            :selectedStatus="selectedStatus"
+            :projectMembers="projectMembers"
+            :applyFilters="applyFilters"
+            :pendingModifications="pendingModifications"
+            :expandedDetailRows="expandedDetailRows"
+            :hasDetailFieldModifications="hasDetailFieldModifications"
+            :toggleDetailExpand="toggleDetailExpand"
+            :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
+            :getConsecutiveGroupSize="getConsecutiveGroupSize"
+            :confirmModify="confirmModify"
+            :cancelModify="cancelModify"
+            :getBadcaseStatusText="getBadcaseStatusText"
+            :getAssigneeDisplayText="getAssigneeDisplayText"
+            :pendingCreates="pendingCreates"
+            :confirmCreate="confirmCreate"
+            :cancelCreate="cancelCreate"
+            @openCreate="handleOpenCreate"
+          />
+          <TestCaseListPanel
+            v-else-if="currentTypeFilter === 'testcase'"
+            :key="'testcase-' + selectedPlan"
+            :project_id="projectId"
+            :plan_id="selectedPlan"
+            :generateBreadcrumb="() => getTypeListBreadcrumb('testcase', activeWorkbenchTab?.meta?.cardTitle)"
+            :showLongBreadcrumb="true"
+            :currentPlanType="'test_case'"
+            :totalBadcases="totalBadcases"
+            :refreshBadcases="() => fetchBadcasesByPlan(selectedPlan, 1, activeWorkbenchTab?.meta?.cardId)"
+            :filteredBadcases="filteredBadcases"
+            :badcaseLoading="badcaseLoading"
+            :selectedTasks="selectedTasks"
+            :selectAll="selectAll"
+            :toggleSelectAll="toggleSelectAll"
+            :toggleTaskSelection="toggleTaskSelection"
+            :editBadcase="editBadcase"
+            :searchText="searchText"
+            :selectedAssignee="selectedAssignee"
+            :selectedStatus="selectedStatus"
+            :projectMembers="projectMembers"
+            :applyFilters="applyFilters"
+            :pendingModifications="pendingModifications"
+            :expandedDetailRows="expandedDetailRows"
+            :hasDetailFieldModifications="hasDetailFieldModifications"
+            :toggleDetailExpand="toggleDetailExpand"
+            :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
+            :getConsecutiveGroupSize="getConsecutiveGroupSize"
+            :confirmModify="confirmModify"
+            :cancelModify="cancelModify"
+            :getBadcaseStatusText="getBadcaseStatusText"
+            :getAssigneeDisplayText="getAssigneeDisplayText"
+            :pendingCreates="pendingCreates"
+            :confirmCreate="confirmCreate"
+            :cancelCreate="cancelCreate"
+            @openCreate="handleOpenCreate"
+          />
+          <CardPanel
+            v-else
             :key="listPanelCacheKey"
-            :is="'CardPanel'"
-            :ref="el => { console.log('[CardPanel] mounted, items:', filteredCards?.length, 'total:', totalCards, 'loading:', cardLoading) }"
+            ref="cardPanelRef"
             v-model:searchText="searchText"
+            :breadcrumb="projectName"
             :title="selectedBaselinePlanName || t('project.selectPlan')"
             :showHeader="true"
             :itemType="'card'"
@@ -314,9 +334,11 @@
             :selectAll="selectAll"
             :toggleSelectAll="toggleSelectAll"
             :toggleTaskSelection="toggleTaskSelection"
-            :editItem="editBadcase"
+            :editItem="editCard"
             :onQuickCreate="handleQuickCreate"
-            />
+            :onQuickUpdate="handleQuickUpdate"
+            @openTypeList="handleOpenTypeList"
+          />
         </keep-alive>
         </div>
         
@@ -335,6 +357,8 @@
           
           <div class="panel-content">
             <EmbeddedTerminalWorkspace
+              ref="embeddedTerminalWorkspaceRef"
+              :key="'embedded-terminal-workspace-v3'"
               :working-directory="currentWorkingDir"
               :project-id="projectId"
             />
@@ -668,16 +692,17 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, provide } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, createCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline } from '../api.js'
+import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, createCard, updateCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getCardDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline } from '../api.js'
 import { getBadCaseStatusText } from '../constants/status.js'
 import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
+import TerminalSettingsWorkbenchPanel from './TerminalSettingsWorkbenchPanel.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
 import AppSettingsPanel from './AppSettingsPanel.vue'
 import ProjectHelpPanel from './ProjectHelpPanel.vue'
 import WorkflowNotificationsPanel from './WorkflowNotificationsPanel.vue'
 import ProjectWorkspaceShell from './ProjectWorkspaceShell.vue'
 import NarrowNavBar from './NarrowNavBar.vue'
-import GlobalSearch from './GlobalSearch.vue'
+import LeftSidebarHost from './left/LeftSidebarHost.vue'
 import BadcaseListPanel from './panels/BadcaseListPanel.vue'
 import BugListPanel from './panels/BugListPanel.vue'
 import TestCaseListPanel from './panels/TestCaseListPanel.vue'
@@ -710,14 +735,15 @@ export default {
   name: 'ProjectDetail',
   components: {
     ProjectWorkspaceShell,
+    LeftSidebarHost,
     BadcaseListPanel,
     BugListPanel,
     TestCaseListPanel,
     CardPanel,
     EmbeddedTerminalWorkspace,
+    TerminalSettingsWorkbenchPanel,
     SimpleChatPanel,
-    NarrowNavBar,
-    GlobalSearch
+    NarrowNavBar
   },
   setup() {
     const router = useRouter()
@@ -752,6 +778,7 @@ export default {
     const selectedPlan = ref(null)
     const highlightBugId = ref(null) // 用于高亮显示的bug ID
     const urlContentType = ref(null) // URL参数传递的内容类型，优先级高于计划类型
+    const currentTypeFilter = ref('') // 当前类型过滤器，用于显示对应类型的面板
     const currentPlan = computed(() => {
       if (!selectedPlan.value) {
         return null
@@ -771,25 +798,13 @@ export default {
     })
     
     const currentPlanType = computed(() => {
-      // 优先使用 URL 参数传递的内容类型
+      // 以后类型以“卡片类型/列表上下文”为主。
+      // 这里仅保留 URL 传递的内容类型（多 Tab/导航场景），否则默认 badcase。
       if (urlContentType.value) {
         console.log('🐛 currentPlanType: 使用URL参数类型:', urlContentType.value)
         return urlContentType.value
       }
-      
-      if (!currentPlan.value) {
-        console.log('🐛 currentPlanType: no currentPlan → badcase')
-        return 'badcase'
-      }
-      const planType = currentPlan.value.content_type || currentPlan.value.plan_type || 'badcase'
-      console.log('🐛 currentPlanType:', {
-        planId: selectedPlan.value,
-        planName: currentPlan.value.name,
-        content_type: currentPlan.value.content_type,
-        plan_type: currentPlan.value.plan_type,
-        finalType: planType
-      })
-      return planType
+      return 'badcase'
     })
 
     /** 列表区 keep-alive 缓存键：同一计划/类型视图切换回来时可复用实例 */
@@ -854,6 +869,8 @@ export default {
     const HELP_WORKBENCH_TAB_ID = 'app-help'
     /** 通知收件箱：工作台 Tab id */
     const NOTIFICATIONS_WORKBENCH_TAB_ID = 'app-notifications'
+    /** 嵌入式终端设置：与计划 Tab 并列于主内容区顶栏 */
+    const TERMINAL_SETTINGS_WORKBENCH_TAB_ID = 'workbench-terminal-settings'
     const currentUser = ref(null)
     
     // 布局控制状态
@@ -861,6 +878,7 @@ export default {
     const showAIAssistant = ref(false)
 
     const terminalCtl = ref(null)
+    const embeddedTerminalWorkspaceRef = ref(null)
     provide('terminalCtl', terminalCtl)
 
     const { localGoProxyOk, localGoProxyLastError, pingLocalGoProxy } = useLocalGoProxyStatus()
@@ -872,6 +890,40 @@ export default {
 
     const badcaseDraftPreset = ref({ token: 0, description: '' })
     provide('badcaseDraftPreset', badcaseDraftPreset)
+    const bugDraftPreset = ref({ token: 0, description: '' })
+    provide('bugDraftPreset', bugDraftPreset)
+    const testcaseDraftPreset = ref({ token: 0, description: '' })
+    provide('testcaseDraftPreset', testcaseDraftPreset)
+
+    provide('openTerminalQuickEditor', () => {
+      try {
+        embeddedTerminalWorkspaceRef.value?.openQuickEditor?.()
+      } catch (_) {
+        /* ignore */
+      }
+    })
+
+    provide('terminalCreateBadcaseFromSelection', () => {
+      try {
+        embeddedTerminalWorkspaceRef.value?.createBadcaseFromTerminal?.()
+      } catch (_) {
+        /* ignore */
+      }
+    })
+    provide('terminalCreateBugFromSelection', () => {
+      try {
+        embeddedTerminalWorkspaceRef.value?.createBugFromTerminal?.()
+      } catch (_) {
+        /* ignore */
+      }
+    })
+    provide('terminalCreateTestcaseFromSelection', () => {
+      try {
+        embeddedTerminalWorkspaceRef.value?.createTestcaseFromTerminal?.()
+      } catch (_) {
+        /* ignore */
+      }
+    })
 
     // ── 全局命令历史弹框（出现在 top-bar 下方，跨越所有面板） ──
     const showGlobalCmdHistory = ref(false)
@@ -1005,6 +1057,8 @@ export default {
     const mainEditorEdit = ref(true)
     const mainEditorPlanId = ref(null)
     const mainEditorShowDiff = ref(false)
+    /** 创建时关联的卡片ID，用于类型校验 */
+    const mainEditorCardId = ref(null)
     /** 嵌入详情：badcase | bug | test_case，与 mainEditorItemId 组成稳定 keep-alive 键 */
     const embeddedEditorKind = ref('badcase')
 
@@ -1030,7 +1084,34 @@ export default {
     const isNotificationsWorkbenchTab = computed(
       () => activeWorkbenchTabId.value === NOTIFICATIONS_WORKBENCH_TAB_ID
     )
+    const isTerminalSettingsWorkbenchTab = computed(
+      () => activeWorkbenchTabId.value === TERMINAL_SETTINGS_WORKBENCH_TAB_ID
+    )
     const activeWorkbenchTab = computed(() => workbenchTabs.value.find(t => t.id === activeWorkbenchTabId.value))
+    
+    /** 供嵌入式终端展示/关联的“当前卡片上下文”（来自工作台 Tab meta） */
+    const terminalCardContext = computed(() => {
+      const meta = activeWorkbenchTab.value?.meta || {}
+      const cardId = meta.cardId ?? null
+      const cardTitle = meta.cardTitle ?? ''
+      const type = meta.type ?? meta.editorPlanType ?? meta.kind ?? ''
+      if (!cardId) {
+        return { cardId: null, cardTitle: '', type: type ? String(type) : '' }
+      }
+      return { cardId, cardTitle: String(cardTitle || ''), type: type ? String(type) : '' }
+    })
+    provide('terminalCardContext', terminalCardContext)
+
+    /** 供嵌入式终端展示/关联的“当前迭代计划上下文”（来自左侧计划树 selectedPlan） */
+    const terminalPlanContext = computed(() => {
+      const pid = selectedPlan.value
+      // 当前版本已不再存在“未计划”；若历史状态仍残留 unplanned，也按空处理
+      if (!pid || pid === 'unplanned') return { planId: null, planTitle: '' }
+      const p = currentPlan.value
+      const title = p?.title ?? p?.name ?? ''
+      return { planId: pid, planTitle: String(title || '') }
+    })
+    provide('terminalPlanContext', terminalPlanContext)
     const workbenchMenuRef = ref(null)
     const workbenchTabsStripRef = ref(null)
     /** Tab 条左键拖拽平移时用于样式（抓手 / 禁止选中文本） */
@@ -1066,10 +1147,15 @@ export default {
     const availableBadcases = ref([])
     
     // 窄条导航栏相关状态
-    const showGlobalSearch = ref(false)
+    // 左侧可挂载面板：plans/search/archive/plugins + 插件
+    const activeLeftPanel = ref('plans')
+    // 搜索改为左侧面板，不再使用覆盖层
     
     // 窄条导航栏处理函数
     const handleReturnToPlans = () => {
+      // 切回迭代计划树面板
+      activeLeftPanel.value = 'plans'
+
       // 收起左侧边栏
       if (leftSidebarHidden.value) {
         leftSidebarHidden.value = false
@@ -1087,22 +1173,36 @@ export default {
     }
     
     const handleOpenGlobalSearch = () => {
-      showGlobalSearch.value = true
+      // 搜索作为左侧挂载面板展示（无 X 关闭）
+      activeLeftPanel.value = 'search'
     }
     
     // 打开归档视图
     const handleOpenArchive = () => {
+      // 新架构：归档作为左侧挂载面板
+      activeLeftPanel.value = 'archive'
       // 展开已归档计划的section
-      if (!expandedSections.value.archived) {
-        expandedSections.value.archived = true
+      if (!expandedSections.archived) {
+        expandedSections.archived = true
       }
       // 确保侧边栏显示
       if (leftSidebarHidden.value) {
         leftSidebarHidden.value = false
         planCollapsed.value = false
       }
-      // 关闭搜索
-      showGlobalSearch.value = false
+    }
+
+    const handlePluginAction = (evt) => {
+      const type = evt?.type
+      if (type === 'openSearch') {
+        handleOpenGlobalSearch()
+        return
+      }
+      if (type === 'openArchive') {
+        handleOpenArchive()
+        return
+      }
+      console.log('[pluginAction] unknown:', evt)
     }
     
     const handleOpenCardCreate = () => {
@@ -1165,8 +1265,9 @@ export default {
     const cardLoading = ref(false)
     const cardPage = ref(1)
     const cardPerPage = ref(20)
-    const totalCards = ref(0)
-    
+const totalCards = ref(0)
+    const cardPanelRef = ref(null) // CardPanel 组件实例引用
+
     const pendingModifications = ref({}) // 存储待确认的修改
     /** 须在 restorePendingDiffReviews 之前声明：route watch immediate 会立刻恢复 diff，避免 TDZ */
     const highlightRowId = ref(null) // 高亮的列表行，用于滚动&样式
@@ -1476,7 +1577,16 @@ export default {
       try {
         console.log('调用API: 获取列表')
         const additionalParams = {}
-        if (selectedPlan.value) {
+        
+        // 获取当前 Tab 的 cardId（如果有的话）
+        const currentTab = activeWorkbenchTab.value
+        const cardId = currentTab?.meta?.cardId
+        
+        // 如果有 cardId，优先使用 cardId 过滤（卡片分类型，计划不分类型）
+        if (cardId) {
+          additionalParams.card_id = cardId
+          console.log(`🔍 按卡片ID过滤: cardId=${cardId}`)
+        } else if (selectedPlan.value) {
           // 确保是数字类型传递给后端
           const planId = parseInt(selectedPlan.value)
           if (!isNaN(planId)) {
@@ -1484,17 +1594,20 @@ export default {
           }
         }
         
-        // 如果有特定的内容类型，也传递给后端
-        if (currentPlanType.value) {
-          additionalParams.content_type = currentPlanType.value
+        // 优先使用 currentTypeFilter（当前视图类型）决定 API，兜底用 currentPlanType
+        const viewType = currentTypeFilter.value === 'bug' ? 'bug'
+                       : currentTypeFilter.value === 'testcase' ? 'test_case'
+                       : currentPlanType.value
+        if (viewType) {
+          additionalParams.content_type = viewType
         }
         
         let response
-        if (currentPlanType.value === 'bug') {
-          console.log('🔍 检测到当前计划类型为 bug，调用 getProjectBugs')
+        if (viewType === 'bug') {
+          console.log('🔍 检测到当前视图类型为 bug，调用 getProjectBugs')
           response = await getProjectBugs(projectId.value, page, badcasePerPage.value, additionalParams)
-        } else if (currentPlanType.value === 'test_case') {
-          console.log('🔍 检测到当前计划类型为 test_case，调用 getProjectTestCases')
+        } else if (viewType === 'test_case') {
+          console.log('🔍 检测到当前视图类型为 test_case，调用 getProjectTestCases')
           response = await getProjectTestCases(projectId.value, page, badcasePerPage.value, additionalParams)
         } else {
           console.log('🔍 调用 getProjectBadcases')
@@ -1545,8 +1658,8 @@ export default {
     }
     
     // 快速创建卡片（只填标题）
-    const handleQuickCreate = async (title) => {
-      console.log('[handleQuickCreate] 快速创建卡片:', title)
+    const handleQuickCreate = async (title, type = 'bug') => {
+      console.log('[handleQuickCreate] 快速创建卡片:', title, '类型:', type)
       
       if (!title?.trim()) {
         console.error('标题不能为空')
@@ -1556,21 +1669,36 @@ export default {
       try {
         const cardData = {
           title: title.trim(),
+          project_id: projectId.value,
           plan_id: selectedPlan.value || null,
-          status: 'new',
-          type: 'card'
+          type: type || 'bug'
         }
         
         const response = await createCard(cardData)
         console.log('[handleQuickCreate] 创建响应:', response)
         
         if (response?.data?.success) {
-          console.log('[handleQuickCreate] 卡片创建成功:', response.data.card)
+          // 后端统一返回 { success, data: card.to_dict() }，兼容历史字段名 card
+          const newCard = response.data.data ?? response.data.card
+          console.log('[handleQuickCreate] 卡片创建成功:', newCard)
           
+          if (!newCard || newCard.id == null) {
+            console.error('[handleQuickCreate] 响应缺少卡片数据', response.data)
+            alert(t('common.unknownError'))
+            return
+          }
           // 在列表前面插入新卡片
-          const newCard = response.data.card
           filteredCards.value = [newCard, ...filteredCards.value]
           totalCards.value++
+          
+          // 等待 DOM 更新
+          await nextTick()
+          
+          // 通知 CardPanel 新卡片已添加，用于显示新标记
+          const panelInstance = cardPanelRef?.value
+          if (panelInstance && typeof panelInstance.addNewlyCreatedId === 'function') {
+            panelInstance.addNewlyCreatedId(newCard.id)
+          }
           
           return newCard
         } else {
@@ -1608,7 +1736,7 @@ export default {
         console.log('[CardPanel] Cards API响应:', response)
         
         if (response && response.data && response.data.success) {
-          cards.value = response.data.cards || []
+          cards.value = response.data.data || response.data.cards || []
           // 按创建时间倒序排列（新的在前）
           cards.value.sort((a, b) => {
             const timeA = new Date(b.created_at || 0).getTime()
@@ -1623,10 +1751,13 @@ export default {
           // 应用筛选条件
           if (searchText.value) {
             const search = searchText.value.toLowerCase()
-            filteredCards.value = filteredCards.value.filter(c => 
-              (c.title && c.title.toLowerCase().includes(search)) ||
-              (c.assignee && c.assignee.toLowerCase().includes(search))
-            )
+            filteredCards.value = filteredCards.value.filter((c) => {
+              const t = (c.title && String(c.title).toLowerCase()) || ''
+              const r = (c.remark && String(c.remark).toLowerCase()) || ''
+              const d = (c.description && String(c.description).toLowerCase()) || ''
+              const a = (c.assignee && String(c.assignee).toLowerCase()) || ''
+              return t.includes(search) || r.includes(search) || d.includes(search) || a.includes(search)
+            })
           }
         } else {
           console.error('获取Card数据失败:', response?.data?.error || '未知错误')
@@ -1674,6 +1805,12 @@ export default {
           const tc = res?.data?.testcase
           if (res?.data?.success && tc) {
             return parsePositivePlanId(tc.plan_id)
+          }
+        } else if (tt === 'card') {
+          const res = await getCardDetail(id)
+          const card = res?.data?.data
+          if (res?.data?.success && card) {
+            return parsePositivePlanId(card.plan_id)
           }
         }
       } catch (e) {
@@ -2152,6 +2289,97 @@ export default {
     }
     provide('openDiagnosticTerminal', openDiagnosticTerminal)
 
+    // 获取类型列表面包屑
+    const getTypeListBreadcrumb = (type, cardTitle) => {
+      const planName = selectedBaselinePlanName.value || `迭代${selectedPlan.value}`
+      return `${planName}/${cardTitle || ''}`
+    }
+
+    // 处理类型列表打开 - 创建新Tab
+    const handleOpenTypeList = async (type, cardTitle, cardId) => {
+      // 先保存当前 CardPanel Tab 的类型状态
+      const currentTabId = activeWorkbenchTabId.value
+      const currentTab = workbenchTabs.value.find(t => t.id === currentTabId)
+      if (currentTab?.kind === 'plan-list') {
+        upsertWorkbenchTab({
+          id: currentTabId,
+          meta: { ...currentTab.meta, type: currentTypeFilter.value }
+        })
+      }
+      
+      // 创建新的类型列表 Tab，标题为卡片标题，保存卡片ID用于类型校验
+      const tabId = `type-list-${type}-${selectedPlan.value}-${Date.now()}`
+      upsertWorkbenchTab({
+        id: tabId,
+        kind: 'type-list',
+        title: cardTitle || `${type}列表`,
+        meta: { type, planId: selectedPlan.value, cardTitle, cardId }
+      })
+      currentTypeFilter.value = type
+      activeWorkbenchTabId.value = tabId
+      
+      // 等待 DOM 更新后，调用 activateWorkbenchTab 触发数据获取
+      await nextTick()
+      await activateWorkbenchTab(tabId)
+    }
+
+    // 处理新建按钮点击 - 在新Tab中打开对应的创建界面
+    const handleOpenCreate = (planType) => {
+      const editorType = planType === 'test_case' ? 'test_case' : planType
+      // 从当前Tab获取卡片ID，用于类型校验
+      const currentTab = activeWorkbenchTab.value
+      const cardId = currentTab?.meta?.cardId
+      const cardTitle = currentTab?.meta?.cardTitle
+      console.log('[handleOpenCreate] planType:', planType, 'cardId:', cardId, 'currentTab:', currentTab?.kind, currentTab?.meta)
+      
+      // 保存当前Tab ID用于返回
+      const returnTo = activeWorkbenchTabId.value
+      const pidKey = selectedPlan.value == null ? 'unplanned' : String(selectedPlan.value)
+      const tid = `create-${editorType}-${pidKey}-${Date.now()}`
+      const titleMap = {
+        badcase: t('project.newBadcase') || '新建 BadCase',
+        bug: t('project.newBug') || '新建 Bug',
+        test_case: t('project.newTestCase') || '新建 测试用例'
+      }
+      upsertWorkbenchTab({
+        id: tid,
+        kind: 'create',
+        title: truncateForTab(titleMap[editorType] || '新建', '新建'),
+        meta: { editorPlanType: editorType, planId: selectedPlan.value, returnTo, cardId, cardTitle }
+      })
+      activeWorkbenchTabId.value = tid
+      // 传递cardId给编辑器，用于校验卡片类型
+      mountEditorComponents(null, editorType, false, false, selectedPlan.value, cardId)
+    }
+
+    // 获取当前应该显示的面板组件
+    const getCurrentPanelComponent = () => {
+      switch (currentTypeFilter.value) {
+        case 'badcase':
+          return 'BadcaseListPanel'
+        case 'bug':
+          return 'BugListPanel'
+        case 'testcase':
+          return 'TestCaseListPanel'
+        default:
+          return 'CardPanel'
+      }
+    }
+
+    // 处理子组件加载完数据后更新Tab标题
+    const handleTitleLoaded = (title) => {
+      const tid = activeWorkbenchTabId.value
+      if (tid) {
+        const tab = workbenchTabs.value.find(t => t.id === tid)
+        if (tab && (tab.kind === 'detail' || tab.kind === 'create')) {
+          upsertWorkbenchTab({
+            id: tid,
+            title: truncateForTab(title, '编辑')
+          })
+        }
+      }
+    }
+
     watch(
       () => route.query.terminal_cmd,
       async (cmd) => {
@@ -2287,7 +2515,8 @@ export default {
     const processPlanData = (plans) => {
       if (!plans) return []
       return plans.map(plan => {
-        const contentType = plan.content_type || plan.plan_type || 'badcase'
+        // 计划仅作为容器；列表类型由卡片/Tab 上下文决定
+        const contentType = 'badcase'
         const children = plan.children ? processPlanData(plan.children) : []
         return {
           ...plan,
@@ -2456,7 +2685,8 @@ export default {
       }
     }
 
-    const mountEditorComponents = (itemId, editorPlanType, showDiff, edit = true, planId = null) => {
+    const mountEditorComponents = (itemId, editorPlanType, showDiff, edit = true, planId = null, cardId = null) => {
+      console.log('[mountEditorComponents] itemId:', itemId, 'editorPlanType:', editorPlanType, 'cardId:', cardId)
       if (editorPlanType === 'bug') {
         mainEditorComponent.value = NewBug
       } else if (editorPlanType === 'test_case') {
@@ -2469,6 +2699,7 @@ export default {
       mainEditorEdit.value = !!edit
       mainEditorPlanId.value = planId
       mainEditorShowDiff.value = showDiff
+      mainEditorCardId.value = cardId
       showMainEditor.value = true
     }
 
@@ -2485,10 +2716,11 @@ export default {
         id: `plan-${pid}`,
         kind: 'plan-list',
         title,
-        meta: { planId: pid, urlContentType: null }
+        meta: { planId: pid, urlContentType: null, type: null }
       })
       activeWorkbenchTabId.value = `plan-${pid}`
       console.log('选择计划:', planId)
+      currentTypeFilter.value = null
       await applyPlanListTabState({ planId: pid, urlContentType: null })
     }
     
@@ -2622,27 +2854,56 @@ export default {
       }
     }
     
-    /** 按 planId 解析应使用的列表 API（切换计划时 selectedPlan 可能仍是上一个计划，不能依赖 currentPlanType） */
-    const getPlanListApiKindByPlanId = (planId) => {
+    /** 按 planId 和 cardId 解析应使用的列表 API
+     *  优先使用 currentTypeFilter（当前视图类型），因为从卡片进入列表时视图类型是明确的
+     *  当有 cardId 时，也可以使用 card 的类型 */
+    const getPlanListApiKindByPlanId = (planId, cardId = null) => {
+      // 优先使用 currentTypeFilter（当前视图类型）
+      // 因为从卡片进入 bug/testcase 列表时，currentTypeFilter 是 'bug' 或 'testcase'
+      // 而计划的 content_type 可能还是 'badcase'
+      const typeFilter = currentTypeFilter.value
+      if (typeFilter === 'bug') {
+        console.log(`[getPlanListApiKindByPlanId] 使用 currentTypeFilter: bug`)
+        return 'bug'
+      }
+      if (typeFilter === 'testcase') {
+        console.log(`[getPlanListApiKindByPlanId] 使用 currentTypeFilter: test_case`)
+        return 'test_case'
+      }
+      
+      // 如果有 cardId，尝试使用 card 的类型
+      if (cardId) {
+        const card = filteredCards.value.find(c => c.id === cardId || c.id === parseInt(cardId))
+        if (card && card.type) {
+          console.log(`[getPlanListApiKindByPlanId] 使用Card类型: ${card.type}, cardId: ${cardId}`)
+          const raw = card.type.toString().toLowerCase()
+          if (raw === 'bug') return 'bug'
+          if (raw === 'testcase' || raw === 'test_case') return 'test_case'
+          return 'badcase'
+        }
+      }
+      
+      // 兜底使用计划的 content_type
       const numericPlanId = typeof planId === 'number' ? planId : parseInt(String(planId), 10)
       if (Number.isNaN(numericPlanId)) {
+        console.log(`[getPlanListApiKindByPlanId] 无效planId，使用 currentPlanType: ${currentPlanType.value}`)
         return currentPlanType.value
       }
       const planObj = findPlanRecursive(projectPlans.value, numericPlanId)
       if (!planObj) {
+        console.log(`[getPlanListApiKindByPlanId] 未找到计划，使用 currentPlanType: ${currentPlanType.value}`)
         return currentPlanType.value
       }
-      const raw = (planObj.content_type || planObj.plan_type || 'badcase').toString().toLowerCase()
-      if (raw === 'bug') return 'bug'
-      if (raw === 'testcase' || raw === 'test_case') return 'test_case'
-      return 'badcase'
+      // 以后不再从计划推导类型，统一回退当前视图类型
+      return currentPlanType.value
     }
     
     // 根据计划ID调用API获取BadCase
-    const fetchBadcasesByPlan = async (planId, page = 1) => {
+    const fetchBadcasesByPlan = async (planId, page = 1, cardId = null) => {
       console.log(`=== fetchBadcasesByPlan 开始 ===`)
       console.log('计划ID:', planId)
       console.log('页码:', page)
+      console.log('卡片ID:', cardId)
       console.log('项目ID:', projectId.value)
       
       if (!projectId.value) {
@@ -2658,23 +2919,27 @@ export default {
         // 转换为数字，如果有效则设置参数
         const numericPlanId = typeof planId === 'number' ? planId : parseInt(planId)
         
-        if (planId && !isNaN(numericPlanId)) {
+        // 如果有 cardId，优先使用 cardId 过滤（卡片分类型，计划不分类型）
+        if (cardId) {
+          params.card_id = cardId
+          console.log(`🔍 按卡片ID过滤: cardId=${cardId}`)
+        } else if (planId && !isNaN(numericPlanId)) {
           params.plan_id = numericPlanId
           console.log(`🔍 检索计划ID: ${numericPlanId} 的数据`)
-        } else {
+        } else if (!cardId) {
           console.error('❌ 无效的计划ID:', planId, '类型:', typeof planId)
           return
         }
         
         console.log('📋 API参数:', params)
 
-        const listKind = getPlanListApiKindByPlanId(planId)
+        const listKind = getPlanListApiKindByPlanId(planId, cardId)
         let response
         if (listKind === 'bug') {
-          console.log(`🔍 调用 getProjectBugs，检索计划ID: ${planId}`)
+          console.log(`🔍 调用 getProjectBugs，检索计划ID: ${planId}, 卡片ID: ${cardId}`)
           response = await getProjectBugs(projectId.value, page, badcasePerPage.value, params)
         } else if (listKind === 'test_case') {
-          console.log(`🔍 调用 getProjectTestCases，检索计划ID: ${planId}`)
+          console.log(`🔍 调用 getProjectTestCases，检索计划ID: ${planId}, 卡片ID: ${cardId}`)
           response = await getProjectTestCases(projectId.value, page, badcasePerPage.value, params)
         } else {
           console.log(`🔍 调用 getProjectBadcases，检索计划ID: ${planId}`)
@@ -2699,6 +2964,7 @@ export default {
               status: badcase.status,
               assignee: badcase.assignee,
               plan_id: badcase.plan_id,
+              card_id: badcase.card_id,
               created_at: badcase.created_at
             })
           })
@@ -2820,14 +3086,44 @@ export default {
         clearEmbeddedEditor()
         return
       }
+      if (tab.kind === 'terminal-settings') {
+        clearEmbeddedEditor()
+        return
+      }
       if (tab.kind === 'detail') {
         const { entityId, editorPlanType, showDiff } = tab.meta || {}
         mountEditorComponents(entityId, editorPlanType, !!showDiff, true, null)
         return
       }
       if (tab.kind === 'create') {
-        const { editorPlanType, planId } = tab.meta || {}
-        mountEditorComponents(null, editorPlanType, false, false, planId ?? null)
+        const { editorPlanType, planId, cardId } = tab.meta || {}
+        mountEditorComponents(null, editorPlanType, false, false, planId ?? null, cardId ?? null)
+        return
+      }
+      if (tab.kind === 'type-list') {
+        clearEmbeddedEditor()
+        const { type, planId, cardId } = tab.meta || {}
+        currentTypeFilter.value = type
+        selectedPlan.value = planId
+        // 切换到类型列表时，获取该卡片下的数据
+        if (planId) {
+          await nextTick()
+          fetchBadcasesByPlan(planId, 1, cardId)
+        }
+        return
+      }
+      // plan-list Tab: restore type from meta
+      if (tab.kind === 'plan-list') {
+        clearEmbeddedEditor()
+        const { planId, urlContentType: uctMeta, type } = tab.meta || {}
+        let tf = type
+        if (tf === undefined || tf === null || tf === '') {
+          if (uctMeta === 'bug') tf = 'bug'
+          else if (uctMeta === 'test_case') tf = 'testcase'
+          else if (uctMeta === 'badcase') tf = 'badcase'
+        }
+        currentTypeFilter.value = tf || ''
+        await applyPlanListTabState({ planId, urlContentType: uctMeta })
         return
       }
       clearEmbeddedEditor()
@@ -2927,6 +3223,41 @@ export default {
         await nextTick()
         scrollActiveWorkbenchTabIntoView()
       }
+    }
+
+    /**
+     * grep / 沙箱：打开「某卡片下」的类型列表 Tab（Bug / BadCase / 测试用例），与 CardPanel 点进列表一致。
+     */
+    const upsertAndActivateTypeListTab = async ({ planId, cardId, type, cardTitle }) => {
+      const pid =
+        planId != null && planId !== 'unplanned'
+          ? typeof planId === 'number'
+            ? planId
+            : parseInt(String(planId), 10)
+          : NaN
+      const cid =
+        cardId != null ? (typeof cardId === 'number' ? cardId : parseInt(String(cardId), 10)) : NaN
+      if (Number.isNaN(pid) || pid <= 0 || Number.isNaN(cid) || cid <= 0) return
+      const tl =
+        type === 'badcase'
+          ? 'badcase'
+          : type === 'testcase' || type === 'test_case'
+            ? 'testcase'
+            : 'bug'
+      const tabId = `type-list-${tl}-${pid}-${cid}`
+      const title = truncateForTab(
+        cardTitle || `${tl}列表`,
+        t('tab.planFallback', { id: pid })
+      )
+      upsertWorkbenchTab({
+        id: tabId,
+        kind: 'type-list',
+        title,
+        meta: { type: tl, planId: pid, cardTitle, cardId: cid }
+      })
+      await activateWorkbenchTab(tabId)
+      await nextTick()
+      scrollActiveWorkbenchTabIntoView()
     }
 
     const onWorkbenchTabStripMouseDown = (e) => {
@@ -3039,13 +3370,73 @@ export default {
     }
 
     // 编辑 BadCase/Bug/TestCase（统一入口）
+    // 根据当前视图类型决定编辑器类型：bug列表用bug，badcase列表用badcase
     const editBadcase = (badcaseId) => {
       console.log('=== editBadcase函数被调用 ===')
       console.log('BadCase/Bug/TestCase ID:', badcaseId)
       console.log('项目ID:', projectId.value)
+      console.log('当前视图类型 currentTypeFilter:', currentTypeFilter.value)
 
+      // 根据当前视图类型决定编辑器类型，而不是依赖计划的 content_type
+      // 这样从卡片进入 bug 列表时，点击 bug 记录会正确打开 bug 编辑器
+      const editorType = currentTypeFilter.value === 'bug' ? 'bug' 
+                       : currentTypeFilter.value === 'testcase' ? 'test_case'
+                       : currentPlanType.value
+
+      console.log('使用的编辑器类型:', editorType)
+      
       // 统一改为主区域挂载编辑，避免 overlay 顶栏/布局重复
-      openMainEditor(badcaseId, currentPlanType.value, false)
+      openMainEditor(badcaseId, editorType, false)
+    }
+    
+    // 编辑卡片（支持传递卡片自己的类型）
+    const editCard = (cardId) => {
+      console.log('=== editCard函数被调用 ===')
+      console.log('卡片 ID:', cardId, '类型:', typeof cardId)
+      
+      // 跳转到 BadCase 详情页面编辑
+      openMainEditor(cardId, currentPlanType.value, false)
+    }
+    
+    // 快速更新卡片（行内编辑）
+    const handleQuickUpdate = async (updateData) => {
+      console.log('[handleQuickUpdate] 快速更新卡片:', updateData)
+      console.log('[handleQuickUpdate] 传递的 type:', updateData.type)
+      
+      try {
+        const response = await updateCard(updateData.id, {
+          title: updateData.title,
+          type: updateData.type
+        })
+        
+        console.log('[handleQuickUpdate] 更新响应:', response.data)
+        const updatedCard = response.data.data ?? response.data.card
+        console.log('[handleQuickUpdate] 后端返回的卡片:', updatedCard)
+        
+        if (response.data.success) {
+          // 更新列表中的卡片数据
+          const index = filteredCards.value.findIndex(c => c.id === updateData.id)
+          if (index !== -1) {
+            // 使用后端返回的完整卡片数据（API 为 data，兼容 card）
+            if (updatedCard && typeof updatedCard === 'object') {
+              filteredCards.value[index] = { ...filteredCards.value[index], ...updatedCard }
+            } else {
+              filteredCards.value[index] = {
+                ...filteredCards.value[index],
+                title: updateData.title,
+                type: updateData.type
+              }
+            }
+            console.log('[handleQuickUpdate] 更新后的卡片:', filteredCards.value[index])
+          }
+        } else {
+          console.error('[handleQuickUpdate] 更新失败:', response.data.error)
+          alert(response.data.error || '更新失败')
+        }
+      } catch (err) {
+        console.error('[handleQuickUpdate] 更新卡片失败:', err)
+        alert('更新卡片失败')
+      }
     }
     
     // 打开编辑覆盖层
@@ -3054,9 +3445,19 @@ export default {
       console.log('[MAIN-EDITOR] 打开主区域编辑:', { itemId, itemType, showDiff })
       
       const et = mapToEditorPlanType(itemType)
+      console.log('[MAIN-EDITOR] 映射后的编辑器类型:', et)
       const returnTo = activeWorkbenchTabId.value
       const tid = `detail-${et}-${itemId}`
-      const row = badcases.value.find((b) => b.id == itemId)
+      // 根据类型在正确的数组中查找
+      let row = null
+      if (itemType === 'card') {
+        // 从卡片列表中查找
+        row = filteredCards.value.find((c) => c.id == itemId)
+      }
+      if (!row) {
+        // 从 badcases 列表中查找
+        row = badcases.value.find((b) => b.id == itemId)
+      }
       const title = truncateForTab(row?.title, '编辑')
       upsertWorkbenchTab({
         id: tid,
@@ -3102,6 +3503,34 @@ export default {
     }
     provide('openNewBadcaseFromTerminal', openNewBadcaseFromTerminal)
 
+    function openNewBugFromTerminal(text) {
+      const snippet = String(text || '').trim()
+      if (!snippet) return
+      bugDraftPreset.value = { token: Date.now(), description: snippet.slice(0, 12000) }
+      const pid =
+        selectedPlan.value && selectedPlan.value !== 'unplanned'
+          ? typeof selectedPlan.value === 'number'
+            ? selectedPlan.value
+            : parseInt(String(selectedPlan.value), 10)
+          : null
+      openMainCreateEditor('bug', Number.isFinite(pid) ? pid : null)
+    }
+    provide('openNewBugFromTerminal', openNewBugFromTerminal)
+
+    function openNewTestcaseFromTerminal(text) {
+      const snippet = String(text || '').trim()
+      if (!snippet) return
+      testcaseDraftPreset.value = { token: Date.now(), description: snippet.slice(0, 12000) }
+      const pid =
+        selectedPlan.value && selectedPlan.value !== 'unplanned'
+          ? typeof selectedPlan.value === 'number'
+            ? selectedPlan.value
+            : parseInt(String(selectedPlan.value), 10)
+          : null
+      openMainCreateEditor('test_case', Number.isFinite(pid) ? pid : null)
+    }
+    provide('openNewTestcaseFromTerminal', openNewTestcaseFromTerminal)
+
     const closeMainEditor = async () => {
       console.log('[MAIN-EDITOR] 关闭主区域编辑')
       const tid = activeWorkbenchTabId.value
@@ -3132,6 +3561,56 @@ export default {
     const goToDashboard = () => {
       router.push('/dashboard')
     }
+
+    /** 与 agents/tools/modify_tool._sanitize_title_modifications 对齐，用于前端采纳 URL */
+    const titleChangeIntentInNaturalQuery = (nq) => {
+      const s = String(nq || '').trim()
+      if (!s) return false
+      const markers = [
+        '标题改为',
+        '改标题',
+        '标题改成',
+        '重命名',
+        '改名为',
+        '改成叫',
+        '名称改为',
+        '题目改为',
+        'rename',
+        'title to',
+        'change title'
+      ]
+      if (markers.some((m) => s.includes(m))) return true
+      const sl = s.toLowerCase()
+      return (
+        sl.includes('title') &&
+        (sl.includes('rename') || sl.includes('change') || s.includes('改为'))
+      )
+    }
+
+    /**
+     * 列表点 √ 采纳：去掉模型误带的 title（界面可能只画了状态 diff，但 payload 里仍有 title）。
+     * restorePendingDiffReviews 恢复的 pending 常无 _naturalQuery，必须在发 POST 前剔除。
+     */
+    const pruneSpuriousTitleForAdopt = (modifyData, modifications) => {
+      if (!modifications || typeof modifications !== 'object') return
+      if (!Object.prototype.hasOwnProperty.call(modifications, 'title')) return
+      const otherKeys = Object.keys(modifications).filter((k) => k !== 'title')
+      const hasOther = otherKeys.length > 0
+      const tv = modifyData?.title
+      const oldT =
+        tv && typeof tv === 'object' && 'old' in tv ? String(tv.old ?? '').trim() : ''
+      const newT =
+        tv && typeof tv === 'object' && 'new' in tv ? String(tv.new ?? '').trim() : ''
+      if (oldT && newT && oldT === newT) {
+        delete modifications.title
+        return
+      }
+      const nq = typeof modifyData?._naturalQuery === 'string' ? modifyData._naturalQuery : ''
+      const wantsTitle = titleChangeIntentInNaturalQuery(nq)
+      if (hasOther && !wantsTitle) {
+        delete modifications.title
+      }
+    }
     
     // 确认修改（单条）。opts.skipRestoreFetch=true 时不在末尾 restore/拉列表，供连续组合批末尾统一执行，减少闪烁。
     const confirmModify = async (bugId, opts = {}) => {
@@ -3151,7 +3630,7 @@ export default {
       const modifications = {}
       const oldValues = {}  // 保存旧值用于回滚
       for (const [field, value] of Object.entries(modifyData)) {
-        if (field === '_target' || field === '_messageId') continue  // 跳过内部字段
+        if (field === '_target' || field === '_messageId' || field === '_naturalQuery') continue  // 跳过内部字段
         if (typeof value === 'object' && 'new' in value) {
           modifications[field] = value.new
           oldValues[field] = value.old
@@ -3159,6 +3638,8 @@ export default {
           modifications[field] = value
         }
       }
+
+      pruneSpuriousTitleForAdopt(modifyData, modifications)
       
       // ======== 乐观更新：立即更新 UI ========
       // 1. 立即更新本地数据
@@ -3198,7 +3679,9 @@ export default {
           target_id: bugId,
           modifications: modifications,
           confirm: true,
-          message_id: modifyData._messageId
+          message_id: modifyData._messageId,
+          natural_query:
+            typeof modifyData._naturalQuery === 'string' ? modifyData._naturalQuery : ''
         })
       })
       .then((response) => response.json())
@@ -3250,7 +3733,7 @@ export default {
         const modifications = {}
         const oldValues = {}
         for (const [field, value] of Object.entries(modifyData)) {
-          if (field === '_target' || field === '_messageId') continue
+          if (field === '_target' || field === '_messageId' || field === '_naturalQuery') continue
           if (typeof value === 'object' && value !== null && 'new' in value) {
             modifications[field] = value.new
             oldValues[field] = value.old
@@ -3258,6 +3741,7 @@ export default {
             modifications[field] = value
           }
         }
+        pruneSpuriousTitleForAdopt(modifyData, modifications)
         snapshots.push({ bugId, modifyData, modifications, oldValues })
       }
       if (snapshots.length === 0) return
@@ -3275,7 +3759,9 @@ export default {
       const messageId = snapshots[0].modifyData._messageId
       const items = snapshots.map((s) => ({
         target_id: s.bugId,
-        modifications: s.modifications
+        modifications: s.modifications,
+        natural_query:
+          typeof s.modifyData._naturalQuery === 'string' ? s.modifyData._naturalQuery : ''
       }))
 
       const rollback = () => {
@@ -3724,8 +4210,7 @@ export default {
       newPlan.description = ''
       newPlan.parentId = plan.id // 设置当前计划为父计划
       newPlan.scopeNotification = false
-      // 子计划必须与父计划同一内容类型（BadCase / Bug / 测试用例）
-      newPlan.contentType = plan.content_type || plan.plan_type || 'badcase'
+      newPlan.contentType = 'badcase'
       
       isCreatingSiblingPlan.value = false
       isCreatingSubPlan.value = true
@@ -3755,8 +4240,7 @@ export default {
       newPlan.parentId = plan.parent_id || '' // 如果是顶级计划，则同级计划也是顶级
       console.log('设置父计划ID为:', newPlan.parentId)
       newPlan.scopeNotification = false
-      // 同级计划与当前所选计划同一内容类型
-      newPlan.contentType = plan.content_type || plan.plan_type || 'badcase'
+      newPlan.contentType = 'badcase'
       
       isCreatingSiblingPlan.value = true
       isCreatingSubPlan.value = false
@@ -3777,7 +4261,7 @@ export default {
       newPlan.description = plan.description || ''
       newPlan.scopeNotification = plan.scope_notification || false
       newPlan.statusType = plan.status_type || 'in_progress'
-      newPlan.contentType = plan.content_type || plan.plan_type || 'badcase'  // 重要：从计划中加载 plan_type
+      newPlan.contentType = 'badcase'
       
       console.log('🐛 编辑计划，加载的 contentType:', newPlan.contentType)
       
@@ -4672,6 +5156,29 @@ export default {
       scrollActiveWorkbenchTabIntoView()
     }
 
+    const openTerminalSettingsWorkbenchTab = async () => {
+      clearEmbeddedEditor()
+      const tab = {
+        id: TERMINAL_SETTINGS_WORKBENCH_TAB_ID,
+        kind: 'terminal-settings',
+        title: truncateForTab(t('embeddedTerminal.terminalSettingsTab'), t('embeddedTerminal.terminalSettingsTab')),
+        meta: {}
+      }
+      const idx = workbenchTabs.value.findIndex((x) => x.id === TERMINAL_SETTINGS_WORKBENCH_TAB_ID)
+      if (idx >= 0) {
+        workbenchTabs.value[idx] = { ...workbenchTabs.value[idx], ...tab }
+      } else {
+        const cur = workbenchTabs.value.findIndex((x) => x.id === activeWorkbenchTabId.value)
+        const insertAt = cur >= 0 ? cur + 1 : workbenchTabs.value.length
+        workbenchTabs.value.splice(insertAt, 0, tab)
+      }
+      await activateWorkbenchTab(TERMINAL_SETTINGS_WORKBENCH_TAB_ID)
+      await nextTick()
+      scrollActiveWorkbenchTabIntoView()
+    }
+
+    provide('openTerminalSettingsWorkbenchTab', openTerminalSettingsWorkbenchTab)
+
     const openProjectManagementWorkbenchTab = async () => {
       showUserDropdown.value = false
       clearEmbeddedEditor()
@@ -5238,7 +5745,8 @@ export default {
             })
           ),
           _target: target,
-          _messageId: messageId
+          _messageId: messageId,
+          _naturalQuery: typeof detail.natural_query === 'string' ? detail.natural_query : ''
         }
         const next = { ...pendingModifications.value }
         next[intTargetId] = { ...(next[intTargetId] || {}), ...newModifyData }
@@ -5297,13 +5805,81 @@ export default {
               })
             ),
             _target: target,
-            _messageId: messageId
+            _messageId: messageId,
+            _naturalQuery: typeof detail.natural_query === 'string' ? detail.natural_query : ''
           }
           base[intTargetId] = { ...(base[intTargetId] || {}), ...newModifyData }
           touched = true
         }
       }
       if (touched) pendingModifications.value = base
+    }
+
+    /**
+     * 将导航 record_id（可能是 Card.id 或源表 id）解析为所在卡片行。
+     */
+    const resolveCardForListNav = (rid, navTarget) => {
+      if (rid == null || rid === '') return null
+      const n = Number(rid)
+      if (Number.isNaN(n) || n <= 0) return null
+      const nt = (navTarget || '').toString().toLowerCase()
+      const list = cards.value
+      if (!Array.isArray(list) || list.length === 0) return null
+
+      const stBug = (s) => String(s || '').toLowerCase() === 'bug'
+      const stBad = (s) => {
+        const t = String(s || '').toLowerCase()
+        return t === 'bad_case' || t === 'badcase'
+      }
+      const stTc = (s) => {
+        const t = String(s || '').toLowerCase()
+        return t === 'test_case' || t === 'testcase'
+      }
+
+      let match = null
+      if (nt === 'bug') {
+        match = list.find(
+          (c) =>
+            String(c.type || '').toLowerCase() === 'bug' &&
+            (Number(c.id) === n || (stBug(c.source_type) && Number(c.source_id) === n))
+        )
+      } else if (nt === 'badcase') {
+        match = list.find(
+          (c) =>
+            String(c.type || '').toLowerCase() === 'badcase' &&
+            (Number(c.id) === n || (stBad(c.source_type) && Number(c.source_id) === n))
+        )
+      } else if (nt === 'testcase' || nt === 'test_case') {
+        match = list.find(
+          (c) =>
+            String(c.type || '').toLowerCase() === 'testcase' &&
+            (Number(c.id) === n || (stTc(c.source_type) && Number(c.source_id) === n))
+        )
+      } else if (nt === 'card') {
+        match = list.find((c) => Number(c.id) === n)
+      }
+
+      return match || null
+    }
+
+    /**
+     * grep/modify 列表定位：行上为 Card.id；源表 id 需先用 resolveCardForListNav 映射。
+     */
+    const findNavListRowEl = (rid, navTarget) => {
+      if (rid == null || rid === '') return null
+      const idStr = String(rid)
+      let el =
+        document.querySelector(`[data-bug-id="${idStr}"]`) ||
+        document.querySelector(`[data-item-id="${idStr}"]`)
+      if (el) return el
+
+      const match = resolveCardForListNav(rid, navTarget)
+      if (!match) return null
+      const cid = String(match.id)
+      return (
+        document.querySelector(`[data-item-id="${cid}"]`) ||
+        document.querySelector(`[data-bug-id="${cid}"]`)
+      )
     }
 
     const handleShowModifyInList = async (event) => {
@@ -5343,7 +5919,21 @@ export default {
             return
           }
           const skipModifyListFetch = dtop.__modifyListBatchItem === true
-          const { targetId, target, diff, modifications, plan_id, executed, messageId, batchIndex, peerTargetIds, suppressAutoOpenDetail } = event.detail
+          const {
+            targetId,
+            target,
+            diff,
+            modifications,
+            plan_id,
+            executed,
+            messageId,
+            batchIndex,
+            peerTargetIds,
+            suppressAutoOpenDetail,
+            natural_query: naturalQueryFromEvent
+          } = event.detail
+          const natural_query =
+            typeof naturalQueryFromEvent === 'string' ? naturalQueryFromEvent : ''
           const intTargetId = parseInt(targetId)
 
           if (dtop.__pendingSyncedBatch === true) {
@@ -5414,8 +6004,28 @@ export default {
               if (targetPlanId) selectedPlan.value = targetPlanId
               else selectedPlan.value = null
             } else {
-              await upsertAndActivatePlanListTab(navMeta)
-              listLoadedByTabNavigation = true
+              let openedTypeList = false
+              if (targetPlanId && ['bug', 'badcase', 'testcase'].includes(target)) {
+                selectedPlan.value = targetPlanId
+                expandPlanTreeToPlanId(targetPlanId)
+                await fetchCards()
+                await nextTick()
+                const cardRow = resolveCardForListNav(intTargetId, target)
+                if (cardRow?.id) {
+                  await upsertAndActivateTypeListTab({
+                    planId: targetPlanId,
+                    cardId: cardRow.id,
+                    type: target,
+                    cardTitle: cardRow.title
+                  })
+                  openedTypeList = true
+                  listLoadedByTabNavigation = true
+                }
+              }
+              if (!openedTypeList) {
+                await upsertAndActivatePlanListTab(navMeta)
+                listLoadedByTabNavigation = true
+              }
             }
             if (!skipModifyListFetch && !listLoadedByTabNavigation) {
               await awaitCoalescedFetchBadcasesForModifyList()
@@ -5599,7 +6209,8 @@ export default {
                     })
                   ),
                   _target: target,
-                  _messageId: messageId
+                  _messageId: messageId,
+                  _naturalQuery: natural_query
                 }
                 const next = { ...pendingModifications.value }
                 next[intTargetId] = {
@@ -5717,8 +6328,28 @@ export default {
             if (targetPlanId) selectedPlan.value = targetPlanId
             else selectedPlan.value = null
           } else {
-            await upsertAndActivatePlanListTab(navMeta)
-            listLoadedByTabNavigation = true
+            let openedTypeList = false
+            if (targetPlanId && ['bug', 'badcase', 'testcase'].includes(target)) {
+              selectedPlan.value = targetPlanId
+              expandPlanTreeToPlanId(targetPlanId)
+              await fetchCards()
+              await nextTick()
+              const cardRow = resolveCardForListNav(intTargetId, target)
+              if (cardRow?.id) {
+                await upsertAndActivateTypeListTab({
+                  planId: targetPlanId,
+                  cardId: cardRow.id,
+                  type: target,
+                  cardTitle: cardRow.title
+                })
+                openedTypeList = true
+                listLoadedByTabNavigation = true
+              }
+            }
+            if (!openedTypeList) {
+              await upsertAndActivatePlanListTab(navMeta)
+              listLoadedByTabNavigation = true
+            }
           }
           
           // 仅在未通过 Tab 导航加载列表时，才补一次列表刷新
@@ -5767,6 +6398,8 @@ export default {
             
             if (Object.keys(modifyDataLocal).length > 0) {
               modifyDataLocal._target = target  // 保存目标类型
+              if (messageId != null) modifyDataLocal._messageId = messageId
+              modifyDataLocal._naturalQuery = natural_query
               pendingModifications.value = {
                 ...pendingModifications.value,
                 [intTargetId]: modifyDataLocal
@@ -5817,22 +6450,21 @@ export default {
           applyPeerPendingSync(intTargetId, peerTargetIds)
           
           // 滚动到目标行并高亮（Tab 切换后列表异步渲染，需短暂重试）
-          const rowSel = `[data-bug-id="${intTargetId}"]`
           let targetRow = null
           for (let i = 0; i < 12; i++) {
             await nextTick()
             await new Promise((resolve) => setTimeout(resolve, i === 0 ? 280 : 130))
-            targetRow = document.querySelector(rowSel)
+            targetRow = findNavListRowEl(intTargetId, target)
             if (targetRow) break
           }
-          console.log('[MODIFY] 查找目标行:', rowSel, targetRow)
+          console.log('[MODIFY] 查找目标行:', intTargetId, targetRow)
           if (targetRow) {
             targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
             targetRow.classList.add('highlight-row')
             setTimeout(() => targetRow.classList.remove('highlight-row'), 3000)
           }
         }
-        
+
         const handleGrepNavigate = async (event) => {
       const detail = event.detail || {}
       const rawPlanId = detail.planId
@@ -5848,16 +6480,47 @@ export default {
         detail.openDetail === true ||
         detail.navigateMode === 'detail' ||
         detail.context === 'detail'
+      const mergedFromLegacy = detail.merged_from_legacy
+      const navTitle = detail.title || detail.navTitle || ''
+      const legacyRowIdRaw = detail.legacy_row_id ?? detail.source_id ?? detail.bug_id
+      let legacyRowId = null
+      if (legacyRowIdRaw != null && legacyRowIdRaw !== '') {
+        const n = Number(legacyRowIdRaw)
+        if (!Number.isNaN(n) && n > 0) legacyRowId = n
+      }
+
+      let listKind = null
+      if (target === 'card' && mergedFromLegacy) {
+        const ml = String(mergedFromLegacy).toLowerCase()
+        listKind = ml === 'test_case' ? 'testcase' : ml
+      } else if (target === 'bug' || target === 'badcase' || target === 'testcase') {
+        listKind = target
+      }
+
+      const listKindToUct = (kind) => {
+        if (kind === 'bug') return 'bug'
+        if (kind === 'badcase') return 'badcase'
+        if (kind === 'testcase' || kind === 'test_case') return 'test_case'
+        return null
+      }
+
+      let uctFromTarget = listKindToUct(listKind)
+      if (uctFromTarget == null) {
+        if (target === 'badcase') uctFromTarget = 'badcase'
+        else if (target === 'testcase') uctFromTarget = 'test_case'
+        else if (target === 'bug') uctFromTarget = 'bug'
+        else uctFromTarget = null
+      }
+
       console.log('[GREP-NAV] 收到导航指令:', {
         rawPlanId,
         recordId,
         recordIdsBatch,
         bugId: detail.bugId,
-        target
+        target,
+        mergedFromLegacy,
+        listKind
       })
-
-      const uctFromTarget =
-        target === 'badcase' ? 'badcase' : target === 'testcase' ? 'test_case' : 'bug'
 
       let meta = null
       if (rawPlanId != null && rawPlanId !== '') {
@@ -5871,17 +6534,87 @@ export default {
         meta = { planId: null, urlContentType: uctFromTarget }
       }
 
+      const resolveTargetForApi = () => listKind || target
+
       if (
         meta &&
         meta.planId == null &&
         (recordIdsBatch?.length > 0 || (recordId != null && recordId !== ''))
       ) {
         const rid = recordIdsBatch?.length ? recordIdsBatch[0] : recordId
-        const resolved = await resolvePlanIdByRecordApi(target, rid)
+        const resolved = await resolvePlanIdByRecordApi(resolveTargetForApi(), rid)
         if (resolved) {
           expandPlanTreeToPlanId(resolved)
           meta = { planId: resolved, urlContentType: uctFromTarget }
         }
+      }
+
+      const numericPlanId =
+        meta?.planId != null && meta.planId !== 'unplanned'
+          ? typeof meta.planId === 'number'
+            ? meta.planId
+            : parseInt(String(meta.planId), 10)
+          : NaN
+
+      /**
+       * 进入「某卡片」下的类型列表（与侧栏点进 Bug 卡片一致）；依赖已拉取 cards。
+       * 纯「点击跳转到卡片」（target=card 且无 merged_from_legacy）只打开迭代卡片总表并高亮行，
+       * 不按卡片类型自动钻进 Bug/BadCase/用例列表。
+       */
+      const openGrepTypeListIfPossible = async () => {
+        if (target === 'card' && !mergedFromLegacy) return false
+        if (!numericPlanId || Number.isNaN(numericPlanId) || numericPlanId <= 0) return false
+        const ridFirst = recordIdsBatch?.length ? recordIdsBatch[0] : recordId
+        if (ridFirst == null || ridFirst === '') return false
+
+        selectedPlan.value = numericPlanId
+        expandPlanTreeToPlanId(numericPlanId)
+        await fetchCards()
+        await nextTick()
+
+        let ek = listKind
+        if (!ek && (target === 'bug' || target === 'badcase' || target === 'testcase')) {
+          ek = target
+        }
+        if (!ek || ek === 'card') return false
+
+        const cardRow = resolveCardForListNav(ridFirst, ek)
+        if (!cardRow?.id) return false
+
+        await upsertAndActivateTypeListTab({
+          planId: numericPlanId,
+          cardId: cardRow.id,
+          type: ek,
+          cardTitle: navTitle || cardRow.title
+        })
+        await nextTick()
+
+        const flashIds = recordIdsBatch?.length
+          ? recordIdsBatch
+          : [legacyRowId != null ? legacyRowId : ridFirst]
+        let anyEl = null
+        for (let i = 0; i < 12; i++) {
+          await nextTick()
+          await new Promise((r) => setTimeout(r, i === 0 ? 400 : 130))
+          anyEl = findNavListRowEl(flashIds[0], ek)
+          if (anyEl) break
+        }
+        if (anyEl) {
+          anyEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+        for (const id of flashIds) {
+          const el = findNavListRowEl(id, ek)
+          if (el) {
+            el.classList.add('highlight-flash')
+            setTimeout(() => el.classList.remove('highlight-flash'), 2000)
+          }
+        }
+        return true
+      }
+
+      if (!openDetail) {
+        const opened = await openGrepTypeListIfPossible()
+        if (opened) return
       }
 
       await upsertAndActivatePlanListTab(meta)
@@ -5894,14 +6627,14 @@ export default {
         for (let i = 0; i < 12; i++) {
           await nextTick()
           await new Promise((r) => setTimeout(r, i === 0 ? 400 : 130))
-          anyEl = document.querySelector(`[data-bug-id="${recordIdsBatch[0]}"]`)
+          anyEl = findNavListRowEl(recordIdsBatch[0], target)
           if (anyEl) break
         }
         if (anyEl) {
           anyEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
         }
         for (const id of recordIdsBatch) {
-          const el = document.querySelector(`[data-bug-id="${id}"]`)
+          const el = findNavListRowEl(id, target)
           if (el) {
             el.classList.add('highlight-flash')
             setTimeout(() => el.classList.remove('highlight-flash'), 2000)
@@ -5912,19 +6645,43 @@ export default {
 
       if (recordId != null && recordId !== '') {
         if (openDetail) {
-          console.log('[GREP-NAV] 详情上下文命中，打开/激活详情 Tab')
-          openMainEditor(recordId, target, false)
+          console.log('[GREP-NAV] 打开卡片/实体详情（grep 导航）')
+          const ridNum = Number(recordId)
+          if (!Number.isNaN(ridNum) && ridNum > 0 && Array.isArray(cards.value)) {
+            const cardRow = cards.value.find((c) => Number(c.id) === ridNum)
+            if (cardRow) {
+              const raw = String(cardRow.type || cardRow.source_type || '').toLowerCase()
+              const edType =
+                raw === 'bug'
+                  ? 'bug'
+                  : raw === 'testcase' || raw === 'test_case'
+                    ? 'test_case'
+                    : 'badcase'
+              openMainEditor(ridNum, edType, false)
+              return
+            }
+          }
+          const fallbackType =
+            target === 'testcase' || target === 'test_case'
+              ? 'test_case'
+              : target === 'bug'
+                ? 'bug'
+                : target === 'badcase'
+                  ? 'badcase'
+                  : target === 'card'
+                    ? 'badcase'
+                    : target
+          openMainEditor(recordId, fallbackType, false)
           return
         }
-        const sel = `[data-bug-id="${recordId}"]`
         let bugElement = null
         for (let i = 0; i < 12; i++) {
           await nextTick()
           await new Promise((r) => setTimeout(r, i === 0 ? 400 : 130))
-          bugElement = document.querySelector(sel)
+          bugElement = findNavListRowEl(recordId, target)
           if (bugElement) break
         }
-        console.log('[GREP-NAV] 查找列表行元素:', bugElement, sel)
+        console.log('[GREP-NAV] 查找列表行元素:', bugElement, 'recordId=', recordId)
         if (bugElement) {
           bugElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
           bugElement.classList.add('highlight-flash')
@@ -5937,6 +6694,7 @@ export default {
     
     return {
       AppSettingsPanel,
+      TerminalSettingsWorkbenchPanel,
       ProjectHelpPanel,
       WorkflowNotificationsPanel,
       ProjectManage,
@@ -5967,6 +6725,7 @@ export default {
       planTestCaseCounts,
       hoveredPlan,
       contextMenu,
+      contextMenuDragActive,
       planCollapsed,
       expandedPlans,
       showCreateModal,
@@ -5996,6 +6755,7 @@ export default {
       mainEditorEdit,
       mainEditorPlanId,
       mainEditorShowDiff,
+      mainEditorCardId,
       embeddedEditorKind,
       mainEditorCacheKey,
       listPanelCacheKey,
@@ -6025,6 +6785,8 @@ export default {
       toggleSelectAll,
       toggleTaskSelection,
       editBadcase,
+      editCard,
+      handleQuickUpdate,
       goToDashboard,
       showPlanActions,
       hidePlanActions,
@@ -6039,6 +6801,7 @@ export default {
       favoritePlan,
       createBaseline,
       showCreatePlanModal,
+      onContextMenuDragStart,
       closeCreateModal,
       getModalTitle,
       showBaselineManagement,
@@ -6099,10 +6862,21 @@ export default {
       openNotificationsWorkbenchTab,
       closeAppSettingsWorkbenchTab,
       isSettingsWorkbenchTab,
+      // 类型过滤器和处理方法
+      currentTypeFilter,
+      handleOpenTypeList,
+      handleOpenCreate,
+      handleSearchResultSelect,
+      getTypeListBreadcrumb,
+      getCurrentPanelComponent,
+      handleTitleLoaded,
+      mountEditorComponents,
       isHelpWorkbenchTab,
       isProjectManagementWorkbenchTab,
       isNotificationsWorkbenchTab,
+      isTerminalSettingsWorkbenchTab,
       activeWorkbenchTab,
+      embeddedTerminalWorkspaceRef,
       appSettingsInitialPane,
       t,
       showNotifications,
@@ -6111,6 +6885,8 @@ export default {
       showAIAssistant,
       setLayout,
       planCollapsed,
+      activeLeftPanel,
+      handlePluginAction,
       leftSidebarHidden,
       leftSidebarWidth,
       startDragLeftSidebar,
@@ -6166,7 +6942,6 @@ export default {
       handleOpenGlobalSearch,
       handleOpenArchive,
       handleOpenCardCreate,
-      showGlobalSearch,
     }
   }
 }
@@ -6395,19 +7170,6 @@ export default {
   flex: 1;
   height: 100%;
   overflow: hidden;
-}
-
-/* 窄条搜索面板 */
-.narrow-search-panel {
-  width: 320px;
-  min-width: 320px;
-  height: 100%;
-  background: #fff;
-  border-right: 1px solid #e8e8e8;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  flex-shrink: 0;
 }
 
 /* 主容器 */
@@ -6724,9 +7486,11 @@ export default {
   min-width: 0;
 }
 
+
 .sidebar-header {
   margin-bottom: 16px;
 }
+
 
 .header-top {
   display: flex;
@@ -6735,6 +7499,7 @@ export default {
   min-height: 32px;
   gap: 4px;
 }
+
 
 .sidebar-header h3 {
   margin: 0;
@@ -6766,14 +7531,17 @@ export default {
   gap: 4px;
 }
 
+
 .action-icon-btn .btn-text {
   font-size: 12px;
   color: #666;
 }
 
+
 .action-icon-btn:hover {
   background: #f8f9fa;
 }
+
 
 .search-section {
   display: flex;
@@ -7384,6 +8152,7 @@ export default {
   margin-top: 16px;
 }
 
+
 .plan-item {
   margin-bottom: 4px;
   border-radius: 4px;
@@ -7391,14 +8160,17 @@ export default {
   position: relative;
 }
 
+
 .plan-item:hover {
   background: #f8f9fa;
 }
+
 
 .plan-item.active {
   background: #e3f2fd;
   color: #1976d2;
 }
+
 
 .badcase-content {
   display: flex;
@@ -9218,7 +9990,8 @@ export default {
   /* 终端区需要参与父级 flex 收缩；auto 滚动会破坏 xterm 的 height:100% / absolute 填满链 */
   flex: 1 1 0;
   min-height: 0;
-  overflow: hidden;
+  /* 允许终端顶栏下拉菜单向上溢出显示（例如 +⌄ 菜单） */
+  overflow: visible;
   padding: 0;
   display: flex;
   flex-direction: column;

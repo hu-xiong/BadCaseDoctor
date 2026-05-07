@@ -3,8 +3,14 @@
     <!-- 头部信息 -->
     <div v-if="showHeader" class="content-header">
       <div class="content-title">
-        <span>{{ title }}</span>
-        <span class="completion-rate">{{ items.length }}/{{ total }}</span>
+        <button v-if="currentTypeFilter" class="back-btn" @click="clearTypeFilter">
+          ← {{ t('common.back') }}
+        </button>
+        <span v-if="currentTypeFilter" class="type-filter-label">
+          {{ getTypeText(currentTypeFilter) }}
+        </span>
+        <span v-else>{{ title }}</span>
+        <span class="completion-rate">{{ filteredItems.length }}/{{ total }}</span>
       </div>
     </div>
 
@@ -54,7 +60,7 @@
       </div>
 
       <div class="table-body">
-        <!-- 新建行（输入框） -->
+        <!-- 新建行（输入框 + 类型选择） -->
         <div v-if="isCreating" class="table-row creating-row">
           <div class="row-checkbox">
             <span class="new-indicator">🆕</span>
@@ -72,7 +78,11 @@
             />
           </div>
           <div class="row-status">
-            <span class="status-badge new">{{ t('list.statusNew') }}</span>
+            <select v-model="newCardType" class="type-select">
+              <option value="bug">{{ t('list.types.bug') }}</option>
+              <option value="badcase">{{ t('list.types.badcase') }}</option>
+              <option value="testcase">{{ t('list.types.testCase') }}</option>
+            </select>
           </div>
           <div class="row-date">
             <span class="date-text creating">—</span>
@@ -86,23 +96,32 @@
         <div v-if="loading && !isCreating" class="loading-row">
           <div class="loading-text">{{ t('list.loading') }}</div>
         </div>
-        <div v-else-if="items.length === 0 && !isCreating" class="empty-row">
+        <div v-else-if="items.length === 0 && !isCreating && !isEditing" class="empty-row">
           <div class="empty-text">{{ t('list.emptyData', { type: itemTypeLabel }) }}</div>
         </div>
         <div
           v-else
-          v-for="item in items"
+          v-for="item in filteredItems"
           :key="item.id"
           :data-item-id="item.id"
+          :data-bug-id="item.id"
           class="table-row"
           :class="{
             selected: selectedItems.includes(item.id),
-            'item-new': isNewItem(item.id)
+            'item-new': isNewItem(item.id),
+            'editing-row': isEditing && editingItem?.id === item.id
           }"
           @click="handleRowClick(item, $event)"
         >
           <div class="row-checkbox">
             <input
+              v-if="isEditing && editingItem?.id === item.id"
+              type="checkbox"
+              disabled
+              style="opacity: 0.3"
+            />
+            <input
+              v-else
               type="checkbox"
               :checked="selectedItems.includes(item.id)"
               @change="emit('toggleSelection', item.id)"
@@ -110,17 +129,50 @@
             />
           </div>
           <div class="row-title">
-            <span class="card-title">{{ item.title }}</span>
-            <span v-if="isNewItem(item.id)" class="new-badge">{{ t('list.newPending') }}</span>
+            <!-- 编辑模式 -->
+            <input
+              v-if="isEditing && editingItem?.id === item.id"
+              ref="editInputRef"
+              v-model="editingTitle"
+              type="text"
+              class="create-input"
+              :placeholder="t('cardCreate.titlePlaceholder')"
+              @keyup.enter="confirmEdit"
+              @keyup.esc="cancelEdit"
+              @click.stop
+            />
+            <!-- 普通模式 -->
+            <template v-else>
+              <span class="card-title">{{ rowDisplayTitle(item) }}</span>
+              <span v-if="isNewItem(item.id)" class="new-badge">{{ t('list.newPending') }}</span>
+            </template>
           </div>
           <div class="row-status">
-            <span class="type-badge" :class="item.type">{{ getTypeText(item.type) }}</span>
+            <!-- 编辑模式 -->
+            <select
+              v-if="isEditing && editingItem?.id === item.id"
+              v-model="editingType"
+              class="type-select"
+              @click.stop
+            >
+              <option value="bug">{{ t('list.types.bug') }}</option>
+              <option value="badcase">{{ t('list.types.badcase') }}</option>
+              <option value="testcase">{{ t('list.types.testCase') }}</option>
+            </select>
+            <!-- 普通模式 - 点击进入该类型列表，支持复制 -->
+            <span v-else class="type-badge" :class="item.type" @click.stop>{{ getTypeText(item.type) }}</span>
           </div>
           <div class="row-date">
             <span class="date-text">{{ formatDate(item.created_at) }}</span>
           </div>
           <div class="row-actions" @click.stop>
-            <button class="btn-icon-edit" :title="t('list.edit')" @click="emit('edit', item.id)">✏️</button>
+            <!-- 编辑模式 -->
+            <template v-if="isEditing && editingItem?.id === item.id">
+              <button class="btn-icon-confirm" @click="confirmEdit" :disabled="!editingTitle.trim()" :title="t('common.confirm')">✓</button>
+              <button class="btn-icon-cancel" @click="cancelEdit" :title="t('common.cancel')">✗</button>
+            </template>
+            <!-- 普通模式 -->
+            <button v-else class="btn-icon-edit" :title="t('common.edit')" @click="startEdit(item)">✏️</button>
           </div>
         </div>
       </div>
@@ -155,16 +207,46 @@ export default {
     
     // 新建卡片回调
     onQuickCreate: { type: Function, default: null },
+    
+    // 编辑卡片回调
+    editItem: { type: Function, default: null },
+    
+    // 快速更新卡片回调（行内编辑）
+    onQuickUpdate: { type: Function, default: null },
   },
-  emits: ['edit', 'delete', 'refresh', 'search', 'toggleSelectAll', 'toggleSelection', 'update:searchText', 'quickCreate', 'create'],
+  emits: ['edit', 'delete', 'refresh', 'search', 'toggleSelectAll', 'toggleSelection', 'update:searchText', 'quickCreate', 'create', 'quickUpdate', 'openTypeList'],
   setup(props, { emit }) {
     const { t } = useI18n()
     
     // 新建状态
     const isCreating = ref(false)
     const newCardTitle = ref('')
+    const newCardType = ref('bug') // 默认类型为 bug
     const createInputRef = ref(null)
     const newlyCreatedIds = ref(new Set())
+    
+    // 编辑状态
+    const isEditing = ref(false)
+    const editingItem = ref(null)
+    const editingTitle = ref('')
+    const editingType = ref('bug')
+    const editInputRef = ref(null)
+    
+    // 类型筛选状态
+    const currentTypeFilter = ref('') // '' 表示总览，其他值为具体类型
+    
+    // 根据类型筛选的卡片列表
+    const filteredItems = computed(() => {
+      if (!currentTypeFilter.value) {
+        return props.items
+      }
+      return props.items.filter(item => item.type === currentTypeFilter.value)
+    })
+    
+    // 清除类型筛选，返回总览
+    const clearTypeFilter = () => {
+      currentTypeFilter.value = ''
+    }
     
     const itemTypeLabel = computed(() => {
       if (props.itemType === 'bug') return t('list.types.bug')
@@ -177,7 +259,8 @@ export default {
       const typeMap = {
         'bug': t('list.types.bug'),
         'badcase': t('list.types.badcase'),
-        'testcase': t('list.types.testCase')
+        'testcase': t('list.types.testCase'),
+        'card': t('list.types.card')
       }
       return typeMap[type] || type || '—'
     }
@@ -186,17 +269,87 @@ export default {
       if (!dateStr) return '—'
       return new Date(dateStr).toLocaleDateString()
     }
+
+    /** 卡片列表首列：统一展示「卡片标题」；testcase 若 title 未同步则用 remark/description 兜底 */
+    const rowDisplayTitle = (item) => {
+      if (!item) return '—'
+      const raw = item.title != null ? String(item.title).trim() : ''
+      if (raw) return raw
+      const ty = (item.type || '').toString().toLowerCase()
+      if (ty === 'testcase') {
+        const rm = item.remark != null ? String(item.remark).trim() : ''
+        if (rm) return rm.length > 200 ? `${rm.slice(0, 200)}…` : rm
+        const desc = item.description != null ? String(item.description).trim() : ''
+        if (desc) return desc.length > 200 ? `${desc.slice(0, 200)}…` : desc
+      }
+      return '—'
+    }
     
     const isNewItem = (itemId) => {
       return newlyCreatedIds.value.has(itemId)
     }
     
+    // 开始行内编辑
+    const startEdit = async (item) => {
+      console.log('[CardPanel] startEdit 被调用, item:', item)
+      editingItem.value = item
+      editingTitle.value = item.title || ''
+      editingType.value = item.type || 'bug'
+      isEditing.value = true
+      await nextTick()
+      // editInputRef 在 v-for 中是数组
+      const inputEl = Array.isArray(editInputRef.value) ? editInputRef.value[0] : editInputRef.value
+      if (inputEl) {
+        inputEl.focus()
+        inputEl.select()
+      }
+    }
+    
+    // 确认编辑
+    const confirmEdit = async () => {
+      const title = editingTitle.value.trim()
+      if (!title || !editingItem.value) return
+      
+      try {
+        const updateData = {
+          id: editingItem.value.id,
+          title: title,
+          type: editingType.value
+        }
+        
+        console.log('[CardPanel] confirmEdit - editingType:', editingType.value)
+        console.log('[CardPanel] confirmEdit - updateData:', updateData)
+        
+        // 调用父组件的快速更新方法
+        if (props.onQuickUpdate) {
+          await props.onQuickUpdate(updateData)
+        } else {
+          emit('quickUpdate', updateData)
+        }
+      } catch (e) {
+        console.error('更新卡片失败:', e)
+        alert(t('common.unknownError'))
+      } finally {
+        cancelEdit()
+      }
+    }
+    
+    // 取消编辑
+    const cancelEdit = () => {
+      isEditing.value = false
+      editingItem.value = null
+      editingTitle.value = ''
+      editingType.value = 'bug'
+    }
+    
     const startCreate = async () => {
       isCreating.value = true
       newCardTitle.value = ''
+      newCardType.value = 'bug' // 重置为默认类型
       await nextTick()
-      if (createInputRef.value) {
-        createInputRef.value.focus()
+      const inputEl = Array.isArray(createInputRef.value) ? createInputRef.value[0] : createInputRef.value
+      if (inputEl) {
+        inputEl.focus()
       }
     }
     
@@ -205,11 +358,11 @@ export default {
       if (!title) return
       
       try {
-        // 调用父组件的快速创建方法
+        // 调用父组件的快速创建方法，传递标题和类型
         if (props.onQuickCreate) {
-          await props.onQuickCreate(title)
+          await props.onQuickCreate(title, newCardType.value)
         } else {
-          emit('quickCreate', title)
+          emit('quickCreate', { title, type: newCardType.value })
         }
         
         // 添加到新建ID集合，用于显示新标记
@@ -226,6 +379,7 @@ export default {
     const cancelCreate = () => {
       isCreating.value = false
       newCardTitle.value = ''
+      newCardType.value = 'bug'
     }
     
     const handleCreateBlur = (e) => {
@@ -241,9 +395,11 @@ export default {
       if (e.button !== 0) return
       const el = e?.target
       if (el && typeof el.closest === 'function') {
+        // 点击 checkbox 或操作按钮区域不处理
         if (el.closest('.row-checkbox') || el.closest('.row-actions')) return
       }
-      emit('edit', item.id)
+      // 点击卡片任意空白处，进入该类型的列表
+      emit('openTypeList', item.type, item.title, item.id)
     }
     
     const batchDeleteSelected = async () => {
@@ -271,21 +427,37 @@ export default {
     
     return { 
       t, 
+      props,
       itemTypeLabel, 
       getTypeText, 
-      formatDate, 
+      formatDate,
+      rowDisplayTitle,
       handleRowClick,
+      startEdit,
       startCreate,
       confirmCreate,
       cancelCreate,
       handleCreateBlur,
       isCreating,
       newCardTitle,
+      newCardType,
       createInputRef,
       isNewItem,
       batchDeleteSelected,
       emit,
       addNewlyCreatedId,
+      // 类型筛选
+      currentTypeFilter,
+      filteredItems,
+      clearTypeFilter,
+      // 编辑相关
+      isEditing,
+      editingItem,
+      editingTitle,
+      editingType,
+      editInputRef,
+      confirmEdit,
+      cancelEdit,
     }
   }
 }
@@ -311,6 +483,25 @@ export default {
   font-size: 18px;
   font-weight: 600;
   color: #333;
+}
+
+.back-btn {
+  padding: 4px 12px;
+  background: #4a90e2;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.back-btn:hover {
+  background: #357abd;
+}
+
+.type-filter-label {
+  color: #4a90e2;
 }
 
 .completion-rate {
@@ -478,6 +669,15 @@ export default {
   border-bottom: 2px solid #faad14;
 }
 
+.editing-row {
+  background: #e6f7ff;
+  border-bottom: 2px solid #1890ff;
+}
+
+.edit-indicator {
+  font-size: 14px;
+}
+
 .item-new {
   background: #e6f7ff;
 }
@@ -508,6 +708,47 @@ export default {
 
 .table-row.selected {
   background: #e3f2fd;
+}
+
+/* 与 grep/modify 列表定位一致：对话区点击跳转后的高亮动画 */
+.table-row.highlight-row {
+  animation: card-highlight-row-pulse 3s ease-in-out;
+}
+
+@keyframes card-highlight-row-pulse {
+  0%,
+  100% {
+    background: #f8f9fa;
+  }
+  30% {
+    background: #fff3cd;
+    box-shadow: inset 4px 0 0 #ffc107;
+  }
+  60% {
+    background: #fff8e1;
+  }
+}
+
+.table-row.highlight-flash {
+  animation: card-highlight-pulse 2s ease-in-out;
+}
+
+@keyframes card-highlight-pulse {
+  0%,
+  100% {
+    background: #f8f9fa;
+  }
+  25% {
+    background: #fff3cd;
+    box-shadow: 0 0 10px rgba(255, 193, 7, 0.5);
+  }
+  50% {
+    background: #ffc107;
+  }
+  75% {
+    background: #fff3cd;
+    box-shadow: 0 0 10px rgba(255, 193, 7, 0.5);
+  }
 }
 
 .row-checkbox,
@@ -561,6 +802,22 @@ export default {
 }
 
 .create-input:focus {
+  border-color: #fa8c16;
+  box-shadow: 0 0 0 2px rgba(250, 173, 20, 0.2);
+}
+
+.type-select {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid #faad14;
+  border-radius: 4px;
+  font-size: 12px;
+  background: white;
+  cursor: pointer;
+  outline: none;
+}
+
+.type-select:focus {
   border-color: #fa8c16;
   box-shadow: 0 0 0 2px rgba(250, 173, 20, 0.2);
 }
