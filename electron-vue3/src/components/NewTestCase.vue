@@ -21,7 +21,7 @@
         <div class="content-left-scroll">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
-          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_') && k !== 'priority').length > 0"
           class="pending-diff-panel"
         >
           <div class="pending-diff-header">
@@ -29,10 +29,9 @@
             <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
           </div>
 
+          <template v-for="(data, field) in pendingDiff.modifications" :key="field">
           <div
-            v-for="(data, field) in pendingDiff.modifications"
-            :key="field"
-            v-show="!String(field).startsWith('_')"
+            v-if="!String(field).startsWith('_') && field !== 'priority'"
             class="pending-diff-item"
             :id="`diff-field-${field}`"
           >
@@ -54,6 +53,7 @@
               :renderSideBySide="false"
             />
           </div>
+          </template>
         </div>
 
         <!-- 标题区域 -->
@@ -325,9 +325,28 @@
                 </div>
 
                 <!-- 重要程度 -->
-                <div class="property-field">
+                <div class="property-field" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
                   <label class="field-label">重要程度</label>
-                  <select v-model="testcase.priority" class="field-select">
+                  <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel">
+                    <div class="diff-header">
+                      <span class="diff-label">重要程度修改预览:</span>
+                      <div class="diff-actions">
+                        <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                        <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
+                      </div>
+                    </div>
+                    <div class="diff-content">
+                      <div class="diff-row">
+                        <span class="diff-tag old">原值</span>
+                        <span class="diff-value">{{ formatTestcasePriorityLabel(pendingDiff.modifications.priority?.old) }}</span>
+                      </div>
+                      <div class="diff-row">
+                        <span class="diff-tag new">新值</span>
+                        <span class="diff-value">{{ formatTestcasePriorityLabel(pendingDiff.modifications.priority?.new) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <select v-model="testcase.priority" class="field-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
                     <option value="P0">P0</option>
                     <option value="P1">P1</option>
                     <option value="P2">P2</option>
@@ -844,6 +863,17 @@ export default {
     const getStatusText = (status) => {
       const statusObj = availableStatuses.find(s => s.value === status)
       return statusObj ? statusObj.label : status
+    }
+
+    const formatTestcasePriorityLabel = (v) => {
+      if (v == null || String(v).trim() === '') return '未设置'
+      const raw = String(v).trim()
+      const u = raw.toUpperCase()
+      const map = { P0: 'P0', P1: 'P1', P2: 'P2', P3: 'P3' }
+      if (map[u]) return map[u]
+      const low = raw.toLowerCase()
+      const fromP = { p0: 'P0', p1: 'P1', p2: 'P2', p3: 'P3', p4: 'P3' }
+      return fromP[low] || raw
     }
 
     const getAssigneeDisplayText = () => {
@@ -1709,6 +1739,7 @@ export default {
       availableStatuses,
       isEdit,
       getStatusText,
+      formatTestcasePriorityLabel,
       getAssigneeDisplayText,
       personPrimaryLabel,
       personSecondaryLabel,

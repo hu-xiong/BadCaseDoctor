@@ -559,9 +559,9 @@
             <!-- diff 显示区域 -->
             <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel-inline">
               <div class="diff-content">
-                <span class="diff-old">{{ pendingDiff.modifications.priority.old || '未设置' }}</span>
+                <span class="diff-old">{{ formatBadcasePriorityLabel(pendingDiff.modifications.priority.old) }}</span>
                 <span class="diff-arrow">→</span>
-                <span class="diff-new">{{ pendingDiff.modifications.priority.new }}</span>
+                <span class="diff-new">{{ formatBadcasePriorityLabel(pendingDiff.modifications.priority.new) }}</span>
                 <div class="diff-actions">
                   <button @click="applyFieldChange('priority')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
                   <button @click="cancelFieldChange('priority')" class="btn-cancel-sm" title="取消">✗</button>
@@ -886,6 +886,19 @@ export default {
         'new': '新建'
       }
       return statusMap[status] || status
+    }
+
+    /** 优先级 diff 展示：统一 p1/P1 等为与下拉选项一致的文案 */
+    const formatBadcasePriorityLabel = (v) => {
+      if (v == null || String(v).trim() === '') return '未设置'
+      const s = String(v).trim().toLowerCase()
+      const map = {
+        p1: 'P1 - 紧急',
+        p2: 'P2 - 高',
+        p3: 'P3 - 中',
+        p4: 'P4 - 低'
+      }
+      return map[s] || String(v).trim()
     }
 
     // 获取项目成员列表
@@ -2040,6 +2053,7 @@ export default {
       filteredPlans,
       expandedPlans,
       getStatusText,
+      formatBadcasePriorityLabel,
       saveBadcase,
       toggleStatusDropdown,
       selectStatus,

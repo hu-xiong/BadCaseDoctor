@@ -24,6 +24,7 @@
           <template v-for="plan in activePlans" :key="plan.id">
             <div
               class="plan-item"
+              :data-plan-id="plan.id"
               :class="{ 'active': selectedPlan === plan.id }"
               @click="onSelectPlan(plan.id)"
               @mouseenter="onShowPlanActions(plan.id)"
@@ -39,6 +40,29 @@
               <span class="plan-icon">{{ getPlanIcon('badcase') }}</span>
               <span class="plan-name">{{ plan.name }}</span>
               <span class="plan-date">{{ formatDate(plan.created_at) }}</span>
+
+              <div
+                v-if="pendingDeletePlanId != null && Number(pendingDeletePlanId) === Number(plan.id)"
+                class="plan-row-delete-actions"
+                @click.stop
+              >
+                <button
+                  type="button"
+                  class="plan-action-icon plan-action-approve"
+                  :title="t('list.approve')"
+                  @click="confirmDelete?.(plan.id)"
+                >
+                  ✓
+                </button>
+                <button
+                  type="button"
+                  class="plan-action-icon plan-action-reject"
+                  :title="t('list.cancelAction')"
+                  @click="cancelPendingDelete?.(plan.id)"
+                >
+                  ✗
+                </button>
+              </div>
 
               <div v-show="hoveredPlan === plan.id" class="plan-actions">
                 <button class="action-btn" @click.stop="onShowContextMenu(plan, $event)">
@@ -98,6 +122,7 @@
                 v-for="childPlan in plan.children"
                 :key="childPlan.id"
                 class="plan-item sub-plan"
+                :data-plan-id="childPlan.id"
                 :class="{ 'active': selectedPlan === childPlan.id }"
                 @click="onSelectPlan(childPlan.id)"
                 @mouseenter="onShowPlanActions(childPlan.id)"
@@ -107,6 +132,29 @@
                 <span class="plan-icon">{{ getPlanIcon('badcase') }}</span>
                 <span class="plan-name">{{ childPlan.name }}</span>
                 <span class="plan-date">{{ formatDate(childPlan.created_at) }}</span>
+
+                <div
+                  v-if="pendingDeletePlanId != null && Number(pendingDeletePlanId) === Number(childPlan.id)"
+                  class="plan-row-delete-actions"
+                  @click.stop
+                >
+                  <button
+                    type="button"
+                    class="plan-action-icon plan-action-approve"
+                    :title="t('list.approve')"
+                    @click="confirmDelete?.(childPlan.id)"
+                  >
+                    ✓
+                  </button>
+                  <button
+                    type="button"
+                    class="plan-action-icon plan-action-reject"
+                    :title="t('list.cancelAction')"
+                    @click="cancelPendingDelete?.(childPlan.id)"
+                  >
+                    ✗
+                  </button>
+                </div>
 
                 <div v-show="hoveredPlan === childPlan.id" class="plan-actions">
                   <button class="action-btn" @click.stop="onShowContextMenu(childPlan, $event)">
@@ -150,7 +198,10 @@ defineProps({
   onEditPlan: { type: Function, required: true },
   onArchivePlan: { type: Function, required: true },
   onDeletePlan: { type: Function, required: true },
-  onPinPlan: { type: Function, required: true }
+  onPinPlan: { type: Function, required: true },
+  pendingDeletePlanId: { type: Number, default: null },
+  confirmDelete: { type: Function, default: null },
+  cancelPendingDelete: { type: Function, default: null }
 })
 </script>
 
@@ -219,6 +270,32 @@ defineProps({
   transition: background 0.15s ease, color 0.15s ease;
   position: relative;
   user-select: none;
+}
+
+.plan-row-delete-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.plan-action-icon {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.plan-action-approve:hover {
+  background: rgba(76, 175, 80, 0.15);
+}
+
+.plan-action-reject:hover {
+  background: rgba(244, 67, 54, 0.12);
 }
 
 .plan-item:hover {

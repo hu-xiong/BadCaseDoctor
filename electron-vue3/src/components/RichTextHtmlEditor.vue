@@ -6,7 +6,6 @@
       :options="editorOptions"
       :placeholder="placeholder"
       :toolsbar="toolsbarList"
-      screen="xl"
       @update:html="onHtml"
     />
   </div>
@@ -97,8 +96,10 @@ watch(
 </script>
 
 <style scoped>
+/* 嵌入表单：覆盖库默认 max-width:750px + 居中，消除左侧大块留白 */
 .rich-text-html-editor {
   width: 100%;
+  --t-editor-content-width: 100%;
 }
 .rich-text-html-editor :deep(.-t-v-editor-wrapper) {
   border: 1px solid #dee2e6;
@@ -107,6 +108,8 @@ watch(
   background: #fff;
 }
 .rich-text-html-editor :deep(.-t-v-tiptap-editor) {
+  max-width: 100%;
+  margin-inline: 0;
   min-height: 220px;
   max-height: 480px;
   overflow-y: auto;

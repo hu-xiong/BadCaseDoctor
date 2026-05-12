@@ -715,8 +715,61 @@ def is_vague_generic_todo(todo: Optional[str]) -> bool:
     return False
 
 
+_BUG_ENTITY_WORD_RE = re.compile(r"\bbugs?\b", re.IGNORECASE)
+
+
+def user_text_implies_bug_entity_type(text: Optional[str]) -> bool:
+    """
+    用户是否在谈「Bug 缺陷」实体类型（而非标题里的 bug 前缀如 bug1.2、debug 等）。
+    - 中文「缺陷」视为明确缺陷意图
+    - 英文仅匹配整词 bug / bugs（\\b）
+    """
+    if not text:
+        return False
+    zh = text
+    if "缺陷" in zh:
+        return True
+    return bool(_BUG_ENTITY_WORD_RE.search(text))
+
+
+def user_text_implies_card_entity_type(text: Optional[str]) -> bool:
+    """用户明确在操作统一卡片层（Card）：改卡片标题/描述、card_id 等。"""
+    if not text:
+        return False
+    zh = text
+    u = text.lower()
+    has_card = ("卡片" in zh) or ("card" in u)
+    if not has_card:
+        return False
+    if any(k in zh for k in ("标题", "描述", "名称", "重命名")):
+        return True
+    if "card_id" in u or re.search(r"\bcard\s*id\b", u):
+        return True
+    if re.search(r"(修改|编辑|更新|改).{0,10}卡片", zh):
+        return True
+    return False
+
+
+def user_text_implies_plan_entity_type(text: Optional[str]) -> bool:
+    """用户明确在搜/改迭代计划节点（粗粒度；具体检索仍可能走 plan_id + grep）。"""
+    if not text:
+        return False
+    zh = text
+    markers = (
+        "迭代计划",
+        "计划树",
+        "计划节点",
+        "搜计划",
+        "查计划",
+        "查找计划",
+        "搜索计划",
+        "计划名称",
+    )
+    return any(m in zh for m in markers)
+
+
 def infer_modify_target_from_user(user_input: Optional[str]) -> str:
-    """从用户话里猜 grep/modify 的 target：testcase / bug / badcase / all。"""
+    """从用户话里猜 grep/modify 的 target：testcase / bug / badcase / card / plan / all。"""
     if not user_input:
         return "all"
     u = user_input.lower()
@@ -725,6 +778,10 @@ def infer_modify_target_from_user(user_input: Optional[str]) -> str:
         return "testcase"
     if "badcase" in u or "坏例" in zh:
         return "badcase"
-    if "bug" in u or "缺陷" in zh:
+    if user_text_implies_card_entity_type(user_input):
+        return "card"
+    if user_text_implies_plan_entity_type(user_input):
+        return "plan"
+    if user_text_implies_bug_entity_type(user_input):
         return "bug"
     return "all"

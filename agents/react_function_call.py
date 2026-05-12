@@ -130,6 +130,8 @@ def decision_from_assistant_message(msg: Any) -> Optional[Dict[str, Any]]:
         out["params"]["confirm"] = False
     if name == "create" and "confirm" not in out["params"]:
         out["params"]["confirm"] = False
+    if name == "delete" and "confirm" not in out["params"]:
+        out["params"]["confirm"] = False
     return out
 
 

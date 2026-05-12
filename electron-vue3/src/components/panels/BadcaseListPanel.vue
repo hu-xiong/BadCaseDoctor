@@ -91,10 +91,18 @@
           >
             <div class="row-checkbox"></div>
             <div class="row-title">
-              <div v-if="pc.displayDiff?.title" class="field-diff-inline create-pending-diff">
+              <SelectableTitleTip
+                v-if="pc.displayDiff?.title"
+                class="field-diff-inline create-pending-diff"
+                :text="pc.displayDiff.title.new"
+              >
                 <span class="new-value-inline create-new-only">{{ pc.displayDiff.title.new }}</span>
-              </div>
-              <span v-else class="badcase-title create-new-only">{{ pc.preview?.title || t('list.newPending') }}</span>
+              </SelectableTitleTip>
+              <SelectableTitleTip
+                v-else
+                class="badcase-title create-new-only"
+                :text="pc.preview?.title || ''"
+              >{{ pc.preview?.title || t('list.newPending') }}</SelectableTitleTip>
             </div>
             <div class="row-type">
               <span class="type-badge" :class="currentPlanType">{{ listTypeLabel }}</span>
@@ -103,6 +111,11 @@
               <div v-if="pc.displayDiff?.status" class="field-diff-inline create-pending-diff">
                 <span class="new-value-inline create-new-only">{{ pc.displayDiff.status.new }}</span>
               </div>
+              <span
+                v-else-if="pc.preview?.status"
+                class="status-badge"
+                :class="pc.preview.status"
+              >{{ getBadcaseStatusText(pc.preview.status) }}</span>
               <span v-else class="status-badge">—</span>
             </div>
             <div class="row-assignee">
@@ -112,9 +125,14 @@
               <span v-else class="assignee-text">{{ getAssigneeDisplayText(pc.preview?.assignee_id) }}</span>
             </div>
             <div class="row-date"><span class="date-text">{{ t('list.pendingConfirm') }}</span></div>
-            <div v-if="!pc?.executed && confirmCreate && cancelCreate" class="row-actions" @click.stop>
-              <button class="btn-icon-approve" :title="t('list.approveCreate')" @click="confirmCreate(pc?.tempId)">✓</button>
-              <button class="btn-icon-reject" :title="t('list.reject')" @click="cancelCreate(pc?.tempId)">✗</button>
+            <div
+              v-if="!pc?.executed && confirmCreate && cancelCreate && isLastInCreateCluster(pc?.tempId)"
+              class="row-actions"
+              @click.stop
+            >
+              <span v-if="getCreateClusterSize(pc?.tempId) > 1" class="batch-count">{{ t('common.nItems', { n: getCreateClusterSize(pc?.tempId) }) }}</span>
+              <button class="btn-icon-approve" :title="t('list.approveCreate')" @click="confirmConsecutiveCreateGroup(pc?.tempId)">✓</button>
+              <button class="btn-icon-reject" :title="t('list.reject')" @click="cancelConsecutiveCreateGroup(pc?.tempId)">✗</button>
             </div>
           </div>
           <div v-if="filteredBadcases.length === 0 && !(pendingCreates || []).length" class="empty-row">
@@ -131,7 +149,8 @@
           class="table-row"
           :class="{
             selected: selectedTasks.includes(badcase.id),
-            'pending-modify': pendingModifications[badcase.id]
+            'pending-delete-row': pendingModifications[badcase.id]?._pendingDelete,
+            'pending-modify': pendingModifications[badcase.id] && !pendingModifications[badcase.id]?._pendingDelete
           }"
           :title="t('common.copyRowHint')"
           @mousedown="onRowMouseDown"
@@ -146,11 +165,19 @@
             />
           </div>
           <div class="row-title">
-            <div v-if="pendingModifications[badcase.id]?.title" class="field-diff-inline">
+            <SelectableTitleTip
+              v-if="pendingModifications[badcase.id]?.title"
+              class="field-diff-inline"
+              :text="`${pendingModifications[badcase.id].title.old} → ${pendingModifications[badcase.id].title.new}`"
+            >
               <span class="old-value-inline">{{ pendingModifications[badcase.id].title.old }}</span>
               <span class="new-value-inline">{{ pendingModifications[badcase.id].title.new }}</span>
-            </div>
-            <span v-else class="badcase-title">{{ badcase.title }}</span>
+            </SelectableTitleTip>
+            <SelectableTitleTip
+              v-else
+              class="badcase-title"
+              :text="badcase.title"
+            >{{ badcase.title }}</SelectableTitleTip>
           </div>
           <div class="row-type">
             <span class="type-badge" :class="currentPlanType">{{ listTypeLabel }}</span>
@@ -174,23 +201,53 @@
           </div>
 
           <div v-if="pendingModifications[badcase.id]" class="row-actions" @click.stop>
-            <button
-              v-if="hasDetailFieldModifications(badcase.id)"
-              class="btn-expand-detail"
-              :title="expandedDetailRows.includes(badcase.id) ? t('list.collapseDetail') : t('list.expandDetail')"
-              @click="toggleDetailExpand(badcase.id)"
-            >
-              {{ expandedDetailRows.includes(badcase.id) ? '▼' : '▶' }}
-            </button>
-            <template v-if="isLastInConsecutiveGroup(badcase.id)">
-              <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(badcase.id) }) }}</span>
-              <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmModify(badcase.id)">✓</button>
-              <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelModify(badcase.id)">✗</button>
+            <template v-if="pendingModifications[badcase.id]._pendingDelete">
+              <template v-if="isLastInConsecutiveDeleteGroup(badcase.id)">
+                <span v-if="getConsecutiveDeleteGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveDeleteGroupSize(badcase.id) }) }}</span>
+                <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmConsecutiveDeleteGroup(badcase.id)">✓</button>
+                <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelConsecutiveDeleteGroup(badcase.id)">✗</button>
+              </template>
+            </template>
+            <template v-else>
+              <button
+                v-if="hasDetailFieldModifications(badcase.id)"
+                class="btn-expand-detail"
+                :title="expandedDetailRows.includes(badcase.id) ? t('list.collapseDetail') : t('list.expandDetail')"
+                @click="toggleDetailExpand(badcase.id)"
+              >
+                {{ expandedDetailRows.includes(badcase.id) ? '▼' : '▶' }}
+              </button>
+              <template v-if="isLastInConsecutiveGroup(badcase.id)">
+                <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(badcase.id) }) }}</span>
+                <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmModify(badcase.id)">✓</button>
+                <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelModify(badcase.id)">✗</button>
+              </template>
             </template>
           </div>
         </div>
         </template>
       </div>
+    </div>
+
+    <div v-if="showPagination" class="list-pagination">
+      <button
+        type="button"
+        class="pagination-btn"
+        :disabled="badcaseLoading || page <= 1"
+        @click="$emit('update:page', page - 1)"
+      >
+        {{ t('list.paginationPrev') }}
+      </button>
+      <span class="pagination-info">{{ t('list.paginationShort', { current: page, total: totalPages }) }}</span>
+      <span class="pagination-total">{{ t('list.paginationTotal', { n: totalBadcases }) }}</span>
+      <button
+        type="button"
+        class="pagination-btn"
+        :disabled="badcaseLoading || page >= totalPages"
+        @click="$emit('update:page', page + 1)"
+      >
+        {{ t('list.paginationNext') }}
+      </button>
     </div>
   </div>
 </template>
@@ -199,14 +256,18 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { deleteBug, deleteBadcase, deleteTestCase } from '../../api.js'
+import SelectableTitleTip from '../SelectableTitleTip.vue'
 export default {
   name: 'BadcaseListPanel',
+  components: { SelectableTitleTip },
   props: {
     // header（多标签工作区下由顶栏 Tab 展示计划名，可关闭长面包屑）
     generateBreadcrumb: { type: Function, default: () => () => [] },
     showLongBreadcrumb: { type: Boolean, default: true },
     currentPlanType: { type: String, default: 'badcase' },
     totalBadcases: { type: Number, default: 0 },
+    page: { type: Number, default: 1 },
+    pageSize: { type: Number, default: 20 },
 
     // filters
     searchText: { type: String, default: '' },
@@ -234,6 +295,11 @@ export default {
     getConsecutiveGroupSize: { type: Function, default: () => 1 },
     confirmModify: { type: Function, default: () => {} },
     cancelModify: { type: Function, default: () => {} },
+    confirmDelete: { type: Function, default: () => {} },
+    isLastInConsecutiveDeleteGroup: { type: Function, default: () => true },
+    getConsecutiveDeleteGroupSize: { type: Function, default: () => 1 },
+    confirmConsecutiveDeleteGroup: { type: Function, default: () => {} },
+    cancelConsecutiveDeleteGroup: { type: Function, default: () => {} },
     getBadcaseStatusText: { type: Function, default: (s) => s },
     getAssigneeDisplayText: { type: Function, default: (a) => a },
 
@@ -242,9 +308,13 @@ export default {
     /** 待确认新建（来自对话 create 沙箱） */
     pendingCreates: { type: Array, default: () => [] },
     confirmCreate: { type: Function, default: null },
-    cancelCreate: { type: Function, default: null }
+    cancelCreate: { type: Function, default: null },
+    isLastInCreateCluster: { type: Function, default: () => true },
+    getCreateClusterSize: { type: Function, default: () => 1 },
+    confirmConsecutiveCreateGroup: { type: Function, default: null },
+    cancelConsecutiveCreateGroup: { type: Function, default: null }
   },
-  emits: ['update:searchText', 'update:selectedAssignee', 'update:selectedStatus', 'openCreate'],
+  emits: ['update:searchText', 'update:selectedAssignee', 'update:selectedStatus', 'update:page', 'openCreate'],
   setup(props, { emit }) {
     const { t } = useI18n()
     const listTypeLabel = computed(() => {
@@ -252,13 +322,24 @@ export default {
       if (props.currentPlanType === 'test_case') return t('list.types.testCase')
       return t('list.types.badcase')
     })
+
+    const totalPages = computed(() => {
+      const ps = Number(props.pageSize) || 20
+      const tot = Number(props.totalBadcases) || 0
+      return Math.max(1, Math.ceil(tot / ps))
+    })
+
+    const showPagination = computed(() => {
+      const ps = Number(props.pageSize) || 20
+      return (Number(props.totalBadcases) || 0) > ps
+    })
     
     // 处理新建按钮点击
     const handleCreateClick = () => {
       emit('openCreate', props.currentPlanType)
     }
     
-    return { t, listTypeLabel, handleCreateClick }
+    return { t, listTypeLabel, totalPages, showPagination, handleCreateClick }
   },
   data() {
     return {
@@ -589,6 +670,21 @@ export default {
   border-left: 3px solid #f59e0b;
 }
 
+/* 与 VS Code / Cursor 删除行一致：左 #f14c4c 竖条 + rgba(255,0,0,.18) 底，正文保持默认色 */
+.table-row.pending-delete-row {
+  background: rgba(255, 0, 0, 0.18) !important;
+  border-left: 4px solid #f14c4c;
+}
+
+.table-row.pending-delete-row:hover {
+  background: rgba(255, 0, 0, 0.22) !important;
+}
+
+.table-row.pending-delete-row .badcase-title {
+  text-decoration: line-through;
+  text-decoration-color: rgba(0, 0, 0, 0.28);
+}
+
 /* Bug导航高亮动画 */
 .table-row.highlight-flash {
   animation: highlight-pulse 2s ease-in-out;
@@ -623,6 +719,15 @@ export default {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.table-row .badcase-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .row-type,
@@ -811,6 +916,49 @@ export default {
 .batch-delete-btn:hover {
   background: #dc2626;
   transform: translateY(-1px);
+}
+
+.list-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px 24px 16px;
+  border-top: 1px solid #e9ecef;
+  background: #fafbfc;
+  font-size: 13px;
+  color: #555;
+}
+
+.list-pagination .pagination-btn {
+  padding: 6px 14px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  color: #333;
+}
+
+.list-pagination .pagination-btn:hover:not(:disabled) {
+  background: #f0f4f8;
+  border-color: #b6c2cf;
+}
+
+.list-pagination .pagination-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.list-pagination .pagination-info {
+  font-weight: 600;
+  color: #333;
+}
+
+.list-pagination .pagination-total {
+  color: #888;
+  font-size: 12px;
 }
 </style>
 

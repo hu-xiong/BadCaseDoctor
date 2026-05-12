@@ -259,7 +259,7 @@ const handleRejectAll = () => {
 }
 
 .diff-line-delete {
-  background: rgba(255, 0, 0, 0.15);
+  background: rgba(255, 0, 0, 0.18);
   border-left: 3px solid #f14c4c;
 }
 

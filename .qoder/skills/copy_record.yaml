@@ -1,28 +1,43 @@
 name: copy_record
-description: 复制已有记录并创建新记录（固定流程：grep + create），支持 bug、badcase、testcase
+description: |
+  复制类「技能」：将 **属性处理（全量合并源记录）** 与 **create（校验/预览/落库）** 拆成可组合的两段能力。
+  标准流程为三步：grep 定位源 → copy 生成合并后的 fields → create 走预览与确认。其中 copy 工具专门负责从库中读出源行并做与 create 一致的字段校验与合并，不落库；create 只负责在已合并的 fields 上出 diff/INSERT。
 trigger:
-  intents: [复制, 克隆, 仿照, 参照, 一样, 同样, 拷贝]
+  intents: [复制, 克隆, 仿照, 参照, 一样, 同样, 拷贝, 按.*新建, 基于.*创建]
   entities: [bug, 缺陷, badcase, 测试用例, testcase]
   patterns:
     - 复制.*测试用例
     - 新增.*测试用例.*和.*一样
     - 按照.*bug.*创建
     - 参照.*badcase.*新增
+    - copy.*from.*bug
 
 tools:
   - name: grep
-    purpose: 定位被复制的源记录
+    purpose: 定位被复制的源记录（keywords/target/project_id）
     params:
       mode: locate
       keywords: ${user_keywords}
       target: ${target}
       project_id: ${project_id}
 
-  - name: create
-    purpose: 创建新记录（标题覆盖，其他属性按自然语言复制）
+  - name: copy
+    purpose: |
+      属性处理步骤：按 source_id 从数据库读出 Bug/BadCase/测试用例全量业务字段，
+      合并并校验为可直接传入 create 的 fields（不落库；等价于 create 内 copy_from_* 合并逻辑的显式一步）。
     params:
       target: ${target}
-      fields: ${user_fields}
+      source_id: ${source_id}
+      project_id: ${project_id}
+      title: ${optional_new_title}
+
+  - name: create
+    purpose: |
+      在 copy 返回的 fields 上做预览（confirm=false）与用户确认后落库（confirm=true）。
+      若上一步已 copy，fields 应使用 observation.fields，通常无需再填 copy_from_*。
+    params:
+      target: ${target}
+      fields: ${merged_fields_from_copy}
       project_id: ${project_id}
       confirm: false
       natural_query: ${user_input}
@@ -30,22 +45,41 @@ tools:
 workflow:
   - step: 1
     tool: grep
-    description: 使用 grep 工具进行精准定位分析
+    description: 使用 grep 定位用户要参照的源记录（拿到 first_*_id）
     depends_on: null
 
   - step: 2
-    tool: create
-    description: 使用 create 工具复制并创建新记录
+    tool: copy
+    description: 使用 copy 合并源记录全部属性，得到 fields（属性处理 / 与 create 共用校验逻辑）
     depends_on: step_1
 
+  - step: 3
+    tool: create
+    description: 使用 create 基于合并后的 fields 生成预览；用户确认后再 confirm=true 落库
+    depends_on: step_2
+
 examples:
-  - 帮我新增一个测试用例，其他属性和“创建测试用例7”一样，标题叫“一个新增的测试用例”
-  - 复制这个 bug 生成一条新 bug，标题改成“登录问题-回归”
-  - 按照 badcase 123 新建一个 badcase，标题改为“新增badcase”
+  - 帮我新增一个测试用例，其他属性和「创建测试用例7」一样，标题叫「一个新增的测试用例」
+  - 复制这个 bug 生成一条新 bug，标题改成「登录问题-回归」
+  - 按照 badcase 123 新建一个 badcase，标题改为「新增badcase」
+  - 先 copy 再 create：用 copy 拉全量字段，再用 create 只改标题并预览
+
+prompt_template: |
+  你正在执行 **copy_record（复制记录）** 技能。
+
+  能力划分（与工具一一对应）：
+  1) **grep**：只负责在 project 内定位源记录，得到 `first_bug_id` / `first_badcase_id` / `first_testcase_id`。
+  2) **copy**：「属性处理」一步——从数据库读取源行，按与 create 相同的规则合并/缺省/校验，返回 `fields`；**不写入数据库**。
+  3) **create**：在 `fields` 上走校验、相似记录检查、**diff 预览**（confirm=false），用户确认后再 confirm=true **INSERT**。
+
+  若模型或链路跳过 copy、仅用 create+copy_from_* 也能工作；当合并缺失或预览字段过少时，**显式先 copy 再 create** 可稳定复现全量字段。
+
+  Todo 顺序必须是：**grep → copy → create**（三步）；不要把三步压缩成一步 create。
 
 metadata:
   category: record_management
   priority: high
-  version: 1.0.0
+  version: 2.0.0
   created_at: 2026-03-19
+  updated_at: 2026-05-07
   author: BadCase Doctor Team

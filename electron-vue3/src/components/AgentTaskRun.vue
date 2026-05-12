@@ -104,7 +104,7 @@
               <pre
                 v-if="showThoughtReasoningBlock(s) && thoughtReasoningUsePlainStream(s)"
                 class="agent-thought-deep-reason agent-thought-rich agent-thought-stream-plain"
-              >{{ thoughtReasoningShown(s, i) }}</pre>
+              >{{ collapseThoughtDisplayNewlines(thoughtReasoningShown(s, i)) }}</pre>
               <div
                 v-else-if="showThoughtReasoningBlock(s)"
                 class="agent-thought-deep-reason agent-thought-rich reasoning-markdown agent-thought-md"
@@ -113,7 +113,7 @@
               <pre
                 v-if="showThoughtContentBlock(s) && thoughtContentUsePlainStream(s)"
                 class="agent-thought-deep-content agent-thought-rich agent-thought-stream-plain"
-              >{{ thoughtContentRaw(s) }}</pre>
+              >{{ collapseThoughtDisplayNewlines(thoughtContentRaw(s)) }}</pre>
               <div
                 v-else-if="showThoughtContentBlock(s)"
                 class="agent-thought-deep-content agent-thought-rich reasoning-markdown agent-thought-md"
@@ -198,7 +198,19 @@
             :title="toolExecOpen(i) ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
             @click="toggleToolExec(i)"
           >
-            <span class="agent-step-fold-icon" aria-hidden="true">{{ toolFoldIcon(s) }}</span>
+            <span class="agent-step-fold-icon" aria-hidden="true">
+              <span
+                v-if="execToolKind(s) === 'delete'"
+                class="agent-step-fold-icon-tint"
+                :style="deleteToolIconMaskStyle"
+              />
+              <span
+                v-else-if="execToolKind(s) === 'copy'"
+                class="agent-step-fold-icon-tint"
+                :style="copyToolIconMaskStyle"
+              />
+              <template v-else>{{ toolFoldIcon(s) }}</template>
+            </span>
             <span class="agent-step-fold-main">
               <span
                 class="agent-step-fold-label"
@@ -291,6 +303,10 @@
           v-if="sandboxAfterModifyStepIndex >= 0 && sandboxAfterModifyStepIndex === i"
           name="modifySandbox"
         />
+        <slot
+          v-if="sandboxAfterDeleteStepIndex >= 0 && sandboxAfterDeleteStepIndex === i"
+          name="deleteSandbox"
+        />
       </div>
     </div>
   </div>
@@ -304,7 +320,20 @@ import todoListIcon from '../assets/todo-list-icon.svg'
 import deepThinkingIcon from '../assets/deep-thinking-icon.svg'
 import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
+import toolDeleteIcon from '../assets/tool-delete.png'
+import toolCopyIcon from '../assets/tool-copy.png'
 import { mergedThoughtReasoningProseFromStep } from '../composables/thoughtSnapshot.js'
+import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
+
+/** 与 .agent-step-fold-head--tool 文案色一致（#7dd3fc），mask 上色使 PNG 与「思考」图标同色系 */
+const deleteToolIconMaskStyle = {
+  WebkitMaskImage: `url(${toolDeleteIcon})`,
+  maskImage: `url(${toolDeleteIcon})`
+}
+const copyToolIconMaskStyle = {
+  WebkitMaskImage: `url(${toolCopyIcon})`,
+  maskImage: `url(${toolCopyIcon})`
+}
 
 const { t } = useI18n()
 
@@ -331,7 +360,12 @@ const props = defineProps({
    * ≥0：在该步骤（最后一个 modify 工具步）之后渲染 modifySandbox 插槽，供父组件 Teleport 锚点。
    * -1：不内嵌（沙箱仍在时间线下方）。
    */
-  sandboxAfterModifyStepIndex: { type: Number, default: -1 }
+  sandboxAfterModifyStepIndex: { type: Number, default: -1 },
+  /**
+   * ≥0：在该步骤（最后一个 delete 工具步）之后渲染 deleteSandbox（删除预览卡片紧跟 delete 行）。
+   * -1：不内嵌（由父组件在任务流下方整体渲染，兼容旧布局）。
+   */
+  sandboxAfterDeleteStepIndex: { type: Number, default: -1 }
 })
 
 const emit = defineEmits(['grep-bug-click'])
@@ -339,7 +373,14 @@ const emit = defineEmits(['grep-bug-click'])
 marked.setOptions({ gfm: true, breaks: true })
 
 const formatThoughtMarkdown = (text) => {
-  const t = String(text || '').trim()
+  const t = stripReasoningChannelArtifacts(
+    String(text || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/[\u200B-\u200D\uFEFF\u2060]/g, '')
+      .trim()
+  )
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
   if (!t) return ''
   try {
     return marked.parse(t, { gfm: true, breaks: true })
@@ -347,6 +388,13 @@ const formatThoughtMarkdown = (text) => {
     return ''
   }
 }
+
+const collapseThoughtDisplayNewlines = (s) =>
+  String(s || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 
 const planExpanded = ref(true)
 
@@ -552,6 +600,8 @@ const execToolKind = (s) => {
   const t = String(s.title || '').toLowerCase()
   if (t.includes('grep')) return 'grep'
   if (t.includes('modify')) return 'modify'
+  if (t.includes('delete') || t.includes('删除')) return 'delete'
+  if (t.includes('copy') || t.includes('复制')) return 'copy'
   if (t.includes('create')) return 'create'
   if (t.includes('search')) return 'search'
   if (t.includes('database')) return 'database'
@@ -565,6 +615,8 @@ const toolFoldIcon = (s) => {
   const map = {
     grep: '⌕',
     modify: '✎',
+    delete: '🗑',
+    copy: '📄',
     create: '＋',
     search: '◉',
     database: '⚗',
@@ -658,6 +710,8 @@ const toolFoldDisplayName = (s) => {
   const map = {
     grep: 'grep',
     modify: 'modify',
+    delete: 'delete',
+    copy: 'copy',
     create: 'create',
     search: 'search',
     database: 'database_query',
@@ -1101,7 +1155,7 @@ const showLogBlock = (s, i = 0) => {
 <style scoped>
 /* 外层不框住「前置思考」，与首轮深度思考同级；步骤正文收在 agent-step-card 内 */
 .agent-task-run {
-  margin: 10px 0 14px;
+  margin: 6px 0 12px;
   border: none;
   border-radius: 0;
   overflow: visible;
@@ -1125,15 +1179,17 @@ const showLogBlock = (s, i = 0) => {
   color: #94a3b8 !important;
   background: rgba(30, 41, 59, 0.35);
   border-radius: 6px;
-  padding: 6px 8px !important;
-  margin-bottom: 8px !important;
+  padding: 5px 8px !important;
+  margin-top: 0 !important;
+  margin-bottom: 6px !important;
   border: 1px solid rgba(148, 163, 184, 0.15);
 }
 .agent-thought-deep-content {
   color: #e2e8f0 !important;
   background: rgba(15, 23, 42, 0.55);
   border-radius: 6px;
-  padding: 6px 8px !important;
+  padding: 5px 8px !important;
+  margin-top: 0 !important;
   border: 1px solid rgba(148, 163, 184, 0.22);
 }
 
@@ -1158,6 +1214,11 @@ const showLogBlock = (s, i = 0) => {
 }
 .agent-thought-md :deep(p:last-child) {
   margin-bottom: 0;
+}
+.agent-thought-md :deep(p:empty) {
+  display: none;
+  margin: 0;
+  min-height: 0;
 }
 .agent-thought-md :deep(ul),
 .agent-thought-md :deep(ol) {
@@ -1228,9 +1289,9 @@ const showLogBlock = (s, i = 0) => {
 .agent-phase-wait {
   display: flex;
   align-items: center;
-  min-height: 28px;
-  margin-bottom: 8px;
-  padding: 6px 10px;
+  min-height: 22px;
+  margin-bottom: 6px;
+  padding: 4px 10px;
   border-radius: 6px;
   background: rgba(59, 130, 246, 0.12);
   border: 1px solid rgba(59, 130, 246, 0.28);
@@ -1466,7 +1527,7 @@ const showLogBlock = (s, i = 0) => {
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 4px 0 8px;
+  padding: 2px 0 2px;
   margin: 0;
   box-sizing: border-box;
   border: none;
@@ -1520,6 +1581,21 @@ const showLogBlock = (s, i = 0) => {
 }
 .agent-step-fold-head--tool .agent-step-fold-icon {
   color: #7dd3fc;
+}
+/* delete 工具 PNG → 与思考图标同档青蓝（背景色与工具标题一致，形状由 mask 决定） */
+.agent-step-fold-icon-tint {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: block;
+  background-color: #7dd3fc;
+  opacity: 0.95;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
 }
 .agent-step-fold-main {
   flex: 1;
@@ -1580,9 +1656,19 @@ const showLogBlock = (s, i = 0) => {
 .agent-preface-thought-feed {
   overflow: visible;
   max-height: none;
-  padding: 0 0 8px 24px;
+  padding: 0 0 6px 24px;
   border: none;
   background: transparent;
+}
+
+/* 收紧「思考」标题行与下方正文间距（避免折叠头 padding + feed 留白叠成一大块空白） */
+.agent-preface-thought-feed > :first-child {
+  margin-top: 0 !important;
+}
+
+.agent-preface-thought-feed > .agent-thought-deep-reason:first-child,
+.agent-preface-thought-feed > .agent-thought-deep-content:first-child {
+  padding-top: 4px !important;
 }
 
 .agent-preface-thought-plain {

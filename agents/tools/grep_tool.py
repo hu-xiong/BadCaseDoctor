@@ -11,6 +11,7 @@ from sqlalchemy import or_
 from agents.tool_registry import BaseTool
 from agents.locale_prompts import (
     normalize_locale,
+    is_english_locale,
     grep_tool_progress,
     grep_plan_material_progress,
     grep_generate_locate_summary,
@@ -38,7 +39,7 @@ class GrepTool(BaseTool):
             name="grep",
             description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位 BadCase/Bug/测试用例/统一卡片(Card)的归属关系和业务场景。"
                          "必须参数：project_id(项目ID)。可选：keywords(标题关键词，拆分后默认「任一词命中」OR；需全部命中可设环境变量 GREP_KEYWORDS_MATCH_MODE=and), "
-                         "target(bug/badcase/testcase/card/all；card=仅查卡片层 Card 表标题与描述；all=四类均检索)，status，plan_id(当前迭代计划ID)，card_id(可选)。"
+                         "target(bug/badcase/testcase/card/plan/all；card=仅查 Card；plan=仅查迭代计划 Plan；all=多类)，status，plan_id(当前迭代)，card_id(可选)。"
                          "代码结构分析可选：code_paths（逗号/分号分隔的 .py 文件路径）、prefer_ast_structure=true 或 mode=code_ast 时优先 Python AST 解析，结果写入 data.code_ast。"
                          "返回 plan_tree、badcase_analysis、bug_location、testcase_location、card_location（Card 表）。建议先用 plan_id 限定迭代计划，再把候选记录交给大模型逐条阅读判断。"
         )
@@ -84,7 +85,12 @@ class GrepTool(BaseTool):
                 )
             else:
                 keywords = str(keywords).strip() or None
-        print(f"[GREP] 🔍 开始定位 (keywords={keywords}, target={target}, status={status}, plan_id={plan_id})")
+        raw_target = (target or "all").strip().lower() if isinstance(target, str) else "all"
+        if raw_target not in ("all", "bug", "badcase", "testcase", "card", "plan"):
+            raw_target = "all"
+        print(
+            f"[GREP] 🔍 开始定位 (keywords={keywords}, target={raw_target}, status={status}, plan_id={plan_id})"
+        )
         
         progress_callback = kwargs.get("progress_callback")
         loc = normalize_locale(kwargs.get("ui_locale"))
@@ -133,157 +139,222 @@ class GrepTool(BaseTool):
                     plan_tree = await self._get_plan_tree(project_id)
                     _progress(grep_tool_progress("phase1_plan_ready", loc))
 
-                    # 人类阅读模式：如果指定了 plan_id，则返回该计划及其子计划的树形结构，并挂载各计划下的记录（从上到下、从外到里）
-                    plan_records_tree = None
-                    if plan_id:
-                        _progress(grep_tool_progress("plan_material_read", loc))
-                        plan_records_tree = await self._build_plan_records_tree(
-                            project_id=project_id,
-                            root_plan_id=plan_id,
-                            progress_callback=progress_callback,
-                            ui_locale=loc,
-                        )
-                        _progress(grep_tool_progress("plan_material_ready", loc))
-                    
-                    badcase_list = []
-                    bug_list = []
-                    testcase_list = []
-                    card_list: List[Dict[str, Any]] = []
-                    if target in ['all', 'badcase']:
-                        _progress(grep_tool_progress("phase1_badcase", loc))
-                        badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
-                        _progress(grep_tool_progress("phase1_badcase_done", loc, n=len(badcase_list)))
-                    if target in ['all', 'bug']:
-                        _progress(grep_tool_progress("phase1_bug", loc))
-                        bug_list = await self._get_bug_list(project_id, keywords, status, plan_id=plan_id)
-                        _progress(grep_tool_progress("phase1_bug_done", loc, n=len(bug_list)))
-                    if target in ['all', 'testcase']:
-                        _progress(grep_tool_progress("phase1_tc", loc))
-                        testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
-                        _progress(grep_tool_progress("phase1_tc_done", loc, n=len(testcase_list)))
-                    # 卡片层：target=all|card 照常拉取；单独查 bug/badcase/testcase 时也拉取，
-                    # 否则 navigation 无法合并为「统一卡片」跳转，迭代下列表里卡片命中也不会出现。
-                    if target in ('all', 'card', 'bug', 'badcase', 'testcase'):
-                        _progress(grep_tool_progress("phase1_card", loc))
-                        card_list = await self._get_card_list(project_id, keywords, plan_id=plan_id)
-                        _progress(grep_tool_progress("phase1_card_done", loc, n=len(card_list)))
-
-                    # 卡片层适配：为导航补充 card_id（优先按 Card.source_type/source_id 映射）
-                    try:
-                        from app import db as _db, Card as _Card
-
-                        def _attach_card_ids(items: List[Dict[str, Any]], st: str) -> None:
-                            if not items:
-                                return
-                            ids = []
-                            for it in items:
-                                try:
-                                    iid = int(it.get("id"))
-                                    ids.append(iid)
-                                except Exception:
-                                    pass
-                            if not ids:
-                                return
-                            st_variants = [st]
-                            if st == "badcase":
-                                st_variants = ["badcase", "bad_case"]
-                            elif st == "testcase":
-                                st_variants = ["testcase", "test_case"]
-                            rows = (
-                                _db.session.query(_Card)
-                                .filter(_Card.project_id == int(project_id))
-                                .filter(_Card.source_type.in_(st_variants))
-                                .filter(_Card.source_id.in_(list(set(ids))))
-                                .all()
+                    if raw_target == "plan":
+                        plan_records_tree = None
+                        if plan_id:
+                            _progress(grep_tool_progress("plan_material_read", loc))
+                            plan_records_tree = await self._build_plan_records_tree(
+                                project_id=project_id,
+                                root_plan_id=plan_id,
+                                progress_callback=progress_callback,
+                                ui_locale=loc,
                             )
-                            m = {int(r.source_id): int(r.id) for r in rows if getattr(r, "source_id", None) is not None}
-                            titles = {
-                                int(r.source_id): (getattr(r, "title", None) or "").strip()
-                                for r in rows
-                                if getattr(r, "source_id", None) is not None
-                            }
-                            for it in items:
-                                if it.get("card_id") is not None:
-                                    continue
-                                try:
-                                    sid = int(it.get("id"))
-                                except Exception:
-                                    continue
-                                cid = m.get(sid)
-                                if cid is not None:
-                                    it["card_id"] = cid
-                                ct = titles.get(sid)
-                                if ct:
-                                    it["card_title"] = ct
-                                    # 源表 title 为空时，用卡片层标题便于导航/模型阅读
-                                    if not (it.get("title") or "").strip():
-                                        it["title"] = ct
+                            _progress(grep_tool_progress("plan_material_ready", loc))
+                        plan_location = self._get_plan_entity_list(project_id, keywords, plan_id)
+                        en = is_english_locale(loc)
+                        if not plan_location:
+                            summary_plan = (
+                                "📅 No matching iteration plans."
+                                if en
+                                else "📅 未找到匹配的迭代计划。"
+                            )
+                        else:
+                            summary_plan = (
+                                f"📅 Found {len(plan_location)} iteration plan(s)."
+                                if en
+                                else f"📅 找到 {len(plan_location)} 个迭代计划（target=plan）。"
+                            )
+                        plan_attr = [
+                            {"id": x["id"], "name": x.get("name"), "plan_id": x["id"]}
+                            for x in plan_location
+                        ]
+                        navigation_list = self._build_grep_navigation_items(
+                            plan_tree,
+                            "plan",
+                            [],
+                            [],
+                            [],
+                            [],
+                            scope_plan_id=plan_id,
+                            plan_entity_list=plan_location,
+                        )
+                        navigation = (
+                            {"type": "multiple", "items": navigation_list}
+                            if navigation_list
+                            else None
+                        )
+                        if navigation_list:
+                            _progress(grep_tool_progress("nav_build", loc))
+                            print(
+                                f"[GREP] ✅ 计划实体检索: n={len(plan_location)} nav={len(navigation_list)}"
+                            )
+                        result["data"] = {
+                            "plan_tree": plan_tree,
+                            "plan_records_tree": plan_records_tree,
+                            "plan_location": plan_location,
+                            "badcase_analysis": [],
+                            "bug_location": [],
+                            "testcase_location": [],
+                            "card_location": [],
+                            "plan_attribution": plan_attr,
+                            "comparison_report": "",
+                            "summary": summary_plan,
+                            "navigation": navigation,
+                        }
+                    else:
+                        # 人类阅读模式：如果指定了 plan_id，则返回该计划及其子计划的树形结构，并挂载各计划下的记录（从上到下、从外到里）
+                        plan_records_tree = None
+                        if plan_id:
+                            _progress(grep_tool_progress("plan_material_read", loc))
+                            plan_records_tree = await self._build_plan_records_tree(
+                                project_id=project_id,
+                                root_plan_id=plan_id,
+                                progress_callback=progress_callback,
+                                ui_locale=loc,
+                            )
+                            _progress(grep_tool_progress("plan_material_ready", loc))
+                    
+                        badcase_list = []
+                        bug_list = []
+                        testcase_list = []
+                        card_list: List[Dict[str, Any]] = []
+                        if raw_target in ['all', 'badcase']:
+                            _progress(grep_tool_progress("phase1_badcase", loc))
+                            badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
+                            _progress(grep_tool_progress("phase1_badcase_done", loc, n=len(badcase_list)))
+                        if raw_target in ['all', 'bug']:
+                            _progress(grep_tool_progress("phase1_bug", loc))
+                            bug_list = await self._get_bug_list(project_id, keywords, status, plan_id=plan_id)
+                            _progress(grep_tool_progress("phase1_bug_done", loc, n=len(bug_list)))
+                        if raw_target in ['all', 'testcase']:
+                            _progress(grep_tool_progress("phase1_tc", loc))
+                            testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
+                            _progress(grep_tool_progress("phase1_tc_done", loc, n=len(testcase_list)))
+                        # 卡片层：target=all|card 照常拉取；单独查 bug/badcase/testcase 时也拉取，
+                        # 否则 navigation 无法合并为「统一卡片」跳转，迭代下列表里卡片命中也不会出现。
+                        if raw_target in ('all', 'card', 'bug', 'badcase', 'testcase'):
+                            _progress(grep_tool_progress("phase1_card", loc))
+                            card_list = await self._get_card_list(project_id, keywords, plan_id=plan_id)
+                            _progress(grep_tool_progress("phase1_card_done", loc, n=len(card_list)))
 
-                        _attach_card_ids(bug_list, "bug")
-                        _attach_card_ids(badcase_list, "badcase")
-                        _attach_card_ids(testcase_list, "testcase")
-                    except Exception:
-                        pass
+                        # 卡片层适配：为导航补充 card_id（优先按 Card.source_type/source_id 映射）
+                        try:
+                            from app import db as _db, Card as _Card
+
+                            def _attach_card_ids(items: List[Dict[str, Any]], st: str) -> None:
+                                if not items:
+                                    return
+                                ids = []
+                                for it in items:
+                                    try:
+                                        iid = int(it.get("id"))
+                                        ids.append(iid)
+                                    except Exception:
+                                        pass
+                                if not ids:
+                                    return
+                                st_variants = [st]
+                                if st == "badcase":
+                                    st_variants = ["badcase", "bad_case"]
+                                elif st == "testcase":
+                                    st_variants = ["testcase", "test_case"]
+                                rows = (
+                                    _db.session.query(_Card)
+                                    .filter(_Card.project_id == int(project_id))
+                                    .filter(_Card.source_type.in_(st_variants))
+                                    .filter(_Card.source_id.in_(list(set(ids))))
+                                    .all()
+                                )
+                                m = {int(r.source_id): int(r.id) for r in rows if getattr(r, "source_id", None) is not None}
+                                titles = {
+                                    int(r.source_id): (getattr(r, "title", None) or "").strip()
+                                    for r in rows
+                                    if getattr(r, "source_id", None) is not None
+                                }
+                                for it in items:
+                                    if it.get("card_id") is not None:
+                                        continue
+                                    try:
+                                        sid = int(it.get("id"))
+                                    except Exception:
+                                        continue
+                                    cid = m.get(sid)
+                                    if cid is not None:
+                                        it["card_id"] = cid
+                                    ct = titles.get(sid)
+                                    if ct:
+                                        it["card_title"] = ct
+                                        # 源表 title 为空时，用卡片层标题便于导航/模型阅读
+                                        if not (it.get("title") or "").strip():
+                                            it["title"] = ct
+
+                            _attach_card_ids(bug_list, "bug")
+                            _attach_card_ids(badcase_list, "badcase")
+                            _attach_card_ids(testcase_list, "testcase")
+                        except Exception:
+                            pass
                     
-                    # 【阶段2】分析关联
-                    _progress(grep_tool_progress("phase2_assoc", loc))
-                    analysis_result = await self._analyze_associations(
-                        keywords=keywords,
-                        plan_tree=plan_tree,
-                        badcase_list=badcase_list,
-                        bug_list=bug_list,
-                        testcase_list=testcase_list,
-                        card_list=card_list,
-                        evidence=evidence,
-                        ui_locale=loc,
-                        plan_records_tree=plan_records_tree,
-                    )
-                    _progress(grep_tool_progress("phase2_done", loc))
-                    
-                    # 【阶段3】生成对比报告
-                    _progress(grep_tool_progress("phase3_compare", loc))
-                    comparison = await self._generate_comparison(project_id, keywords)
-                    _progress(grep_tool_progress("phase3_done", loc))
-                    
-                    # 生成导航指令（Bug / BadCase / TestCase，随 grep target 过滤；all 时合并多类）
-                    navigation = None
-                    navigation_list = self._build_grep_navigation_items(
-                        plan_tree,
-                        target,
-                        badcase_list,
-                        bug_list,
-                        testcase_list,
-                        card_list,
-                        scope_plan_id=plan_id,
-                    )
-                    if navigation_list:
-                        _progress(grep_tool_progress("nav_build", loc))
-                        # 始终使用 type=multiple + items，与前端 SimpleChatPanel / AgentTaskRun 一致；
-                        # 单条时若只返回 expand_and_locate，界面不渲染「点击跳转」列表。
-                        navigation = {'type': 'multiple', 'items': navigation_list}
-                        print(
-                            f"[GREP] ✅ 定位完成: Bug={len(bug_list)} BadCase={len(badcase_list)} "
-                            f"TestCase={len(testcase_list)} Card={len(card_list)}，导航条目={len(navigation_list)}"
+                        # 【阶段2】分析关联
+                        _progress(grep_tool_progress("phase2_assoc", loc))
+                        analysis_result = await self._analyze_associations(
+                            keywords=keywords,
+                            plan_tree=plan_tree,
+                            badcase_list=badcase_list,
+                            bug_list=bug_list,
+                            testcase_list=testcase_list,
+                            card_list=card_list,
+                            evidence=evidence,
+                            ui_locale=loc,
+                            plan_records_tree=plan_records_tree,
                         )
-                        print(
-                            f"[MODIFY-TRACE] grep_tool: grep_target={target!r}, nav_len={len(navigation_list)} "
-                            f"(未计划 plan_id 为空也会进导航)"
+                        _progress(grep_tool_progress("phase2_done", loc))
+                    
+                        # 【阶段3】生成对比报告
+                        _progress(grep_tool_progress("phase3_compare", loc))
+                        comparison = await self._generate_comparison(project_id, keywords)
+                        _progress(grep_tool_progress("phase3_done", loc))
+                    
+                        # 生成导航指令（Bug / BadCase / TestCase，随 grep target 过滤；all 时合并多类）
+                        navigation = None
+                        navigation_list = self._build_grep_navigation_items(
+                            plan_tree,
+                            raw_target,
+                            badcase_list,
+                            bug_list,
+                            testcase_list,
+                            card_list,
+                            scope_plan_id=plan_id,
                         )
-                        _progress(grep_tool_progress("locate_done_nav", loc))
+                        if navigation_list:
+                            _progress(grep_tool_progress("nav_build", loc))
+                            # 始终使用 type=multiple + items，与前端 SimpleChatPanel / AgentTaskRun 一致；
+                            # 单条时若只返回 expand_and_locate，界面不渲染「点击跳转」列表。
+                            navigation = {'type': 'multiple', 'items': navigation_list}
+                            print(
+                                f"[GREP] ✅ 定位完成: Bug={len(bug_list)} BadCase={len(badcase_list)} "
+                                f"TestCase={len(testcase_list)} Card={len(card_list)}，导航条目={len(navigation_list)}"
+                            )
+                            print(
+                                f"[MODIFY-TRACE] grep_tool: grep_target={raw_target!r}, nav_len={len(navigation_list)} "
+                                f"(未计划 plan_id 为空也会进导航)"
+                            )
+                            _progress(grep_tool_progress("locate_done_nav", loc))
                     
-                    result['data'] = {
-                        'plan_tree': plan_tree,
-                        'plan_records_tree': plan_records_tree,
-                        'badcase_analysis': analysis_result['badcase_analysis'],
-                        'bug_location': analysis_result['bug_location'],
-                        'testcase_location': analysis_result.get('testcase_location', []),
-                        'card_location': analysis_result.get('card_location', []),
-                        'plan_attribution': analysis_result['plan_attribution'],
-                        'comparison_report': comparison['markdown'],
-                        'summary': analysis_result['summary'],
-                        'navigation': navigation
-                    }
+                        result['data'] = {
+                            'plan_tree': plan_tree,
+                            'plan_records_tree': plan_records_tree,
+                            'plan_location': [],
+                            'badcase_analysis': analysis_result['badcase_analysis'],
+                            'bug_location': analysis_result['bug_location'],
+                            'testcase_location': analysis_result.get('testcase_location', []),
+                            'card_location': analysis_result.get('card_location', []),
+                            'plan_attribution': analysis_result['plan_attribution'],
+                            'comparison_report': comparison['markdown'],
+                            'summary': analysis_result['summary'],
+                            'navigation': navigation
+                        }
                     
+
                 elif mode == "associate":
                     # 三向关联模式
                     _progress(grep_tool_progress("assoc_start", loc))
@@ -319,6 +390,83 @@ class GrepTool(BaseTool):
                 'error': str(e)
             }
 
+
+
+    def _get_plan_entity_list(
+        self,
+        project_id: Any,
+        keywords: Optional[str],
+        scope_plan_id: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """检索迭代计划 Plan 表；scope_plan_id 有值时仅 root 及其子孙计划。"""
+        from app import db, Plan
+
+        try:
+            pid = int(project_id)
+        except (TypeError, ValueError):
+            return []
+        rows = db.session.query(Plan).filter(Plan.project_id == pid).all()
+        candidates = list(rows)
+        if scope_plan_id not in (None, "", "0"):
+            try:
+                root = int(scope_plan_id)
+            except (TypeError, ValueError):
+                root = None
+            else:
+                children_map: Dict[Any, List[int]] = {}
+                for p in rows:
+                    children_map.setdefault(p.parent_id, []).append(p.id)
+                allowed = {root}
+                stack = [root]
+                while stack:
+                    cur = stack.pop()
+                    for cid in children_map.get(cur, []):
+                        if cid not in allowed:
+                            allowed.add(cid)
+                            stack.append(cid)
+                candidates = [p for p in rows if p.id in allowed]
+
+        kw_list = self._normalize_keywords_for_match(keywords) if keywords else []
+        is_all = not kw_list and (
+            not keywords or str(keywords).strip() in ("", "*")
+        )
+        if not is_all and kw_list:
+            filtered = []
+            for p in candidates:
+                hay = f"{p.name or ''} {(p.description or '')}"
+                if self._text_matches_normalized_keywords(hay, keywords):
+                    filtered.append(p)
+            candidates = filtered
+        elif not is_all and keywords and str(keywords).strip():
+            k = str(keywords).strip().lower()
+            candidates = [
+                p
+                for p in candidates
+                if (p.name and k in (p.name or "").lower())
+                or (p.description and k in (p.description or "").lower())
+            ]
+
+        candidates.sort(
+            key=lambda x: (x.updated_at or x.created_at or x.id),
+            reverse=True,
+        )
+        out: List[Dict[str, Any]] = []
+        for p in candidates[:80]:
+            out.append(
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "title": p.name,
+                    "description": (p.description or "")[:800],
+                    "status": p.status,
+                    "priority": p.priority,
+                    "project_id": p.project_id,
+                    "parent_id": p.parent_id,
+                    "plan_id": p.id,
+                    "is_default": getattr(p, "is_default", False),
+                }
+            )
+        return out
     async def _build_plan_records_tree(
         self,
         project_id: str,
@@ -507,7 +655,7 @@ class GrepTool(BaseTool):
     def _grep_nav_target_priority(target: str) -> int:
         """同一 record_id 合并时优先保留「统一卡片」跳转，避免 target=all 下列四条重复。"""
         t = (target or "").strip().lower()
-        return {"card": 0, "bug": 1, "badcase": 2, "testcase": 3}.get(t, 9)
+        return {"card": 0, "bug": 1, "badcase": 2, "testcase": 3, "plan": 4}.get(t, 9)
 
     def _collapse_navigation_merge_keys(
         self,
@@ -729,6 +877,7 @@ class GrepTool(BaseTool):
         testcase_list: List[Dict[str, Any]],
         card_list: Optional[List[Dict[str, Any]]] = None,
         scope_plan_id: Any = None,
+        plan_entity_list: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         生成前端「点击跳转」列表项；与 bug 一致带 type=expand_and_locate，并统一 record_id/title，
@@ -736,6 +885,29 @@ class GrepTool(BaseTool):
         target=all 时同一卡片会在多类列表中重复出现，这里按 record_id 合并，优先保留 target=card。
         """
         gt = (grep_target or 'all').strip().lower()
+        if gt == "plan":
+            out_plan: List[Dict[str, Any]] = []
+            for pl in plan_entity_list or []:
+                pid = pl.get("id")
+                if pid is None:
+                    continue
+                try:
+                    rid = int(pid)
+                except (TypeError, ValueError):
+                    continue
+                title = (pl.get("name") or pl.get("title") or "").strip()
+                pname = self._plan_display_name(plan_tree, rid) or title or f"Plan #{rid}"
+                out_plan.append(
+                    {
+                        "type": "expand_and_locate",
+                        "target": "plan",
+                        "record_id": rid,
+                        "title": title or pname,
+                        "plan_id": rid,
+                        "plan_name": pname,
+                    }
+                )
+            return self._finalize_grep_navigation_items(out_plan, plan_tree, scope_plan_id)
         raw_items: List[Dict[str, Any]] = []
         card_list = card_list or []
         # record_id -> (priority, entry) 取最优一条
@@ -1328,28 +1500,44 @@ class GrepTool(BaseTool):
         if tp <= 0 and isinstance(plan_tree.get("plans"), list):
             tp = len(plan_tree["plans"])
 
-        summary = grep_generate_locate_summary(
-            ui_locale,
-            keywords=keywords,
-            badcase_count=len(badcase_list),
-            bug_count=len(bug_list),
-            testcase_count=len(testcase_list),
-            card_count=len(card_list),
-            related_badcase_count=sum(1 for bc in badcase_analysis if bc['related_to_evidence']),
-            related_bug_count=sum(1 for bug in bug_location if bug['related_to_evidence']),
-            related_testcase_count=sum(1 for tc in testcase_location if tc['related_to_evidence']),
-            related_card_count=sum(1 for x in card_location if x['related_to_evidence']),
-            attribution_count=len(plan_attribution),
-            bug_location=bug_location,
-            total_plans=tp,
-            plan_material_loaded=plan_records_tree is not None,
-            plan_material_root_name=self._plan_records_root_name(plan_records_tree),
-        )
-        summary = enrich_grep_observation_nl_with_plan_names(
-            summary,
-            {"plan_tree": plan_tree},
-            ui_locale,
-        )
+        try:
+            summary = grep_generate_locate_summary(
+                ui_locale,
+                keywords=keywords,
+                badcase_count=len(badcase_list),
+                bug_count=len(bug_list),
+                testcase_count=len(testcase_list),
+                card_count=len(card_list),
+                related_badcase_count=sum(1 for bc in badcase_analysis if bc['related_to_evidence']),
+                related_bug_count=sum(1 for bug in bug_location if bug['related_to_evidence']),
+                related_testcase_count=sum(1 for tc in testcase_location if tc['related_to_evidence']),
+                related_card_count=sum(1 for x in card_location if x['related_to_evidence']),
+                attribution_count=len(plan_attribution),
+                bug_location=bug_location,
+                total_plans=tp,
+                plan_material_loaded=plan_records_tree is not None,
+                plan_material_root_name=self._plan_records_root_name(plan_records_tree),
+            )
+            summary = enrich_grep_observation_nl_with_plan_names(
+                summary,
+                {"plan_tree": plan_tree},
+                ui_locale,
+            )
+        except Exception as sum_e:
+            print(f"[GREP] ⚠️ 摘要生成失败（已降级，仍返回定位数据）: {sum_e}")
+            nb, ng, nt = len(badcase_list), len(bug_list), len(testcase_list)
+            if is_english_locale(ui_locale):
+                summary = f"🐛 Located: BadCase={nb}, Bug={ng}, Test case={nt}."
+            else:
+                summary = f"🐛 定位摘要降级：BadCase {nb} 条、Bug {ng} 条、测试用例 {nt} 条。"
+            try:
+                summary = enrich_grep_observation_nl_with_plan_names(
+                    summary,
+                    {"plan_tree": plan_tree},
+                    ui_locale,
+                )
+            except Exception:
+                pass
 
         return {
             'badcase_analysis': badcase_analysis,

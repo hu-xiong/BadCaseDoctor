@@ -1,7 +1,10 @@
+import contextlib
 import json
 import re
 import asyncio
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Sequence, Dict, Union, Optional, List, Iterator
 from urllib.parse import quote_plus
@@ -16,6 +19,7 @@ from sqlalchemy import Result
 from config import Config
 from .dashscope_compat import get_dashscope_compat_client
 from .prompt_log import maybe_log_llm_chat_kwargs
+from .multimodal_content import openai_style_user_content
 
 
 def _log_compat_stream_first(
@@ -57,6 +61,49 @@ def _delta_content(delta) -> Optional[str]:
 
 def _norm_qwen_model_id(s: Optional[str]) -> str:
     return (s or "").strip().lower().replace("_", "-")
+
+
+def _qwen_thinking_debug_enabled() -> bool:
+    return (os.getenv("QWEN_THINKING_DEBUG") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _qwen_thinking_stream_off_env() -> bool:
+    """设为 1：请求百炼时不带 enable_thinking，显著缩短 content 首字延迟（无 reasoning 链）。"""
+    return (os.getenv("QWEN_THINKING_STREAM_OFF") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _qwen_first_token_log_enabled() -> bool:
+    return (os.getenv("QWEN_FIRST_TOKEN_LOG") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_qwen_max_family_model(model_id: Optional[str]) -> bool:
+    """qwen-max / qwen3-max* 等走自动难度思考分支的模型。"""
+    m = _norm_qwen_model_id(model_id)
+    return m == "qwen-max" or m.startswith("qwen3-max") or "qwen-max-thinking" in m
+
+
+# ReAct 主循环与 INCR-SUM 后台线程共用一个 QwenLLM 时，勿用实例字段 force_disable_thinking 跨线程传递。
+_qwen_tls_suppress = threading.local()
+
+
+def qwen_suppress_thinking_tls_depth() -> int:
+    return int(getattr(_qwen_tls_suppress, "depth", 0) or 0)
+
+
+@contextlib.contextmanager
+def qwen_suppress_thinking_tls_ctx():
+    """仅当前线程：标记处于 content_only / 说明流，不污染其它线程对 enable_thinking 的判定。"""
+    cur = qwen_suppress_thinking_tls_depth()
+    _qwen_tls_suppress.depth = cur + 1
+    try:
+        yield
+    finally:
+        d = qwen_suppress_thinking_tls_depth() - 1
+        if d <= 0:
+            if hasattr(_qwen_tls_suppress, "depth"):
+                delattr(_qwen_tls_suppress, "depth")
+        else:
+            _qwen_tls_suppress.depth = d
 
 
 class QwenLLM:
@@ -121,6 +168,10 @@ class QwenLLM:
         return False
 
     def _thinking_enabled_for(self, text: str) -> bool:
+        if qwen_suppress_thinking_tls_depth() > 0:
+            return False
+        if _qwen_thinking_stream_off_env():
+            return False
         if getattr(self, "force_disable_thinking", False):
             return False
         if self._is_qwen_thinking_disabled_for_model():
@@ -129,7 +180,14 @@ class QwenLLM:
             return True
         model = (self.model or "").strip().lower()
         if model == "qwen-max" and self._supports_deep_thinking():
-            return self._assess_task_difficulty(text) == "hard"
+            diff = self._assess_task_difficulty(text)
+            out = diff == "hard"
+            if _qwen_thinking_debug_enabled():
+                print(
+                    f"[QWEN-THINKING] qwen-max difficulty_assess={diff!r} -> enable_thinking={out}",
+                    flush=True,
+                )
+            return out
         if model == "glm-5":
             mode = (os.getenv("GLM5_THINKING_MODE", "auto") or "auto").strip().lower()
             if mode == "always":
@@ -213,6 +271,17 @@ class QwenLLM:
         self._apply_qwen_thinking_extra_body(kwargs, enable_thinking=enable_thinking)
         if stream:
             kwargs["stream"] = True
+        if stream and _is_qwen_max_family_model(self.model):
+            print(
+                "[QWEN-THINKING] _chat_create "
+                f"model={self.model!r} stream=True "
+                f"request_enable_thinking={enable_thinking} "
+                f"extra_body={kwargs.get('extra_body')!r} "
+                f"force_disable_thinking={getattr(self, 'force_disable_thinking', False)} "
+                f"self.enable_thinking_flag={getattr(self, 'enable_thinking', False)} "
+                f"disabled_by_env_list={self._is_qwen_thinking_disabled_for_model()}",
+                flush=True,
+            )
         maybe_log_llm_chat_kwargs(
             "qwen",
             kwargs,
@@ -413,14 +482,25 @@ class QwenLLM:
         prompt: str,
         history: list = None,
         max_tokens: Optional[int] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
         messages = []
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+        messages.append(
+            {"role": "user", "content": openai_style_user_content(prompt, images)}
+        )
         eth = self._thinking_enabled_for(prompt)
         if eth:
             print(f"[QWEN-LLM-STREAM-REASONING] enable_thinking=True model={self.model}")
+        if _is_qwen_max_family_model(self.model):
+            print(
+                "[QWEN-THINKING] chat_stream_with_reasoning "
+                f"model={self.model!r} request_enable_thinking={eth} "
+                f"(实例 enable_thinking 标志={self.enable_thinking}；"
+                f"随后一行 [QWEN-THINKING] _chat_create 为真正发往百炼的 extra_body)",
+                flush=True,
+            )
         _pl = len(prompt) if isinstance(prompt, str) else 0
 
         try:
@@ -428,6 +508,11 @@ class QwenLLM:
                 messages, stream=True, enable_thinking=eth, max_tokens=max_tokens
             )
             _first = True
+            _t0 = time.monotonic()
+            _first_reasoning_s: Optional[float] = None
+            _first_content_s: Optional[float] = None
+            _n_rc = 0
+            _n_ct = 0
             for chunk in stream:
                 _log_compat_stream_first(
                     "chat_stream_with_reasoning",
@@ -442,10 +527,30 @@ class QwenLLM:
                 d = chunk.choices[0].delta
                 rc = _delta_reasoning_content(d)
                 if rc and isinstance(rc, str):
+                    _n_rc += 1
+                    if _first_reasoning_s is None:
+                        _first_reasoning_s = time.monotonic() - _t0
                     yield {"type": "reasoning_delta", "delta": rc}
                 ct = _delta_content(d)
                 if ct and isinstance(ct, str):
+                    _n_ct += 1
+                    if _first_content_s is None:
+                        _first_content_s = time.monotonic() - _t0
                     yield {"type": "content_delta", "delta": ct}
+            if _qwen_first_token_log_enabled():
+                _gap = (
+                    None
+                    if _first_reasoning_s is None or _first_content_s is None
+                    else (_first_content_s - _first_reasoning_s)
+                )
+                print(
+                    "[QWEN-TTFT] chat_stream_with_reasoning "
+                    f"model={self.model!r} enable_thinking={eth} "
+                    f"first_reasoning_s={_first_reasoning_s} first_content_s={_first_content_s} "
+                    f"content_after_reasoning_s={_gap} "
+                    f"chunks_reasoning={_n_rc} chunks_content={_n_ct}",
+                    flush=True,
+                )
             yield {"type": "done"}
         except Exception as e:
             yield {"type": "content_delta", "delta": f"Error: {e}"}
@@ -456,11 +561,14 @@ class QwenLLM:
         prompt: str,
         history: list = None,
         max_tokens: Optional[int] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        messages: List[Dict[str, str]] = []
+        messages: List[Dict[str, Any]] = []
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+        messages.append(
+            {"role": "user", "content": openai_style_user_content(prompt, images)}
+        )
         eth = self._thinking_enabled_for(prompt)
         _pl = len(prompt) if isinstance(prompt, str) else 0
         try:

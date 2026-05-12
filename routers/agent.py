@@ -28,6 +28,7 @@ from utils.metrics import (
 from agents.evidence_extractor import deep_sse_json_safe as _sse_sanitize_for_json
 from agents.sse_react_v1 import engine_dict_to_wire_packets, is_wire_v1_packet
 import logging
+import re
 from llm.model_registry import choose_auto_model, supports_vision
 from llm.model_registry import get_model
 
@@ -52,6 +53,47 @@ def model_supports_images(model_name: str) -> bool:
     if model_name == 'auto':
         return True
     return supports_vision(model_name)
+
+
+def _user_followup_needs_react_after_image(text: str) -> bool:
+    """
+    用户是否在「读图」之外还要求走 ReAct 工具链（建 Bug / 定位 / 修改等）。
+    用于非 vision 模型：先 OCR/描述图片后仍应进入主循环，而不是早退 bye。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    cn = (
+        "提炼",
+        "创建",
+        "新建",
+        "生成",
+        "录入",
+        "登记",
+        "放到",
+        "归入",
+        "写入",
+        "保存",
+        "落库",
+        "提交",
+        "卡片",
+        "缺陷",
+        "用例",
+        "测试用例",
+        "badcase",
+        "修改",
+        "删除",
+        "复制",
+        "拷贝",
+    )
+    if any(k in raw for k in cn):
+        return True
+    if any(k in low for k in (" bug", "bug ", "bug#", "create ", "grep", "modify", "copy")):
+        return True
+    if re.search(r"\bbug\b", raw, re.I):
+        return True
+    return False
 
 
 def _sse_json_dumps(obj, **kwargs) -> str:
@@ -751,6 +793,33 @@ def react_agent():
                         # - react: 其他 → 走原 ReAct
                         def _classify_image_intent(_text: str) -> str:
                             t = (_text or '').strip()
+                            low = t.lower()
+                            # 需要走工具链：建 Bug / 写入卡片等，勿判成纯 OCR 早退
+                            if any(
+                                k in t
+                                for k in (
+                                    '提炼成bug',
+                                    '提炼成 bug',
+                                    '创建bug',
+                                    '新建bug',
+                                    '生成bug',
+                                    '放到卡片',
+                                    '写到卡片',
+                                    '卡片里',
+                                    '卡片中',
+                                    '放进卡片',
+                                )
+                            ) or any(
+                                k in low
+                                for k in (
+                                    'create bug',
+                                    'new bug',
+                                    'into card',
+                                    'to card',
+                                    'in card',
+                                )
+                            ):
+                                return 'react'
                             if not t:
                                 return 'ocr'
                             # 原型图 / 测试用例优先（避免被"图片"关键词误判成 ocr）
@@ -775,9 +844,10 @@ def react_agent():
                         _image_intent = _classify_image_intent(user_input) if images else 'react'
                         _model_has_vision = model_supports_images(model_name)
                         if images:
-                            # 判断模型是否支持图片输入
+                            # 多模态优先：仅当模型不支持图片输入时，才走下方 VisionDescribeService（独立 OCR/原型描述）。
+                            # vision=true 时：不调用图片描述服务，不把图转成纯文本再喂 ReAct（避免重复、降质、多耗一次）。
                             if _model_has_vision:
-                                # 模型支持图片：直接使用原始输入（图片数据将在后续 LLM 调用中处理）
+                                # 模型支持图片：用户文本 + 图片应由后续 LLM 多模态调用消费（不在本路由做离线描述）。
                                 q.put({
                                     'type': 'stream',
                                     'payload': {
@@ -801,7 +871,7 @@ def react_agent():
                                     }
                                 })
                             else:
-                                # 模型不支持图片：先调用图片描述服务生成文本描述
+                                # 模型不支持图片：无法用多模态消息带图，只能先调用图片描述服务生成文本，再注入 ReAct。
                                 q.put({
                                     'type': 'stream',
                                     'payload': {
@@ -851,20 +921,39 @@ def react_agent():
                                                             'stream_channel': 'content',
                                                         }
                                                     })
-                                                    # 让出事件循环，促使前端及时刷新（避免短时间内堆积成一次性 DOM 更新）
                                                     await asyncio.sleep(0)
-                                        # 直接返回视觉结论，不进入 ReAct 主循环
-                                        q.put({
-                                            'type': 'bye',
-                                            'payload': {
-                                                'findings': descriptions,
-                                                'steps_count': 0,
-                                                'duration': 0,
-                                                'thinking_time': 0,
-                                                'react_phase': 'think',
-                                            }
-                                        })
-                                        return
+                                        # 仅「读图/识字」且后续不要求工具链时早退；否则把描述注入 user_input 继续 ReAct
+                                        if (
+                                            _image_intent == 'ocr'
+                                            and not _user_followup_needs_react_after_image(user_input)
+                                        ):
+                                            q.put({
+                                                'type': 'bye',
+                                                'payload': {
+                                                    'findings': descriptions,
+                                                    'steps_count': 0,
+                                                    'duration': 0,
+                                                    'thinking_time': 0,
+                                                    'react_phase': 'think',
+                                                }
+                                            })
+                                            return
+                                        _ip, _ul, _def = vision_image_block_labels(ui_locale)
+                                        _joined = "\n\n".join(
+                                            str(x).strip() for x in descriptions if str(x).strip()
+                                        )
+                                        _effective_input = (
+                                            _ip
+                                            + "\n"
+                                            + _joined
+                                            + f"\n\n{_ul} "
+                                            + (user_input or _def)
+                                        )
+                                        logger.info(
+                                            "[REACT] 已注入 %s 条图片描述，丰富后的 user_input 长度: %s",
+                                            len(descriptions),
+                                            len(_effective_input),
+                                        )
                                     else:
                                         _ip, _ul, _def = vision_image_block_labels(ui_locale)
                                         _effective_input = (
@@ -891,6 +980,9 @@ def react_agent():
                                             'stream_channel': 'content',
                                         }
                                     })
+                        _stream_images = (
+                            images if images and _model_has_vision else None
+                        )
                         async for chunk in agent.handle_user_request_stream(
                             _effective_input,
                             project_id=project_id,
@@ -904,6 +996,7 @@ def react_agent():
                             hint_project_name=hint_project_name,
                             hint_plan_name=hint_plan_name,
                             client_shell=client_shell,
+                            images=_stream_images,
                         ):
                             if perf and not getattr(task, "_first_chunk_logged", False):
                                 setattr(task, "_first_chunk_logged", True)

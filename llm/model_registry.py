@@ -114,31 +114,11 @@ def _build_registry() -> List[ModelSpec]:
             id="qwen-max-thinking",
             label="Qwen-Max (auto thinking)",
             provider="qwen",
-            enabled=_enabled("qwen-max-thinking", default=True),
+            # 默认不出现在下拉框（效果差）；需要时 MODEL_ENABLE__QWEN-MAX-THINKING=1
+            enabled=_enabled("qwen-max-thinking", default=False),
             vision=False,
             pricing=_price_for("qwen-max-thinking"),
             priority=50,
-        ),
-        # ---- Baidu Qianfan (ERNIE) ----
-        ModelSpec(
-            id="ernie-4.5-turbo-128k",
-            label="Ernie-4.5-Turbo (128k)",
-            provider="qianfan",
-            enabled=_enabled("ernie-4.5-turbo-128k", default=True),
-            vision=False,
-            context_length=128_000,
-            pricing=_price_for("ernie-4.5-turbo-128k"),
-            priority=46,
-        ),
-        ModelSpec(
-            id="ernie-x1-turbo-32k",
-            label="Ernie-X1 (32k)",
-            provider="qianfan",
-            enabled=_enabled("ernie-x1-turbo-32k", default=True),
-            vision=False,
-            context_length=32_000,
-            pricing=_price_for("ernie-x1-turbo-32k"),
-            priority=42,
         ),
         # ---- Zhipu (GLM) ----
         ModelSpec(
@@ -188,6 +168,16 @@ def _build_registry() -> List[ModelSpec]:
             context_length=128_000,
             pricing=_price_for("deepseek-v4-pro"),
             priority=68,
+        ),
+        ModelSpec(
+            id="deepseek-v4-flash",
+            label="DeepSeek-V4-Flash",
+            provider="deepseek",
+            enabled=_enabled("deepseek-v4-flash", default=True),
+            vision=False,
+            context_length=128_000,
+            pricing=_price_for("deepseek-v4-flash"),
+            priority=66,
         ),
     ]
 

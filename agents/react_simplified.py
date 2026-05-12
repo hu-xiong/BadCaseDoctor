@@ -43,7 +43,7 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 - REACT_SELF_DRIVE_TOOL_LOOP=1：每步用 ``_extract_todo_params`` 直接决策工具，跳过本步 decide LLM（仍走 observe 等后续）。
 - REACT_STOP_AFTER_STEP_FAIL=1（默认）：步骤失败或（严格模式下）grep 空命中后暂停自动推进并发 ``step_failed`` 提示。
 - REACT_STRICT_PLAN_FAIL=1（默认）：grep 成功但三类列表均空时视为失败。
-- REACT_UNIFIED_THINK_SSE_MIN_CHARS：统一流里 ``agent_thought`` 合并下发前的最小字符数（默认 **24**，至少 8）。内部仍按字符解析 ``<decision>``/``<observation>``，对外 SSE 不再单字一条，减轻前端与带宽。
+- REACT_UNIFIED_THINK_SSE_MIN_CHARS：统一流里 ``agent_thought`` 合并下发前的最小字符数（默认 **4**，至少 **1**）。过小会增加 SSE 条数；过大则首轮思考区长时间空白、末段「一整块冒出」。内部仍按字符解析 ``<decision>``/``<observation>``。
 - REACT_PLAN_SSE_LIVE_STEPS=1（默认）：每轮同步 ``plan_update``（单 in_progress）；``=0`` 关闭。
 - REACT_UNIFIED_FIRST_ROUND_TASK_PLAN=1（默认）：统一流首轮提示词允许模型**仅在复杂多步**时在 ``<thinking>`` 内输出 ``<task_plan>``；简单单步不应输出。有输出则解析并注入后续轮 ``<current_todo>``、下发 ``plan_init``/``plan_update``。``=0`` 关闭。
 - REACT_UNIFIED_PLAN_MAX_STEPS：首轮 ``task_plan`` 最大步数（默认 **12**，上限 32）。
@@ -59,6 +59,7 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 - REACT_SUMMARY_STREAM_GAP_MS：``summary_stream`` / 统一总结 LLM 流等分片之间的暂停毫秒数（默认 22；``0`` 关闭）。单靠 ``asyncio.sleep(0)`` 易与单次 TCP/读缓冲合并，前端像「一次性整块」
 - REACT_RUNNING_SUMMARY_STREAM_GAP_MS：终局 ``running_summary_stream`` 分片间隔；**未设置**时与 ``REACT_SUMMARY_STREAM_GAP_MS`` 相同
 - REACT_INCREMENTAL_SUMMARY：每步 observation 后合并「增量运行总览」Markdown。**默认开**；``0``/``false``/``off`` 关闭。``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``（默认 2048）；``REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL=1``（默认）时终局不再跑统一总结 LLM
+- REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT：主循环结束时等待**后台增量总结线程**的最长秒数（默认 **90**）。旧逻辑仅等 3s 即读队列，LLM 仍在输出时会把「关键发现」裁成半句；可调大或配合 ``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``
 - REACT_INCREMENTAL_SUMMARY_STREAM_SSE（默认 ``1``）：仅影响 **主循环结束后** 下发运行总览的方式。``1``：发 ``running_summary_done`` 整块（与 REPLACE_FINAL 等配合）；``0``：走 ``final_wire`` 切片重放 ``running_summary_stream``。**中途**每步合并一律 asyncio 后台队列 + 静默 LLM，不阻塞「准备下一步」、不向中途 SSE 推流（函数 ``_merge_running_summary_incremental_to_sse`` 保留供专项实验，主路径不再调用）
 - REACT_INCREMENTAL_SUMMARY_BLOCK_LOOP：``1`` 时每步在主循环内 ``await`` 静默合并（排障/复现卡顿用）。**默认 ``0``：后台 worker 串行合并**
 - REACT_DECIDE_FC_STREAM=1（默认）：decide 步在支持 ``chat_completion_with_tools_stream`` 的 LLM 上走**流式 FC**（边收 content/tool_calls delta 边 ``agent_thought``）；失败回退整包 ``chat_completion_with_tools``。设为 ``0`` 强制整包 FC。
@@ -109,6 +110,7 @@ from .react_function_call import (
 )
 from .self_correction import SelfCorrectionEngine
 from .evidence_extractor import EvidenceExtractor, _json_safe_tool_params, deep_sse_json_safe
+from llm.multimodal_content import openai_style_user_content
 
 # 与 SSE 信封 request_id（agent_session_id）对齐：前端停止时合作式打断主循环
 _REACT_STREAM_CANCEL_EVENTS: Dict[str, threading.Event] = {}
@@ -149,6 +151,9 @@ from .unified_think_stream_sanitize import create_unified_think_sanitizer
 from .intent_guards import (
     is_vague_generic_todo,
     infer_modify_target_from_user,
+    user_text_implies_bug_entity_type,
+    user_text_implies_card_entity_type,
+    user_text_implies_plan_entity_type,
 )
 from .locale_prompts import (
     normalize_locale,
@@ -205,10 +210,15 @@ _CONTEXT_UPDATE_FROM_LLM_IGNORE_KEYS = frozenset(
         "badcase_list",
         "bug_list",
         "testcase_list",
+        "card_list",
+        "plan_list",
         "grep_result",
         "first_badcase_id",
         "first_bug_id",
         "first_testcase_id",
+        "first_card_id",
+        "first_plan_id",
+        "grep_modify_raw_plan_list",
         "_last_grep_keywords",
         "_last_grep_target",
         "badcase_analysis",
@@ -1692,7 +1702,7 @@ class SimplifiedReActEngine:
         t = (str(target or "badcase")).strip().lower().replace("-", "_")
         if t in ("test_case", "testcase"):
             return "testcase"
-        if t in ("bug", "badcase"):
+        if t in ("bug", "badcase", "card", "plan"):
             return t
         return "badcase"
 
@@ -1739,6 +1749,14 @@ class SimplifiedReActEngine:
             rows = result_context.get("grep_modify_raw_testcase_list")
             if not isinstance(rows, list) or len(rows) == 0:
                 rows = result_context.get("testcase_list") or []
+        elif target_type == "card":
+            rows = result_context.get("grep_modify_raw_card_list")
+            if not isinstance(rows, list) or len(rows) == 0:
+                rows = result_context.get("card_list") or []
+        elif target_type == "plan":
+            rows = result_context.get("grep_modify_raw_plan_list")
+            if not isinstance(rows, list) or len(rows) == 0:
+                rows = result_context.get("plan_list") or []
         else:
             rows = result_context.get("grep_modify_raw_badcase_list")
             if not isinstance(rows, list) or len(rows) == 0:
@@ -1746,10 +1764,15 @@ class SimplifiedReActEngine:
         out: List[int] = []
         seen: set = set()
         for x in rows or []:
-            if not isinstance(x, dict) or x.get("id") is None:
+            if not isinstance(x, dict):
+                continue
+            raw_id = x.get("id")
+            if raw_id is None and target_type == "card":
+                raw_id = x.get("card_id")
+            if raw_id is None:
                 continue
             try:
-                ix = int(x["id"])
+                ix = int(raw_id)
             except (TypeError, ValueError):
                 continue
             if ix not in seen:
@@ -1994,13 +2017,13 @@ class SimplifiedReActEngine:
         # 2) 用户意图目标类型过滤（bug / badcase / testcase）
         inferred = infer_modify_target_from_user(text) or ""
         inferred = self._normalize_modify_target(inferred)
-        if inferred in ("bug", "badcase", "testcase"):
+        if inferred in ("bug", "badcase", "testcase", "card", "plan"):
             by_t = [x for x in items if self._normalize_modify_target(x.get("target")) == inferred]
             if by_t:
                 items = by_t
         else:
             # 关键词弱过滤（未明确意图时）
-            if "bug" in lower:
+            if user_text_implies_bug_entity_type(text):
                 by_t = [x for x in items if self._normalize_modify_target(x.get("target")) == "bug"]
                 if by_t:
                     items = by_t
@@ -2022,19 +2045,42 @@ class SimplifiedReActEngine:
     @contextlib.contextmanager
     def _llm_no_thinking(self):
         """与 run_stream 内 _NoThinking 一致：modify 决策/提取 modifications 时临时关闭思考模式。"""
-        try:
-            if hasattr(self.llm, "force_disable_thinking"):
-                setattr(self.llm, "force_disable_thinking", True)
-            yield
-        finally:
-            if hasattr(self.llm, "force_disable_thinking"):
-                setattr(self.llm, "force_disable_thinking", False)
+        from llm.qwen_llm import QwenLLM, qwen_suppress_thinking_tls_ctx
+
+        if isinstance(self.llm, QwenLLM):
+            with qwen_suppress_thinking_tls_ctx():
+                yield
+        else:
+            try:
+                if hasattr(self.llm, "force_disable_thinking"):
+                    setattr(self.llm, "force_disable_thinking", True)
+                yield
+            finally:
+                if hasattr(self.llm, "force_disable_thinking"):
+                    setattr(self.llm, "force_disable_thinking", False)
 
     @contextlib.contextmanager
     def _react_force_thinking_ctx(self, stream_kind: str):
         """占位：历史代码用 with 包裹；不再开启模型侧深度思考（enable_thinking）。"""
         del stream_kind  # unused
         yield
+
+    def _react_vision_images_for_llm(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        将本轮用户上传的图片附带到 LLM（OpenAI 兼容 image_url）。
+        轮次预算见 REACT_VISION_IMAGE_ATTACH_ROUNDS，避免每轮 observe 重复塞大图。
+        """
+        raw = getattr(self, "_react_stream_images", None)
+        if not raw:
+            return None
+        try:
+            budget = int(getattr(self, "_react_stream_images_round_budget", 0) or 0)
+        except (TypeError, ValueError):
+            budget = 0
+        if budget <= 0:
+            return None
+        self._react_stream_images_round_budget = budget - 1
+        return list(raw)
 
     def _resolve_chat_stream_iter(
         self,
@@ -2048,6 +2094,7 @@ class SimplifiedReActEngine:
         """
         import inspect
 
+        imgs = self._react_vision_images_for_llm()
         fn = getattr(self.llm, "chat_stream_with_reasoning", None)
         if callable(fn):
             _kw: Dict[str, Any] = {}
@@ -2055,6 +2102,12 @@ class SimplifiedReActEngine:
                 try:
                     if "max_tokens" in inspect.signature(fn).parameters:
                         _kw["max_tokens"] = max_tokens
+                except (TypeError, ValueError):
+                    pass
+            if imgs is not None:
+                try:
+                    if "images" in inspect.signature(fn).parameters:
+                        _kw["images"] = imgs
                 except (TypeError, ValueError):
                     pass
             return fn(prompt, history, **_kw) if _kw else fn(prompt, history)
@@ -2065,6 +2118,12 @@ class SimplifiedReActEngine:
                 try:
                     if "max_tokens" in inspect.signature(fb).parameters:
                         _kw2["max_tokens"] = max_tokens
+                except (TypeError, ValueError):
+                    pass
+            if imgs is not None:
+                try:
+                    if "images" in inspect.signature(fb).parameters:
+                        _kw2["images"] = imgs
                 except (TypeError, ValueError):
                     pass
             return fb(prompt, history, **_kw2) if _kw2 else fb(prompt, history)
@@ -2085,8 +2144,13 @@ class SimplifiedReActEngine:
         """
         import inspect
 
-        # 须在实际迭代 LLM 流时保持 force_disable_thinking：若用外层 with + return generator，
-        # 会在首次 next 之前 __exit__，导致 Qwen 仍带 enable_thinking、千帆仍用 X1 推理模型。
+        from llm.qwen_llm import QwenLLM, qwen_suppress_thinking_tls_ctx
+
+        _is_qwen = isinstance(self.llm, QwenLLM)
+        imgs = self._react_vision_images_for_llm()
+
+        # Qwen：线程局部标记 content_only，勿改实例 force_disable_thinking（避免与主循环 think 并发互相污染）
+        # 非 Qwen：仍须在迭代 LLM 流时保持 force_disable_thinking
         fn = getattr(self.llm, "chat_stream", None)
         if callable(fn):
             stream_kw: Dict[str, Any] = {}
@@ -2096,52 +2160,84 @@ class SimplifiedReActEngine:
                         stream_kw["max_tokens"] = max_tokens
                 except (TypeError, ValueError):
                     pass
+            if imgs is not None:
+                try:
+                    if "images" in inspect.signature(fn).parameters:
+                        stream_kw["images"] = imgs
+                except (TypeError, ValueError):
+                    pass
 
             def _gen():
-                try:
-                    if hasattr(self.llm, "force_disable_thinking"):
-                        setattr(self.llm, "force_disable_thinking", True)
+                def _core():
                     try:
-                        for piece in fn(prompt, history, **stream_kw):
-                            if isinstance(piece, str) and piece:
-                                yield {"type": "content_delta", "delta": piece}
-                    except Exception as e:
-                        yield {"type": "content_delta", "delta": f"Error: {e}"}
-                    yield {"type": "done"}
-                finally:
-                    if hasattr(self.llm, "force_disable_thinking"):
-                        setattr(self.llm, "force_disable_thinking", False)
+                        if hasattr(self.llm, "force_disable_thinking") and not _is_qwen:
+                            setattr(self.llm, "force_disable_thinking", True)
+                        try:
+                            for piece in fn(prompt, history, **stream_kw):
+                                if isinstance(piece, str) and piece:
+                                    yield {"type": "content_delta", "delta": piece}
+                        except Exception as e:
+                            yield {"type": "content_delta", "delta": f"Error: {e}"}
+                        yield {"type": "done"}
+                    finally:
+                        if hasattr(self.llm, "force_disable_thinking") and not _is_qwen:
+                            setattr(self.llm, "force_disable_thinking", False)
+
+                if _is_qwen:
+
+                    def _wrapped():
+                        with qwen_suppress_thinking_tls_ctx():
+                            yield from _core()
+
+                    return _wrapped()
+                return _core()
 
             return _gen()
         fn2 = getattr(self.llm, "chat_stream_with_reasoning", None)
         if callable(fn2):
 
             def _gen2():
-                try:
-                    if hasattr(self.llm, "force_disable_thinking"):
-                        setattr(self.llm, "force_disable_thinking", True)
+                def _core2():
                     try:
-                        _f2_kw: Dict[str, Any] = {}
-                        if max_tokens is not None:
-                            try:
-                                if "max_tokens" in inspect.signature(fn2).parameters:
-                                    _f2_kw["max_tokens"] = max_tokens
-                            except (TypeError, ValueError):
-                                pass
-                        _it2 = (
-                            fn2(prompt, history, **_f2_kw)
-                            if _f2_kw
-                            else fn2(prompt, history)
-                        )
-                        for item in _it2:
-                            if isinstance(item, dict) and item.get("type") == "content_delta":
-                                yield item
-                    except Exception as e:
-                        yield {"type": "content_delta", "delta": f"Error: {e}"}
-                    yield {"type": "done"}
-                finally:
-                    if hasattr(self.llm, "force_disable_thinking"):
-                        setattr(self.llm, "force_disable_thinking", False)
+                        if hasattr(self.llm, "force_disable_thinking") and not _is_qwen:
+                            setattr(self.llm, "force_disable_thinking", True)
+                        try:
+                            _f2_kw: Dict[str, Any] = {}
+                            if max_tokens is not None:
+                                try:
+                                    if "max_tokens" in inspect.signature(fn2).parameters:
+                                        _f2_kw["max_tokens"] = max_tokens
+                                except (TypeError, ValueError):
+                                    pass
+                            if imgs is not None:
+                                try:
+                                    if "images" in inspect.signature(fn2).parameters:
+                                        _f2_kw["images"] = imgs
+                                except (TypeError, ValueError):
+                                    pass
+                            _it2 = (
+                                fn2(prompt, history, **_f2_kw)
+                                if _f2_kw
+                                else fn2(prompt, history)
+                            )
+                            for item in _it2:
+                                if isinstance(item, dict) and item.get("type") == "content_delta":
+                                    yield item
+                        except Exception as e:
+                            yield {"type": "content_delta", "delta": f"Error: {e}"}
+                        yield {"type": "done"}
+                    finally:
+                        if hasattr(self.llm, "force_disable_thinking") and not _is_qwen:
+                            setattr(self.llm, "force_disable_thinking", False)
+
+                if _is_qwen:
+
+                    def _wrapped2():
+                        with qwen_suppress_thinking_tls_ctx():
+                            yield from _core2()
+
+                    return _wrapped2()
+                return _core2()
 
             return _gen2()
         raise RuntimeError(
@@ -2394,7 +2490,8 @@ class SimplifiedReActEngine:
             + (_xml_hint and " " + _xml_hint)
             + "）"
         )
-        messages = [{"role": "user", "content": prompt_fc}]
+        _fc_imgs = self._react_vision_images_for_llm()
+        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
         llm = self.llm
         tool_choice = self._parse_react_fc_tool_choice()
         parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
@@ -2616,7 +2713,8 @@ class SimplifiedReActEngine:
             + (_xml_hint and " " + _xml_hint)
             + "）"
         )
-        messages = [{"role": "user", "content": prompt_fc}]
+        _fc_imgs = self._react_vision_images_for_llm()
+        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
         llm = self.llm
         tool_choice = self._parse_react_fc_tool_choice()
         parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
@@ -2755,7 +2853,8 @@ class SimplifiedReActEngine:
             observe_prompt
             + "\n\n（必须 function calling 调用 submit_observe_analysis；不要输出 <result>。）"
         )
-        messages = [{"role": "user", "content": prompt_fc}]
+        _fc_imgs = self._react_vision_images_for_llm()
+        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
         stream_fn = getattr(self.llm, "chat_completion_with_tools_stream", None)
         if stream_fn is None:
             raise RuntimeError("LLM 无 chat_completion_with_tools_stream")
@@ -2838,7 +2937,8 @@ class SimplifiedReActEngine:
             observe_prompt
             + "\n\n（必须 function calling 调用 submit_observe_analysis；不要输出 <result>。）"
         )
-        messages = [{"role": "user", "content": prompt_fc}]
+        _fc_imgs = self._react_vision_images_for_llm()
+        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
         fn = getattr(self.llm, "chat_completion_with_tools", None)
         if fn is None:
             return {"findings": [], "context_update": {}, "next_step": ""}
@@ -3474,35 +3574,63 @@ class SimplifiedReActEngine:
             }
             await asyncio.sleep(0)
 
-    async def _wait_for_background_summary(self, state: Dict[str, Any], max_wait: float = 3.0) -> None:
-        """等待后台增量总结线程完成，更新 state。"""
+    async def _wait_for_background_summary(self, state: Dict[str, Any], max_wait: Optional[float] = None) -> None:
+        """等待后台增量总结线程完成，更新 state。
+
+        旧实现只 busy-wait 约 3s 后对队列 ``get_nowait`` 一轮；此时 LLM 往往仍在输出，
+        ``running_summary_state["text"]`` 会变成半句（例如停在括号前）。现改为
+        ``thread.join(timeout)``（默认 90s，``REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT``）后再排空队列直至 ``DONE``。
+        """
         _last_thread = state.get("_last_summary_thread")
         if not _last_thread:
             return
         _thr, _q, _DONE, _ver = _last_thread
-        _wait_start = time.time()
-        _was_alive = _thr.is_alive()
-        while _thr.is_alive() and (time.time() - _wait_start) < max_wait:
-            await asyncio.sleep(0.05)
-        _wait_duration = time.time() - _wait_start
-        # 线程结束后收集结果
-        _full_parts: List[str] = []
-        while True:
+        if max_wait is None:
             try:
-                _item = _q.get_nowait()
+                max_wait = float((os.getenv("REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT") or "90").strip())
+            except Exception:
+                max_wait = 90.0
+        max_wait = max(5.0, min(max_wait, 600.0))
+
+        loop = asyncio.get_running_loop()
+
+        def _join_worker() -> None:
+            _thr.join(timeout=max_wait)
+
+        await loop.run_in_executor(None, _join_worker)
+
+        def _drain_queue_parts() -> List[str]:
+            parts: List[str] = []
+            while True:
+                try:
+                    _item = _q.get_nowait()
+                except queue.Empty:
+                    break
                 if _item is _DONE:
                     break
                 if isinstance(_item, dict) and _item.get("type") == "content_delta":
                     _d = _item.get("delta") or ""
                     if _d:
-                        _full_parts.append(str(_d))
-            except queue.Empty:
-                break
+                        parts.append(str(_d))
+            return parts
+
+        _full_parts: List[str] = _drain_queue_parts()
+
+        # join 超时后线程仍可能在收尾；短轮询补取尾部 delta（最多再等 ~30s）
+        if _thr.is_alive():
+            _grace_until = time.time() + 30.0
+            while _thr.is_alive() and time.time() < _grace_until:
+                await asyncio.sleep(0.12)
+                _full_parts.extend(_drain_queue_parts())
+
         _ft = "".join(_full_parts).strip()
         if _ft:
             state["text"] = _ft
             state["version"] = _ver
-        print(f"[INCR-SUM] wait_for_background: was_alive={_was_alive} wait_s={_wait_duration:.2f} result_chars={len(_ft)}")
+        print(
+            f"[INCR-SUM] wait_for_background: thread_alive={_thr.is_alive()} "
+            f"join_timeout_s={max_wait:.0f} result_chars={len(_ft)}"
+        )
 
     async def _merge_running_summary_incremental_silent(
         self,
@@ -3829,7 +3957,7 @@ class SimplifiedReActEngine:
         # 兜底：如果 todo 解析不出工具，用技能 workflow 的对应步骤工具补齐（不改 todo 文本，只改执行工具）
         if tool_name == 'unknown' and fallback_workflow_tools:
             mapped = fallback_workflow_tools[i] if i < len(fallback_workflow_tools) else fallback_workflow_tools[-1]
-            if mapped in ('grep', 'modify', 'create'):
+            if mapped in ('grep', 'modify', 'create', 'copy'):
                 tool_name = mapped
                 todo_params['tool'] = mapped
                 # 尽量补齐 grep/modify 的必要参数
@@ -3843,7 +3971,9 @@ class SimplifiedReActEngine:
                         inferred_target = 'testcase'
                     elif user_input and ('测试用例' in user_input or 'test case' in user_input.lower()):
                         inferred_target = 'testcase'
-                    elif user_input and ('bug' in user_input or '缺陷' in user_input or 'Bug' in user_input):
+                    elif user_input and (
+                        user_text_implies_bug_entity_type(user_input) or '缺陷' in user_input
+                    ):
                         inferred_target = 'all'  # 兜底：在所有计划、不分类型查一遍
                     else:
                         inferred_target = 'badcase'
@@ -3862,6 +3992,8 @@ class SimplifiedReActEngine:
                     params.setdefault('target', 'bug')
                     params.setdefault('fields', {})
                     params['confirm'] = False
+                elif mapped == 'copy':
+                    params.setdefault('target', 'bug')
                 todo_params['params'] = params
                 print(f"[REACT-planing] 🔧 todo 工具兜底映射: index={i}, unknown -> {mapped}")
         
@@ -3889,6 +4021,12 @@ class SimplifiedReActEngine:
                 p.setdefault('confirm', False)
                 p.setdefault('modifications', {})
                 todo_params['params'] = p
+            elif any(k in t for k in ('复制', '拷贝')) or (t.startswith('copy ') or ' copy ' in f' {t} '):
+                tool_name = 'copy'
+                todo_params['tool'] = 'copy'
+                p = todo_params.get('params') or {}
+                p.setdefault('target', 'bug')
+                todo_params['params'] = p
 
         print(f"[REACT-planing] Todo[{i}] 提取参数: tool={tool_name}, params={todo_params}")
         
@@ -3912,11 +4050,37 @@ class SimplifiedReActEngine:
                 params, result_context, target_type, log_prefix="[REACT-thought] "
             )
             target_id = params.get("target_id")
-            if not params.get("target_ids") and target_id is None:
+            if target_type == "card":
+                cid = params.get("card_id")
+                if cid is None:
+                    cid = grep_result.get("first_card_id")
+                if cid is None and target_id is not None:
+                    cid = target_id
+                if cid is None:
+                    tid_c = self._try_target_id_from_merged_lists(
+                        result_context, target_type, user_input, todo
+                    )
+                    if tid_c is not None:
+                        cid = tid_c
+                        print(
+                            f"[REACT-thought] 从合并列表注入 card_id={cid}, target={target_type}"
+                        )
+                if cid is not None:
+                    try:
+                        params["card_id"] = int(cid)
+                        params.pop("target_id", None)
+                        print(
+                            f"[REACT-thought] 从 grep 结果获取 card_id={params['card_id']}, target={target_type}"
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            elif not params.get("target_ids") and target_id is None:
                 if target_type == 'bug':
                     target_id = grep_result.get('first_bug_id')
                 elif target_type == 'testcase':
                     target_id = grep_result.get('first_testcase_id')
+                elif target_type == 'plan':
+                    target_id = grep_result.get('first_plan_id')
                 else:
                     target_id = grep_result.get('first_badcase_id')
                 if not target_id:
@@ -3937,17 +4101,22 @@ class SimplifiedReActEngine:
                         )
                     except (TypeError, ValueError):
                         target_id = None
-            if not params.get("target_ids") and not params.get("target_id"):
+            _missing_modify_loc = (
+                not params.get("target_ids")
+                and params.get("target_id") is None
+                and (params.get("card_id") is None if target_type == "card" else True)
+            )
+            if _missing_modify_loc:
                 print(f"[REACT-thought] ⚠️ 无法从 grep 结果获取 target_id (target={target_type})，尝试补救 grep…")
                 kw = self._extract_title_keywords_for_grep(user_input, todo) or ''
                 gparams: Dict[str, Any] = {
                     'project_id': project_id,
                     'keywords': kw,
                     'mode': 'locate',
-                    'target': target_type if target_type in ('bug', 'badcase', 'testcase') else 'all',
+                    'target': target_type if target_type in ('bug', 'badcase', 'testcase', 'card', 'plan') else 'all',
                     'userId': 'system_agent',
                 }
-                if self.plan_id is not None and gparams.get('target') != 'all':
+                if self.plan_id is not None and gparams.get('target') not in ('all', 'plan'):
                     gparams['plan_id'] = self.plan_id
                 if gparams.get('target') == 'all':
                     gparams.pop('plan_id', None)
@@ -3964,27 +4133,65 @@ class SimplifiedReActEngine:
                 if grep_obs.get('success'):
                     self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
                     grep_result = result_context.get('grep_result', {})
-                    if target_type == 'bug':
+                    if target_type == "card":
+                        cid2 = grep_result.get("first_card_id")
+                        if cid2 is not None:
+                            try:
+                                params["card_id"] = int(cid2)
+                                params.pop("target_id", None)
+                                print(f"[REACT-thought] 补救 grep 后 card_id={params['card_id']}")
+                            except (TypeError, ValueError):
+                                pass
+                        if params.get("card_id") is None:
+                            tid_s = self._try_target_id_from_merged_lists(
+                                result_context, target_type, user_input, todo
+                            )
+                            if tid_s is not None:
+                                params["card_id"] = int(tid_s)
+                                params.pop("target_id", None)
+                                print(f"[REACT-thought] 技能分支补救 grep 后从列表注入 card_id={tid_s}")
+                    elif target_type == 'bug':
                         target_id = grep_result.get('first_bug_id')
+                        if target_id:
+                            try:
+                                params['target_id'] = int(target_id)
+                                print(f"[REACT-thought] 补救 grep 后 target_id={params['target_id']}")
+                            except (TypeError, ValueError):
+                                pass
                     elif target_type == 'testcase':
                         target_id = grep_result.get('first_testcase_id')
+                        if target_id:
+                            try:
+                                params['target_id'] = int(target_id)
+                                print(f"[REACT-thought] 补救 grep 后 target_id={params['target_id']}")
+                            except (TypeError, ValueError):
+                                pass
+                    elif target_type == 'plan':
+                        target_id = grep_result.get('first_plan_id')
+                        if target_id:
+                            try:
+                                params['target_id'] = int(target_id)
+                                print(f"[REACT-thought] 补救 grep 后 target_id={params['target_id']}")
+                            except (TypeError, ValueError):
+                                pass
                     else:
                         target_id = grep_result.get('first_badcase_id')
-                    if target_id:
-                        try:
-                            params['target_id'] = int(target_id)
-                            print(f"[REACT-thought] 补救 grep 后 target_id={params['target_id']}")
-                        except (TypeError, ValueError):
-                            pass
-                    if not params.get("target_ids") and not params.get('target_id'):
+                        if target_id:
+                            try:
+                                params['target_id'] = int(target_id)
+                                print(f"[REACT-thought] 补救 grep 后 target_id={params['target_id']}")
+                            except (TypeError, ValueError):
+                                pass
+                    if not params.get("target_ids") and params.get('target_id') is None and target_type != "card":
                         tid_s = self._try_target_id_from_merged_lists(
                             result_context, target_type, user_input, todo
                         )
                         if tid_s is not None:
                             params['target_id'] = tid_s
-                            target_id = tid_s
                             print(f"[REACT-thought] 技能分支补救 grep 后从列表注入 target_id={tid_s}")
-            if not params.get("target_ids") and params.get("target_id") is None:
+            if not params.get("target_ids") and params.get("target_id") is None and (
+                params.get("card_id") is None if target_type == "card" else True
+            ):
                 self._enrich_modify_params_target_ids(
                     params, result_context, target_type, log_prefix="[REACT-thought] 技能补全后 "
                 )
@@ -3997,7 +4204,38 @@ class SimplifiedReActEngine:
                         tid_explore = int(_tls[0])
                     except (TypeError, ValueError):
                         tid_explore = None
-            
+            explore_target = target_type
+            if target_type == "card" and params.get("card_id") is not None and self.tools.get(
+                "modify"
+            ):
+                mt = self.tools.get("modify")
+
+                def _card_explore_resolve():
+                    with mt._get_app_context():
+                        nt, _ = mt._normalize_target_using_card_row(
+                            target_type,
+                            params.get("project_id"),
+                            params["card_id"],
+                        )
+                        sid = mt._resolve_target_id_from_card_id(
+                            nt,
+                            params["card_id"],
+                            params.get("project_id"),
+                        )
+                        return nt, sid
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    nt_e, sid_e = await asyncio.wait_for(
+                        loop.run_in_executor(self._tool_executor, _card_explore_resolve),
+                        timeout=10,
+                    )
+                    if sid_e is not None:
+                        explore_target = nt_e
+                        tid_explore = int(sid_e)
+                except Exception as e:
+                    print(f"[REACT-thought] card→源表 explore 解析失败: {e}")
+
             # 思考意图 + 探索记录（类似 Cursor 探索文件）：有 target_id 时先探索当前记录与用户列表，再让大模型基于探索结果确认 modifications
             if tid_explore and (not params.get('modifications') or len(params.get('modifications', {})) == 0):
                 modify_tool = self.tools.get('modify')
@@ -4008,7 +4246,7 @@ class SimplifiedReActEngine:
                             loop.run_in_executor(
                                 self._tool_executor,
                                 lambda: modify_tool.explore_record(
-                                    target_type,
+                                    explore_target,
                                     tid_explore,
                                     params.get("project_id") or self.project_id,
                                     getattr(self, "_ui_locale", None),
@@ -4047,7 +4285,16 @@ class SimplifiedReActEngine:
             if extracted_title and not fields.get(title_key):
                 fields[title_key] = extracted_title
 
-            wants_copy = any(token in (user_input or '') for token in ('复制', '一样', '相同')) or any(token in (todo or '') for token in ('复制', '一样', '相同'))
+            _ui = (user_input or "").strip()
+            _td = (todo or "").strip()
+            wants_copy = (
+                any(token in _ui for token in ("复制", "拷贝", "一样", "相同"))
+                or any(token in _td for token in ("复制", "拷贝", "一样", "相同"))
+                or bool(re.search(r"(?i)\bcopy\b", _ui))
+                or bool(re.search(r"(?i)\bcopy\b", _td))
+                or ("duplicate" in _ui.lower())
+                or ("duplicate" in _td.lower())
+            )
             if wants_copy:
                 if target_type == 'bug':
                     source_id = grep_result.get('first_bug_id') or result_context.get('first_bug_id')
@@ -4061,11 +4308,111 @@ class SimplifiedReActEngine:
                     source_id = grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
                     if source_id and not fields.get('copy_from_testcase_id'):
                         fields['copy_from_testcase_id'] = source_id
+                elif target_type == 'card':
+                    source_id = grep_result.get('first_card_id') or result_context.get('first_card_id')
+                    if source_id and not fields.get('copy_from_card_id'):
+                        fields['copy_from_card_id'] = source_id
+
+            if target_type != "plan" and isinstance(fields, dict):
+                _copy_src_keys = (
+                    "copy_from_bug_id",
+                    "source_bug_id",
+                    "copy_from_badcase_id",
+                    "source_badcase_id",
+                    "copy_from_testcase_id",
+                    "source_testcase_id",
+                    "copy_from_card_id",
+                    "source_card_id",
+                )
+                _has_copy_fields = any(
+                    fields.get(k) not in (None, "", 0, "0") for k in _copy_src_keys
+                )
+                _ep = fields.get("plan_id")
+                if not _has_copy_fields and _ep in (None, "", 0, "0"):
+                    _chosen = None
+                    if params.get("plan_id") not in (None, "", 0, "0"):
+                        try:
+                            _chosen = int(params.get("plan_id"))
+                        except (TypeError, ValueError):
+                            _chosen = None
+                    if (_chosen is None or _chosen <= 0) and getattr(self, "plan_id", None) not in (
+                        None,
+                        "",
+                        0,
+                        "0",
+                    ):
+                        try:
+                            _chosen = int(self.plan_id)
+                        except (TypeError, ValueError):
+                            _chosen = None
+                    _fp_c = grep_result.get("first_plan_id") or result_context.get("first_plan_id")
+                    if (_chosen is None or _chosen <= 0) and _fp_c is not None:
+                        try:
+                            _chosen = int(_fp_c)
+                        except (TypeError, ValueError):
+                            _chosen = None
+                    if _chosen is not None and _chosen > 0:
+                        fields["plan_id"] = _chosen
 
             params['fields'] = fields
             params.setdefault('confirm', False)
             params.setdefault('natural_query', user_input)
             print(f"[REACT-planing] create 参数补齐: target={target_type}, fields={fields}")
+
+        if tool_name == 'copy':
+            grep_result = result_context.get('grep_result', {})
+            target_type = params.get('target') or self._infer_create_target(user_input, todo)
+            params['target'] = target_type
+            if not params.get('source_id'):
+                if target_type == 'bug':
+                    _sid = grep_result.get('first_bug_id') or result_context.get('first_bug_id')
+                elif target_type == 'badcase':
+                    _sid = grep_result.get('first_badcase_id') or result_context.get('first_badcase_id')
+                elif target_type == 'testcase':
+                    _sid = grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
+                elif target_type == 'card':
+                    _sid = grep_result.get('first_card_id') or result_context.get('first_card_id')
+                else:
+                    _sid = None
+                if _sid:
+                    params['source_id'] = _sid
+            extracted_title = self._extract_create_title(user_input, todo)
+            if extracted_title and not params.get('title'):
+                params['title'] = extracted_title
+            params.setdefault('natural_query', user_input)
+            print(f"[REACT-planing] copy 参数补齐: target={params.get('target')}, source_id={params.get('source_id')}")
+
+        if tool_name == "delete":
+            grep_result = result_context.get("grep_result", {})
+            target_type = params.get("target") or self._infer_modify_target(user_input, todo)
+            params["target"] = target_type
+            params.setdefault("confirm", False)
+            tt = str(target_type).strip().lower()
+            if tt == "plan":
+                if not params.get("plan_id"):
+                    _fp = grep_result.get("first_plan_id") or result_context.get("first_plan_id")
+                    if _fp is not None:
+                        params["plan_id"] = int(_fp)
+                if not params.get("plan_id") and getattr(self, "plan_id", None) is not None:
+                    params["plan_id"] = self.plan_id
+            elif tt == "card":
+                if not params.get("card_id") and not params.get("target_id"):
+                    _cid = grep_result.get("first_card_id") or result_context.get("first_card_id")
+                    if _cid:
+                        params["card_id"] = _cid
+            elif not params.get("target_id"):
+                if tt == "bug":
+                    _tid = grep_result.get("first_bug_id") or result_context.get("first_bug_id")
+                elif tt == "testcase":
+                    _tid = grep_result.get("first_testcase_id") or result_context.get("first_testcase_id")
+                else:
+                    _tid = grep_result.get("first_badcase_id") or result_context.get("first_badcase_id")
+                if _tid:
+                    params["target_id"] = _tid
+            print(
+                f"[REACT-planing] delete 参数补齐: target={params.get('target')}, "
+                f"ids={params.get('target_id') or params.get('card_id') or params.get('plan_id')}"
+            )
 
         # 技能分支：与主循环一致，执行 modify 前再 enrich + last_resort，避免仅有 modifications 却无 target_id 直接调工具报错
         skill_skip_modify = False
@@ -4256,6 +4603,7 @@ class SimplifiedReActEngine:
         hint_project_name: Optional[str] = None,
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ):
         '''唯一流式引擎：三段式 XML；前置 gather 与旧链路一致。'''
         perf = (os.getenv("PERF_LOG") == "1")
@@ -4270,6 +4618,14 @@ class SimplifiedReActEngine:
         self.plan_id = plan_id
         # grep 纠偏：泛查时若模型窄化 target 会跳过 Card 表，导致「无卡片命中」
         self._react_stream_user_input = user_input or ""
+        self._react_stream_images = list(images) if images else None
+        try:
+            _rb = int((os.getenv("REACT_VISION_IMAGE_ATTACH_ROUNDS") or "5").strip())
+        except ValueError:
+            _rb = 5
+        self._react_stream_images_round_budget = (
+            max(0, min(_rb, 32)) if self._react_stream_images else 0
+        )
         self._index_pending_context(pending_diff_context or [])
         _t0 = time.time()
         _total_think_time = 0.0
@@ -4517,9 +4873,12 @@ class SimplifiedReActEngine:
                 _think_sse_parts: List[str] = []
                 _unified_seg: Optional[str] = None  # thinking | observation | decision
                 try:
-                    _min_sse = max(8, int((os.getenv("REACT_UNIFIED_THINK_SSE_MIN_CHARS") or "24").strip() or "24"))
+                    _min_sse = max(
+                        1,
+                        int((os.getenv("REACT_UNIFIED_THINK_SSE_MIN_CHARS") or "4").strip() or "4"),
+                    )
                 except Exception:
-                    _min_sse = 24
+                    _min_sse = 4
 
                 def _react_phase_for_segment() -> str:
                     if _unified_seg == "observation":
@@ -5066,7 +5425,7 @@ class SimplifiedReActEngine:
                     elif project_id is not None:
                         tool_params["project_id"] = project_id
                 tool_params["ui_locale"] = normalize_locale(getattr(self, "_ui_locale", None))
-                if tool_name in ("modify", "create") and "confirm" not in tool_params:
+                if tool_name in ("modify", "create", "delete") and "confirm" not in tool_params:
                     tool_params["confirm"] = False
                 if tool_name == "modify":
                     if (
@@ -5077,6 +5436,12 @@ class SimplifiedReActEngine:
                         tool_params["natural_query"] = (user_input or "")[:500]
                     if not tool_params.get("project_id") and project_id is not None:
                         tool_params["project_id"] = project_id
+                    _mt = str(tool_params.get("target") or "").strip().lower()
+                    if _mt == "plan" and not tool_params.get("target_id"):
+                        _grm = (result_ctx or {}).get("grep_result") or {}
+                        _fpid = _grm.get("first_plan_id") or result_ctx.get("first_plan_id")
+                        if _fpid is not None:
+                            tool_params["target_id"] = int(_fpid)
                 elif tool_name == "create":
                     # 闭环：与旧链路一致，避免模型只给空 fields / 漏 natural_query 时 create 直接报「缺参数」
                     if not tool_params.get("natural_query") and (user_input or "").strip():
@@ -5091,6 +5456,138 @@ class SimplifiedReActEngine:
                             _tgt = str(tool_params.get("target") or "bug").strip()
                             _tkey = "name" if _tgt == "plan" else "title"
                             tool_params["fields"] = {_tkey: _nq[:500]}
+                    # 新建 Bug/BadCase/用例/卡片等：preview 缺 plan_id 时用「当前侧栏迭代」或 grep 首推计划写入 fields，
+                    # 以便复制源未关联计划时仍归入当前 tab，避免预览出现「（未关联计划）」。
+                    # 带 copy_from_* 时不注入：create_tool 从源 Card 取子迭代 plan，注入根迭代 id 会覆盖 Card。
+                    _cf2 = tool_params.get("fields")
+                    _tgt_inj = str(tool_params.get("target") or "bug").strip().lower()
+                    if _tgt_inj != "plan" and isinstance(_cf2, dict):
+                        _copy_src_keys_m = (
+                            "copy_from_bug_id",
+                            "source_bug_id",
+                            "copy_from_badcase_id",
+                            "source_badcase_id",
+                            "copy_from_testcase_id",
+                            "source_testcase_id",
+                            "copy_from_card_id",
+                            "source_card_id",
+                        )
+                        _has_copy_fields_m = any(
+                            _cf2.get(k) not in (None, "", 0, "0") for k in _copy_src_keys_m
+                        )
+                        _ep = _cf2.get("plan_id")
+                        if not _has_copy_fields_m and _ep in (None, "", 0, "0"):
+                            _gr_c = (result_ctx or {}).get("grep_result") or {}
+                            _fp_c = _gr_c.get("first_plan_id") or result_ctx.get("first_plan_id")
+                            _chosen = None
+                            _tp_pid = tool_params.get("plan_id")
+                            if _tp_pid not in (None, "", 0, "0"):
+                                try:
+                                    _chosen = int(_tp_pid)
+                                except (TypeError, ValueError):
+                                    _chosen = None
+                            if (_chosen is None or _chosen <= 0) and getattr(self, "plan_id", None) not in (
+                                None,
+                                "",
+                                0,
+                                "0",
+                            ):
+                                try:
+                                    _chosen = int(self.plan_id)
+                                except (TypeError, ValueError):
+                                    _chosen = None
+                            if (_chosen is None or _chosen <= 0) and _fp_c is not None:
+                                try:
+                                    _chosen = int(_fp_c)
+                                except (TypeError, ValueError):
+                                    _chosen = None
+                            if _chosen is not None and _chosen > 0:
+                                _cf2["plan_id"] = _chosen
+                        # 与 _extract_todo_params 的 wants_copy 对齐：英文 copy / 仅 reason·todo 含复制语义时，
+                        # 模型常漏写 copy_from_*，导致 preview 无 nav_copy_source_card_id、前端只能落「迭代」Tab。
+                        if _tgt_inj == "bug" and isinstance(_cf2, dict):
+                            if not any(
+                                _cf2.get(k) not in (None, "", 0, "0")
+                                for k in ("copy_from_bug_id", "source_bug_id")
+                            ):
+                                _gr_nav = (result_ctx or {}).get("grep_result") or {}
+                                _fbid = _gr_nav.get("first_bug_id") or result_ctx.get(
+                                    "first_bug_id"
+                                )
+                                if _fbid is not None:
+                                    _nq_ex = (
+                                        tool_params.get("natural_query") or user_input or ""
+                                    ).strip()
+                                    _rsn = str(decision.get("reason") or "")
+                                    _todo_eff = str(_round_todo_effective or "")
+                                    _nl = _nq_ex.lower()
+                                    _copy_hint_x = (
+                                        any(
+                                            t in _nq_ex
+                                            for t in ("复制", "拷贝", "一样", "相同")
+                                        )
+                                        or bool(re.search(r"(?i)\bcopy\b", _nq_ex))
+                                        or ("duplicate" in _nl)
+                                        or any(t in _rsn for t in ("复制", "拷贝"))
+                                        or bool(re.search(r"(?i)\bcopy\b", _rsn))
+                                        or any(t in _todo_eff for t in ("复制", "拷贝"))
+                                        or bool(re.search(r"(?i)\bcopy\b", _todo_eff))
+                                    )
+                                    if _copy_hint_x:
+                                        try:
+                                            _cf2["copy_from_bug_id"] = int(_fbid)
+                                        except (TypeError, ValueError):
+                                            pass
+                elif tool_name == "copy":
+                    if not tool_params.get("project_id") and project_id is not None:
+                        tool_params["project_id"] = project_id
+                    _gr = (result_ctx or {}).get("grep_result") or {}
+                    _tt = str(tool_params.get("target") or "bug").strip().lower()
+                    if not tool_params.get("source_id"):
+                        if _tt == "bug":
+                            _sid = _gr.get("first_bug_id") or result_ctx.get("first_bug_id")
+                        elif _tt == "badcase":
+                            _sid = _gr.get("first_badcase_id") or result_ctx.get("first_badcase_id")
+                        elif _tt == "testcase":
+                            _sid = _gr.get("first_testcase_id") or result_ctx.get("first_testcase_id")
+                        elif _tt == "card":
+                            _sid = _gr.get("first_card_id") or result_ctx.get("first_card_id")
+                        else:
+                            _sid = None
+                        if _sid:
+                            tool_params["source_id"] = _sid
+                    if not tool_params.get("title") and (user_input or "").strip():
+                        _xt = self._extract_create_title(user_input, "")
+                        if _xt:
+                            tool_params["title"] = _xt
+                elif tool_name == "delete":
+                    if not tool_params.get("project_id") and project_id is not None:
+                        tool_params["project_id"] = project_id
+                    _gr = (result_ctx or {}).get("grep_result") or {}
+                    _tt = str(tool_params.get("target") or "bug").strip().lower()
+                    if _tt == "plan":
+                        if not tool_params.get("plan_id"):
+                            _fp = _gr.get("first_plan_id") or result_ctx.get("first_plan_id")
+                            if _fp is not None:
+                                tool_params["plan_id"] = int(_fp)
+                        if not tool_params.get("plan_id") and getattr(self, "plan_id", None) is not None:
+                            tool_params["plan_id"] = self.plan_id
+                    elif _tt == "card":
+                        if not tool_params.get("card_id") and not tool_params.get("target_id"):
+                            _cid = _gr.get("first_card_id") or result_ctx.get("first_card_id")
+                            if _cid:
+                                tool_params["card_id"] = _cid
+                    elif not tool_params.get("target_id"):
+                        if _tt == "bug":
+                            _tid = _gr.get("first_bug_id") or result_ctx.get("first_bug_id")
+                        elif _tt == "testcase":
+                            _tid = _gr.get("first_testcase_id") or result_ctx.get("first_testcase_id")
+                        elif _tt == "badcase":
+                            _tid = _gr.get("first_badcase_id") or result_ctx.get("first_badcase_id")
+                        else:
+                            _tid = None
+                        if _tid:
+                            tool_params["target_id"] = _tid
 
                 decision_dict: Dict[str, Any] = {
                     "execute": True,
@@ -5496,6 +5993,11 @@ class SimplifiedReActEngine:
             _done_sent = True
         finally:
             try:
+                self._react_stream_images = None
+                self._react_stream_images_round_budget = 0
+            except Exception:
+                pass
+            try:
                 self._client_shell = None
             except Exception:
                 pass
@@ -5526,6 +6028,7 @@ class SimplifiedReActEngine:
         hint_project_name: Optional[str] = None,
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         流式执行 ReAct（Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下记录。
@@ -5543,6 +6046,7 @@ class SimplifiedReActEngine:
             hint_project_name=hint_project_name,
             hint_plan_name=hint_plan_name,
             client_shell=client_shell,
+            images=images,
         ):
             if not isinstance(raw, dict):
                 continue
@@ -5706,14 +6210,15 @@ class SimplifiedReActEngine:
         complex_task_keywords = [
             '修改缺陷', '创建缺陷', '查询缺陷',
             '修改badcase', '创建badcase', '查询badcase',
-            '批量处理', '多步骤操作', '完整流程'
+            '批量处理', '多步骤操作', '完整流程',
+            '复制', '拷贝', '参照', '一样',
         ]
         
         #检查是否为复杂任务
         is_complex_task = any(keyword in user_input.lower() or keyword in decision.get('reason', '').lower() 
                             for keyword in complex_task_keywords)
         
-        if is_complex_task and tool_name in ['grep', 'modify', 'create']:
+        if is_complex_task and tool_name in ['grep', 'modify', 'create', 'copy']:
             print(f"[REACT-planing] 🎯检测到复杂任务，建议使用Skill工具优化")
             
             # 重定向到skill_executor工具
@@ -5789,6 +6294,17 @@ class SimplifiedReActEngine:
         
         return ""
 
+    def _normalize_rerank_keywords(self, raw: Any) -> str:
+        """grep / FC 可能传入字符串或关键词列表，统一成单个检索串供 rerank。"""
+        if raw is None:
+            return ''
+        if isinstance(raw, (list, tuple)):
+            parts = [str(x).strip() for x in raw if x is not None and str(x).strip()]
+            return ' '.join(parts)
+        if isinstance(raw, str):
+            return raw
+        return str(raw)
+
     def _rerank_score(self, item: Dict, keywords: str, key_title: str = 'title') -> float:
         """
         Rerank 打分：分高的优先。关键词命中数×10 + 整句命中加 50，便于选最相关的一条。
@@ -5814,6 +6330,7 @@ class SimplifiedReActEngine:
         """
         if not items:
             return []
+        keywords = self._normalize_rerank_keywords(keywords)
         if not keywords or not keywords.strip():
             return items[:top_k]
         scored = [(item, self._rerank_score(item, keywords, key_title)) for item in items]
@@ -5838,19 +6355,30 @@ class SimplifiedReActEngine:
         badcase_list = grep_data.get('badcase_analysis', [])
         bug_list = grep_data.get('bug_location', [])
         testcase_list = grep_data.get('testcase_location', [])
+        card_list = grep_data.get('card_location', [])
+        plan_list_raw = grep_data.get('plan_location', []) or []
         # 无 plan_id 的记录不会进入 navigation，_restrict_by_nav 后 bug_list 可能只剩 1 条，
         # 但 modify 批量应与「grep 关键词命中」的全集一致，故单独保留原始列表供 target_ids 推断。
         result_context["grep_modify_raw_badcase_list"] = list(badcase_list or [])
         result_context["grep_modify_raw_bug_list"] = list(bug_list or [])
         result_context["grep_modify_raw_testcase_list"] = list(testcase_list or [])
-        kw = (params.get('keywords') or result_context.get('_last_grep_keywords') or '')
-        result_context['_last_grep_keywords'] = kw or params.get('keywords') or ''
+        result_context["grep_modify_raw_card_list"] = list(card_list or [])
+        result_context["grep_modify_raw_plan_list"] = list(plan_list_raw or [])
+        _kw_raw = params.get('keywords') or result_context.get('_last_grep_keywords') or ''
+        kw = self._normalize_rerank_keywords(_kw_raw)
+        result_context['_last_grep_keywords'] = kw or ''
         _gtt = str(params.get('target') or '').strip().lower()
         if _gtt:
             result_context['_last_grep_target'] = _gtt
 
         # 优先使用 grep_tool 生成的 navigation（它已按计划/权限/可跳转过滤），避免后续 modify 误选到列表里“碰巧更像”的其它记录
-        nav_ids: Dict[str, List[int]] = {"bug": [], "badcase": [], "testcase": []}
+        nav_ids: Dict[str, List[int]] = {
+            "bug": [],
+            "badcase": [],
+            "testcase": [],
+            "card": [],
+            "plan": [],
+        }
         nav_items: List[Dict[str, Any]] = []
         _nav = grep_data.get("navigation")
         has_nav = _nav is not None
@@ -5883,9 +6411,12 @@ class SimplifiedReActEngine:
         print(
             f"[GREP-NAV] navigation_ids: bug={nav_ids['bug']} (n={len(nav_ids['bug'])}), "
             f"badcase={nav_ids['badcase']} (n={len(nav_ids['badcase'])}), "
-            f"testcase={nav_ids['testcase']} (n={len(nav_ids['testcase'])}); "
+            f"testcase={nav_ids['testcase']} (n={len(nav_ids['testcase'])}), "
+            f"card={nav_ids['card']} (n={len(nav_ids['card'])}), "
+            f"plan={nav_ids['plan']} (n={len(nav_ids['plan'])}); "
             f"raw_location_counts: badcase_analysis={len(badcase_list)}, bug_location={len(bug_list)}, "
-            f"testcase_location={len(testcase_list)}; has_navigation={has_nav}"
+            f"testcase_location={len(testcase_list)}, card_location={len(card_list)}, "
+            f"plan_location={len(plan_list_raw)}; has_navigation={has_nav}"
         )
         if has_nav and _total_nav == 0:
             print(
@@ -5923,21 +6454,30 @@ class SimplifiedReActEngine:
         badcase_list_nav = _restrict_by_nav(badcase_list, nav_ids.get("badcase") or [])
         bug_list_nav = _restrict_by_nav(bug_list, nav_ids.get("bug") or [])
         testcase_list_nav = _restrict_by_nav(testcase_list, nav_ids.get("testcase") or [])
+        card_list_nav = _restrict_by_nav(card_list, nav_ids.get("card") or [])
+        plan_list_nav = _restrict_by_nav(plan_list_raw, nav_ids.get("plan") or [])
 
         result_context['grep_result'] = {
             'first_badcase_id': first_id(badcase_list_nav, kw),
             'first_bug_id': first_id(bug_list_nav, kw),
             'first_testcase_id': first_id(testcase_list_nav, kw),
+            'first_card_id': first_id(card_list_nav, kw),
+            'first_plan_id': first_id(plan_list_nav, kw),
             'badcase_list': badcase_list_nav,
             'bug_list': bug_list_nav,
             'testcase_list': testcase_list_nav,
+            'card_list': card_list_nav,
+            'plan_list': plan_list_nav,
             'navigation_ids': nav_ids,
         }
         result_context['badcase_list'] = badcase_list_nav
         result_context['bug_list'] = bug_list_nav
         result_context['testcase_list'] = testcase_list_nav
+        result_context['card_list'] = card_list_nav
+        result_context['plan_list'] = plan_list_nav
         print(
-            f"[REACT-execution] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, {len(testcase_list)} testcase"
+            f"[REACT-execution] grep 结果: {len(badcase_list)} badcase, {len(bug_list)} bug, "
+            f"{len(testcase_list)} testcase, {len(card_list)} card, {len(plan_list_raw)} plan"
         )
         # merge 后候选（写入 context）与 [GREP-NAV] 对照
         try:
@@ -6009,18 +6549,24 @@ class SimplifiedReActEngine:
         tc_l = result_context.get('testcase_list') or []
         bc_l = result_context.get('badcase_list') or []
         bg_l = result_context.get('bug_list') or []
+        card_l = result_context.get('card_list') or []
+        plan_l = result_context.get('plan_list') or []
         explicit = self._infer_modify_target_explicit(user_input, todo)
         user_infer = self._infer_modify_target(user_input, todo)
         if explicit:
             target_type = explicit
         else:
             target_type = str(params.get('target') or '').strip().lower() or user_infer
-        if tc_l and not bc_l and not bg_l:
+        if tc_l and not bc_l and not bg_l and not card_l and not plan_l:
             target_type = 'testcase'
-        elif bc_l and not tc_l and not bg_l:
+        elif bc_l and not tc_l and not bg_l and not card_l and not plan_l:
             target_type = 'badcase'
-        elif bg_l and not tc_l and not bc_l:
+        elif bg_l and not tc_l and not bc_l and not card_l and not plan_l:
             target_type = 'bug'
+        elif card_l and not tc_l and not bc_l and not bg_l and not plan_l:
+            target_type = 'card'
+        elif plan_l and not tc_l and not bc_l and not bg_l and not card_l:
+            target_type = 'plan'
         _lgt = str(result_context.get('_last_grep_target') or '').lower()
         if _lgt == 'testcase' and tc_l:
             target_type = 'testcase'
@@ -6028,14 +6574,61 @@ class SimplifiedReActEngine:
             target_type = 'badcase'
         elif _lgt == 'bug' and bg_l:
             target_type = 'bug'
+        elif _lgt == 'card' and card_l:
+            target_type = 'card'
+        elif _lgt == 'plan' and plan_l:
+            target_type = 'plan'
         params['target'] = target_type
         self._enrich_modify_params_target_ids(
             params, result_context, target_type, log_prefix="[REACT-planing] "
         )
         target_id = params.get("target_id")
 
-        _ctx_rows = bg_l if target_type == 'bug' else tc_l if target_type == 'testcase' else bc_l
-        if target_id is not None and _ctx_rows:
+        if target_type == 'bug':
+            _ctx_rows = bg_l
+        elif target_type == 'testcase':
+            _ctx_rows = tc_l
+        elif target_type == 'card':
+            _ctx_rows = card_l
+        elif target_type == 'plan':
+            _ctx_rows = plan_l
+        else:
+            _ctx_rows = bc_l
+        if target_type == "card":
+            cid_v = params.get("card_id")
+            if cid_v is None:
+                cid_v = target_id
+            if cid_v is not None and _ctx_rows:
+                _ok_c = False
+                try:
+                    iv = int(cid_v)
+                except (TypeError, ValueError):
+                    iv = None
+                if iv is not None:
+                    for x in _ctx_rows:
+                        if not isinstance(x, dict):
+                            continue
+                        rid = x.get("id")
+                        if rid is None:
+                            rid = x.get("card_id")
+                        try:
+                            if rid is not None and int(rid) == iv:
+                                _ok_c = True
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                if not _ok_c:
+                    print(
+                        f"[REACT-planing] enrich 丢弃与 card 候选列表不一致的 card_id={cid_v}（避免串表）"
+                    )
+                    params.pop("card_id", None)
+                    params.pop("target_id", None)
+                    target_id = None
+                else:
+                    params["card_id"] = iv
+                    params.pop("target_id", None)
+                    target_id = None
+        elif target_id is not None and _ctx_rows:
             _ok = False
             for x in _ctx_rows:
                 if not isinstance(x, dict) or x.get('id') is None:
@@ -6053,11 +6646,30 @@ class SimplifiedReActEngine:
                 params.pop('target_id', None)
                 target_id = None
 
-        if not params.get("target_ids") and params.get("target_id") is None:
+        if target_type == "card":
+            cid = params.get("card_id")
+            if cid is None:
+                cid = grep_result.get("first_card_id") or result_context.get("first_card_id")
+            if cid is None:
+                tid_ca = self._try_target_id_from_merged_lists(
+                    result_context, target_type, user_input, todo
+                )
+                if tid_ca is not None:
+                    cid = tid_ca
+                    print(f"[REACT-planing] enrich 从合并列表注入 card_id={cid} ({target_type})")
+            if cid is not None:
+                try:
+                    params["card_id"] = int(cid)
+                    params.pop("target_id", None)
+                except (TypeError, ValueError):
+                    pass
+        elif not params.get("target_ids") and params.get("target_id") is None:
             if target_type == 'bug':
                 target_id = grep_result.get('first_bug_id') or result_context.get('first_bug_id')
             elif target_type == 'testcase':
                 target_id = grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
+            elif target_type == 'plan':
+                target_id = grep_result.get('first_plan_id') or result_context.get('first_plan_id')
             else:
                 target_id = grep_result.get('first_badcase_id') or result_context.get('first_badcase_id')
             if target_id is not None:
@@ -6067,7 +6679,7 @@ class SimplifiedReActEngine:
                 except (TypeError, ValueError):
                     target_id = None
 
-        if not params.get("target_ids") and not params.get('target_id'):
+        if target_type != "card" and not params.get("target_ids") and not params.get('target_id'):
             tid_m = self._try_target_id_from_merged_lists(
                 result_context, target_type, user_input, todo
             )
@@ -6075,7 +6687,27 @@ class SimplifiedReActEngine:
                 params['target_id'] = tid_m
                 print(f"[REACT-planing] enrich 从合并列表注入 target_id={tid_m} ({target_type})")
 
-        if not params.get("target_ids") and not params.get('target_id'):
+        if (
+            target_type == "plan"
+            and params.get("target_id") is None
+            and self.plan_id is not None
+        ):
+            try:
+                params["target_id"] = int(self.plan_id)
+                print(
+                    f"[REACT-planing] enrich 引擎上下文 plan_id → modify target_id={params['target_id']}"
+                )
+            except (TypeError, ValueError):
+                pass
+
+        _need_rescue = (
+            not params.get("target_ids")
+            and (
+                (params.get("card_id") is None and target_type == "card")
+                or (params.get("target_id") is None and target_type != "card")
+            )
+        )
+        if _need_rescue:
             print(
                 f"[REACT-thought] ⚠️ 主循环 modify：无法从上下文获取 target_id (target={target_type})，尝试补救 grep…"
             )
@@ -6084,10 +6716,10 @@ class SimplifiedReActEngine:
                 'project_id': project_id,
                 'keywords': kw,
                 'mode': 'locate',
-                'target': target_type if target_type in ('bug', 'badcase', 'testcase') else 'all',
+                'target': target_type if target_type in ('bug', 'badcase', 'testcase', 'card', 'plan') else 'all',
                 'userId': 'system_agent',
             }
-            if self.plan_id is not None and gparams.get('target') != 'all':
+            if self.plan_id is not None and gparams.get('target') not in ('all', 'plan'):
                 gparams['plan_id'] = self.plan_id
             if gparams.get('target') == 'all':
                 gparams.pop('plan_id', None)
@@ -6105,19 +6737,56 @@ class SimplifiedReActEngine:
             if grep_obs.get('success'):
                 self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
                 grep_result = result_context.get('grep_result', {})
-                if target_type == 'bug':
+                if target_type == "card":
+                    cid_r = grep_result.get('first_card_id')
+                    if cid_r is not None:
+                        try:
+                            params['card_id'] = int(cid_r)
+                            params.pop('target_id', None)
+                            print(f"[REACT-execution] 主循环补救 grep 后 card_id={params['card_id']}")
+                        except (TypeError, ValueError):
+                            pass
+                    if params.get("card_id") is None:
+                        tid2c = self._try_target_id_from_merged_lists(
+                            result_context, target_type, user_input, todo
+                        )
+                        if tid2c is not None:
+                            params['card_id'] = int(tid2c)
+                            params.pop('target_id', None)
+                            print(f"[REACT-planing] enrich 补救 grep 后从列表注入 card_id={tid2c}")
+                elif target_type == 'bug':
                     target_id = grep_result.get('first_bug_id')
+                    if target_id is not None:
+                        try:
+                            params['target_id'] = int(target_id)
+                            print(f"[REACT-execution] 主循环补救 grep 后 target_id={params['target_id']}")
+                        except (TypeError, ValueError):
+                            pass
                 elif target_type == 'testcase':
                     target_id = grep_result.get('first_testcase_id')
+                    if target_id is not None:
+                        try:
+                            params['target_id'] = int(target_id)
+                            print(f"[REACT-execution] 主循环补救 grep 后 target_id={params['target_id']}")
+                        except (TypeError, ValueError):
+                            pass
+                elif target_type == 'plan':
+                    target_id = grep_result.get('first_plan_id')
+                    if target_id is not None:
+                        try:
+                            params['target_id'] = int(target_id)
+                            print(f"[REACT-execution] 主循环补救 grep 后 target_id={params['target_id']}")
+                        except (TypeError, ValueError):
+                            pass
                 else:
                     target_id = grep_result.get('first_badcase_id')
-                if target_id is not None:
-                    try:
-                        params['target_id'] = int(target_id)
-                        print(f"[REACT-execution] 主循环补救 grep 后 target_id={params['target_id']}")
-                    except (TypeError, ValueError):
-                        pass
-            if not params.get("target_ids") and not params.get('target_id'):
+                    if target_id is not None:
+                        try:
+                            params['target_id'] = int(target_id)
+                            print(f"[REACT-execution] 主循环补救 grep 后 target_id={params['target_id']}")
+                        except (TypeError, ValueError):
+                            pass
+            if target_type != "card" and not params.get("target_ids") and not params.get('target_id'):
                 tid2 = self._try_target_id_from_merged_lists(
                     result_context, target_type, user_input, todo
                 )
@@ -6125,7 +6794,9 @@ class SimplifiedReActEngine:
                     params['target_id'] = tid2
                     print(f"[REACT-planing] enrich 补救 grep 后从列表注入 target_id={tid2}")
 
-        if not params.get("target_ids") and params.get("target_id") is None:
+        if not params.get("target_ids") and params.get("target_id") is None and (
+            params.get("card_id") is None if target_type == "card" else True
+        ):
             self._enrich_modify_params_target_ids(
                 params, result_context, target_type, log_prefix="[REACT-planing] 补全后 "
             )
@@ -6138,6 +6809,36 @@ class SimplifiedReActEngine:
                     tid = int(tls[0])
                 except (TypeError, ValueError):
                     tid = None
+        explore_target = target_type
+        if target_type == "card" and params.get("card_id") is not None and self.tools.get("modify"):
+            mt = self.tools.get("modify")
+
+            def _card_explore_resolve_ml():
+                with mt._get_app_context():
+                    nt, _ = mt._normalize_target_using_card_row(
+                        target_type,
+                        params.get("project_id"),
+                        params["card_id"],
+                    )
+                    sid = mt._resolve_target_id_from_card_id(
+                        nt,
+                        params["card_id"],
+                        params.get("project_id"),
+                    )
+                    return nt, sid
+
+            try:
+                loop = asyncio.get_event_loop()
+                nt_e, sid_e = await asyncio.wait_for(
+                    loop.run_in_executor(self._tool_executor, _card_explore_resolve_ml),
+                    timeout=10,
+                )
+                if sid_e is not None:
+                    explore_target = nt_e
+                    tid = int(sid_e)
+            except Exception as e:
+                print(f"[REACT-execution] card→源表 explore 解析失败: {e}")
+
         mods = params.get('modifications')
         _proj_for_explore = params.get('project_id') or self.project_id
         if tid and (not mods or (isinstance(mods, dict) and len(mods) == 0)):
@@ -6151,7 +6852,7 @@ class SimplifiedReActEngine:
                         loop.run_in_executor(
                             self._tool_executor,
                             lambda: modify_tool.explore_record(
-                                target_type, _eid, _epid, getattr(self, "_ui_locale", None)
+                                explore_target, _eid, _epid, getattr(self, "_ui_locale", None)
                             ),
                         ),
                         timeout=15,
@@ -6272,7 +6973,18 @@ class SimplifiedReActEngine:
         events.extend(self._drain_tool_task_sse_buffer_list())
         if grep_obs.get('success'):
             self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
-            for tt in ('bug', 'testcase', 'badcase'):
+            for tt in ('card', 'bug', 'testcase', 'badcase'):
+                if tt == 'card':
+                    tid = self._try_target_id_from_merged_lists(
+                        result_context, tt, user_input, todo
+                    )
+                    if tid is not None:
+                        params['card_id'] = tid
+                        params.pop('target_id', None)
+                        params['target'] = 'card'
+                        print(f"[REACT-planing] last_resort 从列表选定 card_id={tid}, target=card")
+                        break
+                    continue
                 tid = self._try_target_id_from_merged_lists(
                     result_context, tt, user_input, todo
                 )
@@ -6367,6 +7079,10 @@ class SimplifiedReActEngine:
             lst = result_context.get('bug_list') or []
         elif target_type == 'testcase':
             lst = result_context.get('testcase_list') or []
+        elif target_type == 'card':
+            lst = result_context.get('card_list') or []
+        elif target_type == 'plan':
+            lst = result_context.get('plan_list') or []
         else:
             lst = result_context.get('badcase_list') or []
         if not lst:
@@ -6374,7 +7090,9 @@ class SimplifiedReActEngine:
         pick = self._pick_best_match_from_list(lst, kw, 'title') if kw else lst[0]
         if not isinstance(pick, dict):
             return None
-        tid = pick.get('id')
+        tid = pick.get('card_id') if target_type == 'card' else pick.get('id')
+        if tid is None:
+            tid = pick.get('id')
         if tid is None:
             return None
         try:
@@ -6405,11 +7123,18 @@ class SimplifiedReActEngine:
         ]
         _gr_nav = result_context.get("grep_result") or {}
         _nav_map = _gr_nav.get("navigation_ids") or {}
-        _nk = (
-            "bug"
-            if target_type == "bug"
-            else ("badcase" if target_type == "badcase" else "testcase")
-        )
+        if target_type == "bug":
+            _nk = "bug"
+        elif target_type == "badcase":
+            _nk = "badcase"
+        elif target_type == "testcase":
+            _nk = "testcase"
+        elif target_type == "card":
+            _nk = "card"
+        elif target_type == "plan":
+            _nk = "plan"
+        else:
+            _nk = "badcase"
         nav_authoritative_ids = list(_nav_map.get(_nk) or [])
         _allowed_ids = nav_authoritative_ids
         if not _allowed_ids:
@@ -6487,10 +7212,14 @@ class SimplifiedReActEngine:
             or 'test_case' in text
         ):
             return 'testcase'
-        if ('bug' in text or '缺陷' in text_raw) and 'badcase' not in text and 'bad case' not in text:
-            return 'bug'
+        if user_text_implies_card_entity_type(text_raw):
+            return 'card'
+        if user_text_implies_plan_entity_type(text_raw):
+            return 'plan'
         if 'badcase' in text or 'bad case' in text:
             return 'badcase'
+        if user_text_implies_bug_entity_type(text_raw):
+            return 'bug'
         return None
 
     def _infer_modify_target(self, user_input: str, todo: str) -> str:
@@ -6500,15 +7229,20 @@ class SimplifiedReActEngine:
         exp = self._infer_modify_target_explicit(user_input, todo)
         if exp:
             return exp
-        text = ((user_input or '') + ' ' + (todo or '')).lower()
+        combined = f"{user_input or ''} {todo or ''}"
+        text = combined.lower()
         if not text.strip():
             return 'badcase'
-        if 'bug' in text and 'badcase' not in text and 'bad case' not in text:
-            return 'bug'
-        if '测试用例' in text or 'testcase' in text or 'test_case' in text:
-            return 'testcase'
+        if user_text_implies_card_entity_type(combined):
+            return 'card'
+        if user_text_implies_plan_entity_type(combined):
+            return 'plan'
         if 'badcase' in text or 'bad case' in text:
             return 'badcase'
+        if user_text_implies_bug_entity_type(combined):
+            return 'bug'
+        if '测试用例' in combined or 'testcase' in text or 'test_case' in text:
+            return 'testcase'
         return 'badcase'
 
     def _widen_grep_target_to_include_cards_unless_explicit(
@@ -6524,7 +7258,7 @@ class SimplifiedReActEngine:
         if not t:
             params["target"] = "all"
             return
-        if t in ("all", "card"):
+        if t in ("all", "card", "plan"):
             return
         if t not in ("bug", "badcase", "testcase"):
             return
@@ -6561,6 +7295,12 @@ class SimplifiedReActEngine:
         elif exp == 'badcase' and t not in ('badcase', 'all'):
             print(f"[REACT-execution] grep.params.target 按用户 BadCase 意图纠正: {t!r} -> badcase")
             params['target'] = 'badcase'
+        elif exp == 'card' and t not in ('card', 'all'):
+            print(f"[REACT-execution] grep.params.target 按用户卡片意图纠正: {t!r} -> card")
+            params['target'] = 'card'
+        elif exp == 'plan' and t not in ('plan', 'all'):
+            print(f"[REACT-execution] grep.params.target 按用户计划意图纠正: {t!r} -> plan")
+            params['target'] = 'plan'
 
     def _force_grep_card_layer_only_if_requested(
         self, params: Dict[str, Any], user_input: str, todo: str
@@ -6658,10 +7398,25 @@ class SimplifiedReActEngine:
         return ''
 
     def _infer_create_target(self, user_input: str, todo: str) -> str:
+        import re
+
         text = f"{todo or ''} {user_input or ''}"
         text_lower = text.lower()
         if 'testcase' in text_lower or 'test_case' in text_lower or '测试用例' in text:
             return 'testcase'
+        # Card 总表行（先于「计划」匹配，避免「迭代」误伤）
+        if (
+            'target=card' in text_lower
+            or ' target card' in text_lower
+            or '新建卡片' in text
+            or '创建卡片' in text
+        ):
+            return 'card'
+        # 迭代列表常见标题 bug1.21 / BUG2．3：含 bug 子串但不是缺陷 Bug 实体；须先于下方裸 bug 关键词
+        if re.search(r'bug\s*\d{1,8}\s*[\.．]\s*\d{1,8}', text_lower) or re.search(
+            r'(?<![a-z])bug\d{1,8}[\.．]\d{1,8}', text_lower
+        ):
+            return 'card'
         if 'plan' in text_lower or '计划' in text or '迭代' in text:
             return 'plan'
         if 'bug' in text_lower or '缺陷' in text:
@@ -7722,14 +8477,14 @@ class SimplifiedReActEngine:
                     copy.deepcopy(res),
                 )
             if (
-                tool_name in ("modify", "create")
+                tool_name in ("modify", "create", "delete")
                 and isinstance(res, dict)
                 and res.get("success")
                 and self._grep_result_cache
             ):
                 self._grep_result_cache.clear()
                 if os.getenv("PERF_LOG") == "1":
-                    print("[PERF][grep_cache] cleared after modify/create success")
+                    print("[PERF][grep_cache] cleared after modify/create/delete success")
             return res
         except Exception as e:
             print(f"[REACT] ❌ 工具执行异常: {str(e)}")

@@ -1,4 +1,5 @@
 import { i18n } from '../i18n/index.js'
+import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
 
 /** 是否已有可展示的思考正文（与 AgentTaskRun thoughtBodySubstantive 对齐） */
 function thoughtStepHasSubstantiveProse(st, aiMessage) {
@@ -31,12 +32,11 @@ function freezeThoughtPhaseEndForActionXmlWait(st, aiMessage) {
 }
 
 /**
- * 后端已将 XML 转换为语义标记，前端直接透传即可
- * 保留此函数接口以兼容旧代码，未来可在此添加其他过滤逻辑
+ * THINK 轨增量：后端已吞主协议 XML；部分模型仍会在 reasoning 里输出 `<reason>` 等泄漏标签，在此剔除。
  */
 function appendUnifiedFilteredThinkPiece(aiMessage, j, piece) {
-  // 后端 unified_think_stream_sanitize 已处理 XML 转换，直接返回原文
-  return typeof piece === 'string' ? piece : ''
+  if (typeof piece !== 'string' || !piece) return ''
+  return stripReasoningChannelArtifacts(piece)
 }
 
 /** plan 轨 todo_list XML：reasoning 已出正文后冻结墙钟并显示等待点（无 <decision> 过滤器时） */
@@ -184,6 +184,7 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       if (typeof piece === 'string' && piece && isThink) {
         pieceVisible = appendUnifiedFilteredThinkPiece(aiMessage, j, piece)
       }
+      pieceVisible = stripReasoningChannelArtifacts(pieceVisible)
 
       if (typeof piece === 'string' && piece && isThink) {
         aiMessage.hadAgentThinkPhase = true
@@ -226,13 +227,14 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
         const st = aiMessage.steps[j]
         const seg = stepEvent.segment
         const piece = stepEvent.content
+        const p = stripReasoningChannelArtifacts(piece)
         if (seg === 'decide') {
-          st.reasoningDecideDraft = (st.reasoningDecideDraft || '') + piece
+          st.reasoningDecideDraft = (st.reasoningDecideDraft || '') + p
         } else if (seg !== 'observe') {
-          st.reasoningStepDraft = (st.reasoningStepDraft || '') + piece
+          st.reasoningStepDraft = (st.reasoningStepDraft || '') + p
         }
         if (seg !== 'observe') {
-          st.thoughtReasoningDraft = (st.thoughtReasoningDraft || '') + piece
+          st.thoughtReasoningDraft = (st.thoughtReasoningDraft || '') + p
         }
       }
       return true
@@ -270,7 +272,7 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       const piece = stepEvent.delta
       if (j != null && aiMessage.steps[j] && typeof piece === 'string' && piece) {
         const st = aiMessage.steps[j]
-        st.thoughtContentDraft = (st.thoughtContentDraft || '') + piece
+        st.thoughtContentDraft = (st.thoughtContentDraft || '') + stripReasoningChannelArtifacts(piece)
       }
       return true
     }
@@ -295,7 +297,9 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
         /** 与 isThink 对齐：缺省 react_phase 时也应写入 thinkReasoningDraft，勿只写 reasoningContent（否则 plan 到达后不同步到 steps[0]，Thought 空白） */
         const inThinkDraftPhase =
           typeof sseIsReactThinkPhase === 'function' ? sseIsReactThinkPhase(rp) : !rp || rp === 'think'
-        const pieceVisible = isThink ? appendUnifiedFilteredThinkPiece(aiMessage, j, piece) : piece
+        const rawPiece = isThink ? appendUnifiedFilteredThinkPiece(aiMessage, j, piece) : piece
+        const pieceVisible =
+          typeof rawPiece === 'string' ? stripReasoningChannelArtifacts(rawPiece) : ''
 
         if (sseIsReactThinkPhase(stepEvent.react_phase)) aiMessage.hadAgentThinkPhase = true
         if (aiMessage.reasoningPhaseStartTs == null) aiMessage.reasoningPhaseStartTs = Date.now()
@@ -304,13 +308,6 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
           aiMessage.thinkReasoningDraft = (aiMessage.thinkReasoningDraft || '') + pieceVisible
           aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + pieceVisible
           scheduleReasoningTypewriter(aiMessage)
-          // 有 reasoning 时自动展开（避免“最后隐藏/折叠导致看不到”）
-          try {
-            const vis = String(pieceVisible || '').replace(/[\u200B-\u200D\uFEFF\u2060]/g, '').trim()
-            if (vis && aiMessage.thoughtCollapsed === true) aiMessage.thoughtCollapsed = false
-          } catch {
-            // ignore
-          }
         } else if (inThinkDraftPhase && sc === 'content') {
           aiMessage.thinkContentDraft = (aiMessage.thinkContentDraft || '') + pieceVisible
           aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + pieceVisible
@@ -342,15 +339,16 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
         if (!aiMessage.steps || aiMessage.steps.length === 0) {
           const rp = stepEvent.react_phase
           const sc = stepEvent.stream_channel
+          const pieceClean = stripReasoningChannelArtifacts(piece)
           aiMessage._thinkTodoMergedIntoReasoning = true
           if (aiMessage.reasoningPhaseStartTs == null) aiMessage.reasoningPhaseStartTs = Date.now()
           aiMessage._reasoningPhaseLive = true
           if (rp === 'think' && sc === 'content') {
-            aiMessage.thinkContentDraft = (aiMessage.thinkContentDraft || '') + piece
-            aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + piece
+            aiMessage.thinkContentDraft = (aiMessage.thinkContentDraft || '') + pieceClean
+            aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + pieceClean
             scheduleReasoningTypewriter(aiMessage)
           } else {
-            aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + piece
+            aiMessage.reasoningContent = (aiMessage.reasoningContent || '') + pieceClean
             scheduleReasoningTypewriter(aiMessage)
           }
         }

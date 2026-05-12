@@ -20,7 +20,7 @@
       <div class="content-left" :class="{ 'collapsed': isLeftCollapsed }">
         <!-- 待采纳改动（show_diff 模式） -->
         <div
-          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_')).length > 0"
+          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_') && k !== 'priority').length > 0"
           class="pending-diff-panel"
         >
           <div class="pending-diff-header">
@@ -28,10 +28,9 @@
             <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
           </div>
 
+          <template v-for="(data, field) in pendingDiff.modifications" :key="field">
           <div
-            v-for="(data, field) in pendingDiff.modifications"
-            :key="field"
-            v-show="!String(field).startsWith('_')"
+            v-if="!String(field).startsWith('_') && field !== 'priority'"
             class="pending-diff-item"
             :id="`diff-field-${field}`"
           >
@@ -53,6 +52,7 @@
               :renderSideBySide="false"
             />
           </div>
+          </template>
         </div>
 
         <!-- 标题区域 -->
@@ -464,9 +464,28 @@
               <option value="其他">其他</option>
             </select>
           </div>
-          <div class="form-row">
+          <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
             <label class="form-label required">优先级:</label>
-            <select v-model="bug.priority" class="form-select">
+            <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel">
+              <div class="diff-header">
+                <span class="diff-label">优先级修改预览:</span>
+                <div class="diff-actions">
+                  <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                  <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
+                </div>
+              </div>
+              <div class="diff-content">
+                <div class="diff-row">
+                  <span class="diff-tag old">原值</span>
+                  <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.old) }}</span>
+                </div>
+                <div class="diff-row">
+                  <span class="diff-tag new">新值</span>
+                  <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.new) }}</span>
+                </div>
+              </div>
+            </div>
+            <select v-model="bug.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
               <option value="">请选择优先级</option>
               <option value="p1">P1 - 紧急</option>
               <option value="p2">P2 - 高</option>
@@ -662,7 +681,9 @@ export default {
   setup(props, { emit }) {
     const router = useRouter()
     const route = useRoute()
-    console.log('[NewBug] props.card_id:', props.card_id, 'props:', props)
+    if (import.meta.env.DEV) {
+      console.log('[NewBug] props.card_id:', props.card_id, 'id:', props.id)
+    }
     const loading = ref(false)
     const saveLoading = ref(false)
     const isEdit = ref(false)
@@ -1156,49 +1177,6 @@ export default {
                 const memberMatch = projectMembers.value.find(m => m.id === parseInt(assigneeId) || m.id.toString() === assigneeId)
                 console.log(`负责人 ${assigneeId} 匹配结果:`, memberMatch ? `✓ 找到 (${memberMatch.name})` : '✗ 未找到')
               }
-              
-              // 延迟再次触发响应式更新，确保模板正确渲染
-              setTimeout(async () => {
-                console.log('延迟响应式更新，当前状态:')
-                console.log('- bug.project_id:', bug.project_id)
-                console.log('- bug.associate_project:', bug.associate_project)
-                console.log('- bug.plan:', bug.plan)
-                console.log('- projectInfo:', projectInfo.value)
-                console.log('- availablePlans:', availablePlans.value)
-                
-                // 强制触发响应式更新
-                await nextTick()
-                
-                // 再次检查状态，确保数据正确设置
-                console.log('最终检查 - 模板渲染前:')
-                console.log('- bug.project_id:', bug.project_id)
-                console.log('- bug.associate_project:', bug.associate_project)
-                console.log('- bug.plan:', bug.plan)
-                console.log('- availablePlans长度:', availablePlans.value.length)
-                console.log('- availablePlans内容:', availablePlans.value)
-                
-                // 强制更新bug对象，触发响应式更新
-                const temp = { ...bug }
-                Object.assign(bug, temp)
-                
-                await nextTick()
-                
-                // 最终状态检查
-                console.log('最终状态检查:')
-                console.log('- bug.project_id:', bug.project_id)
-                console.log('- bug.plan:', bug.plan)
-                console.log('- bug.associate_project:', bug.associate_project)
-                console.log('- availableProjects:', availableProjects.value)
-                console.log('- availablePlans:', availablePlans.value)
-                
-                // 检查项目匹配
-                const matchedProject = availableProjects.value.find(p => p.id == bug.project_id)
-                console.log('匹配的项目:', matchedProject)
-                
-                // 检查计划匹配
-                const matchedPlan = availablePlans.value.find(p => p.value == bug.plan)
-                console.log('匹配的计划:', matchedPlan)
-              }, 100)
             } else {
               console.log('编辑模式，Bug没有项目ID')
             }
@@ -1571,21 +1549,54 @@ export default {
       }
     }
     
+    /** 沙箱/模型可能用 steps_to_reproduce，界面按钮仍传 reproduction_steps，需解析到实际 key */
+    const resolvePendingModifyStoreKey = (requested) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return null
+      const tryKeys = [
+        requested,
+        requested === 'reproduction_steps' ? 'steps_to_reproduce' : null,
+        requested === 'reproduction_steps' ? 'reproduce_steps' : null,
+        requested === 'steps_to_reproduce' ? 'reproduction_steps' : null
+      ].filter(Boolean)
+      for (const k of tryKeys) {
+        if (mods[k]) return k
+      }
+      return null
+    }
+
+    const mapBugModifyApiField = (storeKey) => {
+      if (storeKey === 'reproduction_steps' || storeKey === 'reproduce_steps') return 'steps_to_reproduce'
+      return storeKey
+    }
+
+    const formatBugPriorityLabel = (v) => {
+      if (v == null || String(v).trim() === '') return '未设置'
+      const s = String(v).trim().toLowerCase()
+      const map = {
+        p1: 'P1 - 紧急',
+        p2: 'P2 - 高',
+        p3: 'P3 - 中',
+        p4: 'P4 - 低'
+      }
+      return map[s] || String(v).trim()
+    }
+
     // 取消字段修改
     const cancelFieldChange = (field) => {
-      console.log('[DIFF] 取消字段修改:', field)
-      if (pendingDiff.value?.modifications?.[field]) {
-        const oldValue = pendingDiff.value.modifications[field].old
-        if (bug.hasOwnProperty(field)) {
-          bug[field] = oldValue || ''
-        }
-        
-        delete pendingDiff.value.modifications[field]
-        
-        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
-          sessionStorage.removeItem('pendingModifyDiff')
-          pendingDiff.value = null
-        }
+      const storeKey = resolvePendingModifyStoreKey(field)
+      if (!storeKey || !pendingDiff.value?.modifications?.[storeKey]) return
+      const oldValue = pendingDiff.value.modifications[storeKey].old
+      const target = pendingDiff.value?.target || 'bug'
+      if (target === 'bug' && (storeKey === 'steps_to_reproduce' || storeKey === 'reproduction_steps' || storeKey === 'reproduce_steps')) {
+        bug.reproduction_steps = oldValue || ''
+      } else if (bug.hasOwnProperty(storeKey)) {
+        bug[storeKey] = oldValue || ''
+      }
+      delete pendingDiff.value.modifications[storeKey]
+      if (Object.keys(pendingDiff.value.modifications).filter((k) => !k.startsWith('_')).length === 0) {
+        sessionStorage.removeItem('pendingModifyDiff')
+        pendingDiff.value = null
       }
     }
 
@@ -1595,13 +1606,15 @@ export default {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
 
-    const applyFieldChange = async (field) => {
-      if (!pendingDiff.value?.modifications?.[field]) return
+    const applyFieldChange = async (requestedField) => {
+      const storeKey = resolvePendingModifyStoreKey(requestedField)
+      if (!storeKey || !pendingDiff.value?.modifications?.[storeKey]) return
 
       const projectId = bug.project_id || props.project_id
       const targetId = pendingDiff.value?.targetId || props.id
       const target = pendingDiff.value?.target || 'bug'
-      const newValue = pendingDiff.value.modifications[field]?.new
+      const newValue = pendingDiff.value.modifications[storeKey]?.new
+      const apiField = target === 'bug' ? mapBugModifyApiField(storeKey) : storeKey
 
       if (!projectId || !targetId) {
         console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId, targetId })
@@ -1616,7 +1629,7 @@ export default {
           body: JSON.stringify({
             target,
             target_id: targetId,
-            modifications: { [field]: newValue },
+            modifications: { [apiField]: newValue },
             confirm: true,
             message_id: pendingDiff.value?.messageId
           })
@@ -1627,7 +1640,13 @@ export default {
           return
         }
 
-        confirmFieldChange(field)
+        if (target === 'bug' && apiField === 'steps_to_reproduce') {
+          bug.reproduction_steps = newValue
+        } else if (Object.prototype.hasOwnProperty.call(bug, apiField)) {
+          bug[apiField] = newValue
+        }
+
+        confirmFieldChange(storeKey)
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
       }
@@ -1684,29 +1703,44 @@ export default {
         bgTasks.push(fetchCurrentUser())
         
         // 先拉项目列表，保证右侧「项目名称」下拉有数据，并支持默认选中
-        await fetchProjects()
-        
-        // 然后初始化Bug
-        console.log('开始初始化Bug...')
-        await initBug()
+        // 编辑模式：项目列表与 Bug 详情互不依赖，并行拉取以缩短首屏
+        const isEditEarly = props.edit || route.query.edit === 'true'
+        const itemIdEarly = props.id || route.query.id
+        if (isEditEarly && itemIdEarly) {
+          await Promise.all([fetchProjects(), initBug()])
+        } else {
+          await fetchProjects()
+          await initBug()
+        }
         console.log('Bug初始化完成')
 
-        // 初始化后，一次性拉取编辑页最小上下文（project + plans + members）
+        // 编辑页 initBug 已拉取 plans/members 时，不再重复请求 edit-context（省一轮 400～600ms）
         const ctxProjectId = bug.project_id
         if (ctxProjectId) {
-          try {
-            const resp = await getProjectEditContext(ctxProjectId)
-            if (resp.data?.success) {
-              projectInfo.value = resp.data.project || projectInfo.value
-              projectMembers.value = resp.data.members || projectMembers.value
-              // 将当前项目添加到 availableProjects 中，确保下拉框能显示
-              if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
-                availableProjects.value.push(resp.data.project)
+          const skipDupContext =
+            isEdit.value &&
+            Array.isArray(availablePlans.value) &&
+            availablePlans.value.length > 0 &&
+            Array.isArray(projectMembers.value) &&
+            projectMembers.value.length > 0
+          if (!skipDupContext) {
+            try {
+              const resp = await getProjectEditContext(ctxProjectId)
+              if (resp.data?.success) {
+                projectInfo.value = resp.data.project || projectInfo.value
+                projectMembers.value = resp.data.members || projectMembers.value
+                // 将当前项目添加到 availableProjects 中，确保下拉框能显示
+                if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
+                  availableProjects.value.push(resp.data.project)
+                }
+                await setAvailablePlansFromTree(resp.data.plans || [])
               }
-              await setAvailablePlansFromTree(resp.data.plans || [])
+            } catch (e) {
+              console.error('获取编辑页上下文失败:', e)
             }
-          } catch (e) {
-            console.error('获取编辑页上下文失败:', e)
+          } else if (!projectInfo.value?.name) {
+            const prj = availableProjects.value.find((p) => String(p.id) === String(ctxProjectId))
+            if (prj) projectInfo.value = prj
           }
         }
 
@@ -1806,6 +1840,7 @@ export default {
       confirmFieldChange,
       cancelFieldChange,
       applyFieldChange,
+      formatBugPriorityLabel,
       copyDocumentLink,
       addAttachment,
       handleFileUpload,
@@ -1906,9 +1941,10 @@ export default {
   min-height: 600px;
 }
 
-/* 确保在嵌入模式下也能正常显示 */
+/* 确保在嵌入模式下也能正常显示；勿沿用 min-height:600px，否则复现区与底部按钮间易被撑出大块空白 */
 .bug-detail-wrapper.is-embedded .main-content {
   padding: 16px;
+  min-height: 0;
 }
 </style>
 

@@ -51,7 +51,7 @@
     <div class="card-table">
       <div class="table-header">
         <div class="header-checkbox">
-          <input type="checkbox" :checked="selectAll" @change="emit('toggleSelectAll')" />
+          <input type="checkbox" :checked="selectAll" @change="onHeaderSelectAllChange" />
         </div>
         <div class="header-title">{{ t('list.colTitle', { type: itemTypeLabel }) }}</div>
         <div class="header-status">{{ t('list.colType') }}</div>
@@ -60,6 +60,45 @@
       </div>
 
       <div class="table-body">
+        <!-- create 沙箱待确认（target=card）：与 BadCase 列表风格一致 -->
+        <div
+          v-for="pc in (pendingCreates || [])"
+          :key="pc?.tempId"
+          :data-create-id="pc?.tempId"
+          class="table-row pending-create-row"
+          @click.stop
+        >
+          <div class="row-checkbox"></div>
+          <div class="row-title">
+            <SelectableTitleTip
+              v-if="pc.displayDiff?.title"
+              class="field-diff-inline create-pending-diff"
+              :text="pc.displayDiff.title.new"
+            >
+              <span class="new-value-inline create-new-only">{{ pc.displayDiff.title.new }}</span>
+            </SelectableTitleTip>
+            <SelectableTitleTip
+              v-else
+              class="card-title create-new-only"
+              :text="pc.preview?.title || ''"
+            >{{ pc.preview?.title || t('list.newPending') }}</SelectableTitleTip>
+          </div>
+          <div class="row-status">
+            <span class="type-badge" :class="pc.preview?.type || 'bug'">{{
+              getTypeText(pc.preview?.type || 'bug')
+            }}</span>
+          </div>
+          <div class="row-date"><span class="date-text">{{ t('list.pendingConfirm') }}</span></div>
+          <div
+            v-if="!pc?.executed && confirmCreate && cancelCreate && isLastInCreateCluster(pc?.tempId)"
+            class="row-actions"
+            @click.stop
+          >
+            <span v-if="getCreateClusterSize(pc?.tempId) > 1" class="batch-count">{{ t('common.nItems', { n: getCreateClusterSize(pc?.tempId) }) }}</span>
+            <button class="btn-icon-approve" :title="t('list.approveCreate')" @click="confirmConsecutiveCreateGroup(pc?.tempId)">✓</button>
+            <button class="btn-icon-reject" :title="t('list.reject')" @click="cancelConsecutiveCreateGroup(pc?.tempId)">✗</button>
+          </div>
+        </div>
         <!-- 新建行（输入框 + 类型选择） -->
         <div v-if="isCreating" class="table-row creating-row">
           <div class="row-checkbox">
@@ -72,8 +111,8 @@
               type="text"
               class="create-input"
               :placeholder="t('cardCreate.titlePlaceholder')"
-              @keyup.enter="confirmCreate"
-              @keyup.esc="cancelCreate"
+              @keyup.enter="submitQuickCreate"
+              @keyup.esc="abortQuickCreate"
               @blur="handleCreateBlur"
             />
           </div>
@@ -88,15 +127,15 @@
             <span class="date-text creating">—</span>
           </div>
           <div class="row-actions">
-            <button class="btn-icon-confirm" @mousedown.prevent="confirmCreate" :disabled="!newCardTitle.trim()" :title="t('common.confirm')">✓</button>
-            <button class="btn-icon-cancel" @mousedown.prevent="cancelCreate" :title="t('common.cancel')">✗</button>
+            <button class="btn-icon-confirm" @mousedown.prevent="submitQuickCreate" :disabled="!newCardTitle.trim()" :title="t('common.confirm')">✓</button>
+            <button class="btn-icon-cancel" @mousedown.prevent="abortQuickCreate" :title="t('common.cancel')">✗</button>
           </div>
         </div>
 
         <div v-if="loading && !isCreating" class="loading-row">
           <div class="loading-text">{{ t('list.loading') }}</div>
         </div>
-        <div v-else-if="items.length === 0 && !isCreating && !isEditing" class="empty-row">
+        <div v-else-if="items.length === 0 && !isCreating && !isEditing && !(pendingCreates || []).length" class="empty-row">
           <div class="empty-text">{{ t('list.emptyData', { type: itemTypeLabel }) }}</div>
         </div>
         <div
@@ -109,7 +148,9 @@
           :class="{
             selected: selectedItems.includes(item.id),
             'item-new': isNewItem(item.id),
-            'editing-row': isEditing && editingItem?.id === item.id
+            'editing-row': isEditing && editingItem?.id === item.id,
+            'pending-delete-row': pendingDeleteForCardRow(item),
+            'pending-modify': pendingForCardRow(item) && !pendingDeleteForCardRow(item)
           }"
           @click="handleRowClick(item, $event)"
         >
@@ -124,7 +165,7 @@
               v-else
               type="checkbox"
               :checked="selectedItems.includes(item.id)"
-              @change="emit('toggleSelection', item.id)"
+              @change="onRowSelectionChange(item.id)"
               @click.stop
             />
           </div>
@@ -143,8 +184,20 @@
             />
             <!-- 普通模式 -->
             <template v-else>
-              <span class="card-title">{{ rowDisplayTitle(item) }}</span>
-              <span v-if="isNewItem(item.id)" class="new-badge">{{ t('list.newPending') }}</span>
+              <SelectableTitleTip
+                v-if="pendingForCardRow(item)?.title"
+                class="field-diff-inline"
+                :text="`${pendingForCardRow(item).title.old} → ${pendingForCardRow(item).title.new}`"
+              >
+                <span class="old-value-inline">{{ pendingForCardRow(item).title.old }}</span>
+                <span class="new-value-inline">{{ pendingForCardRow(item).title.new }}</span>
+              </SelectableTitleTip>
+              <template v-else>
+                <SelectableTitleTip class="card-title" :text="rowTitleTooltip(item)">
+                  {{ rowDisplayTitle(item) }}
+                </SelectableTitleTip>
+                <span v-if="isNewItem(item.id)" class="new-badge">{{ t('list.newPending') }}</span>
+              </template>
             </template>
           </div>
           <div class="row-status">
@@ -160,22 +213,80 @@
               <option value="testcase">{{ t('list.types.testCase') }}</option>
             </select>
             <!-- 普通模式 - 点击进入该类型列表，支持复制 -->
+            <div v-else-if="pendingForCardRow(item)?.type" class="field-diff-inline">
+              <span class="old-value-inline">{{ getTypeText(pendingForCardRow(item).type.old) }}</span>
+              <span class="new-value-inline">{{ getTypeText(pendingForCardRow(item).type.new) }}</span>
+            </div>
             <span v-else class="type-badge" :class="item.type" @click.stop>{{ getTypeText(item.type) }}</span>
           </div>
           <div class="row-date">
             <span class="date-text">{{ formatDate(item.created_at) }}</span>
           </div>
           <div class="row-actions" @click.stop>
+            <template v-if="pendingDeleteForCardRow(item)">
+              <template v-if="isLastInConsecutiveCardDeleteGroup(item.id)">
+                <span v-if="getConsecutiveCardDeleteGroupSize(item.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveCardDeleteGroupSize(item.id) }) }}</span>
+                <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmConsecutiveCardDeleteGroup(item.id)">✓</button>
+                <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelConsecutiveCardDeleteGroup(item.id)">✗</button>
+              </template>
+            </template>
+            <!-- 沙箱待采纳（与 Bug/BadCase 列表一致） -->
+            <template v-else-if="pendingForCardRow(item)">
+              <button
+                v-if="hasDetailFieldModifications(item.id)"
+                class="btn-expand-detail"
+                :title="expandedDetailRows.includes(item.id) ? t('list.collapseDetail') : t('list.expandDetail')"
+                @click="toggleDetailExpand(item.id)"
+              >
+                {{ expandedDetailRows.includes(item.id) ? '▼' : '▶' }}
+              </button>
+              <template v-if="isLastInConsecutiveGroup(item.id)">
+                <span v-if="getConsecutiveGroupSize(item.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(item.id) }) }}</span>
+                <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmModify(item.id)">✓</button>
+                <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelModify(item.id)">✗</button>
+              </template>
+            </template>
             <!-- 编辑模式 -->
-            <template v-if="isEditing && editingItem?.id === item.id">
+            <template v-else-if="isEditing && editingItem?.id === item.id">
               <button class="btn-icon-confirm" @click="confirmEdit" :disabled="!editingTitle.trim()" :title="t('common.confirm')">✓</button>
               <button class="btn-icon-cancel" @click="cancelEdit" :title="t('common.cancel')">✗</button>
             </template>
             <!-- 普通模式 -->
-            <button v-else class="btn-icon-edit" :title="t('common.edit')" @click="startEdit(item)">✏️</button>
+            <template v-else>
+              <button class="btn-icon-edit" :title="t('common.edit')" @click="startEdit(item)">✏️</button>
+              <button
+                class="btn-icon-delete"
+                :title="t('unplannedCards.delete')"
+                @click="deleteOneCard(item)"
+              >🗑️</button>
+            </template>
           </div>
         </div>
       </div>
+    </div>
+
+    <div
+      v-if="showPagination"
+      class="list-pagination"
+    >
+      <button
+        type="button"
+        class="pagination-btn"
+        :disabled="loading || page <= 1"
+        @click="emit('update:page', page - 1)"
+      >
+        {{ t('list.paginationPrev') }}
+      </button>
+      <span class="pagination-info">{{ t('list.paginationShort', { current: page, total: totalPages }) }}</span>
+      <span class="pagination-total">{{ t('list.paginationTotal', { n: total }) }}</span>
+      <button
+        type="button"
+        class="pagination-btn"
+        :disabled="loading || page >= totalPages"
+        @click="emit('update:page', page + 1)"
+      >
+        {{ t('list.paginationNext') }}
+      </button>
     </div>
   </div>
 </template>
@@ -183,9 +294,12 @@
 <script>
 import { ref, nextTick, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { deleteCard } from '../../api.js'
+import SelectableTitleTip from '../SelectableTitleTip.vue'
 
 export default {
   name: 'CardPanel',
+  components: { SelectableTitleTip },
   props: {
     // 标题相关
     title: { type: String, default: '' },
@@ -194,6 +308,8 @@ export default {
     // 数据
     items: { type: Array, default: () => [] },
     total: { type: Number, default: 0 },
+    page: { type: Number, default: 1 },
+    pageSize: { type: Number, default: 20 },
     loading: { type: Boolean, default: false },
     selectedItems: { type: Array, default: () => [] },
     selectAll: { type: Boolean, default: false },
@@ -210,11 +326,39 @@ export default {
     
     // 编辑卡片回调
     editItem: { type: Function, default: null },
+
+    /** 与 BadcaseListPanel 一致：由父组件更新 selectedItems / selectAll */
+    toggleSelectAll: { type: Function, default: () => {} },
+    toggleTaskSelection: { type: Function, default: () => {} },
     
     // 快速更新卡片回调（行内编辑）
     onQuickUpdate: { type: Function, default: null },
+
+    /** 沙箱修改待采纳（target=card 时 key 为 Card.id） */
+    pendingModifications: { type: Object, default: () => ({}) },
+    confirmModify: { type: Function, default: null },
+    cancelModify: { type: Function, default: null },
+    confirmDelete: { type: Function, default: null },
+    isLastInConsecutiveCardDeleteGroup: { type: Function, default: () => true },
+    getConsecutiveCardDeleteGroupSize: { type: Function, default: () => 1 },
+    confirmConsecutiveCardDeleteGroup: { type: Function, default: null },
+    cancelConsecutiveCardDeleteGroup: { type: Function, default: null },
+    hasDetailFieldModifications: { type: Function, default: () => false },
+    toggleDetailExpand: { type: Function, default: () => {} },
+    expandedDetailRows: { type: Array, default: () => [] },
+    isLastInConsecutiveGroup: { type: Function, default: () => true },
+    getConsecutiveGroupSize: { type: Function, default: () => 1 },
+
+    /** create 沙箱待采纳（当前视图已过滤，迭代卡片总表仅 card） */
+    pendingCreates: { type: Array, default: () => [] },
+    confirmCreate: { type: Function, default: null },
+    cancelCreate: { type: Function, default: null },
+    isLastInCreateCluster: { type: Function, default: () => true },
+    getCreateClusterSize: { type: Function, default: () => 1 },
+    confirmConsecutiveCreateGroup: { type: Function, default: null },
+    cancelConsecutiveCreateGroup: { type: Function, default: null }
   },
-  emits: ['edit', 'delete', 'refresh', 'search', 'toggleSelectAll', 'toggleSelection', 'update:searchText', 'quickCreate', 'create', 'quickUpdate', 'openTypeList'],
+  emits: ['edit', 'delete', 'refresh', 'search', 'update:searchText', 'update:page', 'quickCreate', 'create', 'quickUpdate', 'openTypeList'],
   setup(props, { emit }) {
     const { t } = useI18n()
     
@@ -241,6 +385,17 @@ export default {
         return props.items
       }
       return props.items.filter(item => item.type === currentTypeFilter.value)
+    })
+
+    const totalPages = computed(() => {
+      const ps = Number(props.pageSize) || 20
+      const tot = Number(props.total) || 0
+      return Math.max(1, Math.ceil(tot / ps))
+    })
+
+    const showPagination = computed(() => {
+      const ps = Number(props.pageSize) || 20
+      return (Number(props.total) || 0) > ps
     })
     
     // 清除类型筛选，返回总览
@@ -283,6 +438,21 @@ export default {
         if (desc) return desc.length > 200 ? `${desc.slice(0, 200)}…` : desc
       }
       return '—'
+    }
+
+    /** 列表省略展示时的原生 title 悬停：给完整标题/备注（不把 testcase 截断到 200） */
+    const rowTitleTooltip = (item) => {
+      if (!item) return ''
+      const raw = item.title != null ? String(item.title).trim() : ''
+      if (raw) return raw
+      const ty = (item.type || '').toString().toLowerCase()
+      if (ty === 'testcase') {
+        const rm = item.remark != null ? String(item.remark).trim() : ''
+        if (rm) return rm
+        const desc = item.description != null ? String(item.description).trim() : ''
+        if (desc) return desc
+      }
+      return ''
     }
     
     const isNewItem = (itemId) => {
@@ -353,7 +523,7 @@ export default {
       }
     }
     
-    const confirmCreate = async () => {
+    const submitQuickCreate = async () => {
       const title = newCardTitle.value.trim()
       if (!title) return
       
@@ -376,7 +546,7 @@ export default {
       }
     }
     
-    const cancelCreate = () => {
+    const abortQuickCreate = () => {
       isCreating.value = false
       newCardTitle.value = ''
       newCardType.value = 'bug'
@@ -386,12 +556,25 @@ export default {
       // 延迟检查，因为可能点击的是确认/取消按钮
       setTimeout(() => {
         if (isCreating.value && !newCardTitle.value.trim()) {
-          cancelCreate()
+          abortQuickCreate()
         }
       }, 150)
     }
+
+    /** 仅展示 target=card 的 pending，避免与其它表主键数字冲突 */
+    const pendingForCardRow = (item) => {
+      const p = props.pendingModifications?.[item?.id]
+      if (!p || p._target !== 'card' || p._pendingDelete) return null
+      return p
+    }
+
+    const pendingDeleteForCardRow = (item) => {
+      const p = props.pendingModifications?.[item?.id]
+      return !!(p && p._target === 'card' && p._pendingDelete)
+    }
     
     const handleRowClick = (item, e) => {
+      if (pendingDeleteForCardRow(item) || pendingForCardRow(item)) return
       if (e.button !== 0) return
       const el = e?.target
       if (el && typeof el.closest === 'function') {
@@ -402,17 +585,56 @@ export default {
       emit('openTypeList', item.type, item.title, item.id)
     }
     
+    const onHeaderSelectAllChange = () => {
+      if (typeof props.toggleSelectAll === 'function') props.toggleSelectAll()
+    }
+
+    const onRowSelectionChange = (id) => {
+      if (typeof props.toggleTaskSelection === 'function') props.toggleTaskSelection(id)
+    }
+
     const batchDeleteSelected = async () => {
-      const ids = [...props.selectedItems]
+      const ids = [...(props.selectedItems || [])]
       if (!ids.length) return
-      
+
       if (!confirm(t('list.batchDeleteConfirm', { n: ids.length, type: itemTypeLabel.value }))) return
-      
+
       try {
-        emit('batchDelete', ids)
+        const requests = ids.map((id) => deleteCard(id))
+        const results = await Promise.allSettled(requests)
+        const failed = results.filter((r) => {
+          if (r.status !== 'fulfilled') return true
+          const ok = r.value?.data?.success === true
+          return !ok
+        }).length
+
+        if (failed > 0) {
+          alert(t('list.batchDeletePartial', { failed }))
+        } else {
+          alert(t('list.batchDeleteOk'))
+        }
       } catch (e) {
         console.error('批量删除异常:', e)
         alert(t('list.batchDeleteFail', { msg: e?.message || t('common.unknownError') }))
+      } finally {
+        emit('refresh')
+      }
+    }
+
+    const deleteOneCard = async (item) => {
+      if (!item?.id) return
+      const title = rowDisplayTitle(item)
+      if (!confirm(t('unplannedCards.confirmDelete', { title }))) return
+      try {
+        const res = await deleteCard(item.id)
+        if (res?.data?.success === false) {
+          alert(t('unplannedCards.deleteFailed'))
+          return
+        }
+        emit('refresh')
+      } catch (e) {
+        console.error(e)
+        alert(t('unplannedCards.deleteFailed'))
       }
     }
     
@@ -432,11 +654,14 @@ export default {
       getTypeText, 
       formatDate,
       rowDisplayTitle,
+      rowTitleTooltip,
+      pendingForCardRow,
+      pendingDeleteForCardRow,
       handleRowClick,
       startEdit,
       startCreate,
-      confirmCreate,
-      cancelCreate,
+      submitQuickCreate,
+      abortQuickCreate,
       handleCreateBlur,
       isCreating,
       newCardTitle,
@@ -444,11 +669,16 @@ export default {
       createInputRef,
       isNewItem,
       batchDeleteSelected,
+      deleteOneCard,
+      onHeaderSelectAllChange,
+      onRowSelectionChange,
       emit,
       addNewlyCreatedId,
       // 类型筛选
       currentTypeFilter,
       filteredItems,
+      totalPages,
+      showPagination,
       clearTypeFilter,
       // 编辑相关
       isEditing,
@@ -637,7 +867,7 @@ export default {
 
 .table-header {
   display: grid;
-  grid-template-columns: 40px 2fr 1fr 1fr 100px;
+  grid-template-columns: 40px 2fr 1fr 1fr 130px;
   gap: 16px;
   padding: 12px 24px;
   background: #f8f9fa;
@@ -654,7 +884,7 @@ export default {
 
 .table-row {
   display: grid;
-  grid-template-columns: 40px 2fr 1fr 1fr 100px;
+  grid-template-columns: 40px 2fr 1fr 1fr 130px;
   gap: 16px;
   padding: 12px 24px;
   border-bottom: 1px solid #f0f0f0;
@@ -672,6 +902,15 @@ export default {
 .editing-row {
   background: #e6f7ff;
   border-bottom: 2px solid #1890ff;
+}
+
+.pending-create-row {
+  background: #ecfdf5;
+  border-left: 3px solid #10b981;
+}
+
+.create-new-only {
+  font-weight: 500;
 }
 
 .edit-indicator {
@@ -708,6 +947,63 @@ export default {
 
 .table-row.selected {
   background: #e3f2fd;
+}
+
+.table-row.pending-modify {
+  background: #fffbeb;
+  border-left: 3px solid #f59e0b;
+}
+
+/* 与 VS Code 删除行一致：#f14c4c 左边条 + rgba(255,0,0,.18) */
+.table-row.pending-delete-row {
+  background: rgba(255, 0, 0, 0.18) !important;
+  border-left: 4px solid #f14c4c;
+}
+
+.table-row.pending-delete-row:hover {
+  background: rgba(255, 0, 0, 0.22) !important;
+}
+
+.table-row.pending-delete-row .card-title {
+  text-decoration: line-through;
+  text-decoration-color: rgba(0, 0, 0, 0.28);
+}
+
+.delete-preview-hint {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.field-diff-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.old-value-inline {
+  background: #fef2f2;
+  color: #991b1b;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  text-decoration: line-through;
+  border: 1px solid #fecaca;
+}
+
+.new-value-inline {
+  background: #f0fdf4;
+  color: #166534;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid #bbf7d0;
+}
+
+.table-row .field-diff-inline span {
+  cursor: text;
+  user-select: text;
 }
 
 /* 与 grep/modify 列表定位一致：对话区点击跳转后的高亮动画 */
@@ -773,6 +1069,8 @@ export default {
 }
 
 .card-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -844,11 +1142,76 @@ export default {
 
 .row-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.btn-icon-approve,
+.btn-icon-reject {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-approve {
+  background: #10b981;
+  color: white;
+}
+
+.btn-icon-approve:hover {
+  background: #059669;
+  transform: scale(1.1);
+}
+
+.btn-icon-reject {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-icon-reject:hover {
+  background: #dc2626;
+  transform: scale(1.1);
+}
+
+.btn-expand-detail {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid #e5e7eb;
+  background: white;
+  color: #374151;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-expand-detail:hover {
+  background: #f3f4f6;
+}
+
+.batch-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+  background: #fef3c7;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-right: 8px;
 }
 
 .btn-icon-edit,
+.btn-icon-delete,
 .btn-icon-confirm,
 .btn-icon-cancel {
   width: 28px;
@@ -866,6 +1229,10 @@ export default {
 
 .btn-icon-edit:hover {
   background: #e9ecef;
+}
+
+.btn-icon-delete:hover {
+  background: #fff1f0;
 }
 
 .btn-icon-confirm {
@@ -918,5 +1285,48 @@ export default {
 .batch-delete-btn:hover {
   background: #dc2626;
   transform: translateY(-1px);
+}
+
+.list-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px 24px 16px;
+  border-top: 1px solid #e9ecef;
+  background: #fafbfc;
+  font-size: 13px;
+  color: #555;
+}
+
+.list-pagination .pagination-btn {
+  padding: 6px 14px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  color: #333;
+}
+
+.list-pagination .pagination-btn:hover:not(:disabled) {
+  background: #f0f4f8;
+  border-color: #b6c2cf;
+}
+
+.list-pagination .pagination-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.list-pagination .pagination-info {
+  font-weight: 600;
+  color: #333;
+}
+
+.list-pagination .pagination-total {
+  color: #888;
+  font-size: 12px;
 }
 </style>

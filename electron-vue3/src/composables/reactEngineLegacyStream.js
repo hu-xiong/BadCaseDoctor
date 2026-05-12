@@ -127,6 +127,14 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
   if (stepEvent.event === 'running_summary_done') {
     aiMessage.unifiedSummaryLoading = false
     if (stepEvent.version != null) aiMessage.runningSummaryVersion = stepEvent.version
+    // 后端在切片重放后附带全文；仅靠 stream delta 可能丢尾包或中断，必须以 full_text 收口
+    const ft =
+      typeof stepEvent.full_text === 'string'
+        ? stepEvent.full_text.trim()
+        : ''
+    if (ft) {
+      aiMessage.runningSummaryDraft = ft
+    }
     return {}
   }
   if (stepEvent.event === 'llm_text_stream') {

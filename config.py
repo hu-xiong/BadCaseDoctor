@@ -76,7 +76,8 @@ class Config:
     QIANFAN_MAX_RETRIES = int(os.getenv('QIANFAN_MAX_RETRIES', '3'))
     
     # 默认 LLM 配置（步骤推理 ReAct / 对话 Agent）
-    DEFAULT_LLM = os.getenv('DEFAULT_LLM', 'qianfan')  # 默认文心；千问需配置 DASHSCOPE_API_KEY
+    # 默认千问：与前端下拉默认 qwen3.5-plus 对齐；需百度文心时请设环境变量 DEFAULT_LLM=qianfan 并配置千帆密钥
+    DEFAULT_LLM = os.getenv('DEFAULT_LLM', 'qwen')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
     OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
 
@@ -91,6 +92,12 @@ class Config:
     DEEPSEEK_TEMPERATURE = float(os.getenv('DEEPSEEK_TEMPERATURE', '0.7'))
     # 可选：同一账号内 KV/前缀缓存隔离键（官方 request.user_id）；固定为产品实例 id 可提高同前缀命中稳定性
     DEEPSEEK_KV_USER_ID = os.getenv('DEEPSEEK_KV_USER_ID', '').strip()
+    # deepseek-v4-pro：调用方未传 max_tokens 时的默认 completion 上限（思考+正文共用），减轻冗长重复；0=不限制
+    try:
+        _dsmpt = (os.getenv('DEEPSEEK_V4_PRO_MAX_TOKENS') or '2048').strip()
+        DEEPSEEK_V4_PRO_MAX_TOKENS = int(_dsmpt) if _dsmpt else 0
+    except ValueError:
+        DEEPSEEK_V4_PRO_MAX_TOKENS = 2048
     
     REDIS_DATABASE=int(os.getenv('REDIS_DATABASE', 0))
     REDIS_USERNAME=os.getenv('REDIS_USERNAME', None)

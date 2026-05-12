@@ -84,26 +84,29 @@ def modify_tool_params_log_snapshot(
 
 
 class ModifyTool(BaseTool):
-    """对话修改Bug/BadCase工具"""
+    """对话修改 Bug / BadCase / TestCase / 统一卡片(Card) 的工具"""
     
     def __init__(self, db_session, database_uri: str = None):
         self.db = db_session
         self.name = "modify"
         self.description = """
-用于修改 Bug / BadCase / 测试用例(testcase) 的工具，支持对话式修改和行级别对比。
+用于修改 Bug / BadCase / 测试用例(testcase) / **统一迭代卡片(Card)** / **迭代计划(Plan)** 的工具，支持对话式修改和行级别对比。
+
+主界面迭代列表一行对应 **Card 表**（card.id 为卡片主键）。修改「卡片标题/描述」且用户明确说「卡片」或 grep 命中 **target=card** 时：
+- **target 必须设为 'card'**，并传 **card_id**（或 engine 将数字识别为 Card 主键时的 target_id）。
+- 勿只因标题里含 bug/testcase 等字样就把 target 设为 bug/testcase。
 
 使用场景：
-- 用户说"修改这个 Bug 的标题"
-- 用户说"把优先级改成高"
-- 用户说"更新复现步骤"
-- 用户说"修改最近创建的 Bug 状态为已解决"
-- 用户说"修改某个测试用例的标题/状态/负责人等"
+- 用户说「修改卡片的标题 …」「把这张卡片标题改成 …」→ target=card，modifications 含 title
+- 用户说「修改这个 Bug 的标题」→ target=bug（或先 grep target=bug）
+- 用户说「把优先级改成高」「更新复现步骤」
+- 用户说「修改某个测试用例的标题/状态/负责人等」
 
 参数：
-- target: 修改目标类型，'bug'、'badcase' 或 'testcase'
-- target_id: 目标ID（可选，如果提供 natural_query 可自动查找；兼容旧版直接传源表主键）
-- card_id: 卡片ID（可选；推荐优先使用。若提供，会优先用 card_id 在对应源表中定位记录）
-- modifications: 修改内容字典，格式 {"字段名": "新值"}
+- target: 'bug' | 'badcase' | 'testcase' | **'card'** | **'plan'**（plan 时为迭代计划表 Plan.id）
+- target_id: 目标主键（Bug/BadCase/TestCase 的源表 id；**target=card 时为 card.id**；**target=plan 时为 plan.id**）
+- card_id: **Card 表主键**（可选）。提供时优先按卡片定位；与 source 表关联时也可用来校正 target
+- modifications: 修改内容字典，格式 {"字段名": "新值"}；Card 常用 title、description、priority、assignee 等
 - project_id: 项目ID（必需）
 - natural_query: 自然语言查询（可选，用于查找目标记录）
 
@@ -194,6 +197,126 @@ class ModifyTool(BaseTool):
         except Exception:
             return target, False
 
+    def _infer_modify_target_from_modification_keys(self, modifications: Dict[str, Any]) -> Optional[str]:
+        """当同一 project 下 bug/badcase/testcase 主键撞号时，用修改字段粗判真实类型（仅作歧义消解）。"""
+        if not modifications or not isinstance(modifications, dict):
+            return None
+        keys = {str(k).strip().lower() for k in modifications.keys()}
+        bugish = {
+            "steps_to_reproduce",
+            "expected_result",
+            "actual_result",
+            "severity",
+            "description",
+        }
+        badish = {
+            "reproduction_steps",
+            "answer",
+            "correct_answer",
+            "badcase_result",
+            "base_problem",
+            "case_category",
+        }
+        tcish = {"preconditions", "steps", "remark", "baseline", "test_type", "case_type"}
+        b_hit = bool(keys & bugish)
+        d_hit = bool(keys & badish)
+        t_hit = bool(keys & tcish)
+        if b_hit and not d_hit and not t_hit:
+            return "bug"
+        if d_hit and not b_hit and not t_hit:
+            return "badcase"
+        if t_hit and not b_hit and not d_hit:
+            return "testcase"
+        return None
+
+    def _reconcile_modify_target_from_db(
+        self,
+        target: Optional[str],
+        target_id: int,
+        project_id: int,
+        modifications: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        模型常把 target 写成 badcase，实际要改的是 Bug 源行（或反之）。
+        在已解析出 project_id + 源表主键 target_id 后：
+        1) 优先用 Card.source_id + source_type 作为权威；
+        2) 无 Card 时若仅一张源表存在该 id，则采用该表类型；
+        3) 多张表同 id 时尝试用 modifications 字段集消歧。
+        """
+        tl = (str(target or "bug")).strip().lower()
+        if tl in ("card", "plan"):
+            return tl
+        try:
+            pid = int(project_id)
+            tid = int(target_id)
+        except (TypeError, ValueError):
+            return tl
+        try:
+            from app import app as flask_app, db as flask_db, Bug, BadCase, Card, TestCase
+
+            with flask_app.app_context():
+                cards = (
+                    flask_db.session.query(Card)
+                    .filter(Card.project_id == pid, Card.source_id == tid)
+                    .all()
+                )
+                if len(cards) == 1:
+                    canon = self._canonical_target_from_card_source_type(
+                        getattr(cards[0], "source_type", None)
+                    )
+                    if canon and canon != tl:
+                        print(
+                            f"[MODIFY] 按 Card.source_type 校正 target: {tl!r} → {canon!r} "
+                            f"(card.id={getattr(cards[0], 'id', None)}, source_id={tid})",
+                            flush=True,
+                        )
+                        return canon
+                if len(cards) > 1:
+                    return tl
+
+                has_bug = (
+                    flask_db.session.query(Bug.id)
+                    .filter(Bug.project_id == pid, Bug.id == tid)
+                    .first()
+                    is not None
+                )
+                has_bad = (
+                    flask_db.session.query(BadCase.id)
+                    .filter(BadCase.project_id == pid, BadCase.id == tid)
+                    .first()
+                    is not None
+                )
+                has_tc = (
+                    flask_db.session.query(TestCase.id)
+                    .filter(TestCase.project_id == pid, TestCase.id == tid)
+                    .first()
+                    is not None
+                )
+                hits: List[str] = []
+                if has_bug:
+                    hits.append("bug")
+                if has_bad:
+                    hits.append("badcase")
+                if has_tc:
+                    hits.append("testcase")
+                if len(hits) == 1 and hits[0] != tl:
+                    print(
+                        f"[MODIFY] 按源表唯一命中校正 target: {tl!r} → {hits[0]!r} (id={tid})",
+                        flush=True,
+                    )
+                    return hits[0]
+                if len(hits) > 1:
+                    hinted = self._infer_modify_target_from_modification_keys(modifications or {})
+                    if hinted and hinted in hits and hinted != tl:
+                        print(
+                            f"[MODIFY] 按 modifications 字段校正 target: {tl!r} → {hinted!r} (id={tid})",
+                            flush=True,
+                        )
+                        return hinted
+        except Exception as e:
+            print(f"[MODIFY] target 校正查询异常，沿用 {tl!r}: {e}", flush=True)
+        return tl
+
     def _resolve_target_id_from_card_id(self, target: str, card_id: Any, project_id: Any) -> Optional[int]:
         """
         卡片层适配：优先用 card_id 在 Card 表中定位 source_type/source_id；
@@ -218,12 +341,23 @@ class ModifyTool(BaseTool):
                         .first()
                     )
                     if card is not None:
-                        st = (getattr(card, "source_type", None) or "").strip().lower()
+                        tl = (target or "").strip().lower()
                         sid = getattr(card, "source_id", None)
+                        # target=card：无 source 映射时不要落到 Bug.card_id，否则会绑错多条缺陷
+                        if tl == "card":
+                            if sid is not None and str(sid).strip():
+                                try:
+                                    return int(sid)
+                                except Exception:
+                                    return None
+                            return None
                         if sid is not None and str(sid).strip():
-                            # source_type 与 target 不一致时，避免误改其他类型
-                            if st and st != target:
-                                return None
+                            canon_st = self._canonical_target_from_card_source_type(
+                                getattr(card, "source_type", None)
+                            )
+                            if canon_st and tl not in ("card",):
+                                if canon_st != tl:
+                                    return None
                             try:
                                 return int(sid)
                             except Exception:
@@ -446,7 +580,7 @@ class ModifyTool(BaseTool):
         但若误写仍会污染 Bug/BadCase/TestCase 的标题字段。
         规则：无明确「改标题」意图且同时改其它字段时剔除 title；或与当前行标题相同则剔除冗余。
         """
-        if target not in ("bug", "badcase", "testcase"):
+        if target not in ("bug", "badcase", "testcase", "card", "plan"):
             return modifications
         if "title" not in modifications:
             return modifications
@@ -480,16 +614,17 @@ class ModifyTool(BaseTool):
             print("[MODIFY] 剔除冗余 title（与当前记录标题相同）", flush=True)
             return m
 
-        # 仅有 title、且附带用户原话、话里无改标题意图：多为模型把 Bug 名误写入 title（采纳路径以往拿不到 nq）
+        # 仅有 title、且无改标题意图：多为模型把实体名误写入 title（采纳路径常无 natural_query，也必须剔除）
+        # Card：标题即列表主文案；剔除会导致 diff 为空、沙箱预览「0 项」
         if (
             not batch_mode
             and set(m.keys()) == {"title"}
-            and nq
             and not has_title_intent
+            and target != "card"
         ):
             m.pop("title", None)
             print(
-                "[MODIFY] 仅 title 且用户原话无改标题意图，已移除 title",
+                "[MODIFY] 仅 title 且无改标题意图，已移除 title（与 natural_query 是否为空无关）",
                 flush=True,
             )
             return m
@@ -559,7 +694,7 @@ class ModifyTool(BaseTool):
         """已明确定位 id+project 时，读行只需 ORM 主键查询，无需 Text2SQL（避免数秒 LLM，且与生产库一致；Text2SQL 常连本地 SQLite）。"""
         if self._env_flag_enabled("MODIFY_FORCE_TEXT2SQL_ROW_READ", "0"):
             return False
-        if target not in ("bug", "badcase", "testcase"):
+        if target not in ("bug", "badcase", "testcase", "card", "plan"):
             return False
         try:
             if target_id is None or project_id is None:
@@ -649,7 +784,7 @@ class ModifyTool(BaseTool):
                 modified_data["assignee_display"] = user.name if user else str(new_assignee)
             except (ValueError, TypeError):
                 modified_data["assignee_display"] = str(modifications.get("assignee", ""))
-        if target in ("bug", "testcase") and (
+        if target in ("bug", "testcase", "card", "plan") and (
             "assignee_id" in modifications or "assignee" in modifications
         ):
             from app import User, db as flask_db
@@ -856,18 +991,29 @@ class ModifyTool(BaseTool):
                     flush=True,
                 )
                 card_id = amb
-                target, _ = self._normalize_target_using_card_row(target or "bug", project_id, card_id)
-                tid_src = self._resolve_target_id_from_card_id(target, card_id, project_id)
-                if tid_src is not None:
-                    target_id = tid_src
+                # 数字实为 Card 主键时，默认按「卡片层」修改 Card 表；勿再用 Bug.card_id 反查误绑其它缺陷
+                target = "card"
+                target_id = int(amb)
+                card_id = int(amb)
         # 传入 card_id 时以 Card.source_type 为权威，避免标题含「testcase」等词误导 LLM 选错 target
         if card_id and project_id:
-            target, _ = self._normalize_target_using_card_row(target, project_id, card_id)
-        if (not target_id) and card_id and project_id:
+            target, _ = self._normalize_target_using_card_row(target or "bug", project_id, card_id)
+        # 仅非「纯卡片层」时才把 card_id 解析为源表主键（target=card 时用 Card 主键直接读写）
+        if (
+            str(target or "").strip().lower() != "card"
+            and (not target_id)
+            and card_id
+            and project_id
+        ):
             tid_from_card = self._resolve_target_id_from_card_id(target, card_id, project_id)
             if tid_from_card:
                 target_id = tid_from_card
                 print(f"[MODIFY] 通过 card_id={card_id} 定位到源表 target_id={target_id}")
+        elif str(target or "").strip().lower() == "card" and card_id and project_id and not target_id:
+            try:
+                target_id = int(card_id)
+            except (TypeError, ValueError):
+                pass
         batch_target_ids = self._normalize_target_ids(kwargs.get("target_ids", None) or target_id)
         if batch_target_ids:
             target_id = batch_target_ids[0]
@@ -897,6 +1043,15 @@ class ModifyTool(BaseTool):
                     'success': False,
                     'error': modify_error_target_id_bad(target_id, loc),
                 }
+
+        # 已定位源表主键：按 Card / 源表实际类型校正 target，避免 summary 出现「预览修改 BadCase」实为 Bug 行
+        if target_id is not None and project_id is not None:
+            tl0 = str(target or "").strip().lower()
+            if tl0 not in ("card", "plan"):
+                target = self._reconcile_modify_target_from_db(
+                    target, target_id, project_id, dict(modifications or {})
+                )
+        target = str(target or "bug").strip().lower()
         
         _progress(modify_tool_progress("located_validate", loc, target_id=target_id))
         
@@ -987,7 +1142,25 @@ class ModifyTool(BaseTool):
         _progress(modify_tool_progress("fields_mapped", loc, keys=list(modifications.keys())))
         
         # 不可修改字段检查：若用户请求修改 type/类型 等，直接返回明确错误，避免长时间执行
-        IMMUTABLE_FIELDS = {'id', 'type', 'project_id', 'plan_id', 'created_at', 'updated_at', 'creator_id'}
+        if (target or "").strip().lower() == "plan":
+            IMMUTABLE_FIELDS = {
+                "id",
+                "project_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+                "is_default",
+            }
+        else:
+            IMMUTABLE_FIELDS = {
+                "id",
+                "type",
+                "project_id",
+                "plan_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+            }
         requested_immutable = [f for f in modifications.keys() if f in IMMUTABLE_FIELDS]
         if requested_immutable:
             for f in requested_immutable:
@@ -1156,6 +1329,11 @@ class ModifyTool(BaseTool):
                     )
                     modifications = self._sanitize_title_modifications(
                         target, modifications, od_apply, natural_query, batch_mode=False
+                    )
+                    print(
+                        f"[MODIFY_TRACE] commit target={target!r} id={target_id} "
+                        f"keys={sorted(modifications.keys())} title_applies={'title' in modifications}",
+                        flush=True,
                     )
                     success = await self._apply_modifications(
                         target, target_id, modifications, project_id
@@ -1513,7 +1691,79 @@ class ModifyTool(BaseTool):
                 'actual_time': testcase.actual_time or '',
                 'baseline': testcase.baseline or ''
             }
-        
+
+        elif target == "card":
+            _prog(modify_tool_progress("querying_card", loc))
+            from app import Card, User
+
+            card = flask_db.session.query(Card).filter(
+                Card.id == target_id,
+                Card.project_id == project_id,
+            ).first()
+            if not card:
+                return None
+            assignee_name = ""
+            if card.assignee_id:
+                user = flask_db.session.query(User).get(card.assignee_id)
+                if user:
+                    assignee_name = user.name
+            ty = card.type.value if hasattr(card.type, "value") else str(card.type)
+            return {
+                "id": card.id,
+                "title": card.title,
+                "description": card.description or "",
+                "type": ty,
+                "priority": card.priority or "",
+                "plan_id": card.plan_id,
+                "assignee_id": card.assignee_id,
+                "assignee": assignee_name,
+                "source_type": card.source_type,
+                "source_id": card.source_id,
+            }
+
+        elif target == "plan":
+            _prog(modify_tool_progress("db_fetch", loc))
+            from app import Plan, User
+
+            row = (
+                flask_db.session.query(Plan)
+                .filter(Plan.id == target_id, Plan.project_id == project_id)
+                .first()
+            )
+            if not row:
+                return None
+            assignee_name = ""
+            if row.assignee_id:
+                u = flask_db.session.query(User).get(row.assignee_id)
+                if u:
+                    assignee_name = u.name or ""
+            creator_name = ""
+            if row.creator_id:
+                u = flask_db.session.query(User).get(row.creator_id)
+                if u:
+                    creator_name = u.name or ""
+            sd = row.start_date.isoformat() if row.start_date else ""
+            ed = row.end_date.isoformat() if row.end_date else ""
+            return {
+                "id": row.id,
+                "name": row.name,
+                "title": row.name,
+                "description": row.description or "",
+                "status": row.status or "",
+                "priority": row.priority or "",
+                "is_pinned": bool(row.is_pinned),
+                "is_default": bool(row.is_default),
+                "parent_id": row.parent_id,
+                "progress": row.progress,
+                "scope_notification": bool(row.scope_notification),
+                "start_date": sd,
+                "end_date": ed,
+                "assignee_id": row.assignee_id,
+                "assignee": assignee_name,
+                "creator_id": row.creator_id,
+                "creator": creator_name,
+            }
+
         if self.text2sql and prefer_orm_read and not orm_pk_only:
             _prog(modify_tool_progress("text2sql_load", loc))
             _t_sup0 = time.perf_counter()
@@ -1687,7 +1937,13 @@ class ModifyTool(BaseTool):
 
     @staticmethod
     def _sandbox_table_name(target: str) -> str:
-        return {"bug": "bug", "badcase": "bad_case", "testcase": "test_case"}.get(target, "bug")
+        return {
+            "bug": "bug",
+            "badcase": "bad_case",
+            "testcase": "test_case",
+            "card": "card",
+            "plan": "plan",
+        }.get(target, "bug")
 
     @staticmethod
     def _sandbox_preview_mode() -> str:
@@ -1995,7 +2251,25 @@ class ModifyTool(BaseTool):
         self, target: str, modifications: Dict[str, Any], project_id: int
     ) -> tuple[Optional[List[str]], Optional[str]]:
         """直出 UPDATE 的 SET 子句列表；与单条沙箱预览语义一致。"""
-        immutable_fields = {"id", "type", "project_id", "created_at", "updated_at", "creator_id", "plan_id"}
+        if (target or "").strip().lower() == "plan":
+            immutable_fields = {
+                "id",
+                "project_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+                "is_default",
+            }
+        else:
+            immutable_fields = {
+                "id",
+                "type",
+                "project_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+                "plan_id",
+            }
         set_clauses: List[str] = []
         for field, value in (modifications or {}).items():
             if field in immutable_fields:
@@ -2620,8 +2894,26 @@ class ModifyTool(BaseTool):
     async def _apply_modifications(self, target: str, target_id: int, modifications: Dict, project_id: int) -> bool:
         """应用修改到数据库"""
         print(f"[MODIFY] _apply_modifications 开始: target={target}, target_id={target_id}, 共 {len(modifications or {})} 个字段")
-        # 不可修改的字段列表
-        immutable_fields = {'id', 'type', 'project_id', 'created_at', 'updated_at', 'creator_id', 'plan_id'}
+        # 不可修改的字段列表（Plan 表无 plan_id / type）
+        if (target or "").strip().lower() == "plan":
+            immutable_fields = {
+                "id",
+                "project_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+                "is_default",
+            }
+        else:
+            immutable_fields = {
+                "id",
+                "type",
+                "project_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+                "plan_id",
+            }
         
         try:
             # 构建自然语言修改描述
@@ -2708,12 +3000,20 @@ class ModifyTool(BaseTool):
                 from app import TestCase
                 q = flask_db.session.query(TestCase).filter(TestCase.project_id == project_id, TestCase.id.in_(ids))
                 update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
+            elif target == "card":
+                from app import Card
+                q = flask_db.session.query(Card).filter(Card.project_id == project_id, Card.id.in_(ids))
+                update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
             else:
                 return False
             if not update_map:
                 return False
             affected = q.update(update_map, synchronize_session=False)
             pid = int(project_id)
+            if target == "card":
+                flask_db.session.commit()
+                print(f"[MODIFY] 批量更新完成: target={target}, ids={ids}, affected={affected}")
+                return affected > 0
             from app import Bug, BadCase, TestCase
 
             _model = {"bug": Bug, "badcase": BadCase, "testcase": TestCase}[target]
@@ -2780,6 +3080,26 @@ class ModifyTool(BaseTool):
                 '创建人': 'creator_id',
                 'conect_answer': 'answer',
                 '最终正确答案': 'correct_answer',
+            }
+        elif target == "card":
+            field_mapping = {
+                **common_mapping,
+                **label_to_field,
+                'assignee': 'assignee_id',
+                'creator': 'creator_id',
+                '创建人': 'creator_id',
+            }
+        elif target == "plan":
+            plan_labels = dict(label_to_field)
+            plan_labels["标题"] = "name"
+            plan_labels["名称"] = "name"
+            plan_labels["title"] = "name"
+            field_mapping = {
+                **common_mapping,
+                **plan_labels,
+                'assignee': 'assignee_id',
+                'creator': 'creator_id',
+                '创建人': 'creator_id',
             }
         else:
             # bug / testcase
@@ -2891,9 +3211,16 @@ class ModifyTool(BaseTool):
         
         注意：传入的 modifications 已经是解析后的值（用户名已转换为用户ID）
         """
-        # Bug 和 TestCase 使用 assignee_id，BadCase 使用 assignee
+        # Bug / TestCase / Plan 使用 assignee_id，BadCase 使用 assignee
         if target == 'badcase':
             field_mapping = {
+                'creator': 'creator_id',
+                '创建人': 'creator_id',
+            }
+        elif target == "plan":
+            field_mapping = {
+                'assignee': 'assignee_id',
+                '负责人': 'assignee_id',
                 'creator': 'creator_id',
                 '创建人': 'creator_id',
             }
@@ -2975,7 +3302,46 @@ class ModifyTool(BaseTool):
                 )
                 flask_db.session.commit()
                 return True
-            
+
+            elif target == "card":
+                from app import Card
+
+                card = flask_db.session.query(Card).filter(
+                    Card.id == target_id,
+                    Card.project_id == project_id,
+                ).first()
+                if not card:
+                    return False
+                for field, value in modifications.items():
+                    actual_field = self._map_field_name(field, target)
+                    if hasattr(card, actual_field):
+                        actual_value = (
+                            value["new"] if isinstance(value, dict) and "new" in value else value
+                        )
+                        setattr(card, actual_field, actual_value)
+                flask_db.session.commit()
+                return True
+
+            elif target == "plan":
+                from app import Plan
+
+                row = flask_db.session.query(Plan).filter(
+                    Plan.id == target_id,
+                    Plan.project_id == project_id,
+                ).first()
+                if not row:
+                    return False
+                for field, value in modifications.items():
+                    actual_field = self._map_field_name(field, target)
+                    if not hasattr(row, actual_field):
+                        continue
+                    actual_value = (
+                        value["new"] if isinstance(value, dict) and "new" in value else value
+                    )
+                    setattr(row, actual_field, actual_value)
+                flask_db.session.commit()
+                return True
+
             return False
             
         except Exception as e:

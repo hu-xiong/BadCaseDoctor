@@ -128,12 +128,13 @@ class SkillExecutorTool(BaseTool):
             if step_result['success']:
                 results['successful_steps'].append(step_result)
                 # 更新上下文
-                if 'data' in step_result['observation']:
-                    results['final_context'].update(step_result['observation']['data'])
+                obs = step_result.get('observation') or {}
+                if isinstance(obs, dict) and 'data' in obs:
+                    results['final_context'].update(obs['data'])
             else:
                 results['failed_steps'].append(step_result)
                 #检查是否需要中断
-                if step.break_on_failure:
+                if getattr(step, 'break_on_failure', False):
                     print(f"[SKILL_EXECUTOR]⚠️步失败且设置为中断执行")
                     break
         
@@ -143,7 +144,7 @@ class SkillExecutorTool(BaseTool):
         """执行单个工作流步骤"""
         try:
             #准工具参数
-            tool_params = step.params.copy() if step.params else {}
+            tool_params = dict(step.params) if getattr(step, "params", None) else {}
             
             # 添加必要参数
             if project_id:
@@ -157,7 +158,7 @@ class SkillExecutorTool(BaseTool):
             observation = await tool.execute(tool_params)
             
             return {
-                'step_index': step.index,
+                'step_index': getattr(step, 'step', None),
                 'tool_name': step.tool,
                 'description': todo_desc,
                 'parameters': tool_params,
@@ -167,7 +168,7 @@ class SkillExecutorTool(BaseTool):
             
         except Exception as e:
             return {
-                'step_index': step.index,
+                'step_index': getattr(step, 'step', None),
                 'tool_name': step.tool,
                 'description': todo_desc,
                 'error': str(e),

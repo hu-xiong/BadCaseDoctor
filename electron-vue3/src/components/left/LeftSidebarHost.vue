@@ -25,6 +25,9 @@
       :onArchivePlan="archivePlan"
       :onDeletePlan="deletePlan"
       :onPinPlan="pinPlan"
+      :pendingDeletePlanId="pendingDeletePlanId"
+      :confirmDelete="confirmDelete"
+      :cancelPendingDelete="cancelModify"
     />
 
     <SearchPanel
@@ -108,7 +111,10 @@ defineProps({
   editPlan: { type: Function, required: true },
   archivePlan: { type: Function, required: true },
   deletePlan: { type: Function, required: true },
-  pinPlan: { type: Function, required: true }
+  pinPlan: { type: Function, required: true },
+  pendingDeletePlanId: { type: Number, default: null },
+  confirmDelete: { type: Function, default: null },
+  cancelModify: { type: Function, default: null }
 })
 </script>
 

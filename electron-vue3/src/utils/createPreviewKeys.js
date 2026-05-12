@@ -18,7 +18,22 @@ export function makeStableCreateKey (projectId, target, preview) {
     ''
   ).toString().trim()
   const planId = p.plan_id ?? p.planId ?? 'null'
-  return `${pid}|${t}|${title}|${planId}`
+  // 复制源不同则不应与「仅标题+计划相同」的旧记录共用一条稳定键，否则会误显「已创建」并跳到错误 id
+  const copyHint =
+    p.copy_from_card_id ??
+    p.source_card_id ??
+    p.copy_from_bug_id ??
+    p.source_bug_id ??
+    p.copy_from_badcase_id ??
+    p.source_badcase_id ??
+    p.copy_from_testcase_id ??
+    p.source_testcase_id
+  const copySeg =
+    copyHint != null && String(copyHint).trim() !== ''
+      ? `|copy:${String(copyHint).trim()}`
+      : ''
+  // k3：调整键规则时递增，避免沿用本地旧映射误命中已删或无关记录
+  return `${pid}|${t}|${title}|${planId}${copySeg}|k3`
 }
 
 export function getStableCreatedId (projectId, target, preview) {

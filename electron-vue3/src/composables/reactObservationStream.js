@@ -27,6 +27,54 @@ export const DETAIL_FIELDS = [
   'reproduce_steps'
 ]
 
+/** 与后端 modify 沙箱 before 形状一致：模型常传 target=badcase 实为 Bug 行 */
+function inferModifyTargetFromSourceRowShape(before, after) {
+  const row =
+    before && typeof before === 'object'
+      ? before
+      : after && typeof after === 'object'
+        ? after
+        : null
+  if (!row) return null
+  if (
+    Object.prototype.hasOwnProperty.call(row, 'steps_to_reproduce') ||
+    Object.prototype.hasOwnProperty.call(row, 'severity')
+  ) {
+    return 'bug'
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(row, 'reproduction_steps') ||
+    Object.prototype.hasOwnProperty.call(row, 'badcase_result')
+  ) {
+    return 'badcase'
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(row, 'preconditions') ||
+    Object.prototype.hasOwnProperty.call(row, 'test_type')
+  ) {
+    return 'testcase'
+  }
+  return null
+}
+
+/** 单条 modify 工具结果：优先按 before 推断，避免沙箱跳转误用 BadCase */
+function resolveModifyNavigationTarget(toolData) {
+  if (!toolData || typeof toolData !== 'object') return 'bug'
+  const inferred = inferModifyTargetFromSourceRowShape(toolData.before, toolData.after)
+  if (inferred) return inferred
+  const raw = String(toolData.target || '').trim().toLowerCase()
+  if (['bug', 'badcase', 'testcase', 'card', 'plan'].includes(raw)) return raw
+  return 'bug'
+}
+
+function resolveBatchModifyItemTarget(rr, r, toolData) {
+  const inferred = inferModifyTargetFromSourceRowShape(rr?.before || r?.before, rr?.after || r?.after)
+  if (inferred) return inferred
+  const raw = String(rr?.target || r?.target || toolData?.target || '').trim().toLowerCase()
+  if (['bug', 'badcase', 'testcase', 'card', 'plan'].includes(raw)) return raw
+  return 'bug'
+}
+
 const stableModifyModsKey = (m) => {
   if (!m || typeof m !== 'object') return ''
   const o = {}
@@ -65,6 +113,7 @@ export const extractToolName = (title) => {
   if (t.includes('database_query')) return 'database_query'
   if (t.includes('grep')) return 'grep'
   if (t.includes('modify')) return 'modify'
+  if (t.includes('delete') || t.includes('删除')) return 'delete'
   if (t.includes('create')) return 'create'
   if (t.includes('browser_test')) return 'browser_test'
   if (t.includes('log_analyzer')) return 'log_analyzer'
@@ -105,6 +154,18 @@ export const buildStepResultSummary = (outputData, toolName, toolData) => {
     if (d.diff?.length) return t('chat.stepModifyPreview', { n: d.diff.length })
     if (d.success === false) return t('chat.stepModifyFail', { msg: d.error || t('chat.stepUnknownErr') })
     return d.message || t('chat.stepModifyDone')
+  }
+  if (tool === 'delete' || (d.preview?.record && d.confirmation_required)) {
+    if (d.success === false || outer.success === false) {
+      return combinedErr || t('chat.stepFailed')
+    }
+    if (d.deleted_id != null && d.confirmation_required !== true) {
+      return d.message || t('chat.stepDeleteDone', { id: d.deleted_id })
+    }
+    const pr = d.preview?.record
+    const nm = pr?.title ?? pr?.name ?? pr?.id
+    if (nm != null) return t('chat.stepDeletePreview', { label: String(nm).slice(0, 80) })
+    return d.message || t('chat.stepDeletePreviewShort')
   }
   if (tool === 'create' || (d.preview && typeof d.preview === 'object' && d.target)) {
     if (d.success === false || outer.success === false) {
@@ -244,7 +305,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   if (!runningStep) {
     const ot =
       observationTool || (outputData && typeof outputData === 'object' ? outputData.tool : '')
-    if (ot && ['grep', 'create', 'modify'].includes(String(ot))) {
+    if (ot && ['grep', 'create', 'modify', 'delete'].includes(String(ot))) {
       runningStep = [...aiMessage.steps]
         .reverse()
         .find((s) => s.title === ot || (s.title && s.title.includes(ot)))
@@ -256,6 +317,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           s.title &&
           (s.title.includes('create') ||
             s.title.includes('modify') ||
+            s.title.includes('delete') ||
             s.title === 'grep' ||
             s.title.includes('grep'))
       ) ||
@@ -264,7 +326,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   }
   if (_obsIdx != null && runningStep) {
     const tn = observationTool || (outputData && typeof outputData === 'object' ? outputData.tool : '')
-    if (tn && ['grep', 'create', 'modify', 'search', 'database_query'].includes(String(tn))) {
+    if (tn && ['grep', 'create', 'modify', 'delete', 'search', 'database_query'].includes(String(tn))) {
       runningStep.title = String(tn)
     }
   }
@@ -313,6 +375,18 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
       const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
       if (
         flat &&
+        flat.preview &&
+        typeof flat.preview === 'object' &&
+        flat.preview.record &&
+        flat.confirmation_required
+      ) {
+        resolvedTool = 'delete'
+      }
+    }
+    if (!resolvedTool && outputData && typeof outputData === 'object') {
+      const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
+      if (
+        flat &&
         !flat.created_id &&
         flat.preview &&
         typeof flat.preview === 'object' &&
@@ -350,6 +424,18 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
       const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
       if (
         flat &&
+        flat.preview &&
+        typeof flat.preview === 'object' &&
+        flat.preview.record &&
+        flat.confirmation_required
+      ) {
+        toolName = 'delete'
+      }
+    }
+    if (!toolName && outputData && typeof outputData === 'object') {
+      const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
+      if (
+        flat &&
         !flat.created_id &&
         flat.preview &&
         typeof flat.preview === 'object' &&
@@ -380,7 +466,12 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
       const existingNav = aiMessage.modifyNavigation
       const existingCount = existingNav?.batch_results?.length || 0
       const newCount = (toolData.batch_results || toolData.results || []).length
-      if (existingCount > 0 && existingCount === newCount && existingNav?.target === toolData.target) {
+      const resolvedToolTarget = resolveModifyNavigationTarget(toolData)
+      if (
+        existingCount > 0 &&
+        existingCount === newCount &&
+        existingNav?.target === resolvedToolTarget
+      ) {
         console.log('[MODIFY] 跳过重复 modifyNavigation 更新，避免闪烁')
         return
       }
@@ -439,7 +530,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
             const baseItemInfo = {
               target_id: itemId,
               plan_id: itemPlanId,
-              target: rr?.target || r?.target || toolData.target || 'badcase',
+              target: resolveBatchModifyItemTarget(rr, r, toolData),
               modifications: rr?.modifications || r?.modifications || {},
               confirmation_required: (rr?.confirmation_required ?? r?.confirmation_required) !== false,
               success: (rr?.success ?? r?.success) === true,
@@ -481,7 +572,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
               batch_modify: true,
               batch_results: [...resultsArray],
               batch_count: resultsArray.length,
-              target: toolData.target || 'badcase'
+              target: resolvedToolTarget
             }
           } else {
             const planGroups = {}
@@ -510,7 +601,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
                     if (currentGroup.length > 0) {
                       modifyGroups.push({
                         plan_id: planId === 'unplanned' ? null : parseInt(planId),
-                        target: toolData.target || currentGroup[0]?.target || 'badcase',
+                        target: currentGroup[0]?.target || resolvedToolTarget,
                         items: [...currentGroup]
                       })
                     }
@@ -522,7 +613,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
               if (currentGroup.length > 0) {
                 modifyGroups.push({
                   plan_id: planId === 'unplanned' ? null : parseInt(planId),
-                  target: toolData.target || currentGroup[0]?.target || 'badcase',
+                  target: currentGroup[0]?.target || resolvedToolTarget,
                   items: [...currentGroup]
                 })
               }
@@ -533,7 +624,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
               batch_modify: true,
               batch_results: [...allItems],
               batch_count: allItems.length,
-              target: allItems[0]?.target || toolData.target || 'badcase'
+              target: allItems[0]?.target || resolvedToolTarget
             }
             console.log(
               '[MODIFY] 生成 modifyGroups:',
@@ -555,7 +646,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         }
       } else if (toolData.confirmation_required && toolData.diff) {
         aiMessage.modifyNavigation = {
-          target: toolData.target,
+          target: resolveModifyNavigationTarget(toolData),
           target_id: toolData.target_id,
           diff: toolData.diff,
           modifications: toolData.modifications,
@@ -564,7 +655,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         console.log('[MODIFY] 存储沙箱预览导航:', aiMessage.modifyNavigation)
       } else if (toolData.diff && toolData.before && toolData.after) {
         aiMessage.modifyNavigation = {
-          target: toolData.target || 'bug',
+          target: resolveModifyNavigationTarget(toolData),
           target_id: toolData.target_id,
           diff: toolData.diff,
           before: toolData.before,
@@ -584,14 +675,41 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         toolData.success !== false && !toolData.created_id && (hasDiff || hasPreview)
       if (looksLikePreview) {
         const pv = toolData.preview && typeof toolData.preview === 'object' ? toolData.preview : {}
+        const inferCreateTarget = () => {
+          const ex = toolData.target && String(toolData.target).trim().toLowerCase()
+          if (ex === 'card') return 'card'
+          if (pv.copy_from_card_id != null && String(pv.copy_from_card_id).trim() !== '') return 'card'
+          if (pv.source_card_id != null && String(pv.source_card_id).trim() !== '') return 'card'
+          if (pv.copy_from_bug_id != null && String(pv.copy_from_bug_id).trim() !== '') return 'bug'
+          if (pv.source_bug_id != null && String(pv.source_bug_id).trim() !== '') return 'bug'
+          if (pv.copy_from_badcase_id != null || pv.source_badcase_id != null) return 'badcase'
+          if (pv.copy_from_testcase_id != null || pv.source_testcase_id != null) return 'testcase'
+          if (ex && ['bug', 'badcase', 'testcase', 'plan', 'card'].includes(ex)) return ex
+          if (
+            pv.severity != null ||
+            pv.bug_type != null ||
+            (pv.steps_to_reproduce != null && String(pv.steps_to_reproduce).trim() !== '') ||
+            (pv.reproduce_steps != null && String(pv.reproduce_steps).trim() !== '')
+          ) {
+            return 'bug'
+          }
+          if (pv.case_category != null || (pv.base_problem != null && String(pv.base_problem).trim() !== '')) {
+            return 'badcase'
+          }
+          if (pv.steps != null || (pv.case_type != null && String(pv.case_type).trim() !== '')) {
+            return 'testcase'
+          }
+          return 'bug'
+        }
+        const resolvedTarget = inferCreateTarget()
         const adoptedId =
           projectId != null
-            ? getStableCreatedId(projectId, toolData.target || 'testcase', pv)
+            ? getStableCreatedId(projectId, resolvedTarget, pv)
             : null
         if (adoptedId != null) {
           const planIdNav = pv.plan_id ?? pv.planId
           aiMessage.modifyNavigation = {
-            target: toolData.target || 'bug',
+            target: resolvedTarget,
             target_id: adoptedId,
             preview: toolData.preview,
             plan_id: planIdNav,
@@ -601,12 +719,15 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
             is_create: false,
             diff: hasDiff ? toolData.diff : []
           }
+          const cidStable = pv.card_id ?? pv.cardId
           window.dispatchEvent(
             new CustomEvent('grep-navigate', {
               detail: {
                 planId: planIdNav,
                 bugId: adoptedId,
-                target: toolData.target || 'bug'
+                recordId: adoptedId,
+                target: resolvedTarget,
+                ...(cidStable != null && cidStable !== '' ? { card_id: cidStable } : {})
               },
               bubbles: true
             })
@@ -614,7 +735,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           console.log('[CREATE] 稳定键已采纳，改为定位已存在行:', adoptedId)
         } else {
           aiMessage.modifyNavigation = {
-            target: toolData.target || 'testcase',
+            target: resolvedTarget,
             target_id: 'new',
             diff: hasDiff ? toolData.diff : [],
             preview: toolData.preview,
@@ -642,6 +763,111 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           toolDataKeys: Object.keys(toolData),
           hint
         })
+      }
+    }
+
+    if (toolName === 'delete' && toolData && typeof toolData === 'object') {
+      const flat = toolData.data && typeof toolData.data === 'object' ? toolData.data : toolData
+      const okSuccess = flat.success !== false && flat.success !== 'false'
+      const needConfirm =
+        flat.confirmation_required === true ||
+        flat.confirmation_required === 'true' ||
+        flat.confirmation_required === 1
+      const pvRaw = flat.preview && typeof flat.preview === 'object' ? flat.preview : null
+      const recRaw =
+        pvRaw?.record && typeof pvRaw.record === 'object'
+          ? pvRaw.record
+          : flat.record && typeof flat.record === 'object'
+            ? flat.record
+            : null
+
+      const doneDelete =
+        okSuccess &&
+        flat.deleted_id != null &&
+        flat.confirmation_required !== true &&
+        flat.confirmation_required !== 'true'
+
+      if (doneDelete) {
+        const delId = parseInt(flat.deleted_id, 10)
+        const prevNav = aiMessage.deleteNavigation
+        if (prevNav && typeof prevNav === 'object' && !Number.isNaN(delId)) {
+          aiMessage.deleteNavigation = {
+            ...prevNav,
+            confirmation_required: false,
+            success: true,
+            deleted_id: flat.deleted_id
+          }
+        } else if (recRaw && !Number.isNaN(delId)) {
+          let pv =
+            pvRaw && pvRaw.record && typeof pvRaw.record === 'object'
+              ? pvRaw
+              : pvRaw
+                ? { ...pvRaw, record: recRaw }
+                : { target: flat.target || toolData.target || 'bug', record: recRaw }
+          const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
+          let planId = recRaw.plan_id ?? flat.plan_id ?? toolData.plan_id
+          if (planId != null && planId !== '') planId = parseInt(planId, 10)
+          aiMessage.deleteNavigation = {
+            target: tgt || 'bug',
+            target_id: delId,
+            plan_id: Number.isFinite(planId) ? planId : null,
+            preview: pv,
+            confirmation_required: false,
+            success: true,
+            deleted_id: flat.deleted_id
+          }
+        } else {
+          aiMessage.deleteNavigation = null
+        }
+        if (!Number.isNaN(delId)) {
+          const dt = String(flat.target || '').toLowerCase()
+          tick(() => {
+            window.dispatchEvent(
+              new CustomEvent('modify-confirmed', {
+                detail: { targetId: delId, deletedTargetType: dt },
+                bubbles: true
+              })
+            )
+          })
+        }
+      } else if (okSuccess && needConfirm && recRaw) {
+        let pv =
+          pvRaw && pvRaw.record && typeof pvRaw.record === 'object'
+            ? pvRaw
+            : pvRaw
+              ? { ...pvRaw, record: recRaw }
+              : { target: flat.target || toolData.target || 'bug', record: recRaw }
+        const rec = recRaw
+        const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
+        const rid = parseInt(rec.id ?? flat.target_id ?? toolData.target_id, 10)
+        let planId = rec.plan_id ?? flat.plan_id ?? toolData.plan_id
+        if (planId != null && planId !== '') planId = parseInt(planId, 10)
+        if (!isNaN(rid)) {
+          aiMessage.deleteNavigation = {
+            target: tgt || 'bug',
+            target_id: rid,
+            plan_id: Number.isFinite(planId) ? planId : null,
+            preview: pv,
+            confirmation_required: true
+          }
+          console.log('[DELETE] 已写入 deleteNavigation', aiMessage.deleteNavigation)
+          tick(() => {
+            window.dispatchEvent(
+              new CustomEvent('show-delete-in-list', {
+                detail: {
+                  target: tgt || 'bug',
+                  target_id: rid,
+                  plan_id: Number.isFinite(planId) ? planId : null,
+                  preview: pv,
+                  messageId: aiMessage.id
+                },
+                bubbles: true
+              })
+            )
+          })
+        } else {
+          console.warn('[DELETE] 预览缺少有效 record.id', { flat, pvRaw })
+        }
       }
     }
 

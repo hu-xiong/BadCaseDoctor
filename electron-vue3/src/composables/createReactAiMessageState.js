@@ -24,6 +24,7 @@ export function createReactAiMessageState(id) {
     /** 增量运行总览（Markdown，lane=running_summary） */
     runningSummaryDraft: '',
     runningSummaryVersion: 0,
+    /** 实时流：首轮思考默认展开，便于边看推理边看「思考中」；历史会话在 rawApiMessageToUi 仍为默认收起 */
     thoughtCollapsed: false,
     reasoningPhaseStartTs: null,
     reasoningUiDurationMs: null,

@@ -129,6 +129,10 @@ class IntelligentDevOpsAgent:
         # 注册create工具
         from agents.tools.create_tool import CreateTool
         self.tool_registry.register(CreateTool(self.db))
+        from agents.tools.copy_tool import CopyTool
+        self.tool_registry.register(CopyTool(self.db))
+        from agents.tools.delete_tool import DeleteTool
+        self.tool_registry.register(DeleteTool(self.db))
             
         # 注册分层工具（L1/L2/L3）
         layered_tools = LayeredToolFactory.create_all_tools()
@@ -161,7 +165,7 @@ class IntelligentDevOpsAgent:
         """允许复用 Agent 实例时更新 db session 引用。"""
         self.db = db_session
         try:
-            for tool_name in ("modify", "create"):
+            for tool_name in ("modify", "create", "copy"):
                 tool = self.tool_registry.get(tool_name)
                 if tool is not None and hasattr(tool, "db"):
                     setattr(tool, "db", db_session)
@@ -182,6 +186,7 @@ class IntelligentDevOpsAgent:
         hint_project_name: str = None,
         hint_plan_name: str = None,
         client_shell: dict = None,
+        images: list = None,
     ):
         """流式处理用户请求。plan_id 为当前迭代计划ID时，grep 会只检索该计划下的记录（人类式先看本迭代）。"""
         _llm = self.llm
@@ -224,6 +229,7 @@ class IntelligentDevOpsAgent:
             hint_project_name=hint_project_name,
             hint_plan_name=hint_plan_name,
             client_shell=client_shell if isinstance(client_shell, dict) else None,
+            images=images if isinstance(images, list) else None,
         ):
             yield pkt
 

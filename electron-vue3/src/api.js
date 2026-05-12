@@ -239,6 +239,37 @@ export function addChatMessage(sessionId, data) {
   return api.post(`/api/chat-sessions/${sessionId}/messages`, data, { timeout: 120000 })
 }
 
+/**
+ * 聊天附图异步落库：POST /upload（MinIO），返回可公网/内网访问的 url。
+ * 勿手动设 Content-Type，以便浏览器带 multipart boundary。
+ */
+export function uploadChatImageBlob(blob, filename = 'image.png') {
+  const fd = new FormData()
+  const name = String(filename || 'image.png').trim() || 'image.png'
+  const file =
+    blob instanceof File
+      ? blob
+      : new File([blob], name, { type: blob.type || 'application/octet-stream' })
+  fd.append('file', file)
+  return api
+    .post('/upload', fd, { timeout: 120000 })
+    .then((r) => {
+      const d = r && r.data !== undefined ? r.data : r
+      const url = d && (d.url || d.fileurl || d.filelink)
+      if (!url || (d && d.success === false) || (d && d.error)) {
+        throw new Error((d && d.error) || 'upload failed')
+      }
+      return String(url).trim()
+    })
+}
+
+/** 列表侧取消删除：清空 DB delete_navigation；采纳：保留快照并标记已确认 */
+export function clearChatMessageDeleteNavigation(messageId, opts = {}) {
+  return api.post(`/api/chat-messages/${messageId}/clear-delete-navigation`, {
+    cancel: opts.cancel === true
+  })
+}
+
 // ==================== Bug API ====================
 
 // 新建 Bug

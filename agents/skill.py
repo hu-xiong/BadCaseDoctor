@@ -34,6 +34,8 @@ class WorkflowStep:
     description: str
     depends_on: Optional[str] = None
     condition: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+    break_on_failure: bool = False
     
     @classmethod
     def from_dict(cls, data: dict) -> 'WorkflowStep':
@@ -43,7 +45,9 @@ class WorkflowStep:
             tool=data.get('tool'),
             description=data.get('description', ''),
             depends_on=data.get('depends_on'),
-            condition=data.get('condition')
+            condition=data.get('condition'),
+            params=data.get('params'),
+            break_on_failure=bool(data.get('break_on_failure', False)),
         )
 
 
@@ -167,7 +171,9 @@ class Skill:
                     'tool': step.tool,
                     'description': step.description,
                     'depends_on': step.depends_on,
-                    'condition': step.condition
+                    'condition': step.condition,
+                    'params': step.params,
+                    'break_on_failure': step.break_on_failure,
                 }
                 for step in self.workflow
             ],

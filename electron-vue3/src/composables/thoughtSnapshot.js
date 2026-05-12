@@ -1,3 +1,5 @@
+import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
+
 function stripUnifiedDecisionBlocks(t) {
   return String(t || '')
     .replace(/<decision[\s\S]*?<\/decision>/gi, '')
@@ -21,7 +23,9 @@ export function mergedThoughtReasoningProseFromStep(s) {
   } else {
     merged = fromChunks || fromDraft
   }
-  return stripUnifiedDecisionBlocks(merged).trim()
+  let out = stripUnifiedDecisionBlocks(merged).trim()
+  out = stripReasoningChannelArtifacts(out).trim()
+  return out
 }
 
 /**
@@ -38,7 +42,7 @@ export function snapshotThoughtContentFromStep(s) {
   if (/<decision|<execute|<tool\b|<params|<reason\b|<result\b/i.test(raw)) {
     return ''
   }
-  return raw
+  return stripReasoningChannelArtifacts(raw).trim()
 }
 
 /** 在置为 completed / 等价终态前调用，写入 thoughtReasoningSnapshot / thoughtContentSnapshot */

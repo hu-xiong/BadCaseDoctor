@@ -67,6 +67,19 @@ create -> 创建新的 Bug/BadCase/测试用例
 |---------|-----------------|
 | 创建一个登录失败的Bug | 使用 create 工具创建Bug，标题=登录失败，优先级=高 |
 
+### 复制新建（copy_record 技能：三步流程）
+
+按**已有记录**复制出一条新记录时，将「属性合并」与「创建落库」拆开，对应 YAML 技能 `copy_record`：
+
+```
+1. grep    -> 定位源记录（得到 first_bug_id / first_badcase_id / first_testcase_id）
+2. copy    -> 属性处理：从数据库读出源行，合并为可直接传给 create 的 fields（不落库）
+3. create  -> 在合并后的 fields 上预览（confirm=false），用户确认后再 confirm=true 落库
+```
+
+- **copy** 工具与 **create** 共用同一套字段校验/合并规则；仅负责合并，不写库。
+- 若链路稳定，也可省略 copy，直接用 **create** 并在 `fields` 中带 `copy_from_*_id`（等价合并发生在 create 内）。
+
 ## grep 工具参数规范
 
 ```json

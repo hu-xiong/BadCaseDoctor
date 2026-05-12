@@ -19,6 +19,7 @@ from openai import OpenAI
 from config import Config
 
 from .prompt_log import maybe_log_llm_chat_kwargs
+from .multimodal_content import openai_style_user_content
 
 
 def _deepseek_prefix_cache_log_enabled() -> bool:
@@ -153,6 +154,8 @@ class DeepSeekLLM:
     def _supports_api_thinking(self) -> bool:
         """V4 Pro 等支持官方 thinking + reasoning_effort；工具调用时仍应关闭。"""
         m = (self.model or "").lower()
+        if "flash" in m:
+            return False
         return "deepseek-v4" in m or "v4-pro" in m
 
     def _reasoning_effort(self) -> str:
@@ -169,6 +172,26 @@ class DeepSeekLLM:
             return float(os.getenv("DEEPSEEK_TEMPERATURE", str(getattr(Config, "DEEPSEEK_TEMPERATURE", 0.7))))
         except Exception:
             return 0.7
+
+    def _default_max_tokens_for_model(self) -> Optional[int]:
+        """
+        deepseek-v4-pro 未显式传 max_tokens 时的上限（推理+输出共用额度），抑制车轱辘话。
+        DEEPSEEK_V4_PRO_MAX_TOKENS=0 或不适用型号时不添加默认。
+        """
+        m = (self.model or "").lower()
+        if "flash" in m:
+            return None
+        if "v4-pro" not in m:
+            return None
+        try:
+            raw = os.getenv("DEEPSEEK_V4_PRO_MAX_TOKENS")
+            if raw is not None and str(raw).strip() != "":
+                v = int(str(raw).strip())
+                return None if v <= 0 else v
+            v = int(getattr(Config, "DEEPSEEK_V4_PRO_MAX_TOKENS", 2048))
+            return None if v <= 0 else v
+        except Exception:
+            return 2048
 
     def _merge_thinking_params(self, kwargs: Dict[str, Any], *, thinking_on: bool) -> None:
         """
@@ -223,8 +246,11 @@ class DeepSeekLLM:
             "messages": messages,
             "stream": stream,
         }
-        if max_tokens is not None and max_tokens > 0:
-            kwargs["max_tokens"] = max_tokens
+        mt_use = max_tokens
+        if mt_use is None or mt_use <= 0:
+            mt_use = self._default_max_tokens_for_model()
+        if mt_use is not None and mt_use > 0:
+            kwargs["max_tokens"] = mt_use
         if tools is not None:
             kwargs["tools"] = tools
             kwargs["parallel_tool_calls"] = parallel_tool_calls
@@ -318,11 +344,14 @@ class DeepSeekLLM:
         prompt: str,
         history: Optional[list] = None,
         max_tokens: Optional[int] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+        messages.append(
+            {"role": "user", "content": openai_style_user_content(prompt, images)}
+        )
         thinking_on = bool(
             self.enable_thinking
             and self._supports_api_thinking()
@@ -359,11 +388,14 @@ class DeepSeekLLM:
         prompt: str,
         history: Optional[list] = None,
         max_tokens: Optional[int] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+        messages.append(
+            {"role": "user", "content": openai_style_user_content(prompt, images)}
+        )
         thinking_on = bool(
             self.enable_thinking
             and self._supports_api_thinking()
@@ -392,11 +424,14 @@ class DeepSeekLLM:
         history: Optional[list] = None,
         locale: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ):
         from agents.locale_prompts import wrap_general_user_prompt
 
         p = wrap_general_user_prompt(prompt, locale)
-        for item in self.chat_stream_with_reasoning(p, history, max_tokens=max_tokens):
+        for item in self.chat_stream_with_reasoning(
+            p, history, max_tokens=max_tokens, images=images
+        ):
             if not isinstance(item, dict):
                 continue
             if item.get("type") == "reasoning_delta":

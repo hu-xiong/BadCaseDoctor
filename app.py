@@ -61,7 +61,8 @@ from flask_cors import CORS
 import boto3
 from botocore.exceptions import ClientError
 import mimetypes
-from sqlalchemy import text, inspect, Enum, or_
+from sqlalchemy import text, inspect, Enum, or_, Text
+from sqlalchemy.dialects.mysql import LONGTEXT
 from PIL import Image
 import io
 import time
@@ -269,7 +270,7 @@ REDIS_CONFIG = {
 }
 
 # 允许上传的文件类型
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'zip', 'rar'}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'zip', 'rar'}
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'static', 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -1268,9 +1269,12 @@ class ChatMessage(db.Model):
     navigation = db.Column(db.Text)  # JSON格式存储navigation（点击跳转Bug）
     modify_navigation = db.Column(db.Text)  # JSON格式存储modifyNavigation（修改预览导航）
     modify_groups = db.Column(db.Text)  # JSON格式存储modifyGroups（分组修改预览）
+    delete_navigation = db.Column(db.Text)  # JSON：delete 工具 confirm=false 预览（与前端 deleteNavigation 对齐）
     final_response = db.Column(db.Text)
     # 本条消息发起请求时选用的模型 id（用户消息=所选模型；助手消息=生成该条回复的请求模型，便于排查效果问题）
     llm_model = db.Column(db.String(128))
+    # 用户消息附图：JSON 字符串，项为 { data: dataURL|base64, filename? }；MySQL 用 LONGTEXT 避免单图超 TEXT 64KB
+    images = db.Column(Text().with_variant(LONGTEXT(), "mysql"), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # 不使用 backref，避免依赖外键
@@ -2863,8 +2867,9 @@ def _nullify_chat_message_modify_preview(message_id):
             return
         msg.modify_groups = None
         msg.modify_navigation = None
+        msg.delete_navigation = None
         db.session.commit()
-        print(f"[MODIFY-BG] 已清空消息 {mid} 的 modify_groups / modify_navigation")
+        print(f"[MODIFY-BG] 已清空消息 {mid} 的 modify_groups / modify_navigation / delete_navigation")
     except Exception as e:
         print(f"[MODIFY-BG] 清空消息预览字段失败 id={mid}: {e}")
         db.session.rollback()
@@ -5283,7 +5288,9 @@ def api_create_card():
             card.actual_time = data.get('actual_time')
             card.remaining_time = data.get('remaining_time')
             card.version = data.get('version', 'v1')
-        
+        elif card_type == CardType.CARD:
+            card.description = data.get('description')
+
         db.session.add(card)
         db.session.commit()
         
@@ -6021,7 +6028,35 @@ def sync_database_schema():
                     pass
                 print(f"[DB] ⚠️ bad_case 字段迁移失败(可忽略/手动处理): {e}")
 
+        def _migrate_bug_plan_id_nullable():
+            """历史库 bug.plan_id 常为 NOT NULL，与 ORM Bug.plan_id nullable=True /「未计划 Bug」不一致，会导致 plan_id=NULL 插入失败。"""
+            try:
+                insp = inspect(db.engine)
+                if not insp.has_table('bug'):
+                    return
+                cols = insp.get_columns('bug')
+                plan_col = next((c for c in cols if c.get('name') == 'plan_id'), None)
+                if not plan_col:
+                    return
+                if plan_col.get('nullable', True):
+                    return
+                dialect = (db.engine.dialect.name or '').lower()
+                if dialect == 'mysql':
+                    print("[DB] 迁移: bug.plan_id 允许 NULL（未计划 Bug / create 预览 plan_id 为空）")
+                    db.session.execute(text('ALTER TABLE bug MODIFY COLUMN plan_id INT NULL'))
+                    db.session.commit()
+                elif dialect in ('postgresql', 'postgres'):
+                    db.session.execute(text('ALTER TABLE bug ALTER COLUMN plan_id DROP NOT NULL'))
+                    db.session.commit()
+            except Exception as e:
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+                print(f"[DB] ⚠️ bug.plan_id 可空迁移失败(可手动执行 ALTER): {e}")
+
         _migrate_bad_case_answer_fields()
+        _migrate_bug_plan_id_nullable()
 
         # 重要：SQLite ALTER TABLE 后 inspector 可能缓存旧列信息，重新创建 inspector 避免重复加列
         inspector = inspect(db.engine)
@@ -6293,8 +6328,10 @@ def sync_database_schema():
                     'navigation TEXT',
                     'modify_navigation TEXT',
                     'modify_groups TEXT',
+                    'delete_navigation TEXT',
                     'final_response TEXT',
                     'llm_model VARCHAR(128)',
+                    'images LONGTEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
@@ -6746,12 +6783,6 @@ def api_create_plan():
                 print(f"缺少必填字段: {field}")
                 return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
             
-        # 验证计划周期（可选字段）
-        if data.get('cycle'):
-            valid_cycles = ['one_week', 'two_weeks', 'one_month', 'custom']
-            if data['cycle'] not in valid_cycles:
-                return jsonify({'success': False, 'error': '无效的计划周期'}), 400
-            
         # 检查项目权限
         print(f"检查项目权限: 用户ID={current_user.id}, 项目 ID={data['project_id']}")
         if not has_project_permission(current_user.id, data['project_id']):
@@ -6773,7 +6804,12 @@ def api_create_plan():
         except ValueError:
             return jsonify({'success': False, 'error': '日期格式错误，请使用 YYYY-MM-DD 格式'}), 400
             
-        # 创建计划
+        try:
+            pid = int(data['project_id'])
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '无效的 project_id'}), 400
+
+        # 创建计划（Plan 表已移除 cycle / plan_count 等字段，勿再传入）
         plan = Plan(
             name=data['name'],
             description=data.get('description', ''),
@@ -6781,11 +6817,9 @@ def api_create_plan():
             priority=data.get('priority', 'medium'),
             start_date=start_date,
             end_date=end_date,
-            cycle=data.get('cycle'),
-            plan_count=data.get('count', 1),
             scope_notification=data.get('scope_notification', False),
             parent_id=data.get('parent_id'),
-            project_id=data['project_id'],
+            project_id=pid,
             creator_id=current_user.id,
             assignee_id=data.get('assignee_id')
         )
@@ -6806,8 +6840,6 @@ def api_create_plan():
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
-                'cycle': plan.cycle,
-                'plan_count': plan.plan_count,
                 'scope_notification': plan.scope_notification,
                 'parent_id': plan.parent_id,
                 'project_id': plan.project_id,
@@ -7578,20 +7610,97 @@ def api_add_project_user(project_id):
         print(f"添加项目用户失败: {e}")
         return jsonify({'success': False, 'error': '添加项目用户失败'}), 500
 
-    # Bug相关API接口
+def _coerce_non_negative_int(v):
+    """转为非负整数；无效返回 None。"""
+    if v is None:
+        return None
+    if isinstance(v, str) and not v.strip():
+        return None
+    try:
+        i = int(float(v))
+        return i if i >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_positive_int_or_none(v):
+    """转为正整数；无效或非正返回 None（用于 assignee_id）。"""
+    if v is None:
+        return None
+    if isinstance(v, str) and not str(v).strip():
+        return None
+    try:
+        i = int(float(v))
+        return i if i > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _truncate_db_str(value, max_len, default=''):
+    if value is None:
+        return default
+    s = str(value)
+    return s[:max_len] if len(s) > max_len else s
+
+
+def _normalize_bug_priority_for_db(raw):
+    """Bug.priority 列为 VARCHAR(10)，create 工具可能产出中文「高/中/低」或过长英文。"""
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return 'p3'
+    s = str(raw).strip()
+    zh_map = {
+        '高': 'p1', '中': 'p2', '低': 'p3',
+        '紧急': 'p1', '一般': 'p2',
+        '极高': 'p1',
+    }
+    if s in zh_map:
+        return zh_map[s]
+    low = s.lower()
+    if low in ('p1', 'p2', 'p3'):
+        return low
+    if s in ('P1', 'P2', 'P3'):
+        return s.lower()
+    if s in ('1', '2', '3'):
+        return 'p' + s
+    # 未知值截断，避免超过 10 字符写库失败
+    return _truncate_db_str(s, 10, 'p3') or 'p3'
+
+
+def _attachments_to_text(raw):
+    if raw is None:
+        return ''
+    if isinstance(raw, (dict, list)):
+        try:
+            return json.dumps(raw, ensure_ascii=False)
+        except Exception:
+            return str(raw)
+    return str(raw)
+
+
+# Bug相关API接口
 @app.route('/api/bugs', methods=['POST'])
 @login_required
 def api_create_bug():
     """创建Bug"""
     try:
         data = request.get_json()
-        
+        if not data or not isinstance(data, dict):
+            return jsonify({'success': False, 'error': '请求体必须是 JSON 对象'}), 400
+
+        title = (data.get('title') or '').strip()
+        title = ' '.join(title.split())  # 合并任意空白，与 create 工具一致
+        title = _truncate_db_str(title, 200, '')
+        project_raw = data.get('project_id')
+        project_id_val = _coerce_non_negative_int(project_raw)
+        if project_id_val is None or project_id_val <= 0:
+            return jsonify({'success': False, 'error': '缺少或无效的 project_id'}), 400
+
         # 验证必填字段（plan_id 可选：未指定则归入「未计划的 Bug」）
-        if not data.get('title') or not data.get('project_id'):
+        if not title:
             return jsonify({'success': False, 'error': '缺少必填字段: title 或 project_id'}), 400
         
         # 检查项目权限
-        if not has_project_permission(current_user.id, data['project_id']):
+        if not has_project_permission(current_user.id, project_id_val):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
         raw_plan = data.get('plan_id')
@@ -7630,31 +7739,62 @@ def api_create_bug():
             if not plan:
                 return jsonify({'success': False, 'error': '计划不存在'}), 404
             # 计划类型字段已移除：不再按计划类型限制创建 bug
-        
-        # 创建Bug
+
+        steps_raw = data.get('steps_to_reproduce')
+        if steps_raw is None or (isinstance(steps_raw, str) and steps_raw.strip() == ''):
+            steps_raw = data.get('reproduce_steps', '')
+        steps_to_reproduce = '' if steps_raw is None else str(steps_raw)
+
         bug = Bug(
-            title=data['title'],
-            description=data.get('description', ''),
-            steps_to_reproduce=data.get('steps_to_reproduce', ''),
-            expected_result=data.get('expected_result', ''),
-            actual_result=data.get('actual_result', ''),
-            severity=data.get('severity', 'medium'),
-            priority=data.get('priority', 'p3'),
-            status=data.get('status', 'new'),
-            bug_type=data.get('bug_type', ''),
-            environment=data.get('environment', ''),
-            browser=data.get('browser', ''),
-            os=data.get('os', ''),
+            title=title,
+            description=_truncate_db_str(data.get('description', ''), 65535, ''),
+            steps_to_reproduce=steps_to_reproduce,
+            expected_result=_truncate_db_str(data.get('expected_result', ''), 65535, ''),
+            actual_result=_truncate_db_str(data.get('actual_result', ''), 65535, ''),
+            severity=_truncate_db_str(data.get('severity', 'medium'), 20, 'medium'),
+            priority=_normalize_bug_priority_for_db(data.get('priority')),
+            status=_truncate_db_str(data.get('status', 'new'), 20, 'new'),
+            bug_type=_truncate_db_str(data.get('bug_type', ''), 50, ''),
+            environment=_truncate_db_str(data.get('environment', ''), 100, ''),
+            browser=_truncate_db_str(data.get('browser', ''), 50, ''),
+            os=_truncate_db_str(data.get('os', ''), 50, ''),
             plan_id=plan_id_val,
             card_id=card_id_val,
-            project_id=data['project_id'],
+            project_id=project_id_val,
             creator_id=current_user.id,
-            assignee_id=data.get('assignee_id'),
-            attachments=data.get('attachments', '')
+            assignee_id=_coerce_positive_int_or_none(data.get('assignee_id')),
+            attachments=_attachments_to_text(data.get('attachments', ''))
         )
         
         db.session.add(bug)
         db.session.commit()
+        db.session.refresh(bug)
+
+        # 与 agents CreateTool 一致：迭代看板按 Card 展示；仅插入 Bug 而无 Card 时左侧列表不可见
+        if bug.card_id is None:
+            try:
+                _card = Card(
+                    title=bug.title or "",
+                    type=CardType.BUG,
+                    priority=bug.priority or "p3",
+                    assignee_id=bug.assignee_id,
+                    project_id=project_id_val,
+                    creator_id=bug.creator_id,
+                    plan_id=bug.plan_id,
+                    description=bug.description,
+                    source_type="bug",
+                    source_id=int(bug.id),
+                )
+                db.session.add(_card)
+                db.session.commit()
+                db.session.refresh(_card)
+                bug.card_id = int(_card.id)
+                db.session.commit()
+                db.session.refresh(bug)
+            except Exception as _card_ex:
+                db.session.rollback()
+                print(f"[api_create_bug] 同步创建 Card 失败: {_card_ex}")
+
         try:
             _rec = _workflow_merge_creator_if_empty(
                 _workflow_recipients_bug(bug), bug.creator_id
@@ -7699,7 +7839,10 @@ def api_create_bug():
     except Exception as e:
         db.session.rollback()
         print(f"创建Bug失败: {e}")
-        return jsonify({'success': False, 'error': '创建Bug失败'}), 500
+        import traceback
+        traceback.print_exc()
+        err_msg = str(e) if e else 'unknown'
+        return jsonify({'success': False, 'error': f'创建Bug失败: {err_msg}'}), 500
 
 @app.route('/api/projects/<int:project_id>/bugs', methods=['GET'])
 @login_required
@@ -7806,6 +7949,15 @@ def api_bug_detail(bug_id):
                     'created_at': comment.created_at.isoformat()
                 })
             
+            cid = getattr(bug, 'card_id', None)
+            navigation_plan_id = bug.plan_id
+            if cid:
+                crow = Card.query.get(int(cid))
+                if crow is not None:
+                    cp = getattr(crow, 'plan_id', None)
+                    if cp is not None and int(cp or 0) > 0:
+                        navigation_plan_id = cp
+
             return jsonify({
                 'success': True,
                 'bug': {
@@ -7823,6 +7975,8 @@ def api_bug_detail(bug_id):
                     'browser': bug.browser,
                     'os': bug.os,
                     'plan_id': bug.plan_id,
+                    'navigation_plan_id': navigation_plan_id,
+                    'card_id': cid,
                     'project_id': bug.project_id,
                     'creator_id': bug.creator_id,
                     'assignee_id': bug.assignee_id,
@@ -8547,6 +8701,7 @@ def api_get_chat_session(session_id):
                 ChatMessage.content,
                 ChatMessage.final_response,
                 ChatMessage.llm_model,
+                ChatMessage.images,
                 ChatMessage.created_at,
             ).filter(ChatMessage.session_id == session_id)
         else:
@@ -8563,8 +8718,10 @@ def api_get_chat_session(session_id):
                 ChatMessage.navigation,
                 ChatMessage.modify_navigation,
                 ChatMessage.modify_groups,
+                ChatMessage.delete_navigation,
                 ChatMessage.final_response,
                 ChatMessage.llm_model,
+                ChatMessage.images,
                 ChatMessage.created_at,
             ).filter(ChatMessage.session_id == session_id)
         if before_id:
@@ -8580,13 +8737,14 @@ def api_get_chat_session(session_id):
         messages = []
         if lite:
             # lite：只返回渲染“最新一屏”所需字段，避免无意义的 null 键占用 payload
-            for (mid, is_user, content, final_response, llm_model, created_at) in msg_rows:
+            for (mid, is_user, content, final_response, llm_model, images, created_at) in msg_rows:
                 messages.append({
                     'id': mid,
                     'is_user': is_user,
                     'content': content,
                     'final_response': final_response,
                     'llm_model': llm_model,
+                    'images': images,
                     'created_at': created_at.isoformat() if created_at else None
                 })
         else:
@@ -8603,8 +8761,10 @@ def api_get_chat_session(session_id):
                 navigation,
                 modify_navigation,
                 modify_groups,
+                delete_navigation,
                 final_response,
                 llm_model,
+                images,
                 created_at,
             ) in msg_rows:
                 messages.append({
@@ -8620,8 +8780,10 @@ def api_get_chat_session(session_id):
                     'navigation': navigation,
                     'modify_navigation': modify_navigation,
                     'modify_groups': modify_groups,  # 添加 modify_groups
+                    'delete_navigation': delete_navigation,
                     'final_response': final_response,
                     'llm_model': llm_model,
+                    'images': images,
                     'created_at': created_at.isoformat() if created_at else None
                 })
         t_build = (time.perf_counter() - t0) * 1000
@@ -8807,6 +8969,17 @@ def api_add_chat_message(session_id):
             return jsonify({'success': False, 'error': '没有权限访题此会话'}), 403
             
         data = request.get_json()
+        _raw_imgs = data.get('images')
+        _images_store = None
+        if _raw_imgs is not None:
+            if isinstance(_raw_imgs, str):
+                _s = _raw_imgs.strip()
+                _images_store = _s if _s else None
+            else:
+                try:
+                    _images_store = json.dumps(_raw_imgs, ensure_ascii=False)
+                except Exception:
+                    _images_store = None
             
         message = ChatMessage(
             session_id=session_id,
@@ -8822,8 +8995,10 @@ def api_add_chat_message(session_id):
             navigation=data.get('navigation'),
             modify_navigation=data.get('modify_navigation'),
             modify_groups=data.get('modify_groups'),  # 添加 modify_groups
+            delete_navigation=data.get('delete_navigation'),
             final_response=data.get('final_response'),
             llm_model=data.get('llm_model'),
+            images=_images_store,
         )
             
         db.session.add(message)
@@ -8840,6 +9015,43 @@ def api_add_chat_message(session_id):
         db.session.rollback()
         print(f"添加消息失败: {e}")
         return jsonify({'success': False, 'error': '添加消息失败'}), 500
+
+
+@app.route('/api/chat-messages/<int:message_id>/clear-delete-navigation', methods=['POST'])
+@login_required
+def api_clear_chat_message_delete_navigation(message_id):
+    """列表取消删除时清空 delete_navigation；采纳时保留快照并标记已确认（confirmation_required=false），刷新后仍可核对。"""
+    try:
+        mid = _normalize_chat_message_id(message_id)
+        if mid is None:
+            return jsonify({'success': False, 'error': '无效的消息 id'}), 400
+        msg = db.session.get(ChatMessage, mid)
+        if not msg:
+            return jsonify({'success': False, 'error': '消息不存在'}), 404
+        session = db.session.get(ChatSession, msg.session_id)
+        if not session or session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '无权访问'}), 403
+        payload = request.get_json(silent=True) or {}
+        cancel = payload.get('cancel') is True
+        if cancel:
+            msg.delete_navigation = None
+        elif msg.delete_navigation:
+            try:
+                nav = json.loads(msg.delete_navigation)
+                if not isinstance(nav, dict):
+                    nav = {}
+            except Exception:
+                nav = {}
+            nav['confirmation_required'] = False
+            nav['success'] = True
+            msg.delete_navigation = json.dumps(nav, ensure_ascii=False)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[CHAT] clear-delete-navigation 失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/projects/<int:project_id>/testcases', methods=['GET'])
 @login_required

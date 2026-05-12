@@ -48,6 +48,7 @@ const PREVIEW_LIST_KEYS = {
     'owner',
     'bug_type',
     'plan_id',
+    'card_id',
     'environment',
     'browser',
     'os'
@@ -138,6 +139,7 @@ const getFieldLabel = (key) => {
     'severity': '严重程度',
     'status': '状态',
     'plan_id': '所属计划',
+    'card_id': '所属卡片',
     'parent_id': '父计划',
     'assignee_id': '负责人',
     'reproduce_steps': '复现步骤',

@@ -47,9 +47,9 @@ REACT_SYSTEM_STATIC = """<system>
 2) **仅**一个 <decision>...</decision>，结构如下
 
 **决策规则：**
-- 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）
+- 修改类任务须先 grep 后 modify；删除类任务须先 grep 后 delete（观察里已有列表时从 context 取 id）
 - **仅查看**卡片/Bug/用例详情、用户未要求改字段时：用 grep（或已有 observation 里的列表）直接回答，**不要**调用 modify 当「读详情」
-- create/modify 预览用 confirm=false，禁止直接落库
+- create/modify/delete 预览用 confirm=false，禁止直接落库
 - 目标已达成则 execute=false，tool 留空
 - 纯聊天/问候场景：execute=false，不调用工具
 - 涉及搜索、查询、测试、修改时 execute 必须为 true
@@ -61,7 +61,7 @@ REACT_SYSTEM_STATIC = """<system>
 - target_id: 单条记录的 ID（整数）
 - target_ids: 多条同一修改时传 ID 数组，如 [9,8]，**一次调用**批量预览（与「各调一次 modify」等价但 UI 稳定为一张卡片多条 diff）
 - modifications: {"字段名": "新值"}  # 必须嵌套在 modifications 里！
-- **禁止误写 title**：用户用语义里的 Bug/卡片名称（如「一个测试的bug」）**只做定位**，除非用户明确说「改标题/重命名/标题改为」等，否则 **modifications 不要包含 title**。改状态/优先级/负责人时只传对应字段；否则服务端会把 Bug.title 镜像到左侧卡片标题，造成「卡片标题被改掉」。
+- **禁止误写 title**：用户用语义里的 Bug/卡片名称（如「一个测试的bug」）**只做定位**，除非用户明确说「改标题/重命名/标题改为」等，否则 **modifications 不要包含 title**。改状态/优先级/负责人时只传对应字段；否则会把 Bug 记录标题写脏（迭代卡片标题已与 Bug 标题解耦，但仍会污染 Bug 列表详情）。
 - confirm: false  # 预览模式
 </system>
 
@@ -207,6 +207,7 @@ def parse_opening_decision(text: str) -> Dict[str, Any]:
         "grep",
         "modify",
         "create",
+        "delete",
         "terminal",
         "search",
         "database",
@@ -391,7 +392,7 @@ class ReactPromptTemplates:
 两段（顺序固定）1) 规划说明 **简短** 中文（目标与约束 + 路径与步骤，**逐步对应每个 item，含后续 modify 等**；**不写**泛泛风险与备选，除非重大不确定性），无 XML。2) 仅 <todo_list>…</todo_list>，每步 <item>。
 
 规则：有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。技能匹配则跟技能流（阈值约 0.3）。
-查询→一步 grep。仅**查看**详情（未要求修改）→一步 grep 或基于已有 grep 结果直接回答，**禁止**为展示而调用 modify。修改→两步 grep 再 modify（禁止只 modify）。创建→一步 create。browser_test→一步。本机命令→一步 terminal（command 必填）。
+查询→一步 grep。仅**查看**详情（未要求修改）→一步 grep 或基于已有 grep 结果直接回答，**禁止**为展示而调用 modify。修改→两步 grep 再 modify（禁止只 modify）。**零起新建**→一步 create。**按已有记录复制新建**（copy_record 技能）→三步 **grep → copy（属性合并/不落库）→ create（预览与落库）**；若合并链稳定也可一步 **create**，fields 含 **copy_from_bug_id / copy_from_badcase_id / copy_from_testcase_id / copy_from_card_id**（与 copy→create **等价**，并非只能用卡片）。**copy 工具支持 bug、badcase、testcase、card**。browser_test→一步。本机命令→一步 terminal（command 必填）。
 grep：keywords 可按记录标题原文；**多词默认 OR**（任一词命中）；须全部词命中时由环境 GREP_KEYWORDS_MATCH_MODE=and（一般不写）。**主界面迭代列表即 Card 表**；泛查、不确定类型时用 **target=all**（同时检索 Card + 各源表）；**用户明确说「查卡片/查询卡片/卡片列表/迭代卡片」等时，必须用 target=card（只查 Card 表标题与描述），禁止用 bug/badcase/testcase/all**，否则会混入源表口径。**勿**在无明确用户意图时填 target=bug/badcase/testcase（会跳过 Card 表导致「无卡片命中」）。勿把「期望结果/步骤」等字段名当 keywords；target∈bug/badcase/testcase/card/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
 modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
 </system>
@@ -404,6 +405,7 @@ modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。�
 <good_example><request>查看一下测试bug的卡片</request><todo_list><item>grep keywords=测试bug，target=card，plan_id=当前迭代；根据 card_location 向用户说明详情，勿再调用 modify</item></todo_list></good_example>
 <good_example><request>改创建测试用例7负责人33</request><todo_list><item>grep keywords=创建测试用例7，target=testcase</item><item>modify 负责人=33</item></todo_list></good_example>
 <good_example><request>新建登录失败 Bug</request><todo_list><item>create 标题登录失败</item></todo_list></good_example>
+<good_example><request>复制登录bug1，标题改为登录bug2</request><todo_list><item>grep keywords=登录bug1，target=bug</item><item>create bug，fields 含 copy_from_bug_id 与新标题（或与复制新建技能一致：grep→copy→create）</item></todo_list></good_example>
 <good_example><request>测登录</request><todo_list><item>browser_test 登录</item></todo_list></good_example>
 <bad_example><request>界面</request><todo_list><item>界面</item></todo_list>原因：应 grep</bad_example>
 <bad_example><request>改 Bug 状态</request><todo_list><item>仅 modify</item></todo_list>原因：缺 grep</bad_example>
@@ -1264,8 +1266,8 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 - tool 为空表示返回自然语言回复（闲聊场景）
 
 **决策规则：**
-1. 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）
-2. create/modify 预览用 confirm=false，禁止直接落库
+1. 修改类任务须先 grep 后 modify（观察里已有列表时从 context 取 target_id）；删除类宜 grep 后 delete
+2. create/modify/delete 预览用 confirm=false，禁止直接落库
 3. **多步串行**：按 `task_plan` **一轮一个工具**执行，直到计划中**每一步都至少调用过一次**（各步可为沙箱预览）。**同一条 SSE 内**若仍有未执行步骤，**禁止** `execute=false`。**服务端**在「沙箱/创建待用户确认」或「计划步数已跑完」时会**自动结束本条流**；待确认时用户会在 UI 操作后再发新消息继续，你不必在同一连接里假定已落库。**若流仍在继续**且还有未调用步骤（常见：尚未 `create`），**下一轮必须** `execute=true`。
 4. 用户要求的操作已在工具层面全部执行完毕（无遗漏步骤）、或确属闲聊/与项目无关、或客观无法继续时：`execute=false`，tool 留空
 5. 纯聊天/问候/与项目无关的泛泛问答：优先 execute=false、tool 留空；若需以工具形式收口可 execute=true、tool=chitchat、params 含 message=用户原话或问题摘要

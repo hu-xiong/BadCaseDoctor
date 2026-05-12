@@ -107,7 +107,7 @@ def generate_summary():
 
     请求 JSON：
     {
-      "model": "ernie-4.5-turbo-128k",
+      "model": "qwen3.5-plus",
       "stream": true,
       "turns": [{"role":"user","content":"..."},{"role":"assistant","content":"..."}],
       "meta": {"status":"success","steps_count":2,"execution_time":1.23}

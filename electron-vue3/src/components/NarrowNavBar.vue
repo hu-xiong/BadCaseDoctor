@@ -18,13 +18,13 @@
       <span class="nav-icon">📦</span>
     </div>
 
-    <!-- 分隔线 -->
-    <div class="nav-divider"></div>
-
-    <!-- 插件入口 -->
-    <div class="nav-item" :title="t('narrowNav.pluginPlaceholder')" @click="handleOpenPlugins">
-      <span class="nav-icon">🧩</span>
-    </div>
+    <!-- 分隔线 + 插件入口（暂时隐藏，需要时把 SHOW_PLUGINS_NAV 设为 true） -->
+    <template v-if="SHOW_PLUGINS_NAV">
+      <div class="nav-divider"></div>
+      <div class="nav-item" :title="t('narrowNav.pluginPlaceholder')" @click="handleOpenPlugins">
+        <span class="nav-icon">🧩</span>
+      </div>
+    </template>
 
     <!-- 底部：设置按钮 -->
     <div class="nav-item nav-item-bottom" :title="t('narrowNav.settings')" @click="handleOpenSettings">
@@ -37,6 +37,9 @@
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
+
+/** 侧栏插件入口：关闭则隐藏 🧩（恢复时改为 true） */
+const SHOW_PLUGINS_NAV = false
 
 console.log('[NarrowNavBar] 组件已加载')
 
