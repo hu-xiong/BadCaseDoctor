@@ -223,7 +223,7 @@
                 </span>
                 <span class="cursor-reason-chevron">{{ message.thoughtCollapsed ? '▶' : '▼' }}</span>
               </button>
-              <div v-show="!message.thoughtCollapsed" class="cursor-reason-feed">
+              <div v-if="!message.thoughtCollapsed" class="cursor-reason-feed">
                 <div class="cursor-reason-feed-stack">
                   <!-- 流式中：content 轨与 reasoning 轨同时存在时用双 pre；仅 reasoning 时用打字机缓冲（避免多包同帧合并后 thinkReasoningDraft 整段闪现） -->
                   <template
@@ -232,10 +232,10 @@
                     <pre
                       v-if="thinkDraftReasoningVisible(message)"
                       class="react-sse-stream react-sse-stream--reasoning"
-                    >{{ message.thinkReasoningDraft }}</pre>
+                    >{{ squeezeReasoningVerticalWhitespace(message.thinkReasoningDraft) }}</pre>
                     <pre
                       class="react-sse-stream react-sse-stream--content"
-                    >{{ message.thinkContentDraft }}</pre>
+                    >{{ squeezeReasoningVerticalWhitespace(message.thinkContentDraft) }}</pre>
                   </template>
                   <div
                     v-else-if="
@@ -450,11 +450,11 @@
                     <template v-else-if="git.diff && git.diff.length">
                       <div v-for="(fieldDiff, idx) in git.diff" :key="`${gix}-${idx}`" class="modify-field-preview">
                         <span class="field-label">{{ fieldDiff.field_label }}:</span>
-                        <span :class="['old-value', { 'empty-value': !getFieldOldValue(fieldDiff) }]">
-                          {{ getFieldOldValue(fieldDiff) || t('chat.notSet') }}
+                        <span :class="['old-value', { 'empty-value': !(formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) }]">
+                          {{ (formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) || t('chat.notSet') }}
                         </span>
                         <span class="arrow">→</span>
-                        <span class="new-value">{{ getFieldNewValue(fieldDiff) || '-' }}</span>
+                        <span class="new-value">{{ (formatSandboxModifySideDisplay(git, fieldDiff, 'new') || getFieldNewValue(fieldDiff)) || '-' }}</span>
                       </div>
                     </template>
                     <div v-else-if="group.items.length > 1" class="modify-field-preview modify-field-preview--muted">
@@ -551,12 +551,12 @@
                       >
                         <span class="field-label">{{ fieldDiff.field_label }}:</span>
                         <span
-                          :class="['old-value', { 'empty-value': !fieldDiff.lines?.find((l) => l.type === 'delete')?.content }]"
+                          :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(br, fieldDiff, 'old') }]"
                         >
-                          {{ fieldDiff.lines?.find((l) => l.type === 'delete')?.content || t('chat.notSet') }}
+                          {{ formatSandboxModifySideDisplay(br, fieldDiff, 'old') || t('chat.notSet') }}
                         </span>
                         <span class="arrow">→</span>
-                        <span class="new-value">{{ fieldDiff.lines?.find((l) => l.type === 'add')?.content || '-' }}</span>
+                        <span class="new-value">{{ formatSandboxModifySideDisplay(br, fieldDiff, 'new') || '-' }}</span>
                       </div>
                     </template>
                     <div
@@ -589,11 +589,11 @@
                       <span class="new-value create-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
                     </template>
                     <template v-else>
-                      <span :class="['old-value', { 'empty-value': !fieldDiff.lines?.find(l => l.type === 'delete')?.content }]">
-                        {{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || t('chat.notSet') }}
+                      <span :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(message.modifyNavigation, fieldDiff, 'old') }]">
+                        {{ formatSandboxModifySideDisplay(message.modifyNavigation, fieldDiff, 'old') || t('chat.notSet') }}
                       </span>
                       <span class="arrow">→</span>
-                      <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
+                      <span class="new-value">{{ formatSandboxModifySideDisplay(message.modifyNavigation, fieldDiff, 'new') || '-' }}</span>
                     </template>
                   </div>
                 </template>
@@ -839,6 +839,7 @@ import {
 } from '../composables/useAgentStream.js'
 import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
+import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
   pingLocalGoProxy as sharedPingLocalGoProxy
@@ -1017,6 +1018,152 @@ function isPlaceholderSessionTitle(title) {
       return rows
     }
     return nav.diff || []
+  }
+
+  /** Bug/卡片：优先级在沙箱里与表单一致；优先读 modifications / before.after，避免 diff 行「紧急→紧急」 */
+  const formatSandboxBugPriorityText = (raw) => {
+    if (raw == null || String(raw).trim() === '') return ''
+    const s = String(raw).trim().toLowerCase()
+    const map = { p1: 'P1 - 紧急', p2: 'P2 - 高', p3: 'P3 - 中', p4: 'P4 - 低' }
+    if (map[s]) return map[s]
+    return String(raw).trim()
+  }
+
+  /** 沙箱状态列：与列表 i18n 一致，避免英文枚举直接展示；未知值原样返回 */
+  const formatSandboxBugStatusText = (raw) => {
+    const s = String(raw ?? '')
+      .trim()
+      .toLowerCase()
+    if (!s) return ''
+    const keyMap = {
+      new: 'list.statusNew',
+      pending: 'list.statusPending',
+      resolved: 'list.statusResolved',
+      closed: 'list.statusClosed',
+      close: 'list.statusClosed',
+      hold: 'list.statusHold',
+      reopened: 'list.statusReopen',
+      reopen: 'list.statusReopen',
+      not_badcase: 'list.statusNotType'
+    }
+    const i18nKey = keyMap[s]
+    if (i18nKey) {
+      if (i18nKey === 'list.statusNotType') {
+        return t(i18nKey, { type: t('list.types.badcase') })
+      }
+      return t(i18nKey)
+    }
+    return String(raw).trim()
+  }
+
+  const readSandboxModifySideRaw = (ctx, fieldDiff, which) => {
+    const fk = String(fieldDiff?.field || '').trim().toLowerCase()
+    const label = String(fieldDiff?.field_label || '')
+    const isPriority = fk === 'priority' || label.includes('优先级')
+    const isStatus = fk === 'status' || /状态/i.test(label)
+    const tgt = String(ctx?.target || '').toLowerCase()
+    const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
+    if (isPriority && mods.priority && typeof mods.priority === 'object') {
+      const v = which === 'old' ? mods.priority.old : mods.priority.new
+      if (v != null && String(v).trim() !== '') return String(v).trim()
+    }
+    if (isStatus && mods.status && typeof mods.status === 'object') {
+      const v = which === 'old' ? mods.status.old : mods.status.new
+      if (v != null && String(v).trim() !== '') return String(v).trim()
+    }
+    if ((tgt === 'bug' || tgt === 'card') && isPriority) {
+      const b = ctx?.before
+      const a = ctx?.after
+      if (which === 'old' && b?.priority != null && String(b.priority).trim() !== '') return String(b.priority).trim()
+      if (which === 'new' && a?.priority != null && String(a.priority).trim() !== '') return String(a.priority).trim()
+    }
+    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isStatus) {
+      const b = ctx?.before
+      const a = ctx?.after
+      if (which === 'old' && b?.status != null && String(b.status).trim() !== '') return String(b.status).trim()
+      if (which === 'new' && a?.status != null && String(a.status).trim() !== '') return String(a.status).trim()
+    }
+    // 分组/批量项上常缺 before：从本会话合并后的待采纳 payload 补 status（与列表、详情 reconcile 一致）
+    if (isStatus && (which === 'old' || which === 'new')) {
+      const tid = Number(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+      const nt = tgt || 'bug'
+      if (Number.isFinite(tid) && tid > 0 && Array.isArray(messages.value)) {
+        try {
+          const merged = getMergedPendingForTarget(messages.value, nt, tid)
+          if (which === 'old') {
+            const b = merged?.before && typeof merged.before === 'object' ? merged.before : null
+            if (b?.status != null && String(b.status).trim() !== '') return String(b.status).trim()
+          } else {
+            const a = merged?.after && typeof merged.after === 'object' ? merged.after : null
+            if (a?.status != null && String(a.status).trim() !== '') return String(a.status).trim()
+          }
+        } catch (_e) {
+          /* noop */
+        }
+      }
+    }
+    // target=card 时 before 常缺 status（或沙箱库未联到 Bug）：用 source_id 或同会话中带 card_id 的源表快照补旧状态
+    if (isStatus && which === 'old' && tgt === 'card' && Array.isArray(messages.value)) {
+      const sid = Number(ctx?.before?.source_id ?? ctx?.after?.source_id)
+      if (Number.isFinite(sid) && sid > 0) {
+        for (const st of ['bug', 'badcase', 'testcase']) {
+          try {
+            const m = getMergedPendingForTarget(messages.value, st, sid)
+            const stv = m?.before && String(m.before.status ?? '').trim()
+            if (stv) return stv
+          } catch (_e2) {
+            /* noop */
+          }
+        }
+      }
+      const cardId = Number(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+      if (Number.isFinite(cardId) && cardId > 0) {
+        for (const msg of messages.value) {
+          if (!msg || msg.isUser) continue
+          const nav = msg.modifyNavigation
+          const blocks = []
+          if (nav?.batch_modify && Array.isArray(nav.batch_results)) {
+            blocks.push(...nav.batch_results)
+          } else if (nav && !nav.is_create) {
+            blocks.push(nav)
+          }
+          for (const block of blocks) {
+            const bb = block?.before
+            if (!bb || typeof bb !== 'object') continue
+            if (Number(bb.card_id ?? bb.cardId) !== cardId) continue
+            const stv = String(bb.status ?? '').trim()
+            if (stv) return stv
+          }
+          for (const grp of msg.modifyGroups || []) {
+            for (const it of grp.items || []) {
+              const bb = it?.before
+              if (!bb || typeof bb !== 'object') continue
+              if (Number(bb.card_id ?? bb.cardId) !== cardId) continue
+              const stv = String(bb.status ?? '').trim()
+              if (stv) return stv
+            }
+          }
+        }
+      }
+    }
+    const lineType = which === 'old' ? 'delete' : 'add'
+    const line = fieldDiff?.lines?.find((l) => l.type === lineType)
+    return line?.content != null ? String(line.content).trim() : ''
+  }
+
+  const formatSandboxModifySideDisplay = (ctx, fieldDiff, which) => {
+    const fk = String(fieldDiff?.field || '').trim().toLowerCase()
+    const label = String(fieldDiff?.field_label || '')
+    const isPriority = fk === 'priority' || label.includes('优先级')
+    const isStatus = fk === 'status' || /状态/i.test(label)
+    const tgt = String(ctx?.target || '').toLowerCase()
+    const raw = readSandboxModifySideRaw(ctx, fieldDiff, which)
+    if (raw === '') return ''
+    if ((tgt === 'bug' || tgt === 'card') && isPriority) return formatSandboxBugPriorityText(raw)
+    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isStatus) {
+      return formatSandboxBugStatusText(raw)
+    }
+    return raw
   }
 
   /** 从批量预览项中取记录标题，用于「同一ID / 同标题」合并沙箱分组 */
@@ -1524,6 +1671,24 @@ const formatMessage = (content) => {
 
 // 零宽字符（历史后端占位等）：不计入「是否有可见正文」判断
 const INVISIBLE_REASONING_CHARS = /[\u200B-\u200D\uFEFF\u2060]/g
+
+/**
+ * reasoning 轨常见「三连以上换行」或通道残留；pre-wrap 会撑出大块空白（DeepSeek-V4-Flash 等尤甚）。
+ * 与 AgentTaskRun.collapseThoughtDisplayNewlines / stripReasoningChannelArtifacts 对齐。
+ */
+const squeezeReasoningVerticalWhitespace = (raw) => {
+  let t = stripReasoningChannelArtifacts(
+    String(raw || '')
+      .replace(/\r\n/g, '\n')
+      .replace(INVISIBLE_REASONING_CHARS, '')
+  )
+  for (let i = 0; i < 12; i++) {
+    const n = t.replace(/\n{3,}/g, '\n\n')
+    if (n === t) break
+    t = n
+  }
+  return t.trim()
+}
 /** 首轮 Agent 思考区是否展示：是否有实质可见文本（reasoningContent 为历史字段名，实为 THINK 阶段草稿缓冲） */
 const substantiveReasoning = (text) => {
   if (text == null || typeof text !== 'string') return false
@@ -1624,7 +1789,7 @@ marked.setOptions({ gfm: true, breaks: true })
 const formatReasoningMarkdown = (content) => {
   if (!content || typeof content !== 'string') return ''
   try {
-    let text = content.replace(INVISIBLE_REASONING_CHARS, '').trim()
+    let text = squeezeReasoningVerticalWhitespace(content)
     // 若模型未输出换行，在中文句号/分号后插入换行，便于展示段落
     if (!/\n/.test(text) && /[。；]/.test(text)) {
       text = text.replace(/([。；])/g, '$1\n')
@@ -1936,7 +2101,7 @@ const _runFastTypewriter = (msg) => {
 /** 流式阶段展示用纯文本（Vue 插值自动转义，不做 marked）*/
 const reasoningPlainForDisplay = (message) => {
   if (!message) return ''
-  return message.reasoningDisplayContent ?? ''
+  return squeezeReasoningVerticalWhitespace(message.reasoningDisplayContent ?? '')
 }
 
 /** 打字机纯文本轨：至少 2 个可见字符再渲染，避免「一个符 + 空槽」*/
@@ -2234,6 +2399,16 @@ const hasUnifiedSummary = (message) => {
   return (r.findings && r.findings.length > 0) || r.execution_time != null || (r.steps_count != null && r.steps_count > 0)
 }
 
+/** 落库曾误把 done.summary 写成沙箱一句提示，历史消息需跳过该占位，改用 findings 等兜底 */
+const isLegacySandboxOnlySummaryText = (txt) => {
+  const s = String(txt || '').trim()
+  if (!s || s.length > 480) return false
+  if (/\n##\s/.test(s)) return false
+  return /沙箱预览完成|预览已生成|请确认是否应用|请确认变更|sandbox preview completed|preview completed|confirm whether to apply/i.test(
+    s
+  )
+}
+
 // 统一总结正文：优先流式草稿（summary_stream / running_summary_stream）；无草稿时取 summaryText 或 findings 兜底
 const getUnifiedSummaryBody = (message) => {
   const r = message.agentResult
@@ -2255,7 +2430,8 @@ const getUnifiedSummaryBody = (message) => {
     return _rsDraft
   }
   if (r?.summaryText && typeof r.summaryText === 'string' && r.summaryText.trim()) {
-    return r.summaryText.trim()
+    const st = r.summaryText.trim()
+    if (!isLegacySandboxOnlySummaryText(st)) return st
   }
   const lines = []
   if (r?.findings && r.findings.length > 0) {
@@ -2425,7 +2601,9 @@ function getMergedPendingForTarget(msgs, target, targetId) {
           diff: nav.diff || [],
           plan_id: nav.plan_id ?? nav.preview?.plan_id,
           messageId: msg.id,
-          _msgIdx: msgIdx
+          _msgIdx: msgIdx,
+          before: nav.before ?? null,
+          after: nav.after ?? null
         })
       }
     }
@@ -2469,11 +2647,30 @@ function getMergedPendingForTarget(msgs, target, targetId) {
     ]
   }))
   const last = items[items.length - 1]
+  let pickBefore = last.before ?? null
+  let pickAfter = last.after ?? null
+  for (let i = items.length - 1; i >= 0; i--) {
+    const b = items[i].before
+    if (b && typeof b === 'object') {
+      pickBefore = b
+      if (b.status != null && String(b.status).trim() !== '') break
+    }
+  }
+  for (let i = items.length - 1; i >= 0; i--) {
+    const a = items[i].after
+    if (a && typeof a === 'object') {
+      pickAfter = a
+      break
+    }
+  }
   return {
     modifications: mergedMods,
     diff,
     plan_id: last.plan_id,
-    messageId: last.messageId
+    messageId: last.messageId,
+    /** 供列表跳转与沙箱补全：优先带 status 的 before；单条 modifyNavigation 也带上 nav.before/after */
+    before: pickBefore,
+    after: pickAfter
   }
 }
 
@@ -2613,8 +2810,22 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
     )
     const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
     const payload = merged
-      ? { diff: merged.diff, modifications: merged.modifications, plan_id: merged.plan_id ?? group.plan_id, messageId: merged.messageId }
-      : { diff: item.diff || [], modifications: item.modifications || {}, plan_id: group.plan_id, messageId }
+      ? {
+          diff: merged.diff,
+          modifications: merged.modifications,
+          plan_id: merged.plan_id ?? group.plan_id,
+          messageId: merged.messageId,
+          before: merged.before ?? null,
+          after: merged.after ?? null
+        }
+      : {
+          diff: item.diff || [],
+          modifications: item.modifications || {},
+          plan_id: group.plan_id,
+          messageId,
+          before: item.before ?? null,
+          after: item.after ?? null
+        }
 
     if (alreadyProcessed) {
       const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
@@ -2634,7 +2845,9 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
         executed: false,
         messageId: payload.messageId,
         batchIndex: index,
-        peerTargetIds
+        peerTargetIds,
+        before: payload.before ?? null,
+        after: payload.after ?? null
       })
     }
   }
@@ -2727,7 +2940,9 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         diff: result.diff || [],
         modifications: result.modifications || {},
         plan_id: result.plan_id,
-        messageId
+        messageId,
+        before: result.before ?? null,
+        after: result.after ?? null
       }
       if (alreadyProcessed) {
         const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
@@ -2747,7 +2962,9 @@ const handleShowModifyInList = async (modifyData, messageId) => {
           executed: false,
           messageId: payload.messageId ?? messageId,
           batchIndex: index,
-          peerTargetIds
+          peerTargetIds,
+          before: payload.before ?? null,
+          after: payload.after ?? null
         })
       }
     }
@@ -2823,7 +3040,9 @@ const handleShowModifyInList = async (modifyData, messageId) => {
     diff: modifyData.diff || [],
     modifications: modifyData.modifications || {},
     plan_id: modifyData.plan_id || modifyData.before?.plan_id || null,
-    messageId
+    messageId,
+    before: modifyData.before ?? null,
+    after: modifyData.after ?? null
   }
   if (alreadyProcessed) {
     const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
@@ -2846,7 +3065,9 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         modifications: payload.modifications,
         plan_id: payload.plan_id,
         executed: alreadyProcessed,
-        messageId: payload.messageId ?? messageId
+        messageId: payload.messageId ?? messageId,
+        before: payload.before ?? null,
+        after: payload.after ?? null
       },
       bubbles: true
     })
@@ -3498,7 +3719,9 @@ const handleRequestPendingModifyForPlan = async (event) => {
             messageId: merged.messageId,
             batchIndex: 0,
             peerTargetIds,
-            suppressAutoOpenDetail
+            suppressAutoOpenDetail,
+            before: merged.before ?? null,
+            after: merged.after ?? null
           })
         }
       }
@@ -3534,7 +3757,9 @@ const handleRequestPendingModifyForPlan = async (event) => {
           messageId: merged.messageId,
           batchIndex: 0,
           peerTargetIds,
-          suppressAutoOpenDetail
+          suppressAutoOpenDetail,
+          before: merged.before ?? null,
+          after: merged.after ?? null
         })
       }
       continue
@@ -3562,7 +3787,9 @@ const handleRequestPendingModifyForPlan = async (event) => {
         executed: false,
         messageId: merged.messageId,
         peerTargetIds: [intTargetId],
-        suppressAutoOpenDetail
+        suppressAutoOpenDetail,
+        before: merged.before ?? null,
+        after: merged.after ?? null
       })
     }
   }
@@ -3982,6 +4209,10 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
 
   // 保存最终结果到数据库（纯对话路径写入 direct_chat_reply，便于刷新后仍走气泡而非「总结」）
   const _persistAgent = { ...(aiMessage.agentResult || {}) }
+  const _persistRunning = String(aiMessage.runningSummaryDraft || '').trim()
+  const _persistSummaryStream = String(aiMessage.summaryStreamDraft || '').trim()
+  if (_persistRunning) _persistAgent.summaryText = _persistRunning
+  else if (_persistSummaryStream) _persistAgent.summaryText = _persistSummaryStream
   if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
   else delete _persistAgent.direct_chat_reply
   _persistAgent.react_plan_panel_suppressed = !!aiMessage.reactPlanPanelSuppressed

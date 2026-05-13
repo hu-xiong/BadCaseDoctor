@@ -150,7 +150,7 @@
           :class="{
             selected: selectedTasks.includes(badcase.id),
             'pending-delete-row': pendingModifications[badcase.id]?._pendingDelete,
-            'pending-modify': pendingModifications[badcase.id] && !pendingModifications[badcase.id]?._pendingDelete
+            'pending-modify': rowHasPendingModify(badcase)
           }"
           :title="t('common.copyRowHint')"
           @mousedown="onRowMouseDown"
@@ -166,12 +166,12 @@
           </div>
           <div class="row-title">
             <SelectableTitleTip
-              v-if="pendingModifications[badcase.id]?.title"
+              v-if="modifyPendingOverlay(badcase)?.title"
               class="field-diff-inline"
-              :text="`${pendingModifications[badcase.id].title.old} → ${pendingModifications[badcase.id].title.new}`"
+              :text="`${modifyPendingOverlay(badcase).title.old} → ${modifyPendingOverlay(badcase).title.new}`"
             >
-              <span class="old-value-inline">{{ pendingModifications[badcase.id].title.old }}</span>
-              <span class="new-value-inline">{{ pendingModifications[badcase.id].title.new }}</span>
+              <span class="old-value-inline">{{ (modifyPendingOverlay(badcase).title.old || '').trim() || t('chat.notSet') }}</span>
+              <span class="new-value-inline">{{ modifyPendingOverlay(badcase).title.new }}</span>
             </SelectableTitleTip>
             <SelectableTitleTip
               v-else
@@ -183,16 +183,16 @@
             <span class="type-badge" :class="currentPlanType">{{ listTypeLabel }}</span>
           </div>
           <div class="row-status">
-            <div v-if="pendingModifications[badcase.id]?.status" class="field-diff-inline">
-              <span class="old-value-inline">{{ pendingModifications[badcase.id].status.old }}</span>
-              <span class="new-value-inline">{{ pendingModifications[badcase.id].status.new }}</span>
+            <div v-if="modifyPendingOverlay(badcase)?.status" class="field-diff-inline">
+              <span class="old-value-inline">{{ getBadcaseStatusText(pendingStatusOldForRow(badcase)) }}</span>
+              <span class="new-value-inline">{{ getBadcaseStatusText(modifyPendingOverlay(badcase).status.new) }}</span>
             </div>
             <span v-else class="status-badge" :class="badcase.status">{{ getBadcaseStatusText(badcase.status) }}</span>
           </div>
           <div class="row-assignee">
-            <div v-if="pendingModifications[badcase.id]?.assignee" class="field-diff-inline">
-              <span class="old-value-inline">{{ getAssigneeDisplayText(pendingModifications[badcase.id].assignee.old) }}</span>
-              <span class="new-value-inline">{{ getAssigneeDisplayText(pendingModifications[badcase.id].assignee.new) }}</span>
+            <div v-if="modifyPendingOverlay(badcase)?.assignee" class="field-diff-inline">
+              <span class="old-value-inline">{{ getAssigneeDisplayText(modifyPendingOverlay(badcase).assignee.old) }}</span>
+              <span class="new-value-inline">{{ getAssigneeDisplayText(modifyPendingOverlay(badcase).assignee.new) }}</span>
             </div>
             <span v-else class="assignee-text">{{ getAssigneeDisplayText(badcase.assignee) }}</span>
           </div>
@@ -200,8 +200,8 @@
             <span class="date-text">{{ new Date(badcase.created_at).toLocaleDateString() }}</span>
           </div>
 
-          <div v-if="pendingModifications[badcase.id]" class="row-actions" @click.stop>
-            <template v-if="pendingModifications[badcase.id]._pendingDelete">
+          <div v-if="pendingModifications[badcase.id] || modifyPendingOverlay(badcase)" class="row-actions" @click.stop>
+            <template v-if="pendingModifications[badcase.id]?._pendingDelete">
               <template v-if="isLastInConsecutiveDeleteGroup(badcase.id)">
                 <span v-if="getConsecutiveDeleteGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveDeleteGroupSize(badcase.id) }) }}</span>
                 <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmConsecutiveDeleteGroup(badcase.id)">✓</button>
@@ -209,18 +209,10 @@
               </template>
             </template>
             <template v-else>
-              <button
-                v-if="hasDetailFieldModifications(badcase.id)"
-                class="btn-expand-detail"
-                :title="expandedDetailRows.includes(badcase.id) ? t('list.collapseDetail') : t('list.expandDetail')"
-                @click="toggleDetailExpand(badcase.id)"
-              >
-                {{ expandedDetailRows.includes(badcase.id) ? '▼' : '▶' }}
-              </button>
-              <template v-if="isLastInConsecutiveGroup(badcase.id)">
-                <span v-if="getConsecutiveGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(badcase.id) }) }}</span>
-                <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmModify(badcase.id)">✓</button>
-                <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelModify(badcase.id)">✗</button>
+              <template v-if="isLastInConsecutiveGroup(modifyPendingMapKey(badcase))">
+                <span v-if="getConsecutiveGroupSize(modifyPendingMapKey(badcase)) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveGroupSize(modifyPendingMapKey(badcase)) }) }}</span>
+                <button class="btn-icon-approve" :title="t('list.approve')" @click="confirmModify(modifyPendingMapKey(badcase))">✓</button>
+                <button class="btn-icon-reject" :title="t('list.cancelAction')" @click="cancelModify(modifyPendingMapKey(badcase))">✗</button>
               </template>
             </template>
           </div>
@@ -288,9 +280,6 @@ export default {
     editBadcase: { type: Function, required: false, default: null },
     editItem: { type: Function, required: false, default: null },
     pendingModifications: { type: Object, default: () => ({}) },
-    expandedDetailRows: { type: Array, default: () => [] },
-    hasDetailFieldModifications: { type: Function, default: () => false },
-    toggleDetailExpand: { type: Function, default: () => {} },
     isLastInConsecutiveGroup: { type: Function, default: () => false },
     getConsecutiveGroupSize: { type: Function, default: () => 1 },
     confirmModify: { type: Function, default: () => {} },
@@ -386,6 +375,36 @@ export default {
     handleEdit(id) {
       const fn = this.editItem || this.editBadcase
       if (typeof fn === 'function') fn(id)
+    },
+    /** target=card 时 pending 挂在 Card.id，与 Bug 行主键 id 不同，需用 card_id 对齐 */
+    modifyPendingOverlay(badcase) {
+      const pm = this.pendingModifications
+      const a = pm[badcase.id]
+      if (a && !a._pendingDelete) return a
+      const cid = Number(badcase.card_id ?? badcase.cardId)
+      if (Number.isFinite(cid) && cid > 0) {
+        const c = pm[cid]
+        if (c && !c._pendingDelete) return c
+      }
+      return null
+    },
+    rowHasPendingModify(badcase) {
+      const o = this.modifyPendingOverlay(badcase)
+      return !!(o && !o._pendingDelete)
+    },
+    modifyPendingMapKey(badcase) {
+      const pm = this.pendingModifications
+      if (pm[badcase.id] && !pm[badcase.id]._pendingDelete) return badcase.id
+      const cid = Number(badcase.card_id ?? badcase.cardId)
+      if (Number.isFinite(cid) && cid > 0 && pm[cid] && !pm[cid]._pendingDelete) return cid
+      return badcase.id
+    },
+    /** pending 里旧状态为空时，用当前行列表数据兜底，避免误显示「未设置」而库内实为 closed 等 */
+    pendingStatusOldForRow(badcase) {
+      const p = this.modifyPendingOverlay(badcase)?.status
+      if (!p) return ''
+      if (p.old != null && String(p.old).trim() !== '') return p.old
+      return badcase.status
     },
     onRowMouseDown(e) {
       if (e.button !== 0) return
@@ -866,24 +885,6 @@ export default {
   padding: 2px 8px;
   border-radius: 10px;
   margin-right: 8px;
-}
-
-.btn-expand-detail {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  border: 1px solid #e5e7eb;
-  background: white;
-  color: #374151;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.btn-expand-detail:hover {
-  background: #f3f4f6;
 }
 
 .loading-row,

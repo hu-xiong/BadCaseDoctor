@@ -593,8 +593,22 @@
                   </div>
                 </div>
                 
-      <!-- 右侧边栏 -->
-      <div class="sidebar-right">
+      <!-- 右侧边栏：默认收起；展开后为固定宽度 -->
+      <div class="right-panel-column">
+        <button
+          v-show="!isRightSidebarOpen"
+          type="button"
+          class="sidebar-expand-tab"
+          title="展开侧栏"
+          aria-label="展开侧栏"
+          @click="isRightSidebarOpen = true"
+        >
+          <img src="../assets/resize-icon.svg" alt="" class="resize-icon resize-icon--expand" />
+        </button>
+        <div class="sidebar-right" :class="{ 'sidebar-right--open': isRightSidebarOpen }">
+        <div class="resize-handle" role="button" tabindex="0" title="收起侧栏" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
+          <img src="../assets/resize-icon.svg" alt="" class="resize-icon" :class="{ 'rotated': isRightSidebarOpen }" />
+        </div>
         <!-- 所属项目 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">所属项目</h3>
@@ -705,6 +719,7 @@
              </template>
            </div>
          </div>
+        </div>
       </div>
     </div>
     
@@ -766,7 +781,11 @@ export default {
     const saveLoading = ref(false)
     const isEdit = ref(false)
     const badcaseId = ref(null)
-    
+    const isRightSidebarOpen = ref(false)
+    const toggleRightSidebar = () => {
+      isRightSidebarOpen.value = !isRightSidebarOpen.value
+    }
+
     const projectInfo = ref({})
     const availableProjects = ref([])
     
@@ -1228,15 +1247,9 @@ export default {
             
             // 复现步骤由 RichTextHtmlEditor v-model 绑定 badcase.reproduction_steps
 
-            // 获取项目计划列表和成员列表（编辑模式）
+            // 计划/成员由 onMounted 中 getProjectEditContext 一次性拉取，避免与 initBadcase 重复打 /plans、/members
             if (badcase.project_id) {
-              console.log('编辑模式，获取项目计划，项目ID:', badcase.project_id)
-              
-              // 等待数据加载完成
-              await Promise.all([
-                fetchProjectPlans(badcase.project_id),
-                fetchProjectMembers(badcase.project_id)
-              ])
+              console.log('编辑模式，项目ID:', badcase.project_id, '（plans/members 由 edit-context 统一加载）')
               
               // 确保数据同步
               console.log('编辑模式初始化完成后，当前状态:')
@@ -1369,10 +1382,7 @@ export default {
             console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
           }
 
-          // 获取当前项目的计划列表和成员列表
-          console.log('开始获取项目计划，项目ID:', badcase.project_id)
-          await fetchProjectPlans(badcase.project_id)
-          await fetchProjectMembers(badcase.project_id)
+          // 计划/成员由下方 getProjectEditContext 统一加载，避免重复请求
 
           // 确保数据同步
           console.log('初始化完成后，当前状态:')
@@ -1931,9 +1941,6 @@ export default {
           console.log('当前用户信息获取完成')
         }
         
-        // 等待一下确保数据完全加载
-        await new Promise(resolve => setTimeout(resolve, 100))
-        
         // 然后初始化BadCase
         console.log('开始初始化BadCase...')
         await initBadcase()
@@ -1978,6 +1985,24 @@ export default {
             pendingDiff.value = null
           }
         }
+        const reconcilePendingOldFromLoadedBadcase = () => {
+          if (!pendingDiff.value?.modifications) return
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (String(field).startsWith('_')) continue
+            if (!badcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
+            if (field !== 'status' && field !== 'title') continue
+            const bv = badcase[field]
+            const bs = bv != null ? String(bv).trim() : ''
+            if (!bs) continue
+            const oldS = data.old != null ? String(data.old).trim() : ''
+            const newS = data.new != null ? String(data.new).trim() : ''
+            if (!newS || newS === bs) continue
+            if (oldS !== bs) {
+              data.old = bv
+            }
+          }
+        }
+        reconcilePendingOldFromLoadedBadcase()
         if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (
@@ -2086,7 +2111,9 @@ export default {
       commentEditorActive,
       activateCommentEditor,
       finishCommentEditor,
-      inlineDiffFields
+      inlineDiffFields,
+      isRightSidebarOpen,
+      toggleRightSidebar
     }
   }
 }
@@ -2616,12 +2643,14 @@ export default {
 .main-content {
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
 /* 左侧内容区 */
 .content-left {
   flex: 1;
+  min-height: 0;
   padding: 24px;
   overflow-y: auto;
   background: #fff;
@@ -3509,13 +3538,112 @@ export default {
   cursor: not-allowed;
 }
 
-/* 右侧边栏 */
-.sidebar-right {
-  width: 320px;
+/* 侧栏展开/收起（与 NewBug 一致） */
+.resize-handle {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  background-color: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+  z-index: 10;
+}
+
+.resize-handle:hover {
+  background-color: #f5f5f5;
+  border-color: #d0d0d0;
+}
+
+.resize-icon {
+  width: 12px;
+  height: 18px;
+  transition: transform 0.3s ease;
+}
+
+.resize-icon.rotated {
+  transform: rotate(180deg);
+}
+
+.resize-icon--expand {
+  transform: rotate(180deg);
+}
+
+.right-panel-column {
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
+  align-items: stretch;
+  align-self: stretch;
+  min-height: 0;
+}
+
+.sidebar-expand-tab {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 10px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
   background: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.sidebar-expand-tab:hover {
+  background: #f5f5f5;
+  border-color: #d0d0d0;
+}
+
+/* 右侧边栏：默认收起；展开后固定宽度 */
+.sidebar-right {
+  position: relative;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  padding: 0;
+  margin: 0;
+  background: #fff;
+  border-left: none;
+  overflow: hidden;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    width 0.3s ease,
+    min-width 0.3s ease,
+    max-width 0.3s ease,
+    padding 0.3s ease,
+    border-color 0.3s ease,
+    opacity 0.2s ease;
+}
+
+.sidebar-right.sidebar-right--open {
+  width: 320px;
+  min-width: 320px;
+  max-width: 320px;
+  min-height: 0;
+  align-self: stretch;
+  padding: 24px;
   border-left: 1px solid #e9ecef;
   overflow-y: auto;
-  padding: 24px;
+  overflow-x: hidden;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .sidebar-section {
@@ -3970,8 +4098,10 @@ export default {
     flex-direction: column;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 100%;
+    min-width: 0;
+    max-width: none;
     border-left: none;
     border-top: 1px solid #e9ecef;
   }
@@ -3992,7 +4122,7 @@ export default {
     padding: 16px;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     padding: 16px;
   }
   
@@ -4003,8 +4133,10 @@ export default {
 
 /* 开发者工具打开时的布局优化 */
 @media (max-width: 1200px) and (min-width: 769px) {
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 280px;
+    min-width: 280px;
+    max-width: 280px;
   }
   
   .content-left {
@@ -4018,8 +4150,10 @@ export default {
     flex-direction: row !important;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 320px !important;
+    min-width: 320px !important;
+    max-width: 320px !important;
     border-left: 1px solid #e9ecef !important;
     border-top: none !important;
   }

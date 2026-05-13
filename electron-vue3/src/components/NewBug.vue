@@ -17,11 +17,12 @@
 
     <div class="main-content">
       <!-- 左侧主要内容区 -->
-      <div class="content-left" :class="{ 'collapsed': isLeftCollapsed }">
-        <!-- 待采纳改动（show_diff 模式） -->
+      <div class="content-left">
+        <!-- 待采纳改动：仅「尚无对应表单项」的字段在顶部汇总；优先级/复现步骤等均在各自字段上方展示 -->
         <div
-          v-if="!embedded && pendingDiff && pendingDiff.modifications && Object.keys(pendingDiff.modifications).filter(k => !k.startsWith('_') && k !== 'priority').length > 0"
+          v-if="showPendingDiffTopPanel"
           class="pending-diff-panel"
+          :class="{ 'pending-diff-panel--embedded': embedded }"
         >
           <div class="pending-diff-header">
             <div class="pending-diff-title">待采纳改动</div>
@@ -30,25 +31,31 @@
 
           <template v-for="(data, field) in pendingDiff.modifications" :key="field">
           <div
-            v-if="!String(field).startsWith('_') && field !== 'priority'"
+            v-if="shouldShowPendingFieldInTop(field)"
             class="pending-diff-item"
             :id="`diff-field-${field}`"
           >
             <div class="pending-diff-item-head">
               <div class="pending-diff-field">
-                <span class="pending-diff-field-label">{{ field }}</span>
+                <span class="pending-diff-field-label">{{ pendingDiffFieldLabel(field) }}</span>
               </div>
               <div class="pending-diff-actions">
                 <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
                 <button class="btn-icon-reject" title="拒绝该字段" @click="cancelFieldChange(field)">✗</button>
               </div>
             </div>
+            <div v-if="isShortListPendingField(field)" class="pending-diff-inline-row">
+              <span class="pdi-chip pdi-old">{{ formatPendingShortFieldDisplay(field, data?.old) }}</span>
+              <span class="pdi-arrow">→</span>
+              <span class="pdi-chip pdi-new">{{ formatPendingShortFieldDisplay(field, data?.new) }}</span>
+            </div>
             <MonacoDiffEditor
+              v-else
               :original="String(data?.old ?? '')"
               :modified="String(data?.new ?? '')"
               language="markdown"
-              theme="vs-dark"
-              height="160px"
+              theme="vs"
+              height="200px"
               :renderSideBySide="false"
             />
           </div>
@@ -464,34 +471,40 @@
               <option value="其他">其他</option>
             </select>
           </div>
-          <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
+          <div class="form-row form-row--stack-field" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
             <label class="form-label required">优先级:</label>
-            <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel">
-              <div class="diff-header">
-                <span class="diff-label">优先级修改预览:</span>
-                <div class="diff-actions">
-                  <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                  <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
+            <div class="form-row-field-col">
+              <div
+                v-if="pendingDiff?.modifications?.priority"
+                id="diff-field-priority"
+                class="field-diff-panel field-diff-panel--stacked"
+              >
+                <div class="diff-header">
+                  <span class="diff-label">优先级修改预览:</span>
+                  <div class="diff-actions">
+                    <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                    <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.old) }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.new) }}</span>
+                  </div>
                 </div>
               </div>
-              <div class="diff-content">
-                <div class="diff-row">
-                  <span class="diff-tag old">原值</span>
-                  <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.old) }}</span>
-                </div>
-                <div class="diff-row">
-                  <span class="diff-tag new">新值</span>
-                  <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.new) }}</span>
-                </div>
-              </div>
-            </div>
-            <select v-model="bug.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
+              <select v-model="bug.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
               <option value="">请选择优先级</option>
               <option value="p1">P1 - 紧急</option>
               <option value="p2">P2 - 高</option>
               <option value="p3">P3 - 中</option>
               <option value="p4">P4 - 低</option>
             </select>
+            </div>
           </div>
         </div>
         <!-- 底部操作区 -->
@@ -509,11 +522,21 @@
                   </div>
                 </div>
                 
-      <!-- 右侧边栏 -->
-      <div class="sidebar-right" :class="{ 'expanded': isLeftCollapsed }">
-        <!-- 伸缩按钮 -->
-        <div class="resize-handle" @click="toggleLeftPanel">
-          <img src="../assets/resize-icon.svg" alt="Resize" class="resize-icon" :class="{ 'rotated': isLeftCollapsed }" />
+      <!-- 右侧边栏：默认收起；展开后为固定宽度，不会继续 flex 拉宽 -->
+      <div class="right-panel-column">
+        <button
+          v-show="!isRightSidebarOpen"
+          type="button"
+          class="sidebar-expand-tab"
+          title="展开侧栏"
+          aria-label="展开侧栏"
+          @click="isRightSidebarOpen = true"
+        >
+          <img src="../assets/resize-icon.svg" alt="" class="resize-icon resize-icon--expand" />
+        </button>
+        <div class="sidebar-right" :class="{ 'sidebar-right--open': isRightSidebarOpen }">
+        <div class="resize-handle" role="button" tabindex="0" title="收起侧栏" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
+          <img src="../assets/resize-icon.svg" alt="" class="resize-icon" :class="{ 'rotated': isRightSidebarOpen }" />
         </div>
         
         <!-- 所属项目 -->
@@ -626,6 +649,7 @@
              </template>
            </div>
          </div>
+        </div>
       </div>
     </div>
     
@@ -688,13 +712,10 @@ export default {
     const saveLoading = ref(false)
     const isEdit = ref(false)
     const bugId = ref(null)
-    const isLeftCollapsed = ref(false)
-    
-    // 切换左侧面板的收缩/展开状态
-    const toggleLeftPanel = () => {
-      isLeftCollapsed.value = !isLeftCollapsed.value
+    const isRightSidebarOpen = ref(false)
+    const toggleRightSidebar = () => {
+      isRightSidebarOpen.value = !isRightSidebarOpen.value
     }
-    console.log('[NewBug] isLeftCollapsed defined:', typeof isLeftCollapsed)
     
     const projectInfo = ref({})
     const availableProjects = ref([])
@@ -714,7 +735,35 @@ export default {
       { value: 'reopened', label: 'reopened' },
       { value: 'resolved', label: 'resolved' }
     ])
-    
+
+    /** 列表行内已展示采纳时，嵌入顶栏不再重复 title/status/assignee */
+    const PENDING_TOP_LIST_FIELDS = ['title', 'status', 'assignee']
+    /** 主表单内已有「字段上方」diff 区，勿再放入顶部 pending 汇总（含嵌入模式） */
+    const PENDING_DETAIL_INLINE_FIELDS = new Set([
+      'priority',
+      'reproduction_steps',
+      'steps_to_reproduce',
+      'reproduce_steps',
+      'expected_result',
+      'actual_result'
+    ])
+    const PENDING_FIELD_LABELS = {
+      title: '标题',
+      status: '流程状态',
+      assignee: '负责人',
+      priority: '优先级',
+      expected_result: '预期结果',
+      actual_result: '实际结果',
+      reproduction_steps: '复现步骤',
+      comment: '备注',
+      severity: '严重级别',
+      case_category: '问题分类',
+      environment: '环境',
+      browser: '浏览器',
+      os: '操作系统',
+      plan: '计划'
+    }
+
     // 当前用户信息 - 使用全局用户状态
     const currentUser = computed(() => user.value)
     
@@ -775,6 +824,20 @@ export default {
     
     // 待确认的 diff 数据
     const pendingDiff = ref(null)
+
+    /** 嵌入：列表已处理 title/status/assignee；其余仅在顶部展示「无表单项」的字段。非嵌入：无独立 diff 区的字段可走顶部。 */
+    const showPendingDiffTopPanel = computed(() => {
+      const m = pendingDiff.value?.modifications
+      if (!m) return false
+      const keys = Object.keys(m).filter((k) => !String(k).startsWith('_'))
+      if (!keys.length) return false
+      const showInTop = (k) => {
+        if (PENDING_DETAIL_INLINE_FIELDS.has(k)) return false
+        if (props.embedded && PENDING_TOP_LIST_FIELDS.includes(k)) return false
+        return true
+      }
+      return keys.some(showInTop)
+    })
     
     const bug = reactive({
       title: '',
@@ -797,12 +860,61 @@ export default {
       attachments: []
     })
 
-    // 获取状态文本
+    // 获取状态文本（下拉配置优先，其次常用枚举）
     const getStatusText = (status) => {
+      if (status == null || status === '') return '—'
+      const s = String(status)
+      const hit = availableStatuses.value.find((x) => String(x.value) === s)
+      if (hit) return hit.label
       const statusMap = {
-        'new': '新建'
+        new: '新建',
+        close: '已关闭',
+        closed: '已关闭',
+        pending: '处理中',
+        resolved: '已解决',
+        hold: '搁置',
+        reopen: '重新打开',
+        reopened: '重新打开',
+        not_a_bug: '非缺陷',
+        not_badcase: '非 BadCase'
       }
-      return statusMap[status] || status
+      return statusMap[s] || s
+    }
+
+    const pendingDiffFieldLabel = (field) =>
+      PENDING_FIELD_LABELS[String(field)] || String(field)
+
+    const shouldShowPendingFieldInTop = (field) => {
+      const f = String(field || '')
+      if (f.startsWith('_')) return false
+      if (props.embedded && PENDING_TOP_LIST_FIELDS.includes(f)) return false
+      if (PENDING_DETAIL_INLINE_FIELDS.has(f)) return false
+      return true
+    }
+
+    const isShortListPendingField = (field) => PENDING_TOP_LIST_FIELDS.includes(String(field))
+
+    const formatPendingShortFieldDisplay = (field, raw) => {
+      if (raw == null || String(raw).trim() === '') return '未设置'
+      const f = String(field)
+      if (f === 'status') return getStatusText(String(raw))
+      if (f === 'assignee') {
+        if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+          return String(raw.name ?? raw.id ?? raw.username ?? '—')
+        }
+        if (Array.isArray(raw)) {
+          return raw
+            .map((x) =>
+              typeof x === 'object' && x != null
+                ? String(x.name ?? x.id ?? x.username ?? '')
+                : String(x)
+            )
+            .filter(Boolean)
+            .join('、') || '—'
+        }
+        return String(raw)
+      }
+      return String(raw)
     }
 
     // 获取项目成员列表
@@ -861,20 +973,19 @@ export default {
       // 更新之前的项目ID
       bug._previousProjectId = projectId
       
-      // 获取项目信息
+      // 获取项目信息（未在下拉列表中的项目也可通过 edit-context 拉齐 plans/members）
       if (projectId) {
         const project = availableProjects.value.find(p => p.id == projectId)
         if (project) {
           projectInfo.value = project
           console.log('handleProjectChange: 找到项目信息:', project.name)
-          // 获取项目计划
-          fetchProjectPlans(projectId)
-          // 获取项目成员
-          fetchProjectMembers(projectId)
         } else {
-          console.log('handleProjectChange: 未找到项目信息')
+          console.log('handleProjectChange: 未在下拉列表中找到项目，仍尝试 edit-context')
         }
+        projectWorkspaceLoaded.value = false
+        void applyProjectEditContext(projectId)
       } else {
+        projectWorkspaceLoaded.value = false
         console.log('handleProjectChange: 没有项目ID')
       }
     }
@@ -903,6 +1014,28 @@ export default {
     
     // 编辑页不需要拉全量项目列表（包含头像等），避免额外慢接口
     
+    /** 一次请求拉齐 project + plans + members（与 /edit-context 对齐），避免 /plans + /members 各打一遍 */
+    const projectWorkspaceLoaded = ref(false)
+    const applyProjectEditContext = async (projectId) => {
+      const pid = Number(projectId)
+      if (!projectId || !Number.isFinite(pid) || pid <= 0) return false
+      try {
+        const resp = await getProjectEditContext(pid)
+        if (!resp.data?.success) return false
+        projectInfo.value = resp.data.project || projectInfo.value
+        projectMembers.value = resp.data.members || []
+        if (resp.data.project && !availableProjects.value.find((p) => p.id == resp.data.project.id)) {
+          availableProjects.value.push(resp.data.project)
+        }
+        await setAvailablePlansFromTree(resp.data.plans || [])
+        projectWorkspaceLoaded.value = true
+        return true
+      } catch (e) {
+        console.error('applyProjectEditContext 失败:', e)
+        return false
+      }
+    }
+
     // 使用后端 plans 树直接生成下拉选项（避免额外请求 /plans）
     const setAvailablePlansFromTree = async (plansTree) => {
       const formattedPlans = [
@@ -1148,11 +1281,7 @@ export default {
                 console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
               }
               
-              // 等待数据加载完成
-              await Promise.all([
-                fetchProjectPlans(bug.project_id),
-                fetchProjectMembers(bug.project_id)
-              ])
+              await applyProjectEditContext(bug.project_id)
               
               // 确保数据同步
               console.log('编辑模式初始化完成后，当前状态:')
@@ -1237,10 +1366,8 @@ export default {
           bug.plan = String(query.plan_id || props.plan_id)
         }
 
-        // 获取当前项目的计划列表和成员列表
-        console.log('开始获取项目计划，项目ID:', bug.project_id)
-        await fetchProjectPlans(bug.project_id)
-        await fetchProjectMembers(bug.project_id)
+        console.log('开始获取项目计划/成员（edit-context），项目ID:', bug.project_id)
+        await applyProjectEditContext(bug.project_id)
         
         // 确保数据同步
         console.log('初始化完成后，当前状态:')
@@ -1702,46 +1829,21 @@ export default {
         console.log('开始后台加载用户信息...')
         bgTasks.push(fetchCurrentUser())
         
-        // 先拉项目列表，保证右侧「项目名称」下拉有数据，并支持默认选中
-        // 编辑模式：项目列表与 Bug 详情互不依赖，并行拉取以缩短首屏
-        const isEditEarly = props.edit || route.query.edit === 'true'
-        const itemIdEarly = props.id || route.query.id
-        if (isEditEarly && itemIdEarly) {
-          await Promise.all([fetchProjects(), initBug()])
-        } else {
-          await fetchProjects()
-          await initBug()
-        }
+        // 先拉项目列表再 initBug，避免竞态下 initBug 误以为列表为空再次请求 /api/projects
+        await fetchProjects()
+        await initBug()
         console.log('Bug初始化完成')
 
-        // 编辑页 initBug 已拉取 plans/members 时，不再重复请求 edit-context（省一轮 400～600ms）
         const ctxProjectId = bug.project_id
-        if (ctxProjectId) {
-          const skipDupContext =
-            isEdit.value &&
-            Array.isArray(availablePlans.value) &&
-            availablePlans.value.length > 0 &&
-            Array.isArray(projectMembers.value) &&
-            projectMembers.value.length > 0
-          if (!skipDupContext) {
-            try {
-              const resp = await getProjectEditContext(ctxProjectId)
-              if (resp.data?.success) {
-                projectInfo.value = resp.data.project || projectInfo.value
-                projectMembers.value = resp.data.members || projectMembers.value
-                // 将当前项目添加到 availableProjects 中，确保下拉框能显示
-                if (resp.data.project && !availableProjects.value.find(p => p.id == resp.data.project.id)) {
-                  availableProjects.value.push(resp.data.project)
-                }
-                await setAvailablePlansFromTree(resp.data.plans || [])
-              }
-            } catch (e) {
-              console.error('获取编辑页上下文失败:', e)
-            }
-          } else if (!projectInfo.value?.name) {
-            const prj = availableProjects.value.find((p) => String(p.id) === String(ctxProjectId))
-            if (prj) projectInfo.value = prj
+        if (ctxProjectId && !projectWorkspaceLoaded.value) {
+          try {
+            await applyProjectEditContext(ctxProjectId)
+          } catch (e) {
+            console.error('获取编辑页上下文失败:', e)
           }
+        } else if (ctxProjectId && !projectInfo.value?.name) {
+          const prj = availableProjects.value.find((p) => String(p.id) === String(ctxProjectId))
+          if (prj) projectInfo.value = prj
         }
 
         // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
@@ -1758,6 +1860,25 @@ export default {
             pendingDiff.value = null
           }
         }
+        // 待确认 diff 的「旧值」若与当前库表不一致（常见：会话里错成默认 new/空），以 initBug 拉取后的表单为准
+        const reconcilePendingOldFromLoadedBug = () => {
+          if (!pendingDiff.value?.modifications) return
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (String(field).startsWith('_')) continue
+            if (!bug.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
+            if (field !== 'status' && field !== 'title') continue
+            const bv = bug[field]
+            const bs = bv != null ? String(bv).trim() : ''
+            if (!bs) continue
+            const oldS = data.old != null ? String(data.old).trim() : ''
+            const newS = data.new != null ? String(data.new).trim() : ''
+            if (!newS || newS === bs) continue
+            if (oldS !== bs) {
+              data.old = bv
+            }
+          }
+        }
+        reconcilePendingOldFromLoadedBug()
         if (pendingDiff.value?.modifications) {
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (bug.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
@@ -1837,6 +1958,11 @@ export default {
       togglePlanExpansion,
       goBack,
       pendingDiff,
+      showPendingDiffTopPanel,
+      shouldShowPendingFieldInTop,
+      pendingDiffFieldLabel,
+      isShortListPendingField,
+      formatPendingShortFieldDisplay,
       confirmFieldChange,
       cancelFieldChange,
       applyFieldChange,
@@ -1851,8 +1977,8 @@ export default {
       commentEditorActive,
       activateCommentEditor,
       finishCommentEditor,
-      isLeftCollapsed,
-      toggleLeftPanel
+      isRightSidebarOpen,
+      toggleRightSidebar
     }
   }
 }
@@ -1893,43 +2019,48 @@ export default {
   transform: rotate(180deg);
 }
 
-/* 右侧边栏样式 */
-.sidebar-right {
-  position: relative;
-  width: 300px;
-  transition: all 0.3s ease;
+/* 指向内「展开侧栏」的图标方向（与收起态手柄区分） */
+.resize-icon--expand {
+  transform: rotate(180deg);
 }
 
-.sidebar-title {
-  margin: 0 0 12px 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: #333;
+.right-panel-column {
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
+  align-items: stretch;
+  align-self: stretch;
+  min-height: 0;
 }
 
-/* 左侧面板收缩样式 */
+.sidebar-expand-tab {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 10px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.sidebar-expand-tab:hover {
+  background: #f5f5f5;
+  border-color: #d0d0d0;
+}
+
+/* 左侧主内容 */
 .content-left {
   flex: 1;
   min-width: 300px;
   transition: all 0.3s ease;
-}
-
-.content-left.collapsed {
-  flex: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-/* 右侧边栏展开样式 */
-.sidebar-right {
-  width: 300px;
-  transition: all 0.3s ease;
-}
-
-.sidebar-right.expanded {
-  flex: 1;
-  min-width: 300px;
-  max-width: none;
 }
 
 /* 主内容区布局 */
@@ -1978,13 +2109,14 @@ export default {
   z-index: 1000;
 }
 
-/* show_diff：待采纳改动面板（暗色、Cursor风格） */
+/* 待采纳改动：浅色卡片，与主表单一致 */
 .pending-diff-panel {
   margin: 16px 0 20px;
-  padding: 14px;
-  background: #1e1e1e;
-  border: 1px solid #3e3e3e;
-  border-radius: 10px;
+  padding: 16px 16px 12px;
+  background: #fafafa;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
 .pending-diff-header {
@@ -1995,22 +2127,54 @@ export default {
 }
 
 .pending-diff-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: #e5e7eb;
+  font-size: 15px;
+  font-weight: 600;
+  color: #111827;
 }
 
 .pending-diff-subtitle {
   font-size: 12px;
+  color: #6b7280;
+  line-height: 1.45;
+}
+
+.pending-diff-panel--embedded {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.pending-diff-priority-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.pending-diff-priority-inline .diff-val {
+  font-weight: 600;
+  color: #111827;
+}
+
+.pending-diff-priority-inline .diff-arrow {
   color: #9ca3af;
 }
 
+.pending-diff-priority-inline .diff-old-tag,
+.pending-diff-priority-inline .diff-new-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+}
+
 .pending-diff-item {
-  padding: 12px;
-  border: 1px solid #2d2d2d;
+  padding: 12px 14px;
+  border: 1px solid #e5e7eb;
   border-radius: 10px;
-  background: #111827;
-  margin-top: 12px;
+  background: #fff;
+  margin-top: 10px;
 }
 
 .pending-diff-item-head {
@@ -2018,45 +2182,81 @@ export default {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .pending-diff-field-label {
-  font-weight: 700;
-  color: #93c5fd;
+  font-weight: 600;
+  color: #1d4ed8;
 }
 
 .pending-diff-actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
 }
 
-.btn-icon-approve,
-.btn-icon-reject {
+.pending-diff-inline-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.pending-diff-inline-row .pdi-arrow {
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+.pending-diff-inline-row .pdi-chip {
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.pending-diff-inline-row .pdi-chip.pdi-old {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.pending-diff-inline-row .pdi-chip.pdi-new {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.pending-diff-panel .btn-icon-approve,
+.pending-diff-panel .btn-icon-reject {
   width: 32px;
   height: 32px;
   border-radius: 50%;
   border: none;
   font-size: 16px;
   cursor: pointer;
-  transition: transform 0.12s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
-.btn-icon-approve {
-  background: #10b981;
+.pending-diff-panel .btn-icon-approve {
+  background: #059669;
   color: #fff;
 }
 
-.btn-icon-reject {
-  background: #ef4444;
+.pending-diff-panel .btn-icon-reject {
+  background: #dc2626;
   color: #fff;
 }
 
-.btn-icon-approve:hover,
-.btn-icon-reject:hover {
+.pending-diff-panel .btn-icon-approve:hover,
+.pending-diff-panel .btn-icon-reject:hover {
   transform: scale(1.06);
 }
 
@@ -2179,12 +2379,14 @@ export default {
 .main-content {
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
 /* 左侧内容区 */
 .content-left {
   flex: 1;
+  min-height: 0;
   padding: 24px;
   overflow-y: auto;
   background: #fff;
@@ -2983,6 +3185,27 @@ export default {
   gap: 12px;
 }
 
+.form-row--stack-field {
+  align-items: flex-start;
+}
+
+.form-row-field-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.form-row-field-col .form-select {
+  max-width: 100%;
+}
+
+.field-diff-panel--stacked {
+  width: 100%;
+  max-width: 520px;
+}
+
 .form-label {
   width: 100px;
   color: #333;
@@ -3072,13 +3295,42 @@ export default {
   cursor: not-allowed;
 }
 
-/* 右侧边栏 */
+/* 右侧边栏：默认收起；展开后固定宽度，不使用 flex:1 继续拉宽 */
 .sidebar-right {
-  width: 320px;
+  position: relative;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  padding: 0;
+  margin: 0;
   background: #fff;
+  border-left: none;
+  overflow: hidden;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    width 0.3s ease,
+    min-width 0.3s ease,
+    max-width 0.3s ease,
+    padding 0.3s ease,
+    border-color 0.3s ease,
+    opacity 0.2s ease;
+}
+
+.sidebar-right.sidebar-right--open {
+  width: 320px;
+  min-width: 320px;
+  max-width: 320px;
+  min-height: 0;
+  align-self: stretch;
+  padding: 24px;
   border-left: 1px solid #e9ecef;
   overflow-y: auto;
-  padding: 24px;
+  overflow-x: hidden;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .sidebar-section {
@@ -3533,8 +3785,10 @@ export default {
     flex-direction: column;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 100%;
+    min-width: 0;
+    max-width: none;
     border-left: none;
     border-top: 1px solid #e9ecef;
   }
@@ -3555,7 +3809,7 @@ export default {
     padding: 16px;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     padding: 16px;
   }
   
@@ -3566,8 +3820,10 @@ export default {
 
 /* 开发者工具打开时的布局优化 */
 @media (max-width: 1200px) and (min-width: 769px) {
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 280px;
+    min-width: 280px;
+    max-width: 280px;
   }
   
   .content-left {
@@ -3581,8 +3837,10 @@ export default {
     flex-direction: row !important;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 320px !important;
+    min-width: 320px !important;
+    max-width: 320px !important;
     border-left: 1px solid #e9ecef !important;
     border-top: none !important;
   }

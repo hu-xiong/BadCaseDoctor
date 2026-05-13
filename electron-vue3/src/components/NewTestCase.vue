@@ -457,8 +457,22 @@
         </div>
       </div>
 
-      <!-- 右侧边栏 -->
-      <div class="sidebar-right">
+      <!-- 右侧边栏：默认收起；展开后为固定宽度 -->
+      <div class="right-panel-column">
+        <button
+          v-show="!isRightSidebarOpen"
+          type="button"
+          class="sidebar-expand-tab"
+          title="展开侧栏"
+          aria-label="展开侧栏"
+          @click="isRightSidebarOpen = true"
+        >
+          <img src="../assets/resize-icon.svg" alt="" class="resize-icon resize-icon--expand" />
+        </button>
+        <div class="sidebar-right" :class="{ 'sidebar-right--open': isRightSidebarOpen }">
+        <div class="resize-handle" role="button" tabindex="0" title="收起侧栏" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
+          <img src="../assets/resize-icon.svg" alt="" class="resize-icon" :class="{ 'rotated': isRightSidebarOpen }" />
+        </div>
         <!-- 所属项目 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">所属项目</h3>
@@ -571,6 +585,7 @@
               <div class="editor-count">{{ (commentText || '').length }} / 500</div>
             </template>
           </div>
+        </div>
         </div>
       </div>
     </div>
@@ -770,6 +785,10 @@ export default {
 
     const loading = ref(false)
     const saving = ref(false)
+    const isRightSidebarOpen = ref(false)
+    const toggleRightSidebar = () => {
+      isRightSidebarOpen.value = !isRightSidebarOpen.value
+    }
     const showStatusDropdown = ref(false)
     const showAssigneeDropdown = ref(false)
     const showAddDefectDialog = ref(false)
@@ -1557,29 +1576,18 @@ export default {
         const rid = readProjectIdFromRoute()
         if (rid != null) testcase.project_id = rid
 
-        await loadUserProjectsForSelect()
-        await loadProjectWorkspace(testcase.project_id)
-
-        // 新建且带 plan_id：优先 route.query，其次 props.plan_id（嵌入在 ProjectDetail 的 Tab 新建）
-        if (!isEdit) {
-          const pid = toPositiveIntOrNull(route.query.plan_id) ?? toPositiveIntOrNull(props.plan_id)
-          if (pid != null) {
-            testcase.plan = String(pid)
-            testcase.plan_id = pid
-            await ensurePlanOptionVisible(String(pid))
-          }
-        }
-        
-        // projectInfo 由 edit-context 返回
-        
-        // 如果是编辑模式，加载测试用例详情
         if (isEdit && testcaseId) {
-          const response = await getTestCaseDetail(testcaseId)
-          console.log('loadTestCase: 响应:', response)
+          const [, detailResp] = await Promise.all([
+            loadUserProjectsForSelect(),
+            getTestCaseDetail(testcaseId).catch((e) => {
+              console.error('getTestCaseDetail 失败:', e)
+              return null
+            })
+          ])
+          const response = detailResp
           const res = response?.data || response
           if (res && (res.success === true) && res.testcase) {
             const data = res.testcase
-            // 基本字段赋值
             testcase.title = data.title || ''
             testcase.status = (data.status != null && data.status !== undefined) ? String(data.status) : 'draft'
             testcase.case_type = data.case_type || '功能测试'
@@ -1595,19 +1603,16 @@ export default {
             testcase.plan_id = data.plan_id
             testcase.project_id = data.project_id
             testcase.execution_result = data.execution_result || ''
-            
-            // 处理负责人
+
             if (data.assignee_id) {
               testcase.assignee = [data.assignee_id.toString()]
               testcase.assignee_id = data.assignee_id
             }
-            
-            // 处理所属计划
+
             if (data.plan_id) {
               testcase.plan = data.plan_id.toString()
             }
-            
-            // 处理关联缺陷：后端返回的是 [id1, id2]，前端需要 [{id, title}]
+
             if (data.related_defects && Array.isArray(data.related_defects)) {
               testcase.related_defects = data.related_defects.map(id => ({
                 id: typeof id === 'object' ? id.id : id,
@@ -1615,9 +1620,24 @@ export default {
               }))
             }
           }
-          if (testcase.plan && testcase.plan !== 'unplanned') {
-            await ensurePlanOptionVisible(testcase.plan)
+        } else {
+          await loadUserProjectsForSelect()
+        }
+
+        await loadProjectWorkspace(testcase.project_id)
+
+        // 新建且带 plan_id：优先 route.query，其次 props.plan_id（嵌入在 ProjectDetail 的 Tab 新建）
+        if (!isEdit) {
+          const pid = toPositiveIntOrNull(route.query.plan_id) ?? toPositiveIntOrNull(props.plan_id)
+          if (pid != null) {
+            testcase.plan = String(pid)
+            testcase.plan_id = pid
+            await ensurePlanOptionVisible(String(pid))
           }
+        }
+
+        if (isEdit && testcase.plan && testcase.plan !== 'unplanned') {
+          await ensurePlanOptionVisible(testcase.plan)
         }
 
         // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
@@ -1634,6 +1654,24 @@ export default {
             pendingDiff.value = null
           }
         }
+        const reconcilePendingOldFromLoadedTestcase = () => {
+          if (!pendingDiff.value?.modifications) return
+          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (String(field).startsWith('_')) continue
+            if (!testcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
+            if (field !== 'status' && field !== 'title') continue
+            const bv = testcase[field]
+            const bs = bv != null ? String(bv).trim() : ''
+            if (!bs) continue
+            const oldS = data.old != null ? String(data.old).trim() : ''
+            const newS = data.new != null ? String(data.new).trim() : ''
+            if (!newS || newS === bs) continue
+            if (oldS !== bs) {
+              data.old = bv
+            }
+          }
+        }
+        reconcilePendingOldFromLoadedTestcase()
         if (pendingDiff.value?.modifications) {
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (testcase.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
@@ -1653,7 +1691,7 @@ export default {
       } finally {
         loading.value = false
         // 编辑模式下通知父组件更新Tab标题
-        if (isEdit.value && testcase.title) {
+        if (isEdit && testcase.title) {
           emit('titleLoaded', testcase.title)
         }
         console.log('=== NewTestCase onMounted 完成 ===')
@@ -1704,7 +1742,7 @@ export default {
       } finally {
         loading.value = false
         // 编辑模式下通知父组件更新Tab标题
-        if (isEdit.value && testcase.title) {
+        if (isEdit && testcase.title) {
           emit('titleLoaded', testcase.title)
         }
       }
@@ -1781,7 +1819,9 @@ export default {
       cancelFieldChange,
       applyFieldChange,
       openDiagnosticTerminal,
-      onOpenDiagnosticTerminal
+      onOpenDiagnosticTerminal,
+      isRightSidebarOpen,
+      toggleRightSidebar
     }
   }
 }
@@ -1873,6 +1913,7 @@ export default {
 .main-content {
   flex: 1;
   display: flex;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -1891,12 +1932,111 @@ export default {
   padding: 24px;
 }
 
-.sidebar-right {
-  width: 320px;
+/* 侧栏展开/收起（与 NewBug 一致） */
+.resize-handle {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  background-color: #ffffff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+  z-index: 10;
+}
+
+.resize-handle:hover {
+  background-color: #f5f5f5;
+  border-color: #d0d0d0;
+}
+
+.resize-icon {
+  width: 12px;
+  height: 18px;
+  transition: transform 0.3s ease;
+}
+
+.resize-icon.rotated {
+  transform: rotate(180deg);
+}
+
+.resize-icon--expand {
+  transform: rotate(180deg);
+}
+
+.right-panel-column {
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
+  align-items: stretch;
+  align-self: stretch;
+  min-height: 0;
+}
+
+.sidebar-expand-tab {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 10px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
   background: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.sidebar-expand-tab:hover {
+  background: #f5f5f5;
+  border-color: #d0d0d0;
+}
+
+.sidebar-right {
+  position: relative;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  padding: 0;
+  margin: 0;
+  background: #fff;
+  border-left: none;
+  overflow: hidden;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    width 0.3s ease,
+    min-width 0.3s ease,
+    max-width 0.3s ease,
+    padding 0.3s ease,
+    border-color 0.3s ease,
+    opacity 0.2s ease;
+}
+
+.sidebar-right.sidebar-right--open {
+  width: 320px;
+  min-width: 320px;
+  max-width: 320px;
+  min-height: 0;
+  align-self: stretch;
+  padding: 24px;
   border-left: 1px solid #e9ecef;
   overflow-y: auto;
-  padding: 24px;
+  overflow-x: hidden;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .sidebar-section {
@@ -2787,8 +2927,10 @@ export default {
     flex-direction: column;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 100%;
+    min-width: 0;
+    max-width: none;
     border-left: none;
     border-top: 1px solid #e9ecef;
   }
@@ -2799,13 +2941,23 @@ export default {
   }
 }
 
+@media (max-width: 1200px) and (min-width: 769px) {
+  .sidebar-right.sidebar-right--open {
+    width: 280px;
+    min-width: 280px;
+    max-width: 280px;
+  }
+}
+
 @media (min-width: 769px) {
   .main-content {
     flex-direction: row !important;
   }
   
-  .sidebar-right {
+  .sidebar-right.sidebar-right--open {
     width: 320px !important;
+    min-width: 320px !important;
+    max-width: 320px !important;
     border-left: 1px solid #e9ecef !important;
     border-top: none !important;
   }

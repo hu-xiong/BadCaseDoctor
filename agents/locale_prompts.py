@@ -1080,6 +1080,7 @@ def incremental_running_summary_prompt(
 ) -> str:
     """
     每步 observation 后合并生成「运行总览」Markdown；须含固定 ## 标题（与需求文档一致）。
+    已确认段须概括本步客观结果，避免在无信息时滥用「- 无」。
     """
     prev = (prev_running_summary or "").strip()
     obs = (nl_observation or "").strip()
@@ -1095,8 +1096,12 @@ Required format:
 ## Confirmed
 ## Next steps
 ## Risks and blockers
-- Use "- " bullets; empty section: "- None"
-- Keep facts, no invention
+- Use "- " bullets for each section.
+- **Confirmed** MUST list at least one bullet of **verifiable facts from this step**: tool name, success vs failure, and concrete highlights from the observation (e.g. grep hit counts/conclusion, modify preview target and field deltas, database row counts). If the observation text is non-empty or the tool clearly ran, do **not** leave Confirmed as only "- None".
+- Use "- None" under Confirmed only when this step truly has nothing substantive to record.
+- **Next steps**: pending actions (including "user must confirm/reject preview in UI"); may complement Confirmed but do not hide factual outcomes that belong under Confirmed.
+- **Risks and blockers**: "- None" when there are none.
+- Keep facts, no invention.
 
 Previous summary:
 {prev_block}
@@ -1117,8 +1122,11 @@ Output only the new summary."""
 ## 已确认
 ## 待办与建议下一步
 ## 风险与阻塞
-- 每块用 "- " 列表；空块写 "- 无"
-- 忠实合并，不编造
+- 每块用 "- " 列表。
+- **已确认**：必须写出本步**可核对的客观结果**（至少一条）：工具名、成功/失败、观察摘要里的要点（如 grep 命中与结论、modify 预览涉及的记录与字段变化、查询返回规模等）。只要「观察」非空或本步工具已执行，就不得仅用「- 无」敷衍；仅在整步确实无任何实质信息时才写「- 无」。
+- **待办与建议下一步**：写尚未完成的动作（含需在界面确认/拒绝的沙箱预览）；可与已确认互补，但不要把本应属于已确认的可核对事实只写在待办里。
+- **风险与阻塞**：无则写「- 无」。
+- 忠实合并，不编造。
 
 已有总览：
 {prev_block}

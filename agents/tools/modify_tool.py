@@ -92,29 +92,26 @@ class ModifyTool(BaseTool):
         self.description = """
 用于修改 Bug / BadCase / 测试用例(testcase) / **统一迭代卡片(Card)** / **迭代计划(Plan)** 的工具，支持对话式修改和行级别对比。
 
-主界面迭代列表一行对应 **Card 表**（card.id 为卡片主键）。修改「卡片标题/描述」且用户明确说「卡片」或 grep 命中 **target=card** 时：
-- **target 必须设为 'card'**，并传 **card_id**（或 engine 将数字识别为 Card 主键时的 target_id）。
-- 勿只因标题里含 bug/testcase 等字样就把 target 设为 bug/testcase。
+**如何选择 target（必须遵守，优先级高于「grep 是否命中 card」）：**
+1) **先看 modifications 里的字段属于哪张源表**：缺陷工作流字段（如 status、steps_to_reproduce、severity、expected_result、actual_result 等）**一律**用 **target='bug'** 且 **target_id=Bug 源表主键**；BadCase/测例专用字段同理用 badcase/testcase。**禁止**用 target='card' 去改 Bug 状态或复现步骤（Card 行上通常没有这些列，会导致错误 SQL）。
+2) **grep 使用 target=card** 只表示「在 Card 表里检索/定位」，**不表示**下一步 modify 也要 target=card。定位到迭代行后若要改缺陷状态等，modify 仍须 **target=bug**（或从 observation 的 bug_list / 合并导航里的源表 id 取 target_id）；需要关联卡片时可选传 **card_id**，由服务端按 Card.source_type 校正。
+3) **仅当**用户明确要改「**卡片层**」展示信息（且语义是改 Card 行上的 title/description 等），或 modifications **仅含** Card 表自身可写、且无意图写源表独有字段时，才用 **target='card'** + **card_id**（或 target_id=card.id）。
+4) 勿仅凭列表在 UI 上像「一行卡片」就把 modify 设为 card；也勿仅凭标题里出现 bug/testcase 字样推断类型——以 **字段归属** 与 grep 结果中的 **source_type / bug_list** 为准。
 
-使用场景：
-- 用户说「修改卡片的标题 …」「把这张卡片标题改成 …」→ target=card，modifications 含 title
-- 用户说「修改这个 Bug 的标题」→ target=bug（或先 grep target=bug）
-- 用户说「把优先级改成高」「更新复现步骤」
-- 用户说「修改某个测试用例的标题/状态/负责人等」
+使用场景示例：
+- 改状态 / 复现 / 严重程度 → target=bug（或 badcase/testcase），target_id 为对应源表 id
+- 「修改卡片的标题/描述…」且明确指 Card 展示层 → target=card，modifications 含 title/description
+- 「修改这个 Bug 的标题」→ target=bug（或 grep target=bug 取 Bug.id）
 
 参数：
-- target: 'bug' | 'badcase' | 'testcase' | **'card'** | **'plan'**（plan 时为迭代计划表 Plan.id）
-- target_id: 目标主键（Bug/BadCase/TestCase 的源表 id；**target=card 时为 card.id**；**target=plan 时为 plan.id**）
-- card_id: **Card 表主键**（可选）。提供时优先按卡片定位；与 source 表关联时也可用来校正 target
-- modifications: 修改内容字典，格式 {"字段名": "新值"}；Card 常用 title、description、priority、assignee 等
+- target: 'bug' | 'badcase' | 'testcase' | 'card' | 'plan'（plan 时为迭代计划表 Plan.id）
+- target_id: 当前 target 对应表的主键（**target=card 时为 card.id**；**target=plan 时为 plan.id**；其余为源表 id）
+- card_id: Card 表主键（可选，用于与源行关联或辅助定位；**改 Bug 字段时仍可传 card_id，但 target 须为 bug**）
+- modifications: {"字段名": "新值"}
 - project_id: 项目ID（必需）
-- natural_query: 自然语言查询（可选，用于查找目标记录）
+- natural_query: 自然语言查询（可选）
 
-返回：
-- before: 修改前的数据
-- after: 修改后的数据
-- diff: 行级别差异对比（红色删除，绿色新增）
-- confirmation_required: 是否需要用户确认
+返回：before / after / diff / confirmation_required 等。
 """
         
         # 延迟初始化 Text2SQL（采纳时不需要，仅沙箱预览 / natural_query 时再初始化）
@@ -203,11 +200,15 @@ class ModifyTool(BaseTool):
             return None
         keys = {str(k).strip().lower() for k in modifications.keys()}
         bugish = {
+            "status",
+            "状态",
             "steps_to_reproduce",
             "expected_result",
             "actual_result",
             "severity",
             "description",
+            "assignee",
+            "assignee_id",
         }
         badish = {
             "reproduction_steps",
@@ -524,7 +525,236 @@ class ModifyTool(BaseTool):
                 card.version = getattr(row, "version", None) or card.version
         except Exception as e:
             print(f"[MODIFY] Card 镜像同步失败（源表写入仍保留）: {e}")
-    
+
+    def _resolve_linked_source_row_for_card_modify(
+        self, session: Any, card: Any, project_id: int
+    ) -> Tuple[Optional[str], Any]:
+        """Card 表无 status 等列时，解析其关联的 Bug/BadCase/TestCase 行（与快照反查 bug.card_id 同源）。"""
+        if card is None:
+            return None, None
+        try:
+            from app import Bug, BadCase, TestCase, CardType
+
+            pid = int(project_id)
+            st_raw = (getattr(card, "source_type", None) or "").strip().lower()
+            sid = getattr(card, "source_id", None)
+
+            def _canon_st(s: str) -> Optional[str]:
+                if s in ("bug", "defect"):
+                    return "bug"
+                if s in ("bad_case", "badcase", "bad-case"):
+                    return "badcase"
+                if s in ("test_case", "testcase", "test-case"):
+                    return "testcase"
+                return None
+
+            ct = _canon_st(st_raw)
+            if ct and sid is not None:
+                try:
+                    iid = int(sid)
+                except (TypeError, ValueError):
+                    iid = None
+                if iid is not None and iid > 0:
+                    if ct == "bug":
+                        row = (
+                            session.query(Bug)
+                            .filter(Bug.id == iid, Bug.project_id == pid)
+                            .first()
+                        )
+                        if row:
+                            return "bug", row
+                    elif ct == "badcase":
+                        row = (
+                            session.query(BadCase)
+                            .filter(BadCase.id == iid, BadCase.project_id == pid)
+                            .first()
+                        )
+                        if row:
+                            return "badcase", row
+                    elif ct == "testcase":
+                        row = (
+                            session.query(TestCase)
+                            .filter(TestCase.id == iid, TestCase.project_id == pid)
+                            .first()
+                        )
+                        if row:
+                            return "testcase", row
+
+            ctype = getattr(card, "type", None)
+            cv = getattr(ctype, "value", ctype)
+            cv_s = str(cv).strip().lower() if cv is not None else ""
+            if cv_s == "bug" or ctype == CardType.BUG:
+                row = (
+                    session.query(Bug)
+                    .filter(Bug.card_id == int(card.id), Bug.project_id == pid)
+                    .order_by(Bug.id.asc())
+                    .first()
+                )
+                if row:
+                    return "bug", row
+            return None, None
+        except Exception as e:
+            print(f"[MODIFY] 解析 Card 关联源表行失败: {e}")
+            return None, None
+
+    def _coerce_card_modify_to_source_when_applicable(
+        self,
+        target: str,
+        target_id: Any,
+        project_id: Any,
+        modifications: Optional[Dict[str, Any]],
+    ) -> Tuple[str, Any, bool]:
+        """
+        Card 表上许多工作流字段（status 等）实际写在关联 Bug/BadCase/TestCase。
+        模型误传 target=card + Card.id 时：
+        - 只要本次修改含 status，一律改为源表 target + 源表主键；
+        - 否则若「所有可映射字段」均落在源表行、且 Card ORM 上无可写对应列，也改为源表（避免沙箱 UPDATE card）。
+        """
+        tl = (str(target or "")).strip().lower()
+        if tl != "card" or not modifications or target_id is None or project_id is None:
+            return target, target_id, False
+        try:
+            cid = int(target_id)
+            pid = int(project_id)
+        except (TypeError, ValueError):
+            return target, target_id, False
+        try:
+            from app import app as flask_app, db as flask_db, Card
+
+            with flask_app.app_context():
+                card = (
+                    flask_db.session.query(Card)
+                    .filter(Card.id == cid, Card.project_id == pid)
+                    .first()
+                )
+                if card is None:
+                    return target, target_id, False
+                st, row = self._resolve_linked_source_row_for_card_modify(
+                    flask_db.session, card, pid
+                )
+                if not st or row is None:
+                    return target, target_id, False
+
+                mapped: List[str] = []
+                for k in modifications.keys():
+                    try:
+                        mk = str(self._map_field_name(str(k), "card")).strip().lower()
+                        mapped.append(mk)
+                    except Exception:
+                        mapped.append(str(k).strip().lower())
+
+                if "status" in mapped:
+                    rid = int(getattr(row, "id"))
+                    print(
+                        f"[MODIFY] target=card 且含 status，改为 {st!r} id={rid}（card_id={cid}）",
+                        flush=True,
+                    )
+                    return st, rid, True
+
+                any_card = False
+                any_src = False
+                for mk in mapped:
+                    if mk in (
+                        "id",
+                        "type",
+                        "project_id",
+                        "plan_id",
+                        "created_at",
+                        "updated_at",
+                        "creator_id",
+                    ):
+                        continue
+                    try:
+                        on_card = hasattr(card, mk)
+                    except Exception:
+                        on_card = False
+                    try:
+                        sm = self._map_field_name(mk, st)
+                        on_src = hasattr(row, sm) or hasattr(row, mk)
+                    except Exception:
+                        on_src = False
+                    if on_card:
+                        any_card = True
+                    elif on_src:
+                        any_src = True
+                    else:
+                        any_card = True
+
+                if any_src and not any_card:
+                    rid = int(getattr(row, "id"))
+                    print(
+                        f"[MODIFY] target=card 但字段均在关联 {st!r}（无 Card 可写列），改为 {st!r} id={rid}（card_id={cid}）",
+                        flush=True,
+                    )
+                    return st, rid, True
+        except Exception as e:
+            print(f"[MODIFY] card→源表 target 校正失败: {e}", flush=True)
+            return target, target_id, False
+        return target, target_id, False
+
+    def _apply_fields_to_card_and_linked_source(
+        self,
+        session: Any,
+        card: Any,
+        modifications: Dict[str, Any],
+        project_id: int,
+    ) -> bool:
+        """先写 Card 上存在的列；其余（如 status）写到关联 Bug/BadCase/TestCase，再镜像 Card。"""
+        if not card or not modifications:
+            return False
+        source_target, source_row = self._resolve_linked_source_row_for_card_modify(
+            session, card, project_id
+        )
+        applied = False
+        pid = int(project_id)
+
+        for field, value in modifications.items():
+            actual_field = self._map_field_name(field, "card")
+            actual_value = (
+                value["new"] if isinstance(value, dict) and "new" in value else value
+            )
+
+            if hasattr(card, actual_field):
+                setattr(card, actual_field, actual_value)
+                applied = True
+                continue
+
+            if source_row is None or not source_target:
+                print(
+                    f"[MODIFY] Card id={getattr(card, 'id', '?')} 字段 {field} 无法落 Card 且无关联源表行，跳过"
+                )
+                continue
+
+            st_field = self._map_field_name(field, source_target)
+            if not hasattr(source_row, st_field):
+                print(
+                    f"[MODIFY] Card id={getattr(card, 'id', '?')} 源表 {source_target} 无列 {st_field}，跳过 {field}"
+                )
+                continue
+
+            if st_field == "status":
+                actual_value = self._normalize_status(str(actual_value), source_target)
+                if source_target == "badcase":
+                    try:
+                        from app import BadCaseStatus
+
+                        actual_value = BadCaseStatus(actual_value)
+                    except Exception:
+                        pass
+                elif source_target == "testcase":
+                    try:
+                        from app import TestCaseStatus
+
+                        actual_value = TestCaseStatus(actual_value)
+                    except Exception:
+                        pass
+
+            setattr(source_row, st_field, actual_value)
+            applied = True
+            self._sync_card_from_source_row(session, source_target, source_row, pid)
+
+        return applied
+
     def _ensure_text2sql(self):
         """仅在实际需要时初始化 Text2SQL（沙箱预览 / 自然语言查询）"""
         if self.text2sql is not None:
@@ -766,6 +996,74 @@ class ModifyTool(BaseTool):
                 return status_value
             return badcase_status_map.get(status_value, status_value)
 
+    @staticmethod
+    def _snapshot_status_string(value: Any) -> str:
+        """将 ORM/枚举/JSON 中的状态统一为可 diff 的字符串；避免 None/'' 误判为「未设置」而实际库内有值。"""
+        if value is None:
+            return ""
+        if hasattr(value, "value"):
+            try:
+                inner = getattr(value, "value", None)
+                if inner is None:
+                    return ""
+                return str(inner).strip()
+            except Exception:
+                pass
+        s = str(value).strip()
+        if not s or s.lower() == "none":
+            return ""
+        return s
+
+    def _bug_status_sql_fallback(self, flask_db, bug_id: int, project_id: int) -> str:
+        """ORM 偶发未映射到列时，用主键直读 status（与列表/详情一致）。"""
+        try:
+            from sqlalchemy import text
+
+            r = flask_db.session.execute(
+                text(
+                    "SELECT status FROM bug WHERE id = :id AND project_id = :pid LIMIT 1"
+                ),
+                {"id": int(bug_id), "pid": int(project_id)},
+            ).fetchone()
+            if r and r[0] is not None:
+                return self._snapshot_status_string(r[0])
+        except Exception as ex:
+            print(f"[MODIFY] bug.status SQL fallback failed: {ex}", flush=True)
+        return ""
+
+    def _badcase_status_sql_fallback(self, flask_db, badcase_id: int, project_id: int) -> str:
+        """BadCase.status 与 ORM 枚举/列不一致时直读库内字符串，避免沙箱旧值被当成空。"""
+        try:
+            from sqlalchemy import text
+
+            r = flask_db.session.execute(
+                text(
+                    "SELECT status FROM bad_case WHERE id = :id AND project_id = :pid LIMIT 1"
+                ),
+                {"id": int(badcase_id), "pid": int(project_id)},
+            ).fetchone()
+            if r and r[0] is not None:
+                return self._snapshot_status_string(r[0])
+        except Exception as ex:
+            print(f"[MODIFY] badcase.status SQL fallback failed: {ex}", flush=True)
+        return ""
+
+    def _testcase_status_sql_fallback(self, flask_db, testcase_id: int, project_id: int) -> str:
+        try:
+            from sqlalchemy import text
+
+            r = flask_db.session.execute(
+                text(
+                    "SELECT status FROM test_case WHERE id = :id AND project_id = :pid LIMIT 1"
+                ),
+                {"id": int(testcase_id), "pid": int(project_id)},
+            ).fetchone()
+            if r and r[0] is not None:
+                return self._snapshot_status_string(r[0])
+        except Exception as ex:
+            print(f"[MODIFY] testcase.status SQL fallback failed: {ex}", flush=True)
+        return ""
+
     def _enrich_modified_data_for_preview(
         self,
         target: str,
@@ -850,11 +1148,14 @@ class ModifyTool(BaseTool):
                     unames[u.id] = u.name or ""
             for bug in rows:
                 assignee_name = unames.get(bug.assignee_id, "") if bug.assignee_id else ""
+                status_snap = self._snapshot_status_string(getattr(bug, "status", None))
+                if not status_snap:
+                    status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
                 out[bug.id] = {
                     "id": bug.id,
                     "title": bug.title,
                     "description": bug.description or "",
-                    "status": bug.status.value if hasattr(bug.status, "value") else str(bug.status),
+                    "status": status_snap,
                     "priority": bug.priority,
                     "severity": bug.severity or "",
                     "assignee_id": bug.assignee_id,
@@ -874,10 +1175,13 @@ class ModifyTool(BaseTool):
                 .all()
             )
             for bc in rows:
+                st_snap = self._snapshot_status_string(getattr(bc, "status", None))
+                if not st_snap:
+                    st_snap = self._badcase_status_sql_fallback(flask_db, bc.id, project_id)
                 out[bc.id] = {
                     "id": bc.id,
                     "title": bc.title,
-                    "status": bc.status.value if hasattr(bc.status, "value") else str(bc.status),
+                    "status": st_snap,
                     "priority": bc.priority,
                     "assignee": bc.assignee or "",
                     "plan_id": bc.plan_id,
@@ -913,11 +1217,14 @@ class ModifyTool(BaseTool):
                 executed_by_name = (
                     unames.get(testcase.executed_by, "") if testcase.executed_by else ""
                 )
+                tc_st = self._snapshot_status_string(getattr(testcase, "status", None))
+                if not tc_st:
+                    tc_st = self._testcase_status_sql_fallback(flask_db, testcase.id, project_id)
                 out[testcase.id] = {
                     "id": testcase.id,
                     "title": testcase.title,
                     "plan_id": testcase.plan_id,
-                    "status": testcase.status.value if testcase.status else "",
+                    "status": tc_st,
                     "case_type": testcase.case_type or "",
                     "priority": testcase.priority or "",
                     "test_type": testcase.test_type or "",
@@ -986,18 +1293,49 @@ class ModifyTool(BaseTool):
         if not card_id and target_id and project_id:
             amb = self._disambiguate_numeric_id_as_card_id(target_id, project_id)
             if amb is not None:
-                print(
-                    f"[MODIFY] target_id={target_id} 解析为 Card 主键，按 card_id={amb} 处理",
-                    flush=True,
+                mods_chk = dict(modifications or {})
+                nt, nid, rew = self._coerce_card_modify_to_source_when_applicable(
+                    "card", int(amb), project_id, mods_chk
                 )
-                card_id = amb
-                # 数字实为 Card 主键时，默认按「卡片层」修改 Card 表；勿再用 Bug.card_id 反查误绑其它缺陷
-                target = "card"
-                target_id = int(amb)
-                card_id = int(amb)
+                if rew:
+                    target = nt
+                    target_id = int(nid)
+                    print(
+                        f"[MODIFY] target_id 与 Card.id={amb} 重合且修改含 status，已改为 {target!r} id={target_id}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[MODIFY] target_id={target_id} 解析为 Card 主键，按 card_id={amb} 处理",
+                        flush=True,
+                    )
+                    target = "card"
+                    target_id = int(amb)
+                    card_id = int(amb)
         # 传入 card_id 时以 Card.source_type 为权威，避免标题含「testcase」等词误导 LLM 选错 target
         if card_id and project_id:
             target, _ = self._normalize_target_using_card_row(target or "bug", project_id, card_id)
+            # 校正 target 为 bug 等后，target_id 可能仍是 Card.id，必须换成源表主键，否则整条链路按「Bug id=卡片 id」误跑
+            tl_after = (str(target or "")).strip().lower()
+            if (
+                tl_after not in ("card", "plan")
+                and target_id is not None
+            ):
+                try:
+                    cid_row = int(card_id)
+                    tid_cur = int(target_id)
+                    if tid_cur == cid_row:
+                        tid_src = self._resolve_target_id_from_card_id(
+                            tl_after, cid_row, int(project_id)
+                        )
+                        if tid_src is not None and int(tid_src) != tid_cur:
+                            target_id = int(tid_src)
+                            print(
+                                f"[MODIFY] card_id={cid_row} 已将 target_id 从 Card.id 换为源表主键 {target_id}（target={tl_after}）",
+                                flush=True,
+                            )
+                except (TypeError, ValueError):
+                    pass
         # 仅非「纯卡片层」时才把 card_id 解析为源表主键（target=card 时用 Card 主键直接读写）
         if (
             str(target or "").strip().lower() != "card"
@@ -1053,10 +1391,21 @@ class ModifyTool(BaseTool):
                 )
         target = str(target or "bug").strip().lower()
         
+        modifications = dict(modifications or {})
+        if target == "card" and modifications:
+            nt, nid, rew = self._coerce_card_modify_to_source_when_applicable(
+                target, target_id, project_id, modifications
+            )
+            if rew:
+                target = str(nt).strip().lower()
+                target_id = int(nid)
+                target = self._reconcile_modify_target_from_db(
+                    target, target_id, project_id, modifications
+                )
+                target = str(target or "bug").strip().lower()
+
         _progress(modify_tool_progress("located_validate", loc, target_id=target_id))
         
-        modifications = dict(modifications or {})
-
         print(
             f"[MODIFY] 开始执行: target={target}, target_id={target_id}, modifications keys={list(modifications.keys())}",
             flush=True,
@@ -1611,11 +1960,14 @@ class ModifyTool(BaseTool):
                     f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
                     flush=True,
                 )
+            status_snap = self._snapshot_status_string(getattr(bug, "status", None))
+            if not status_snap:
+                status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
             return {
                 'id': bug.id,
                 'title': bug.title,
                 'description': bug.description or '',
-                'status': bug.status.value if hasattr(bug.status, 'value') else str(bug.status),
+                'status': status_snap,
                 'priority': bug.priority,
                 'severity': bug.severity or '',
                 'assignee_id': bug.assignee_id,
@@ -1636,11 +1988,15 @@ class ModifyTool(BaseTool):
             
             if not badcase:
                 return None
-            
+
+            status_snap = self._snapshot_status_string(getattr(badcase, "status", None))
+            if not status_snap:
+                status_snap = self._badcase_status_sql_fallback(flask_db, badcase.id, project_id)
+
             return {
                 'id': badcase.id,
                 'title': badcase.title,
-                'status': badcase.status.value if hasattr(badcase.status, 'value') else str(badcase.status),
+                'status': status_snap,
                 'priority': badcase.priority,
                 'assignee': badcase.assignee or '',
                 'plan_id': badcase.plan_id,
@@ -1673,10 +2029,14 @@ class ModifyTool(BaseTool):
                 if user:
                     executed_by_name = user.name
             
+            tc_status = self._snapshot_status_string(getattr(testcase, "status", None))
+            if not tc_status:
+                tc_status = self._testcase_status_sql_fallback(flask_db, testcase.id, project_id)
+
             return {
                 'id': testcase.id,
                 'title': testcase.title,
-                'status': testcase.status.value if testcase.status else '',
+                'status': tc_status,
                 'case_type': testcase.case_type or '',
                 'priority': testcase.priority or '',
                 'test_type': testcase.test_type or '',
@@ -1708,7 +2068,7 @@ class ModifyTool(BaseTool):
                 if user:
                     assignee_name = user.name
             ty = card.type.value if hasattr(card.type, "value") else str(card.type)
-            return {
+            row = {
                 "id": card.id,
                 "title": card.title,
                 "description": card.description or "",
@@ -1720,6 +2080,81 @@ class ModifyTool(BaseTool):
                 "source_type": card.source_type,
                 "source_id": card.source_id,
             }
+            # 卡片表 priority 与源 Bug/BadCase 可能未同步；沙箱「旧值」必须与详情页一致（以源表为准）
+            st = (card.source_type or "").strip().lower().replace("-", "_")
+            if card.source_id:
+                try:
+                    sid = int(card.source_id)
+                except (TypeError, ValueError):
+                    sid = None
+                if sid is not None:
+                    if st == "bug":
+                        from app import Bug
+
+                        bug = (
+                            flask_db.session.query(Bug)
+                            .filter(Bug.id == sid, Bug.project_id == project_id)
+                            .first()
+                        )
+                        if bug:
+                            if bug.priority is not None and str(bug.priority).strip() != "":
+                                row["priority"] = str(bug.priority).strip()
+                            if bug.severity is not None and str(bug.severity).strip() != "":
+                                row["severity"] = bug.severity or ""
+                            status_snap = self._snapshot_status_string(getattr(bug, "status", None))
+                            if not status_snap:
+                                status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
+                            if status_snap:
+                                row["status"] = status_snap
+                    elif st in ("bad_case", "badcase"):
+                        from app import BadCase
+
+                        bc = (
+                            flask_db.session.query(BadCase)
+                            .filter(BadCase.id == sid, BadCase.project_id == project_id)
+                            .first()
+                        )
+                        if bc:
+                            if bc.priority is not None and str(bc.priority).strip() != "":
+                                row["priority"] = str(bc.priority).strip()
+                            st_bc = self._snapshot_status_string(getattr(bc, "status", None))
+                            if not st_bc:
+                                st_bc = self._badcase_status_sql_fallback(flask_db, bc.id, project_id)
+                            if st_bc:
+                                row["status"] = st_bc
+                    elif st in ("test_case", "testcase"):
+                        from app import TestCase
+
+                        tc = (
+                            flask_db.session.query(TestCase)
+                            .filter(TestCase.id == sid, TestCase.project_id == project_id)
+                            .first()
+                        )
+                        if tc:
+                            if tc.priority is not None and str(tc.priority).strip() != "":
+                                row["priority"] = str(tc.priority).strip()
+                            st_tc = self._snapshot_status_string(getattr(tc, "status", None))
+                            if not st_tc:
+                                st_tc = self._testcase_status_sql_fallback(flask_db, tc.id, project_id)
+                            if st_tc:
+                                row["status"] = st_tc
+            # Bug 卡片常见：Card.source 未回填，用 bug.card_id 反查源缺陷状态（与列表/详情一致）
+            if not row.get("status") and str(ty).strip().lower() == "bug":
+                from app import Bug
+
+                bug_linked = (
+                    flask_db.session.query(Bug)
+                    .filter(Bug.card_id == card.id, Bug.project_id == project_id)
+                    .order_by(Bug.id.asc())
+                    .first()
+                )
+                if bug_linked:
+                    status_snap = self._snapshot_status_string(getattr(bug_linked, "status", None))
+                    if not status_snap:
+                        status_snap = self._bug_status_sql_fallback(flask_db, bug_linked.id, project_id)
+                    if status_snap:
+                        row["status"] = status_snap
+            return row
 
         elif target == "plan":
             _prog(modify_tool_progress("db_fetch", loc))
@@ -2754,6 +3189,76 @@ class ModifyTool(BaseTool):
             "execution_result": {"success": True, "batch_local_executescript": True},
         }
     
+    def _partition_card_modifications_for_sandbox_tables(
+        self, card_id: int, project_id: int, modifications: Dict[str, Any]
+    ) -> Optional[Tuple[str, int, Dict[str, Any], Dict[str, Any]]]:
+        """
+        target=card 时，将已映射字段名拆成「Card 表可写列」与「关联源表行可写列」。
+        若误把 Bug.status 等走 UPDATE card，MySQL 常报 Data truncated（card.status 与 bug 枚举语义不一致或列类型不同）。
+
+        Returns:
+            (source_target, source_row_id, source_only_mods, card_only_mods)
+            若无法拆分或无需拆分则返回 None。
+        """
+        if not modifications:
+            return None
+        try:
+            from app import Card
+
+            sess = self._sqlalchemy_orm_session()
+            card = (
+                sess.query(Card)
+                .filter(Card.id == int(card_id), Card.project_id == int(project_id))
+                .first()
+            )
+            if not card:
+                return None
+            source_target, source_row = self._resolve_linked_source_row_for_card_modify(
+                sess, card, project_id
+            )
+            if not source_row or not source_target:
+                return None
+            st = str(source_target).strip().lower()
+            card_part: Dict[str, Any] = {}
+            src_part: Dict[str, Any] = {}
+            for field, value in modifications.items():
+                if field in {
+                    "id",
+                    "type",
+                    "project_id",
+                    "plan_id",
+                    "created_at",
+                    "updated_at",
+                    "creator_id",
+                }:
+                    continue
+                try:
+                    if hasattr(card, field):
+                        card_part[field] = value
+                        continue
+                except Exception:
+                    pass
+                try:
+                    mapped = self._map_field_name(field, st)
+                    if hasattr(source_row, mapped) or hasattr(source_row, field):
+                        src_part[field] = value
+                    else:
+                        card_part[field] = value
+                except Exception:
+                    card_part[field] = value
+            if not src_part:
+                return None
+            try:
+                sid = int(getattr(source_row, "id", 0) or 0)
+            except (TypeError, ValueError):
+                sid = 0
+            if sid <= 0:
+                return None
+            return (st, sid, src_part, card_part)
+        except Exception as e:
+            print(f"[MODIFY-SANDBOX] card 沙箱拆分失败（保持 card 路径）: {e}", flush=True)
+            return None
+
     async def _preview_in_sandbox(self, target: str, target_id: int, modifications: Dict, project_id: int) -> Dict[str, Any]:
         """
         在沙箱副本上预览修改效果
@@ -2764,6 +3269,53 @@ class ModifyTool(BaseTool):
         3. 返回预览结果（不修改生产库）
         """
         try:
+            tgt = (target or "").strip().lower()
+            if tgt == "card" and modifications:
+                split = self._partition_card_modifications_for_sandbox_tables(
+                    int(target_id), int(project_id), modifications
+                )
+                if split:
+                    src_tgt, src_id, src_mods, card_mods = split
+                    if src_mods and not card_mods:
+                        print(
+                            f"[MODIFY-SANDBOX] target=card 但字段仅落在源表 {src_tgt} id={src_id}，"
+                            f"沙箱 UPDATE 从 card 改为 {self._sandbox_table_name(src_tgt)}",
+                            flush=True,
+                        )
+                        return await self._preview_in_sandbox(
+                            src_tgt, int(src_id), src_mods, project_id
+                        )
+                    if src_mods and card_mods:
+                        print(
+                            f"[MODIFY-SANDBOX] target=card 字段拆分：card 子集 keys={list(card_mods.keys())} "
+                            f"+ {src_tgt} keys={list(src_mods.keys())}，分两次沙箱校验",
+                            flush=True,
+                        )
+                        r_card = await self._preview_in_sandbox(
+                            "card", int(target_id), card_mods, project_id
+                        )
+                        if not r_card.get("success"):
+                            return r_card
+                        r_src = await self._preview_in_sandbox(
+                            src_tgt, int(src_id), src_mods, project_id
+                        )
+                        if not r_src.get("success"):
+                            return r_src
+                        sql_a = str(r_card.get("sql") or "").strip()
+                        sql_b = str(r_src.get("sql") or "").strip()
+                        combined = "\n".join(x for x in (sql_a, sql_b) if x)
+                        return {
+                            "success": True,
+                            "sql": combined,
+                            "sandbox_mode": True,
+                            "message": "沙箱预览完成（card+源表分表校验），确认后将应用到生产库",
+                            "execution_result": {
+                                "success": True,
+                                "sandbox_card": r_card,
+                                "sandbox_source": r_src,
+                            },
+                        }
+
             table_name = self._sandbox_table_name(target)
             use_direct_sql = self._env_flag_enabled("MODIFY_SANDBOX_DIRECT_SQL", "1")
             set_clauses, err = self._build_direct_sandbox_set_clauses(target, modifications, project_id)
@@ -3002,18 +3554,44 @@ class ModifyTool(BaseTool):
                 update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
             elif target == "card":
                 from app import Card
-                q = flask_db.session.query(Card).filter(Card.project_id == project_id, Card.id.in_(ids))
-                update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
-            else:
-                return False
-            if not update_map:
-                return False
-            affected = q.update(update_map, synchronize_session=False)
-            pid = int(project_id)
-            if target == "card":
+
+                q = flask_db.session.query(Card).filter(
+                    Card.project_id == project_id, Card.id.in_(ids)
+                )
+                full_map = {
+                    self._map_field_name(k, target): v
+                    for k, v in resolved_modifications.items()
+                }
+                card_cols = set(Card.__table__.columns.keys())
+                safe_map = {mk: v for mk, v in full_map.items() if mk in card_cols}
+                leftover_mods: Dict[str, Any] = {}
+                for fk, v in resolved_modifications.items():
+                    mk = self._map_field_name(fk, "card")
+                    if mk not in card_cols:
+                        leftover_mods[fk] = v
+                pid = int(project_id)
+                affected = 0
+                if safe_map:
+                    affected = q.update(safe_map, synchronize_session=False) or 0
+                any_src = False
+                if leftover_mods:
+                    for tid in ids:
+                        card = (
+                            flask_db.session.query(Card)
+                            .filter(Card.project_id == pid, Card.id == int(tid))
+                            .first()
+                        )
+                        if card and self._apply_fields_to_card_and_linked_source(
+                            flask_db.session, card, leftover_mods, pid
+                        ):
+                            any_src = True
+                if not safe_map and not leftover_mods:
+                    return False
                 flask_db.session.commit()
-                print(f"[MODIFY] 批量更新完成: target={target}, ids={ids}, affected={affected}")
-                return affected > 0
+                print(
+                    f"[MODIFY] 批量更新完成: target={target}, ids={ids}, affected={affected}, source_delegate={any_src}"
+                )
+                return affected > 0 or any_src
             from app import Bug, BadCase, TestCase
 
             _model = {"bug": Bug, "badcase": BadCase, "testcase": TestCase}[target]
@@ -3312,13 +3890,14 @@ class ModifyTool(BaseTool):
                 ).first()
                 if not card:
                     return False
-                for field, value in modifications.items():
-                    actual_field = self._map_field_name(field, target)
-                    if hasattr(card, actual_field):
-                        actual_value = (
-                            value["new"] if isinstance(value, dict) and "new" in value else value
-                        )
-                        setattr(card, actual_field, actual_value)
+                applied = self._apply_fields_to_card_and_linked_source(
+                    flask_db.session, card, modifications, project_id
+                )
+                if not applied:
+                    print(
+                        f"[MODIFY] target=card id={target_id} 无任何可落库字段（Card 与关联源表均未写入）"
+                    )
+                    return False
                 flask_db.session.commit()
                 return True
 

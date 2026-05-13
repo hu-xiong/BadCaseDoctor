@@ -134,6 +134,13 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
         : ''
     if (ft) {
       aiMessage.runningSummaryDraft = ft
+      // done 可能先于全文包到达，summaryText 已被写成「沙箱预览完成…」短句；此处用增量总览收口
+      if (aiMessage.agentResult && typeof aiMessage.agentResult === 'object') {
+        const cur = String(aiMessage.agentResult.summaryText || '').trim()
+        if (!cur || _isSandboxWaitSummaryStub(cur)) {
+          aiMessage.agentResult.summaryText = ft
+        }
+      }
     }
     return {}
   }
@@ -561,6 +568,16 @@ function formatObjectToSummary(obj) {
   return ''
 }
 
+/** done.summary 在「待用户确认沙箱」路径常为一句提示，勿覆盖已拼好的增量运行总览 Markdown */
+function _isSandboxWaitSummaryStub(txt) {
+  const s = String(txt || '').trim()
+  if (!s || s.length > 480) return false
+  if (/\n##\s/.test(s)) return false
+  return /沙箱预览完成|预览已生成|请确认是否应用|请确认变更|sandbox preview completed|preview completed|confirm whether to apply/i.test(
+    s
+  )
+}
+
 function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypewriter) {
   flushReasoningTypewriter(aiMessage)
   aiMessage.unifiedSummaryLoading = false
@@ -618,7 +635,10 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
     aiMessage.agentResult.thinking_time = stepEvent.thinking_time
   }
   if (stepEvent.summary && typeof stepEvent.summary === 'string') {
-    aiMessage.agentResult.summaryText = stepEvent.summary.trim()
+    const doneSummary = stepEvent.summary.trim()
+    const rsDraft = String(aiMessage.runningSummaryDraft || '').trim()
+    const ssDraft = String(aiMessage.summaryStreamDraft || '').trim()
+    aiMessage.agentResult.summaryText = rsDraft || ssDraft || doneSummary
   }
   // 勿在 done 时清空 summaryStreamDraft / runningSummaryDraft：
   // 统一总结与增量运行总览已靠 SSE 流式拼字，清空会导致界面立刻改以 summaryText 整块重绘，观感「一下子出来」。

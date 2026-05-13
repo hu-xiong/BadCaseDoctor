@@ -1,11 +1,15 @@
 <template>
-  <div class="monaco-diff-editor" :style="{ height }">
+  <div
+    class="monaco-diff-editor"
+    :class="{ 'monaco-diff-editor--light': isLightTheme }"
+    :style="{ height }"
+  >
     <div ref="containerRef" class="editor"></div>
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as monaco from 'monaco-editor'
 
 const props = defineProps({
@@ -22,6 +26,11 @@ const containerRef = ref(null)
 let diffEditor = null
 let originalModel = null
 let modifiedModel = null
+
+const isLightTheme = computed(() => {
+  const t = (props.theme || '').toLowerCase()
+  return t === 'vs' || t === 'vs-light' || t === 'hc-light'
+})
 
 const buildModels = () => {
   if (originalModel) originalModel.dispose()
@@ -85,6 +94,17 @@ watch(
   }
 )
 
+watch(
+  () => props.theme,
+  (t) => {
+    try {
+      monaco.editor.setTheme(t || 'vs-dark')
+    } catch {
+      /* ignore */
+    }
+  }
+)
+
 onBeforeUnmount(() => {
   try {
     originalModel?.dispose()
@@ -105,20 +125,36 @@ onBeforeUnmount(() => {
   background: #1e1e1e;
 }
 
+.monaco-diff-editor--light {
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
 .editor {
   width: 100%;
   height: 100%;
 }
 
-/* 让 diff 高亮更接近 Cursor：暗红删除、暗绿新增 */
-.monaco-diff-editor :deep(.monaco-diff-editor .line-delete),
-.monaco-diff-editor :deep(.monaco-diff-editor .delete) {
+/* 暗色主题：删除/新增条带 */
+.monaco-diff-editor:not(.monaco-diff-editor--light) :deep(.monaco-diff-editor .line-delete),
+.monaco-diff-editor:not(.monaco-diff-editor--light) :deep(.monaco-diff-editor .delete) {
   background: rgba(244, 63, 94, 0.18) !important;
 }
 
-.monaco-diff-editor :deep(.monaco-diff-editor .line-insert),
-.monaco-diff-editor :deep(.monaco-diff-editor .insert) {
+.monaco-diff-editor:not(.monaco-diff-editor--light) :deep(.monaco-diff-editor .line-insert),
+.monaco-diff-editor:not(.monaco-diff-editor--light) :deep(.monaco-diff-editor .insert) {
   background: rgba(34, 197, 94, 0.14) !important;
+}
+
+/* 浅色主题 */
+.monaco-diff-editor--light :deep(.monaco-diff-editor .line-delete),
+.monaco-diff-editor--light :deep(.monaco-diff-editor .delete) {
+  background: rgba(239, 68, 68, 0.12) !important;
+}
+
+.monaco-diff-editor--light :deep(.monaco-diff-editor .line-insert),
+.monaco-diff-editor--light :deep(.monaco-diff-editor .insert) {
+  background: rgba(16, 185, 129, 0.12) !important;
 }
 </style>
 

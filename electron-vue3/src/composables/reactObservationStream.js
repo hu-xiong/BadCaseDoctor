@@ -650,7 +650,9 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           target_id: toolData.target_id,
           diff: toolData.diff,
           modifications: toolData.modifications,
-          confirmation_required: true
+          confirmation_required: true,
+          before: toolData.before ?? null,
+          after: toolData.after ?? null
         }
         console.log('[MODIFY] 存储沙箱预览导航:', aiMessage.modifyNavigation)
       } else if (toolData.diff && toolData.before && toolData.after) {

@@ -56,8 +56,8 @@ REACT_SYSTEM_STATIC = """<system>
 - 不确定参数时可简写，服务端会补全
 
 **modify 工具参数格式（重要）：**
-- target: "bug" 或 "badcase" 或 "testcase"（须与**真实记录类型**一致）
-- **禁止从卡片标题推断 target**：标题里出现「testcase」「Bug」「badcase」等字样**不等于**类型；须以 grep 结果中的 **Card.source_type / navigation.merged_from_legacy / bug_list·testcase_list 的类型字段**或当前迭代视图类型为准。**合并导航若 target=card**，modify 请传 **card_id**（与服务端 Card 表一致），不要把标题里的英文误判成 testcase。
+- target: "bug" 或 "badcase" 或 "testcase"（须与 **modifications 字段所属源实体** 一致；**禁止**因上一步 grep 用了 target=card 定位就把 modify 设成改 Card 去写 status/复现等 Bug 字段）
+- **禁止从卡片标题推断 target**：标题里出现「testcase」「Bug」「badcase」等字样**不等于**类型；须以 grep 结果中的 **Card.source_type / bug_list·testcase_list** 等为准。**grep target=card 只用于检索 Card 行**；若要改 Bug 状态/复现/严重程度等，modify 的 **target 仍为 bug**，**target_id 为 Bug.id**（从 bug_list / bug_location 取）；可选额外传 **card_id** 辅助关联，**不要**把 modify 写成 target=card + status。
 - target_id: 单条记录的 ID（整数）
 - target_ids: 多条同一修改时传 ID 数组，如 [9,8]，**一次调用**批量预览（与「各调一次 modify」等价但 UI 稳定为一张卡片多条 diff）
 - modifications: {"字段名": "新值"}  # 必须嵌套在 modifications 里！
@@ -394,7 +394,7 @@ class ReactPromptTemplates:
 规则：有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。技能匹配则跟技能流（阈值约 0.3）。
 查询→一步 grep。仅**查看**详情（未要求修改）→一步 grep 或基于已有 grep 结果直接回答，**禁止**为展示而调用 modify。修改→两步 grep 再 modify（禁止只 modify）。**零起新建**→一步 create。**按已有记录复制新建**（copy_record 技能）→三步 **grep → copy（属性合并/不落库）→ create（预览与落库）**；若合并链稳定也可一步 **create**，fields 含 **copy_from_bug_id / copy_from_badcase_id / copy_from_testcase_id / copy_from_card_id**（与 copy→create **等价**，并非只能用卡片）。**copy 工具支持 bug、badcase、testcase、card**。browser_test→一步。本机命令→一步 terminal（command 必填）。
 grep：keywords 可按记录标题原文；**多词默认 OR**（任一词命中）；须全部词命中时由环境 GREP_KEYWORDS_MATCH_MODE=and（一般不写）。**主界面迭代列表即 Card 表**；泛查、不确定类型时用 **target=all**（同时检索 Card + 各源表）；**用户明确说「查卡片/查询卡片/卡片列表/迭代卡片」等时，必须用 target=card（只查 Card 表标题与描述），禁止用 bug/badcase/testcase/all**，否则会混入源表口径。**勿**在无明确用户意图时填 target=bug/badcase/testcase（会跳过 Card 表导致「无卡片命中」）。勿把「期望结果/步骤」等字段名当 keywords；target∈bug/badcase/testcase/card/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
-modify：目标 bug/badcase/testcase；不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
+modify：按 **要改的字段** 选 bug/badcase/testcase（**grep 用 card 与 modify 用 card 无必然关系**；改状态/复现等缺陷字段时 target 必须是 bug 等源表，勿 target=card）。不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
 </system>
 
 <examples>
@@ -748,7 +748,7 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 - 流程：先 grep 检索出候选列表（badcase_analysis/bug_location/testcase_location/**card_location**），对候选做 rerank，**分高的**作为 target_id；支持 BadCase、Bug、测试用例、**统一卡片 Card**。
 - **只读「查看详情」禁止误用 modify**：用户仅「查看/看看/展示/介绍下」某张**卡片**或某条 Bug/BadCase/用例的详情、**没有说要改字段或状态**时，**只用 grep 返回结果中的条目作答**（优先 **card_location** 及其中 title、plan、类型相关字段），整理成对话里的结构化说明即可。**禁止**为「展示详情」再调用 modify（modify 用于**修改**预览，不是只读查询接口）。信息不够时允许**再 grep** 缩小关键词或 target，仍不要用 modify 充当读详情。
 - 若 context 中尚无列表，必须先 grep：grep(keywords="用户话里的标题或关键词", target="badcase"|"bug"|"testcase"|"card"|"all", project_id=当前项目)。**多词默认 OR**；**用户只要「查卡片/卡片列表」→ target 必须是 card**；**只要统一卡片层、不要 bug/源表并行结果时，必须用 target=card**（避免与 target=all 下历史 Bug 行重复）。**target=all** 时服务端会将同源「源表行 + Card」**合并为一条卡片导航**。**务必传 plan_id=当前侧栏选中的迭代**，否则命中面过大；导航列表会去重并限条数，仍以 plan 限定为准。
-- 选 target_id 时：系统会对候选按与关键词的匹配度 rerank，分高的即可；修改目标类型 **target 必须与源实体一致**。grep 命中的是**卡片**时优先传 **card_id**；**切勿**仅因标题含「testcase」就把 target 设为 testcase。
+- 选 target_id 时：系统会对候选按与关键词的匹配度 rerank，分高的即可；modify 的 **target 必须与 modifications 字段所在源表一致**（改 Bug 状态 → target=bug + Bug.id）。grep 命中 **card_location** 时可用于定位，但若用户要改的是缺陷工作流字段，modify **仍用 bug/badcase/testcase**，可从同条 observation 的 bug_list 或合并项里的源表 id 取 target_id；**不要**用 target=card 写 status。**切勿**仅因标题含「testcase」就把 target 设为 testcase。
 - 字段命名统一（避免混淆）：**答案用 answer**，**正确答案用 correct_answer**（由 modify 工具映射到数据库字段）。
 - 不要在 params 里编造数字 id；若 context 中已有上一步 grep 结果，你可写出 target_id；**若不确定，params 可只含 target / 或留空，真实执行以服务端补参为准**（见下条）。
 
@@ -1276,7 +1276,7 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 8. **terminal 工具（本机 Shell）**：若 `<current_context>` 含 `client_os: windows`（或用户环境为 Windows），命令须用 **cmd.exe 可用语法**（查看当前目录用 `cd` 或 `echo %CD%`，**禁止**单独使用 Linux 的 `pwd`）；macOS/Linux 可用 `pwd`。若上一轮 terminal 已失败且 stderr 含「not recognized」「不是内部或外部命令」等，须在 observation 中判定为环境/命令不匹配，并在下一轮 **改用语境匹配的命令** 重试，勿只向用户泛泛解释而不继续执行。
 {first_round_plan_block}
 **modify 工具参数格式（重要）：**
-- target: "bug" 或 "badcase" 或 "testcase"
+- target: "bug" 或 "badcase" 或 "testcase"（按字段选源表；**勿**因 grep 用 card 就把 modify 设为 card 来写 status）
 - target_id: 从 grep 结果获取的 ID（整数或数组）
 - modifications: {{"字段名": "新值"}}  # 必须嵌套在 modifications 里！
 - confirm: false  # 预览模式

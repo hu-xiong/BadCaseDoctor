@@ -239,9 +239,6 @@
             :projectMembers="projectMembers"
             :applyFilters="applyFilters"
             :pendingModifications="pendingModifications"
-            :expandedDetailRows="expandedDetailRows"
-            :hasDetailFieldModifications="hasDetailFieldModifications"
-            :toggleDetailExpand="toggleDetailExpand"
             :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
             :getConsecutiveGroupSize="getConsecutiveGroupSize"
             :confirmModify="confirmModify"
@@ -288,9 +285,6 @@
             :projectMembers="projectMembers"
             :applyFilters="applyFilters"
             :pendingModifications="pendingModifications"
-            :expandedDetailRows="expandedDetailRows"
-            :hasDetailFieldModifications="hasDetailFieldModifications"
-            :toggleDetailExpand="toggleDetailExpand"
             :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
             :getConsecutiveGroupSize="getConsecutiveGroupSize"
             :confirmModify="confirmModify"
@@ -337,9 +331,6 @@
             :projectMembers="projectMembers"
             :applyFilters="applyFilters"
             :pendingModifications="pendingModifications"
-            :expandedDetailRows="expandedDetailRows"
-            :hasDetailFieldModifications="hasDetailFieldModifications"
-            :toggleDetailExpand="toggleDetailExpand"
             :isLastInConsecutiveGroup="isLastInConsecutiveGroup"
             :getConsecutiveGroupSize="getConsecutiveGroupSize"
             :confirmModify="confirmModify"
@@ -1310,13 +1301,13 @@ export default {
     
     const handleSearchResultSelect = (result) => {
       console.log('选择搜索结果:', result)
-      // 根据类型跳转到对应详情
+      // openMainEditor(实体id, 类型, showDiff) — 禁止 (类型, id)，否则 mapToEditorPlanType 会把数字当成 badcase
       if (result.type === 'bug') {
-        openMainEditor('bug', result.id, true)
+        openMainEditor(result.id, 'bug', true)
       } else if (result.type === 'badcase') {
-        openMainEditor('badcase', result.id, true)
+        openMainEditor(result.id, 'badcase', true)
       } else if (result.type === 'testcase') {
-        openMainEditor('test_case', result.id, true)
+        openMainEditor(result.id, 'testcase', true)
       }
     }
     
@@ -2170,6 +2161,9 @@ const totalCards = ref(0)
     }
 
     const getBadcaseStatusText = (status) => {
+      if (status === null || status === undefined || String(status).trim() === '') {
+        return t('chat.notSet')
+      }
       const k = `list.badcaseStatus.${status}`
       const tr = t(k)
       if (tr !== k) return tr
@@ -2802,6 +2796,19 @@ const totalCards = ref(0)
     const mapToEditorPlanType = (t) => {
       if (t === 'bug') return 'bug'
       if (t === 'test_case' || t === 'testcase') return 'test_case'
+      if (t === 'badcase' || t === 'bad_case') return 'badcase'
+      if (t === 'card') {
+        console.warn(
+          '[EDITOR-TYPE] mapToEditorPlanType: 仍为 "card"（应在 openMainEditor 内先解析卡片行），兜底为 badcase'
+        )
+        return 'badcase'
+      }
+      console.warn(
+        '[EDITOR-TYPE] mapToEditorPlanType: 未识别类型，兜底为 badcase。入参:',
+        t,
+        'typeof:',
+        typeof t
+      )
       return 'badcase'
     }
 
@@ -2839,7 +2846,22 @@ const totalCards = ref(0)
     )
 
     const mountEditorComponents = (itemId, editorPlanType, showDiff, edit = true, planId = null, cardId = null) => {
-      console.log('[mountEditorComponents] itemId:', itemId, 'editorPlanType:', editorPlanType, 'cardId:', cardId)
+      const compName =
+        editorPlanType === 'bug' ? 'NewBug' : editorPlanType === 'test_case' ? 'NewTestCase' : 'NewBadcase'
+      console.log('[mountEditorComponents]', {
+        itemId,
+        editorPlanType,
+        挂载组件: compName,
+        showDiff,
+        planId,
+        cardId,
+        说明:
+          editorPlanType === 'bug'
+            ? 'editorPlanType=bug'
+            : editorPlanType === 'test_case'
+              ? 'editorPlanType=test_case'
+              : 'editorPlanType 非 bug/test_case → 使用 NewBadcase（若不该出现请查 mapToEditorPlanType / openMainEditor 入参）'
+      })
       if (editorPlanType === 'bug') {
         mainEditorComponent.value = markRaw(NewBug)
       } else if (editorPlanType === 'test_case') {
@@ -3655,13 +3677,14 @@ const totalCards = ref(0)
       openMainEditor(badcaseId, editorType, false)
     }
     
-    // 编辑卡片（支持传递卡片自己的类型）
+    // 编辑卡片：必须用 itemType=card 走 openMainEditor 内解析（type/source_id），禁止用 currentPlanType（多为 badcase 会误开 NewBadcase）
     const editCard = (cardId) => {
-      console.log('=== editCard函数被调用 ===')
-      console.log('卡片 ID:', cardId, '类型:', typeof cardId)
-      
-      // 跳转到 BadCase 详情页面编辑
-      openMainEditor(cardId, currentPlanType.value, false)
+      console.log('[editCard] 卡片编辑入口', {
+        cardId,
+        currentPlanType: currentPlanType.value,
+        note: '统一 openMainEditor(cardId, "card")，避免计划 content_type 与卡片实体类型不一致'
+      })
+      openMainEditor(cardId, 'card', false)
     }
     
     // 快速更新卡片（行内编辑）
@@ -3707,21 +3730,116 @@ const totalCards = ref(0)
     
     // 打开编辑覆盖层
     // 在主区域挂载 Editor（替代 overlay）
-    const openMainEditor = (itemId, itemType, showDiff = false) => {
+    const openMainEditor = async (itemId, itemType, showDiff = false) => {
+      /** 历史误调用：openMainEditor('bug', 14) — 第二参应是类型；若第一参为类型名且第二参为数字则交换 */
+      const typeToken = new Set(['bug', 'badcase', 'bad_case', 'testcase', 'test_case', 'card'])
+      let mid = itemId
+      let mty = itemType
+      const secondIsNumericId =
+        typeof mty === 'number'
+          ? Number.isFinite(mty)
+          : typeof mty === 'string' && /^\d+$/.test(String(mty).trim())
+      if (typeToken.has(String(mid).toLowerCase()) && secondIsNumericId) {
+        console.warn(
+          '[MAIN-EDITOR] 已自动纠正参数顺序：应为 openMainEditor(实体id, 类型)。曾误传 (类型字符串, id)。',
+          { 误传第一参: mid, 误传第二参: mty }
+        )
+        const rid = typeof mty === 'number' ? mty : parseInt(String(mty).trim(), 10)
+        let ty = String(mid).toLowerCase()
+        if (ty === 'bad_case') ty = 'badcase'
+        mty = ty === 'test_case' ? 'testcase' : ty
+        mid = rid
+      }
+      itemId = mid
+      itemType = mty
+
       console.log('[MAIN-EDITOR] 打开主区域编辑:', { itemId, itemType, showDiff })
-      
-      const et = mapToEditorPlanType(itemType)
-      console.log('[MAIN-EDITOR] 映射后的编辑器类型:', et)
+
+      /** target=card 时 itemId 为 Card.id；详情 API 需要 Bug/BadCase/TestCase 的 source_id，且组件不能误用 mapToEditorPlanType 默认成 badcase */
+      let editorSourceType = itemType
+      let entityIdForEditor = itemId
+      let cardRowForId = null
+      if (itemType === 'card') {
+        cardRowForId =
+          (Array.isArray(filteredCards.value) && filteredCards.value.find((c) => c.id == itemId)) ||
+          (Array.isArray(cards.value) && cards.value.find((c) => c.id == itemId)) ||
+          null
+        const cid =
+          typeof itemId === 'number' ? itemId : parseInt(String(itemId), 10)
+        if (!cardRowForId && Number.isFinite(cid) && cid > 0) {
+          try {
+            const res = await getCardDetail(cid)
+            const c = res?.data?.data ?? res?.data?.card
+            if (res?.data?.success && c && (c.id != null || c.title != null || c.type != null)) {
+              cardRowForId = {
+                id: c.id ?? cid,
+                type: c.type,
+                source_type: c.source_type,
+                source_id: c.source_id,
+                title: c.title,
+                plan_id: c.plan_id
+              }
+              console.log('[MAIN-EDITOR] itemType=card 本地无行，已用 getCardDetail 补全', {
+                cardId: cid,
+                type: cardRowForId.type,
+                source_type: cardRowForId.source_type,
+                source_id: cardRowForId.source_id
+              })
+            }
+          } catch (e) {
+            console.warn('[MAIN-EDITOR] getCardDetail 失败，无法解析卡片实体', cid, e)
+          }
+        }
+        if (cardRowForId) {
+          const raw = String(cardRowForId.type || cardRowForId.source_type || '').toLowerCase()
+          if (raw === 'bug') editorSourceType = 'bug'
+          else if (raw === 'testcase' || raw === 'test_case') editorSourceType = 'test_case'
+          else if (raw === 'bad_case' || raw === 'badcase') editorSourceType = 'badcase'
+          else editorSourceType = 'badcase'
+          const sid = cardRowForId.source_id
+          if (sid != null && sid !== '') {
+            const sn = typeof sid === 'number' ? sid : parseInt(String(sid), 10)
+            if (Number.isFinite(sn) && sn > 0) entityIdForEditor = sn
+          }
+          console.log('[MAIN-EDITOR] itemType=card 已解析卡片行', {
+            cardId: itemId,
+            rowType: cardRowForId.type,
+            source_type: cardRowForId.source_type,
+            source_id: cardRowForId.source_id,
+            editorSourceType,
+            entityIdForEditor
+          })
+        } else {
+          console.warn('[MAIN-EDITOR] itemType=card 但本地无行且 getCardDetail 未补全', {
+            itemId,
+            filteredLen: filteredCards.value?.length,
+            cardsLen: cards.value?.length,
+            后果: '随后 mapToEditorPlanType(card)→badcase，可能误请求 /badcases/:id'
+          })
+        }
+      }
+
+      const et = mapToEditorPlanType(editorSourceType)
+      console.log('[MAIN-EDITOR] 映射后的编辑器类型:', et, {
+        editorSourceType,
+        entityIdForEditor,
+        cardId: itemType === 'card' ? itemId : null
+      })
       const returnTo = activeWorkbenchTabId.value
-      const tid = `detail-${et}-${itemId}`
+      const tid = `detail-${et}-${entityIdForEditor}`
       const curTab = workbenchTabs.value.find((t) => t.id === returnTo)
-      // 根据类型在正确的数组中查找
+      // 根据类型在正确的数组中查找（card 不要用 badcases 按 id 误命中）
       let row = null
       if (itemType === 'card') {
-        row = filteredCards.value.find((c) => c.id == itemId)
-      }
-      if (!row) {
+        row = cardRowForId
+      } else {
         row = badcases.value.find((b) => b.id == itemId)
+      }
+      if (!row && itemType !== 'card') {
+        row =
+          (Array.isArray(filteredCards.value) && filteredCards.value.find((c) => c.id == itemId)) ||
+          (Array.isArray(cards.value) && cards.value.find((c) => c.id == itemId)) ||
+          null
       }
       const title = truncateForTab(row?.title, '编辑')
 
@@ -3741,7 +3859,10 @@ const totalCards = ref(0)
       }
 
       let cardIdForEditor = curTab?.meta?.cardId ?? null
-      if (cardIdForEditor == null && row) {
+      if (itemType === 'card') {
+        const cn = typeof itemId === 'number' ? itemId : parseInt(String(itemId), 10)
+        if (Number.isFinite(cn) && cn > 0) cardIdForEditor = cn
+      } else if (cardIdForEditor == null && row) {
         const rc = row.card_id ?? row.cardId
         if (rc != null && rc !== '') {
           const cn = typeof rc === 'number' ? rc : parseInt(String(rc), 10)
@@ -3754,7 +3875,7 @@ const totalCards = ref(0)
         kind: 'detail',
         title,
         meta: {
-          entityId: itemId,
+          entityId: entityIdForEditor,
           editorPlanType: et,
           showDiff: !!showDiff,
           returnTo,
@@ -3763,7 +3884,7 @@ const totalCards = ref(0)
         }
       })
       activeWorkbenchTabId.value = tid
-      mountEditorComponents(itemId, et, showDiff, true, planIdForEditor, cardIdForEditor)
+      mountEditorComponents(entityIdForEditor, et, showDiff, true, planIdForEditor, cardIdForEditor)
     }
     
     const openMainCreateEditor = (itemType, planId = null) => {
@@ -4458,21 +4579,32 @@ const totalCards = ref(0)
       if (changed) pendingModifications.value = next
     }
 
+    /**
+     * Bug/BadCase/TestCase 列表行与 pending 键对齐：modify 可能挂在源表 id 上，也可能挂在 Card.id（target=card）上。
+     */
+    const getPendingModifyMapKeyForBadcaseRow = (badcase) => {
+      const pm = pendingModifications.value
+      if (!badcase) return null
+      const direct = pm[badcase.id]
+      if (direct && !direct._pendingDelete) return badcase.id
+      const cid = Number(badcase.card_id ?? badcase.cardId)
+      if (Number.isFinite(cid) && cid > 0) {
+        const alt = pm[cid]
+        if (alt && !alt._pendingDelete) return cid
+      }
+      return null
+    }
+
     // 获取连续相邻的待修改记录组
     const getConsecutiveGroups = () => {
-      const pendingIds = Object.keys(pendingModifications.value)
-        .map(Number)
-        .filter((id) => {
-          const p = pendingModifications.value[id]
-          return p && !p._pendingDelete
-        })
       const result = []
       let currentGroup = []
-      
-      // 遍历 filteredBadcases 找出连续的待修改记录
+
+      // 遍历 filteredBadcases 找出连续的待修改记录（键与列表 ✓/✗ 所用 modifyPendingMapKey 一致）
       filteredBadcases.value.forEach((badcase, index) => {
-        if (pendingIds.includes(badcase.id)) {
-          currentGroup.push(badcase.id)
+        const pk = getPendingModifyMapKeyForBadcaseRow(badcase)
+        if (pk != null) {
+          currentGroup.push(pk)
         } else {
           if (currentGroup.length > 0) {
             result.push([...currentGroup])
@@ -6917,6 +7049,23 @@ const totalCards = ref(0)
       const modifyData = {}
       const diff = detail?.diff
       const modifications = detail?.modifications
+      const before = detail?.before && typeof detail.before === 'object' ? detail.before : null
+      const after = detail?.after && typeof detail.after === 'object' ? detail.after : null
+      const tgt = String(detail?.target || '').toLowerCase()
+      const bugish = tgt === 'bug' || tgt === 'card'
+      /** Bug/BadCase/TestCase/卡片层 status：卡片快照从源表补 status 后，与 diff 对齐 */
+      const rowSnapshotTargets = ['bug', 'badcase', 'testcase', 'card'].includes(tgt)
+      const snapAssignee = (row) => {
+        if (!row || typeof row !== 'object') return ''
+        const v = row.assignee_display ?? row.assignee ?? row.assignee_id
+        return v == null ? '' : String(v)
+      }
+      const snapListField = (row, fieldKey) => {
+        if (!row || typeof row !== 'object') return ''
+        if (fieldKey === 'assignee') return snapAssignee(row)
+        const v = row[fieldKey]
+        return v == null ? '' : String(v)
+      }
       if (diff && Array.isArray(diff) && diff.length > 0) {
         diff.forEach((fieldDiff) => {
           const rawField = fieldDiff.field ?? fieldDiff.field_label
@@ -6925,7 +7074,41 @@ const totalCards = ref(0)
           const newLine = fieldDiff.lines?.find((l) => l.type === 'add')
           const unchangedLine = fieldDiff.lines?.find((l) => l.type === 'unchanged')
           if (oldLine && newLine) {
-            modifyData[fieldKey] = { old: oldLine.content, new: newLine.content }
+            let oldC = oldLine.content
+            let newC = newLine.content
+            /** diff 行里「优先级」常被模型/渲染成重复中文，真实值以 before/after 为准 */
+            if (bugish && fieldKey === 'priority' && (before || after)) {
+              const bo = before?.priority
+              const ao = after?.priority
+              if (bo != null && String(bo).trim() !== '') oldC = bo
+              if (ao != null && String(ao).trim() !== '') newC = ao
+            }
+            if (
+              rowSnapshotTargets &&
+              ['status', 'title', 'assignee'].includes(fieldKey) &&
+              (before || after)
+            ) {
+              if (String(oldC ?? '').trim() === '') {
+                const bo = snapListField(before, fieldKey)
+                if (bo) oldC = bo
+              }
+              if (String(newC ?? '').trim() === '') {
+                const ao = snapListField(after, fieldKey)
+                if (ao) newC = ao
+              }
+            }
+            modifyData[fieldKey] = { old: oldC, new: newC }
+          } else if (
+            (bugish || rowSnapshotTargets) &&
+            (before || after) &&
+            (oldLine || newLine) &&
+            !unchangedLine
+          ) {
+            const oldC = oldLine ? String(oldLine.content ?? '') : snapListField(before, fieldKey)
+            const newC = newLine ? String(newLine.content ?? '') : snapListField(after, fieldKey)
+            if (oldC !== newC) {
+              modifyData[fieldKey] = { old: oldC, new: newC }
+            }
           } else if (unchangedLine) {
             modifyData[fieldKey] = {
               old: unchangedLine.content,
@@ -6938,13 +7121,99 @@ const totalCards = ref(0)
         for (const [field, value] of Object.entries(modifications)) {
           const fk = normalizeDiffFieldKey(field)
           if (value && typeof value === 'object' && 'new' in value) {
-            modifyData[fk] = value
+            let entry = { ...value }
+            if (
+              rowSnapshotTargets &&
+              (before || after) &&
+              ['status', 'title', 'assignee'].includes(fk) &&
+              (!entry.old || String(entry.old).trim() === '')
+            ) {
+              const bo = snapListField(before, fk)
+              if (bo) entry = { ...entry, old: bo }
+            }
+            modifyData[fk] = entry
           } else {
-            modifyData[fk] = { old: '', new: value }
+            const bo =
+              rowSnapshotTargets && before ? snapListField(before, fk) : ''
+            modifyData[fk] = { old: bo || '', new: value }
           }
         }
       }
+      if (rowSnapshotTargets && (before || after)) {
+        for (const fk of ['status', 'title', 'assignee']) {
+          if (modifyData[fk]) continue
+          const bs = snapListField(before, fk)
+          const as = snapListField(after, fk)
+          if (bs !== as) {
+            modifyData[fk] = { old: bs, new: as }
+          }
+        }
+      }
+      // card + status：payload.before 常无 status（卡片快照未带源表），用已加载 Bug/卡片列表兜底
+      if (
+        tgt === 'card' &&
+        modifyData.status &&
+        (!modifyData.status.old || String(modifyData.status.old).trim() === '')
+      ) {
+        const cid = parseInt(String(detail?.targetId ?? ''), 10)
+        if (!Number.isNaN(cid) && cid > 0) {
+          let fill = ''
+          if (Array.isArray(badcases.value)) {
+            const br = badcases.value.find((b) => Number(b.card_id ?? b.cardId) === cid)
+            if (br?.status != null && String(br.status).trim() !== '') fill = String(br.status)
+          }
+          if (!fill && Array.isArray(cards.value)) {
+            const cr = cards.value.find((c) => Number(c.id) === cid)
+            if (cr?.status != null && String(cr.status).trim() !== '') fill = String(cr.status)
+          }
+          if (fill) {
+            modifyData.status = { ...modifyData.status, old: fill }
+          }
+        }
+      }
+      if (
+        typeof import.meta !== 'undefined' &&
+        import.meta.env?.DEV &&
+        tgt === 'card' &&
+        modifyData.status &&
+        (!modifyData.status.old || String(modifyData.status.old).trim() === '')
+      ) {
+        console.warn('[buildModifyData] card+status 旧值仍为空（检查 Card.source 与 bug.card_id）', {
+          targetId: detail?.targetId,
+          beforeKeys: before ? Object.keys(before) : [],
+          afterStatus: after?.status,
+          diffStatusDelete: diff?.find?.((d) => (d.field || d.field_label) === 'status')?.lines
+        })
+      }
       return modifyData
+    }
+
+    /**
+     * 将 modify 产生的字段（含列表列 title/status/assignee 与详情字段）合并进 pendingModifications，
+     * 避免「仅详情字段」分支提前 return 时列表行内不显示标题/状态/负责人 diff。
+     */
+    const mergePendingModifyOverlayFromModifyData = (modifyData, intTargetId, meta) => {
+      if (meta?.executed === true) return
+      if (intTargetId == null || Number.isNaN(Number(intTargetId))) return
+      const md = modifyData && typeof modifyData === 'object' ? modifyData : {}
+      const overlay = {}
+      for (const [fk, v] of Object.entries(md)) {
+        const nk = normalizeDiffFieldKey(fk)
+        if (!v || typeof v !== 'object' || !('new' in v)) continue
+        if (v.unchanged === true) continue
+        overlay[nk] = v
+      }
+      if (Object.keys(overlay).length === 0) return
+      const next = { ...pendingModifications.value }
+      const prev = next[intTargetId] || {}
+      next[intTargetId] = {
+        ...prev,
+        ...overlay,
+        _target: meta.target,
+        _messageId: meta.messageId,
+        _naturalQuery: typeof meta.natural_query === 'string' ? meta.natural_query : ''
+      }
+      pendingModifications.value = next
     }
 
     /** 同步写入一条待确认（不 await），避免同组多条 async 交错导致黄条逐个出现 */
@@ -6954,12 +7223,6 @@ const totalCards = ref(0)
       const modifyData = buildModifyDataFromShowModifyDetail(detail)
       const fieldKeys = Object.keys(modifyData)
       if (fieldKeys.length === 0) return
-      const hasDetailFields = fieldKeys.some((field) =>
-        DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
-      )
-      const allListFields = fieldKeys.every((field) =>
-        LIST_FIELDS.includes(normalizeDiffFieldKey(field))
-      )
       const intTargetId = parseInt(detail.targetId, 10)
       if (Number.isNaN(intTargetId)) return
       const { target, diff, messageId, batchIndex } = detail
@@ -6979,21 +7242,14 @@ const totalCards = ref(0)
         )
       }
 
-      if (diff && Array.isArray(diff) && diff.length > 0 && allListFields && !hasDetailFields) {
-        const newModifyData = {
-          ...Object.fromEntries(
-            fieldKeys.map((field) => {
-              const v = modifyData[field]
-              return [field, typeof v === 'object' && v && 'new' in v ? v : { old: '', new: v }]
-            })
-          ),
-          _target: target,
-          _messageId: messageId,
-          _naturalQuery: typeof detail.natural_query === 'string' ? detail.natural_query : ''
-        }
-        const next = { ...pendingModifications.value }
-        next[intTargetId] = { ...(next[intTargetId] || {}), ...newModifyData }
-        pendingModifications.value = next
+      if (diff && Array.isArray(diff) && diff.length > 0) {
+        mergePendingModifyOverlayFromModifyData(modifyData, intTargetId, {
+          target,
+          messageId,
+          natural_query: typeof detail.natural_query === 'string' ? detail.natural_query : '',
+          peerTargetIds: detail.peerTargetIds,
+          executed: detail.executed
+        })
       }
     }
 
@@ -7009,12 +7265,6 @@ const totalCards = ref(0)
         const modifyData = buildModifyDataFromShowModifyDetail(detail)
         const fieldKeys = Object.keys(modifyData)
         if (fieldKeys.length === 0) continue
-        const hasDetailFields = fieldKeys.some((field) =>
-          DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
-        )
-        const allListFields = fieldKeys.every((field) =>
-          LIST_FIELDS.includes(normalizeDiffFieldKey(field))
-        )
         const intTargetId = parseInt(detail.targetId, 10)
         if (Number.isNaN(intTargetId)) continue
         const { target, diff, messageId, batchIndex } = detail
@@ -7039,20 +7289,25 @@ const totalCards = ref(0)
           sessionWritten = true
         }
 
-        if (diff && Array.isArray(diff) && diff.length > 0 && allListFields && !hasDetailFields) {
-          const newModifyData = {
-            ...Object.fromEntries(
-              fieldKeys.map((field) => {
-                const v = modifyData[field]
-                return [field, typeof v === 'object' && v && 'new' in v ? v : { old: '', new: v }]
-              })
-            ),
-            _target: target,
-            _messageId: messageId,
-            _naturalQuery: typeof detail.natural_query === 'string' ? detail.natural_query : ''
+        if (diff && Array.isArray(diff) && diff.length > 0) {
+          const prev = base[intTargetId] || {}
+          const overlay = {}
+          for (const [fk, v] of Object.entries(modifyData)) {
+            const nk = normalizeDiffFieldKey(fk)
+            if (!v || typeof v !== 'object' || !('new' in v)) continue
+            if (v.unchanged === true) continue
+            overlay[nk] = v
           }
-          base[intTargetId] = { ...(base[intTargetId] || {}), ...newModifyData }
-          touched = true
+          if (Object.keys(overlay).length > 0) {
+            base[intTargetId] = {
+              ...prev,
+              ...overlay,
+              _target: target,
+              _messageId: messageId,
+              _naturalQuery: typeof detail.natural_query === 'string' ? detail.natural_query : ''
+            }
+            touched = true
+          }
         }
       }
       if (touched) pendingModifications.value = base
@@ -7182,11 +7437,100 @@ const totalCards = ref(0)
     }
 
     /**
+     * 沙箱 show-modify-in-list：当前计划「卡片列表」页可能不含目标卡片或 source 映射失败时，
+     * 与 grep 导航一致，用显式 card_id / before.after / 详情接口解析卡片，避免 Bug 等退化成仅「迭代计划」Tab。
+     */
+    const resolveCardRowForModifyListNav = async (recordId, navTarget, detail = {}) => {
+      const rid =
+        typeof recordId === 'number' ? recordId : parseInt(String(recordId ?? ''), 10)
+      if (!Number.isFinite(rid) || rid <= 0) return null
+      const ntRaw = (navTarget || '').toString().toLowerCase()
+      const nt = ntRaw === 'test_case' ? 'testcase' : ntRaw
+      if (!['bug', 'badcase', 'testcase'].includes(nt)) return null
+
+      let cardRow = null
+      let explicitEc = null
+      const explicitCidRaw = detail.card_id ?? detail.cardId
+      if (explicitCidRaw != null && explicitCidRaw !== '') {
+        explicitEc =
+          typeof explicitCidRaw === 'number' ? explicitCidRaw : parseInt(String(explicitCidRaw), 10)
+        if (!Number.isNaN(explicitEc) && explicitEc > 0 && Array.isArray(cards.value)) {
+          cardRow = cards.value.find((c) => Number(c.id) === explicitEc) || null
+        }
+      }
+      if (!cardRow?.id && explicitEc != null && !Number.isNaN(explicitEc) && explicitEc > 0) {
+        try {
+          const cr = await getCardDetail(explicitEc)
+          const cdata = cr?.data?.data
+          if (cr?.data?.success && cdata?.id) {
+            cardRow = { id: cdata.id, title: cdata.title }
+          }
+        } catch (e) {
+          console.warn('[MODIFY-NAV] getCardDetail(card_id):', e)
+        }
+      }
+
+      const before = detail.before && typeof detail.before === 'object' ? detail.before : null
+      const after = detail.after && typeof detail.after === 'object' ? detail.after : null
+      if (!cardRow?.id) {
+        const bcid = before?.card_id ?? before?.cardId ?? after?.card_id ?? after?.cardId
+        if (bcid != null && bcid !== '') {
+          const ci = typeof bcid === 'number' ? bcid : parseInt(String(bcid), 10)
+          if (!Number.isNaN(ci) && ci > 0) {
+            if (Array.isArray(cards.value)) {
+              cardRow = cards.value.find((c) => Number(c.id) === ci) || null
+            }
+            if (!cardRow?.id) {
+              try {
+                const cr = await getCardDetail(ci)
+                const cdata = cr?.data?.data
+                if (cr?.data?.success && cdata?.id) {
+                  cardRow = { id: cdata.id, title: cdata.title }
+                }
+              } catch (e) {
+                console.warn('[MODIFY-NAV] getCardDetail(before/after.card_id):', e)
+              }
+            }
+            if (!cardRow?.id) {
+              cardRow = { id: ci, title: '' }
+            }
+          }
+        }
+      }
+
+      if (!cardRow) {
+        cardRow = resolveCardForListNav(rid, nt)
+      }
+      if (!cardRow?.id) {
+        cardRow = await resolveCardRowByRecordDetailApi(rid, nt)
+      }
+      return cardRow?.id ? cardRow : null
+    }
+
+    /**
      * grep/modify 列表定位：行上为 Card.id；源表 id 需先用 resolveCardForListNav 映射。
+     * target=card：Bug 子表行用 data-card-id=Card.id，勿先用 data-bug-id（会与「Bug 主键=id」撞车且子表无 item-id）。
      */
     const findNavListRowEl = (rid, navTarget) => {
       if (rid == null || rid === '') return null
       const idStr = String(rid)
+      const nt = String(navTarget || '').toLowerCase()
+
+      if (nt === 'card') {
+        const byCardAttr = document.querySelector(`[data-card-id="${idStr}"]`)
+        if (byCardAttr) return byCardAttr
+        const byItem = document.querySelector(`[data-item-id="${idStr}"]`)
+        if (byItem) return byItem
+        const match = resolveCardForListNav(rid, navTarget)
+        if (!match?.id) return null
+        const cid = String(match.id)
+        return (
+          document.querySelector(`[data-card-id="${cid}"]`) ||
+          document.querySelector(`[data-item-id="${cid}"]`) ||
+          document.querySelector(`[data-bug-id="${cid}"]`)
+        )
+      }
+
       let el =
         document.querySelector(`[data-bug-id="${idStr}"]`) ||
         document.querySelector(`[data-item-id="${idStr}"]`)
@@ -7197,7 +7541,8 @@ const totalCards = ref(0)
       const cid = String(match.id)
       return (
         document.querySelector(`[data-item-id="${cid}"]`) ||
-        document.querySelector(`[data-bug-id="${cid}"]`)
+        document.querySelector(`[data-bug-id="${cid}"]`) ||
+        document.querySelector(`[data-card-id="${cid}"]`)
       )
     }
 
@@ -7323,6 +7668,26 @@ const totalCards = ref(0)
       }
     }
 
+    /** Card 上改 status/负责人 等实际落在源表时，应打开计划下 Bug/BadCase/测试用例子列表，而非迭代卡片总表 */
+    const inferWorkbenchListTypeFromCardSnapshot = (detail) => {
+      const raw = String(detail?.before?.type ?? detail?.after?.type ?? '').toLowerCase()
+      if (raw.includes('test') || raw === 'test_case') return 'testcase'
+      if (raw.includes('bad')) return 'badcase'
+      return 'bug'
+    }
+
+    const cardModifyTouchesLinkedSourceListColumns = (fieldKeys) =>
+      fieldKeys.some((f) => {
+        const nk = normalizeDiffFieldKey(f)
+        return ['status', 'assignee', 'title', 'priority'].includes(nk)
+      })
+
+    const listTypeToUrlContentType = (lt) => {
+      if (lt === 'badcase') return 'badcase'
+      if (lt === 'testcase') return 'test_case'
+      return 'bug'
+    }
+
     const handleShowModifyInList = async (event) => {
           const dtop = event.detail || {}
           if (dtop.__modifyListBatch === true && Array.isArray(dtop.items) && dtop.items.length > 0) {
@@ -7383,14 +7748,28 @@ const totalCards = ref(0)
             const hasDetailFieldsPre = fieldKeysPre.some((field) =>
               DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
             )
+            const hasListFieldChangesPre = fieldKeysPre.some((field) =>
+              LIST_FIELDS.includes(normalizeDiffFieldKey(field))
+            )
             if (
               diff &&
               Array.isArray(diff) &&
               diff.length > 0 &&
               hasDetailFieldsPre &&
-              suppressAutoOpenDetail !== true
+              suppressAutoOpenDetail !== true &&
+              !hasListFieldChangesPre
             ) {
-              openMainEditor(intTargetId, target, true)
+              if (dtop.executed !== true) {
+                mergePendingModifyOverlayFromModifyData(modifyDataPre, intTargetId, {
+                  target: dtop.target,
+                  messageId: dtop.messageId,
+                  natural_query:
+                    typeof dtop.natural_query === 'string' ? dtop.natural_query : '',
+                  peerTargetIds: dtop.peerTargetIds,
+                  executed: dtop.executed
+                })
+              }
+              await openMainEditor(intTargetId, target, true)
               return
             }
             if (target === 'bug') {
@@ -7411,7 +7790,13 @@ const totalCards = ref(0)
               }
             }
             if (!targetPlanId) {
-              const item = badcases.value.find((b) => b.id == intTargetId)
+              let item =
+                target === 'card'
+                  ? badcases.value.find((b) => Number(b.card_id ?? b.cardId) === intTargetId)
+                  : null
+              if (!item) {
+                item = badcases.value.find((b) => b.id == intTargetId)
+              }
               if (item) {
                 targetPlanId = item.plan_id
               } else {
@@ -7419,7 +7804,13 @@ const totalCards = ref(0)
                 selectedPlan.value = null
                 await fetchBadcases(1)
                 await nextTick()
-                const newItem = badcases.value.find((b) => b.id == intTargetId)
+                let newItem =
+                  target === 'card'
+                    ? badcases.value.find((b) => Number(b.card_id ?? b.cardId) === intTargetId)
+                    : null
+                if (!newItem) {
+                  newItem = badcases.value.find((b) => b.id == intTargetId)
+                }
                 if (newItem) {
                   targetPlanId = newItem.plan_id
                 }
@@ -7451,12 +7842,36 @@ const totalCards = ref(0)
               ? { planId: targetPlanId, urlContentType: uctForNav }
               : { planId: null, urlContentType: uctForNav }
             let listLoadedByTabNavigation = false
-            if (suppressAutoOpenDetail === true) {
+            // suppressAutoOpenDetail：避免自动 openMainEditor 与循环；但列表列 diff 必须在列表上确认，仍须激活列表 Tab
+            if (suppressAutoOpenDetail === true && !hasListFieldChangesPre) {
               if (targetPlanId) selectedPlan.value = targetPlanId
               else selectedPlan.value = null
             } else {
               let openedTypeList = false
-              if (targetPlanId && target === 'card') {
+              if (targetPlanId && target === 'card' && hasListFieldChangesPre) {
+                const listType = inferWorkbenchListTypeFromCardSnapshot(dtop)
+                selectedPlan.value = targetPlanId
+                expandPlanTreeToPlanId(targetPlanId)
+                await fetchCards()
+                await nextTick()
+                const cardTitle =
+                  (dtop.before && dtop.before.title) ||
+                  (dtop.after && dtop.after.title) ||
+                  ''
+                await upsertAndActivateTypeListTab({
+                  planId: targetPlanId,
+                  cardId: intTargetId,
+                  type: listType,
+                  cardTitle
+                })
+                urlContentType.value = listTypeToUrlContentType(listType)
+                openedTypeList = true
+                listLoadedByTabNavigation = true
+                const linked = badcases.value.find(
+                  (b) => Number(b.card_id ?? b.cardId) === intTargetId
+                )
+                highlightRowId.value = linked ? linked.id : intTargetId
+              } else if (targetPlanId && target === 'card') {
                 selectedPlan.value = targetPlanId
                 expandPlanTreeToPlanId(targetPlanId)
                 await fetchCards()
@@ -7473,7 +7888,7 @@ const totalCards = ref(0)
                 expandPlanTreeToPlanId(targetPlanId)
                 await fetchCards()
                 await nextTick()
-                const cardRow = resolveCardForListNav(intTargetId, target)
+                const cardRow = await resolveCardRowForModifyListNav(intTargetId, target, dtop)
                 if (cardRow?.id) {
                   await upsertAndActivateTypeListTab({
                     planId: targetPlanId,
@@ -7500,8 +7915,7 @@ const totalCards = ref(0)
                 expandedPlans.value.push(targetPlanId)
               }
             }
-            highlightRowId.value = intTargetId
-            const batchFlashIds =
+            let batchFlashIds =
               Array.isArray(peerTargetIds) && peerTargetIds.length >= 2
                 ? [
                     ...new Set(
@@ -7511,6 +7925,23 @@ const totalCards = ref(0)
                     )
                   ]
                 : [intTargetId]
+            if (
+              target === 'card' &&
+              hasListFieldChangesPre &&
+              batchFlashIds.length === 1
+            ) {
+              const lk = badcases.value.find(
+                (b) => Number(b.card_id ?? b.cardId) === intTargetId
+              )
+              if (lk) {
+                highlightRowId.value = lk.id
+                batchFlashIds = [lk.id]
+              } else {
+                highlightRowId.value = intTargetId
+              }
+            } else {
+              highlightRowId.value = intTargetId
+            }
             let anchorRow = null
             for (let i = 0; i < 12; i++) {
               await nextTick()
@@ -7583,47 +8014,8 @@ const totalCards = ref(0)
           console.log('[MODIFY] modifications 内容:', modifications)
           console.log('[MODIFY] modifications 类型:', typeof modifications, 'keys:', modifications ? Object.keys(modifications) : [])
               
-          // 构造待修改数据结构
-          const modifyData = {}
-          
-          // 优先使用 diff，如果没有 diff 则从 modifications 生成
-          if (diff && Array.isArray(diff) && diff.length > 0) {
-            console.log('[MODIFY] 使用 diff 构造 modifyData, diff.length:', diff.length)
-            diff.forEach(fieldDiff => {
-              const rawField = fieldDiff.field ?? fieldDiff.field_label
-              const fieldKey = normalizeDiffFieldKey(rawField)
-              console.log('[MODIFY] diff 字段:', rawField, '-> key:', fieldKey)
-              const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
-              const newLine = fieldDiff.lines?.find(l => l.type === 'add')
-              const unchangedLine = fieldDiff.lines?.find(l => l.type === 'unchanged')
-              
-              if (oldLine && newLine) {
-                modifyData[fieldKey] = {
-                  old: oldLine.content,
-                  new: newLine.content
-                }
-              } else if (unchangedLine) {
-                modifyData[fieldKey] = {
-                  old: unchangedLine.content,
-                  new: unchangedLine.content,
-                  unchanged: true
-                }
-              }
-            })
-          } else if (modifications && typeof modifications === 'object') {
-            console.log('[MODIFY] 使用 modifications 构造 modifyData')
-            for (const [field, value] of Object.entries(modifications)) {
-              const fk = normalizeDiffFieldKey(field)
-              if (value && typeof value === 'object' && 'new' in value) {
-                modifyData[fk] = value
-              } else {
-                modifyData[fk] = {
-                  old: '',
-                  new: value
-                }
-              }
-            }
-          }
+          // 构造待修改数据结构（与 buildModifyDataFromShowModifyDetail 单一路径，含 before/after 补全）
+          const modifyData = buildModifyDataFromShowModifyDetail(event.detail)
           
           console.log('[MODIFY] 构造后的 modifyData:', modifyData)
           const fieldKeys = Object.keys(modifyData)
@@ -7640,6 +8032,11 @@ const totalCards = ref(0)
             const normalized = normalizeDiffFieldKey(field)
             return LIST_FIELDS.includes(normalized)
           })
+
+          // 是否包含「列表上可见、应用行内采纳」的列（标题/状态/负责人）
+          const hasListFieldChanges =
+            fieldKeys.length > 0 &&
+            fieldKeys.some((field) => LIST_FIELDS.includes(normalizeDiffFieldKey(field)))
 
           // 只要有 diff 就先缓存到 sessionStorage，后续无论跳列表还是详情都可复用
           if (diff && Array.isArray(diff) && diff.length > 0) {
@@ -7658,34 +8055,36 @@ const totalCards = ref(0)
               console.log('[MODIFY] 存储 diff 数据:', diffData)
             }
 
+            // 先合并 pending（含列表列与详情字段）：含详情时会提前 return，否则列表上看不到 title/status/assignee diff
+            if (!executed) {
+              mergePendingModifyOverlayFromModifyData(modifyData, intTargetId, {
+                target,
+                messageId,
+                natural_query,
+                peerTargetIds,
+                executed
+              })
+              if (
+                typeof import.meta !== 'undefined' &&
+                import.meta.env?.DEV &&
+                String(target).toLowerCase() === 'card'
+              ) {
+                const hit = badcases.value.find(
+                  (b) => Number(b.card_id ?? b.cardId) === intTargetId
+                )
+                console.warn('[MODIFY-CARD] 已写入 pending[' + intTargetId + ']；Bug 行请用 card_id 匹配', {
+                  cardId: intTargetId,
+                  listBugId: hit?.id ?? null,
+                  card_idOnRow: hit?.card_id ?? hit?.cardId,
+                  statusPending: pendingModifications.value[intTargetId]?.status
+                })
+              }
+            }
+
             // 如果都是列表字段（例如标题/状态/负责人），只跳到列表并高亮那一行，不打开编辑详情
             if (allListFields && !hasDetailFields) {
               console.log('[MODIFY] 仅列表字段修改，跳转列表并高亮行，不打开详情')
-              // 只有在「尚未采纳」（executed === false）时，才在列表上展示 diff
-              // 一旦采纳成功（executed === true），列表应只显示最新值，不再有黄色 diff 行
-              if (!executed) {
-                const newModifyData = {
-                  ...Object.fromEntries(
-                    fieldKeys.map(field => {
-                      const v = modifyData[field]
-                      return [field, typeof v === 'object' && 'new' in v ? v : { old: '', new: v }]
-                    })
-                  ),
-                  _target: target,
-                  _messageId: messageId,
-                  _naturalQuery: natural_query
-                }
-                const next = { ...pendingModifications.value }
-                next[intTargetId] = {
-                  ...(next[intTargetId] || {}),
-                  ...newModifyData
-                }
-                pendingModifications.value = next
-                if (peerTargetIds && Array.isArray(peerTargetIds) && peerTargetIds.length >= 2) {
-                  applyPeerPendingSync(intTargetId, peerTargetIds)
-                }
-              } else {
-                // executed === true：若列表上还有残留的 pendingModifications，清理掉
+              if (executed) {
                 if (pendingModifications.value[intTargetId]) {
                   const clone = { ...pendingModifications.value }
                   delete clone[intTargetId]
@@ -7705,13 +8104,17 @@ const totalCards = ref(0)
               highlightRowId.value = intTargetId
               // 下面已有的 plan_id 推导和 fetchBadcases 逻辑会负责切计划和刷新列表
             } else {
-              // 包含详情字段：需要在详情页里编辑
+              // 含详情字段：若同时改了列表列，优先留在列表用行内 ✓/✗；仅详情字段时才自动打开编辑页
               if (suppressAutoOpenDetail === true) {
                 console.log('[MODIFY] 自动同步链路，抑制详情自动打开，仅同步列表状态')
-              } else {
-                console.log('[MODIFY] 包含详情字段，打开编辑详情页')
-                openMainEditor(intTargetId, target, true)
+              } else if (!hasListFieldChanges) {
+                console.log('[MODIFY] 仅详情字段修改，打开编辑详情页')
+                await openMainEditor(intTargetId, target, true)
                 return
+              } else {
+                console.log(
+                  '[MODIFY] 列表列与详情同时修改：留在列表采纳标题/状态/负责人；详情字段请点 ▶ 或打开编辑页'
+                )
               }
             }
           }
@@ -7743,9 +8146,15 @@ const totalCards = ref(0)
             }
           }
           
-          // 方式 3: 从当前列表中查找
+          // 方式 3: 从当前列表中查找（target=card 时 intTargetId 为 Card.id，需按 card_id 命中 Bug 行）
           if (!targetPlanId) {
-            const item = badcases.value.find(b => b.id == intTargetId)
+            let item =
+              target === 'card'
+                ? badcases.value.find((b) => Number(b.card_id ?? b.cardId) === intTargetId)
+                : null
+            if (!item) {
+              item = badcases.value.find((b) => b.id == intTargetId)
+            }
             if (item) {
               targetPlanId = item.plan_id
               console.log('[MODIFY] 从列表中找到 plan_id:', targetPlanId)
@@ -7759,7 +8168,13 @@ const totalCards = ref(0)
               await nextTick()
                         
               // 重新查找
-              const newItem = badcases.value.find(b => b.id == intTargetId)
+              let newItem =
+                target === 'card'
+                  ? badcases.value.find((b) => Number(b.card_id ?? b.cardId) === intTargetId)
+                  : null
+              if (!newItem) {
+                newItem = badcases.value.find((b) => b.id == intTargetId)
+              }
               if (newItem) {
                 targetPlanId = newItem.plan_id
                 console.log('[MODIFY] 从刷新后的列表中找到 plan_id:', targetPlanId)
@@ -7797,14 +8212,37 @@ const totalCards = ref(0)
             : { planId: null, urlContentType: uctForNav }
 
           let listLoadedByTabNavigation = false
-          if (suppressAutoOpenDetail === true) {
+          if (suppressAutoOpenDetail === true && !hasListFieldChanges) {
             console.log('[MODIFY] 自动同步链路，跳过重复 Tab 激活，避免循环触发')
             // 当前链路通常已在目标 Tab；仅兜底维护 selectedPlan
             if (targetPlanId) selectedPlan.value = targetPlanId
             else selectedPlan.value = null
           } else {
             let openedTypeList = false
-            if (targetPlanId && target === 'card') {
+            if (targetPlanId && target === 'card' && hasListFieldChanges) {
+              const listType = inferWorkbenchListTypeFromCardSnapshot(event.detail || {})
+              selectedPlan.value = targetPlanId
+              expandPlanTreeToPlanId(targetPlanId)
+              await fetchCards()
+              await nextTick()
+              const cardTitle =
+                (event.detail?.before && event.detail.before.title) ||
+                (event.detail?.after && event.detail.after.title) ||
+                ''
+              await upsertAndActivateTypeListTab({
+                planId: targetPlanId,
+                cardId: intTargetId,
+                type: listType,
+                cardTitle
+              })
+              urlContentType.value = listTypeToUrlContentType(listType)
+              openedTypeList = true
+              listLoadedByTabNavigation = true
+              const linked = badcases.value.find(
+                (b) => Number(b.card_id ?? b.cardId) === intTargetId
+              )
+              highlightRowId.value = linked ? linked.id : intTargetId
+            } else if (targetPlanId && target === 'card') {
               selectedPlan.value = targetPlanId
               expandPlanTreeToPlanId(targetPlanId)
               await fetchCards()
@@ -7821,7 +8259,11 @@ const totalCards = ref(0)
               expandPlanTreeToPlanId(targetPlanId)
               await fetchCards()
               await nextTick()
-              const cardRow = resolveCardForListNav(intTargetId, target)
+              const cardRow = await resolveCardRowForModifyListNav(
+                intTargetId,
+                target,
+                event.detail || {}
+              )
               if (cardRow?.id) {
                 await upsertAndActivateTypeListTab({
                   planId: targetPlanId,
@@ -7856,43 +8298,30 @@ const totalCards = ref(0)
           }
 
           function setupPendingModifications () {
-            const modifyDataLocal = {}
-            
-            // 优先使用 diff，如果没有 diff 则从 modifications 生成
-            if (diff && Array.isArray(diff)) {
-              diff.forEach(fieldDiff => {
-                const rawField = fieldDiff.field ?? fieldDiff.field_label
-                const fieldKey = normalizeDiffFieldKey(rawField)
-                const oldLine = fieldDiff.lines?.find(l => l.type === 'delete')
-                const newLine = fieldDiff.lines?.find(l => l.type === 'add')
-                const unchangedLine = fieldDiff.lines?.find(l => l.type === 'unchanged')
-                if (oldLine && newLine) {
-                  modifyDataLocal[fieldKey] = { old: oldLine.content, new: newLine.content }
-                } else if (unchangedLine) {
-                  modifyDataLocal[fieldKey] = {
-                    old: unchangedLine.content,
-                    new: unchangedLine.content,
-                    unchanged: true
-                  }
-                }
-              })
-            } else if (modifications && typeof modifications === 'object') {
-              for (const [field, value] of Object.entries(modifications)) {
-                const fieldKey = normalizeDiffFieldKey(field)
-                modifyDataLocal[fieldKey] = { old: '', new: value }
-              }
+            // 必须与 mergePendingModifyOverlayFromModifyData 同源，否则会覆盖掉 before/after 已补全的 old（例如 status 旧值为空）
+            const built = buildModifyDataFromShowModifyDetail(event.detail)
+            const fieldCount = Object.keys(built).filter((k) => !k.startsWith('_')).length
+            if (fieldCount === 0) return
+
+            const prev = pendingModifications.value[intTargetId] || {}
+            const merged = {
+              ...prev,
+              ...built,
+              _target: target
             }
-            
-            if (Object.keys(modifyDataLocal).length > 0) {
-              modifyDataLocal._target = target  // 保存目标类型
-              if (messageId != null) modifyDataLocal._messageId = messageId
-              modifyDataLocal._naturalQuery = natural_query
-              pendingModifications.value = {
-                ...pendingModifications.value,
-                [intTargetId]: modifyDataLocal
-              }
-              console.log('[MODIFY] setupPendingModifications 设置 pendingModifications:', pendingModifications.value)
+            if (messageId != null) merged._messageId = messageId
+            merged._naturalQuery = natural_query
+            if (Array.isArray(peerTargetIds) && peerTargetIds.length >= 2) {
+              merged._peerTargetIds = uniqPreserveOrderNumeric(peerTargetIds)
+            } else if (Array.isArray(prev._peerTargetIds) && prev._peerTargetIds.length >= 2) {
+              merged._peerTargetIds = prev._peerTargetIds
             }
+
+            pendingModifications.value = {
+              ...pendingModifications.value,
+              [intTargetId]: merged
+            }
+            console.log('[MODIFY] setupPendingModifications（buildModifyData 合并）:', pendingModifications.value)
           }
           
           // 只有未执行时才重新设置 pendingModifications
@@ -7938,13 +8367,24 @@ const totalCards = ref(0)
           
           // 滚动到目标行并高亮（Tab 切换后列表异步渲染，需短暂重试）
           let targetRow = null
+          let scrollRid = intTargetId
+          let scrollNavTarget = String(target || 'bug').toLowerCase()
+          if (scrollNavTarget === 'card' && hasListFieldChanges) {
+            const lk = badcases.value.find((b) => Number(b.card_id ?? b.cardId) === intTargetId)
+            if (lk) {
+              scrollRid = lk.id
+              scrollNavTarget = inferWorkbenchListTypeFromCardSnapshot(event.detail || {})
+            }
+          }
+          if (scrollNavTarget === 'test_case') scrollNavTarget = 'testcase'
+
           for (let i = 0; i < 12; i++) {
             await nextTick()
             await new Promise((resolve) => setTimeout(resolve, i === 0 ? 280 : 130))
-            targetRow = findNavListRowEl(intTargetId, target)
+            targetRow = findNavListRowEl(scrollRid, scrollNavTarget)
             if (targetRow) break
           }
-          console.log('[MODIFY] 查找目标行:', intTargetId, targetRow)
+          console.log('[MODIFY] 查找目标行:', scrollRid, scrollNavTarget, targetRow)
           if (targetRow) {
             targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' })
             targetRow.classList.add('highlight-row')
@@ -7954,7 +8394,86 @@ const totalCards = ref(0)
 
         const handleGrepNavigate = async (event) => {
       const detail = event.detail || {}
-      const rawPlanId = detail.planId
+      const mergedFromLegacyPre = detail.merged_from_legacy
+      /**
+       * 沙箱/聊天仍带 target=card 时：若该行实为 Bug/BadCase/测例卡片，应进类型子列表而非「纯 Card 总表」或主区编辑器。
+       * getCardDetail 可补 plan_id；有 source_id 时列表高亮用源表主键。
+       */
+      const maybePromoteCardNavDetail = async () => {
+        const t0 = String(detail.target || '').toLowerCase()
+        if (t0 !== 'card' || mergedFromLegacyPre) return
+        const ridRaw =
+          detail.recordId != null && detail.recordId !== ''
+            ? detail.recordId
+            : detail.bugId != null && detail.bugId !== ''
+              ? detail.bugId
+              : null
+        const cid =
+          typeof ridRaw === 'number' ? ridRaw : parseInt(String(ridRaw), 10)
+        if (!Number.isFinite(cid) || cid <= 0) return
+        try {
+          const cr = await getCardDetail(cid)
+          const c = cr?.data?.data
+          if (!cr?.data?.success || !c) return
+          const st = String(c.source_type || '').toLowerCase()
+          const rowType = String(c.type || '').toLowerCase()
+          let kind = null
+          if (st === 'bug' || rowType === 'bug') kind = 'bug'
+          else if (
+            st === 'badcase' ||
+            st === 'bad_case' ||
+            rowType === 'badcase'
+          )
+            kind = 'badcase'
+          else if (
+            st === 'testcase' ||
+            st === 'test_case' ||
+            rowType === 'testcase'
+          )
+            kind = 'testcase'
+          if (!kind) return
+          const sidRaw = c.source_id
+          const sid =
+            sidRaw != null && sidRaw !== ''
+              ? typeof sidRaw === 'number'
+                ? sidRaw
+                : parseInt(String(sidRaw), 10)
+              : NaN
+          const useRowId = Number.isFinite(sid) && sid > 0 ? sid : cid
+          detail.target = kind
+          detail.recordId = useRowId
+          detail.bugId = useRowId
+          detail.card_id = detail.card_id ?? detail.cardId ?? cid
+          detail.cardId = detail.cardId ?? detail.card_id ?? cid
+          const pp = c.plan_id ?? c.planId
+          if (
+            (detail.planId == null || detail.planId === '') &&
+            pp != null &&
+            pp !== ''
+          ) {
+            const pn = typeof pp === 'number' ? pp : parseInt(String(pp), 10)
+            if (Number.isFinite(pn) && pn > 0) detail.planId = pn
+          }
+          if (detail.planId == null || detail.planId === '') {
+            let rp = await resolvePlanIdByRecordApi(kind, useRowId)
+            if (!rp && cid !== useRowId)
+              rp = await resolvePlanIdByRecordApi(kind, cid)
+            if (!rp) rp = await resolvePlanIdByRecordApi('card', cid)
+            if (rp) detail.planId = rp
+          }
+          logListNav('grepNavigate.cardPromotedToTypeList', {
+            cardId: cid,
+            kind,
+            useRowId,
+            planId: detail.planId
+          })
+        } catch (e) {
+          console.warn('[GREP-NAV] card→typeList promote getCardDetail:', e)
+        }
+      }
+      await maybePromoteCardNavDetail()
+
+      let rawPlanId = detail.planId
       const rawRecordIds = detail.recordIds
       const recordIdsBatch =
         Array.isArray(rawRecordIds) && rawRecordIds.length > 0
@@ -8078,8 +8597,8 @@ const totalCards = ref(0)
 
       /**
        * 进入「某卡片」下的类型列表（与侧栏点进 Bug 卡片一致）；依赖已拉取 cards。
-       * 纯「点击跳转到卡片」（target=card 且无 merged_from_legacy）只打开迭代卡片总表并高亮行，
-       * 不按卡片类型自动钻进 Bug/BadCase/用例列表。
+       * 纯 target=card（无 merged_from_legacy）：打开该计划下的**迭代卡片总表**并高亮 Card 行，
+       * 不钻进 Bug/BadCase/用例子列表；plan 缺失时用 getCardDetail 补 plan_id。
        */
       const openGrepTypeListIfPossible = async () => {
         const ridFirstEarly = recordIdsBatch?.length ? recordIdsBatch[0] : recordId
@@ -8095,8 +8614,59 @@ const totalCards = ref(0)
           openDetail
         })
         if (target === 'card' && !mergedFromLegacy) {
-          logListNav('grepOpenTypeList.abort', { reason: 'pure_card_row_no_drill' })
-          return false
+          const cid =
+            ridFirstEarly != null && ridFirstEarly !== ''
+              ? typeof ridFirstEarly === 'number'
+                ? ridFirstEarly
+                : parseInt(String(ridFirstEarly), 10)
+              : NaN
+          if (!Number.isFinite(cid) || cid <= 0) {
+            logListNav('grepOpenTypeList.abort', { reason: 'pure_card_bad_rid', ridFirstEarly })
+            return false
+          }
+          let pid =
+            !Number.isNaN(numericPlanId) && numericPlanId > 0 ? numericPlanId : null
+          if (!pid) {
+            pid = await resolvePlanIdByRecordApi('card', cid)
+          }
+          if (!pid || Number.isNaN(pid) || pid <= 0) {
+            logListNav('grepOpenTypeList.fallback', {
+              reason: 'pure_card_no_plan_open_editor',
+              cardId: cid
+            })
+            await openMainEditor(cid, 'card', false)
+            return true
+          }
+          selectedPlan.value = pid
+          expandPlanTreeToPlanId(pid)
+          await fetchCards()
+          await nextTick()
+          await upsertAndActivatePlanListTab({
+            planId: pid,
+            urlContentType: null
+          })
+          highlightRowId.value = cid
+          await nextTick()
+          let anyEl = null
+          for (let i = 0; i < 14; i++) {
+            await nextTick()
+            if (i > 0) await new Promise((r) => setTimeout(r, 120))
+            anyEl =
+              document.querySelector(`[data-item-id="${cid}"]`) ||
+              document.querySelector(`[data-card-id="${cid}"]`)
+            if (anyEl) break
+          }
+          if (anyEl) {
+            anyEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            anyEl.classList.add('highlight-flash')
+            setTimeout(() => anyEl.classList.remove('highlight-flash'), 2000)
+          }
+          logListNav('grepOpenTypeList.ok', {
+            reason: 'pure_card_plan_list',
+            planId: pid,
+            cardId: cid
+          })
+          return true
         }
         if (!numericPlanId || Number.isNaN(numericPlanId) || numericPlanId <= 0) {
           logListNav('grepOpenTypeList.abort', { reason: 'bad_numericPlanId', numericPlanId })
@@ -8246,18 +8816,18 @@ const totalCards = ref(0)
         if (openDetail) {
           console.log('[GREP-NAV] 打开卡片/实体详情（grep 导航）')
           const ridNum = Number(recordId)
-          if (!Number.isNaN(ridNum) && ridNum > 0 && Array.isArray(cards.value)) {
-            const cardRow = cards.value.find((c) => Number(c.id) === ridNum)
-            if (cardRow) {
-              const raw = String(cardRow.type || cardRow.source_type || '').toLowerCase()
-              const edType =
-                raw === 'bug'
-                  ? 'bug'
-                  : raw === 'testcase' || raw === 'test_case'
-                    ? 'test_case'
-                    : 'badcase'
-              openMainEditor(ridNum, edType, false)
+          if (!Number.isNaN(ridNum) && ridNum > 0) {
+            // target=card 或 recordId 即 Card.id：不必等 cards 列表已加载，openMainEditor 内会 getCardDetail 补全
+            if (target === 'card') {
+              await openMainEditor(ridNum, 'card', false)
               return
+            }
+            if (Array.isArray(cards.value)) {
+              const cardRow = cards.value.find((c) => Number(c.id) === ridNum)
+              if (cardRow) {
+                await openMainEditor(ridNum, 'card', false)
+                return
+              }
             }
           }
           const fallbackType =
@@ -8268,9 +8838,9 @@ const totalCards = ref(0)
                 : target === 'badcase'
                   ? 'badcase'
                   : target === 'card'
-                    ? 'badcase'
+                    ? 'card'
                     : target
-          openMainEditor(recordId, fallbackType, false)
+          await openMainEditor(recordId, fallbackType, false)
           return
         }
         let bugElement = null

@@ -61,7 +61,7 @@ from flask_cors import CORS
 import boto3
 from botocore.exceptions import ClientError
 import mimetypes
-from sqlalchemy import text, inspect, Enum, or_, Text
+from sqlalchemy import text, inspect, Enum, or_, Text, and_
 from sqlalchemy.dialects.mysql import LONGTEXT
 from PIL import Image
 import io
@@ -1621,6 +1621,56 @@ def _schedule_workflow_notify(
 def generate_verification_code():
     return ''.join(random.choices(string.digits, k=6))
 
+def _model_for_user_collaborator_access(model_cls, entity_id: int, user_id: int):
+    """
+    单次 SQL：实体 + 项目 owner + 当前用户 ProjectPermission，
+    与 has_project_permission(user_id, project_id, 'collaborator') 一致。
+    返回 (instance|None, err)，err 为 None | 'not_found' | 'forbidden'。
+    """
+    row = (
+        db.session.query(model_cls, Project.user_id, ProjectPermission.role)
+        .join(Project, Project.id == model_cls.project_id)
+        .outerjoin(
+            ProjectPermission,
+            and_(ProjectPermission.project_id == Project.id, ProjectPermission.user_id == user_id),
+        )
+        .filter(model_cls.id == entity_id)
+        .first()
+    )
+    if not row:
+        return None, 'not_found'
+    entity, owner_id, role = row
+    allowed = owner_id == user_id or (role in ('admin', 'collaborator'))
+    if not allowed:
+        return None, 'forbidden'
+    return entity, None
+
+
+def _project_for_user_collaborator_access(project_id: int, user_id: int):
+    """
+    编辑上下文等：一次 SQL 取 Project + 当前用户 ProjectPermission。
+    与历史 edit-context 一致：负责人任意；非负责人只要在 project_permission 有记录即可访问。
+    返回 (project|None, err)，err 为 None | 'not_found' | 'forbidden'。
+    """
+    row = (
+        db.session.query(Project, ProjectPermission.role)
+        .outerjoin(
+            ProjectPermission,
+            and_(ProjectPermission.project_id == Project.id, ProjectPermission.user_id == user_id),
+        )
+        .filter(Project.id == project_id)
+        .first()
+    )
+    if not row:
+        return None, 'not_found'
+    project, role = row
+    # 与历史 edit-context 一致：负责人任意；非负责人只要有权限表记录即可（不按 role 细筛）
+    allowed = project.user_id == user_id or role is not None
+    if not allowed:
+        return None, 'forbidden'
+    return project, None
+
+
 # 检查用户是否有项目权限
 def has_project_permission(user_id, project_id, required_role='collaborator'):
     """
@@ -1630,12 +1680,11 @@ def has_project_permission(user_id, project_id, required_role='collaborator'):
     cache_key = (user_id, project_id, required_role)
     cache_hit, cached = _cache_get(('perm',) + cache_key, ttl_s=2.0)
     if cache_hit:
-        print(f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}) cache_hit", flush=True)
+        if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}) cache_hit", flush=True)
         return cached
     
     # 尽量只做 1 次查询：同时拿到 owner_id + 当前用户在该项目的权限 role
-    from sqlalchemy import and_
-
     t0 = time.perf_counter()
     row = (
         db.session.query(Project.user_id, ProjectPermission.role)
@@ -1647,10 +1696,11 @@ def has_project_permission(user_id, project_id, required_role='collaborator'):
         .first()
     )
     dt_ms = (time.perf_counter() - t0) * 1000
-    print(
-        f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}, required_role={required_role}) db={dt_ms:.1f}ms",
-        flush=True,
-    )
+    if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+        print(
+            f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}, required_role={required_role}) db={dt_ms:.1f}ms",
+            flush=True,
+        )
     if not row:
         _cache_set(('perm',) + cache_key, False)
         return False
@@ -1683,10 +1733,71 @@ def _cache_set(key, value):
 
 
 def _cache_invalidate_plans(project_id: int):
-    """测试用例/Bug/BadCase 变更后使计划列表缓存失效"""
+    """测试用例/Bug/BadCase 变更后使计划列表缓存失效（内存 + Redis 双清）"""
     to_del = [k for k in _PROJECT_CTX_CACHE if isinstance(k, tuple) and len(k) >= 2 and k[0] == 'plans' and k[1] == project_id]
     for k in to_del:
         _PROJECT_CTX_CACHE.pop(k, None)
+    # 同步清除 Redis 中该项目的所有相关缓存
+    _redis_cache_invalidate_project(project_id)
+
+
+# ==================== Redis 缓存层 ====================
+# 对 projects / plans / members / edit-context 等高频只读接口做 Redis 缓存，
+# 写操作时主动失效；projects 列表另见进程内短缓存 api_projects。
+
+import json as _json
+
+REDIS_CACHE_PREFIX = 'bcd:cache:'
+
+def _redis_cache_get(key: str):
+    """从 Redis 获取缓存，返回 (hit: bool, value: any)"""
+    try:
+        rc = get_redis_client()
+        if rc is None:
+            return False, None
+        raw = rc.get(REDIS_CACHE_PREFIX + key)
+        if raw is None:
+            return False, None
+        return True, _json.loads(raw)
+    except Exception:
+        return False, None
+
+
+def _redis_cache_set(key: str, value, ttl_s: int = 10):
+    """写入 Redis 缓存，默认 10 秒过期"""
+    try:
+        rc = get_redis_client()
+        if rc is None:
+            return
+        rc.setex(REDIS_CACHE_PREFIX + key, ttl_s, _json.dumps(value, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _redis_cache_delete(key: str):
+    """删除单条 Redis 缓存"""
+    try:
+        rc = get_redis_client()
+        if rc is None:
+            return
+        rc.delete(REDIS_CACHE_PREFIX + key)
+    except Exception:
+        pass
+
+
+def _redis_cache_invalidate_project(project_id: int):
+    """项目数据变更时，清除该项目相关的所有 Redis 缓存（plans/members/edit-context/cards）"""
+    for suffix in ('plans', 'members', 'edit-context', 'cards'):
+        _redis_cache_delete(f'{suffix}:{project_id}')
+
+
+def _redis_cache_invalidate_projects(user_id: int):
+    """项目列表变更时，清除 /api/projects 的 Redis 与进程内缓存"""
+    _redis_cache_delete(f'projects:{user_id}')
+    try:
+        _PROJECT_CTX_CACHE.pop(('api_projects', user_id), None)
+    except Exception:
+        pass
 
 
 # 路由
@@ -3533,6 +3644,7 @@ def api_invite_user(project_id):
     permission = ProjectPermission(project_id=project_id, user_id=user.id, role=role)
     db.session.add(permission)
     db.session.commit()
+    _redis_cache_invalidate_project(project_id)
     return jsonify({'success': True})
 
 # 移除成员
@@ -3548,6 +3660,7 @@ def api_remove_user(project_id):
     if permission:
         db.session.delete(permission)
         db.session.commit()
+    _redis_cache_invalidate_project(project_id)
     return jsonify({'success': True})
 
 # 修改成员角色
@@ -3565,6 +3678,7 @@ def api_change_role(project_id):
         return jsonify({'success': False, 'error': '用户无项目权限'}), 404
     permission.role = new_role
     db.session.commit()
+    _redis_cache_invalidate_project(project_id)
     return jsonify({'success': True})
 
 # 获取所有可邀请用户（不在该项目的已注册用户）
@@ -3853,76 +3967,98 @@ def _safe_parse_project_login_configs(raw):
 def api_get_projects():
     t0 = time.perf_counter()
     try:
-        # 使用更简单的查询方式，避免复杂的UNION操作
-        # 首先获取用户创建的项目，限制返回字段
+        # Redis 缓存（按用户维度）；无 Redis 时走下方进程内短缓存 + 轻量 SQL
+        redis_hit, redis_cached = _redis_cache_get(f'projects:{current_user.id}')
+        if redis_hit:
+            t_total = (time.perf_counter() - t0) * 1000
+            if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+                print(f"[PERF] GET /api/projects redis_hit total={t_total:.1f}ms", flush=True)
+            return jsonify(redis_cached)
+
+        mem_hit, mem_cached = _cache_get(('api_projects', current_user.id), ttl_s=20.0)
+        if mem_hit:
+            t_total = (time.perf_counter() - t0) * 1000
+            if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+                print(f"[PERF] GET /api/projects mem_hit total={t_total:.1f}ms", flush=True)
+            return jsonify(mem_cached)
+
+        uid = current_user.id
         t1 = time.perf_counter()
-        owned_projects = db.session.query(
-            Project.id,
-            Project.name,
-            Project.description,
-            Project.avatar,
-            Project.owner,
-            Project.status,
-            Project.created_at
-        ).filter(Project.user_id == current_user.id).limit(100).all()  # 限制数量避免过多数据
-        t_q1 = (time.perf_counter() - t1) * 1000
-        
-        # 获取用户参与的项目（通过权限表），限制数量
-        t2 = time.perf_counter()
-        permission_projects = db.session.query(
-            Project.id,
-            Project.name,
-            Project.description,
-            Project.avatar,
-            Project.owner,
-            Project.status,
-            Project.created_at,
-            ProjectPermission.role
-        ).join(
-            ProjectPermission, Project.id == ProjectPermission.project_id
-        ).filter(
-            ProjectPermission.user_id == current_user.id,
-            Project.user_id != current_user.id  # 排除用户自己创建的项目
-        ).limit(100).all()  # 限制数量避免过多数据
-        t_q2 = (time.perf_counter() - t2) * 1000
-        
-        # 合并项目列表
-        user_projects = []
-        
-        # 添加用户创建的项目
-        for project in owned_projects:
-            user_projects.append({
-                'id': project.id,
-                'name': project.name,
-                'description': project.description,
-                'avatar': project.avatar,
-                'owner': project.owner,
-                'status': project.status,
-                'created_at': project.created_at.isoformat(),
-                'role': 'admin'
-            })
-        
-        # 添加用户参与的项目
-        for project in permission_projects:
-            user_projects.append({
-                'id': project.id,
-                'name': project.name,
-                'description': project.description,
-                'avatar': project.avatar,
-                'owner': project.owner,
-                'status': project.status,
-                'created_at': project.created_at.isoformat(),
-                'role': project.role
-            })
-        # 性能：项目列表接口不在此处做 MinIO 探测/重新签名（会产生外部网络耗时）
-        # 头像 URL 的刷新应由前端缓存策略或独立的刷新接口来处理
-        
-        # 按创建时间排序
+        # 拆成两次窄查询：均走 user_id / (user_id,project_id) 索引友好路径，且只取列表字段，避免 ORM 加载 login_configs、intro 等大列
+        owned_rows = (
+            db.session.query(
+                Project.id,
+                Project.name,
+                Project.description,
+                Project.avatar,
+                Project.owner,
+                Project.status,
+                Project.created_at,
+            )
+            .filter(Project.user_id == uid)
+            .order_by(Project.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        shared_rows = (
+            db.session.query(
+                Project.id,
+                Project.name,
+                Project.description,
+                Project.avatar,
+                Project.owner,
+                Project.status,
+                Project.created_at,
+                ProjectPermission.role,
+            )
+            .join(ProjectPermission, Project.id == ProjectPermission.project_id)
+            .filter(ProjectPermission.user_id == uid, Project.user_id != uid)
+            .order_by(Project.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        t_q = (time.perf_counter() - t1) * 1000
+
+        by_pid = {}
+        for rid, name, desc, av, ow, st, cat in owned_rows:
+            by_pid[rid] = {
+                'id': rid,
+                'name': name,
+                'description': desc,
+                'avatar': av,
+                'owner': ow,
+                'status': st,
+                'created_at': cat.isoformat() if cat else '',
+                'role': 'admin',
+            }
+        for rid, name, desc, av, ow, st, cat, role in shared_rows:
+            if rid in by_pid:
+                continue
+            by_pid[rid] = {
+                'id': rid,
+                'name': name,
+                'description': desc,
+                'avatar': av,
+                'owner': ow,
+                'status': st,
+                'created_at': cat.isoformat() if cat else '',
+                'role': role or 'collaborator',
+            }
+
+        user_projects = list(by_pid.values())
         user_projects.sort(key=lambda x: x['created_at'], reverse=True)
-        
+
         t_total = (time.perf_counter() - t0) * 1000
-        print(f"[PERF] GET /api/projects total={t_total:.1f}ms q1={t_q1:.1f}ms({len(owned_projects)}) q2={t_q2:.1f}ms({len(permission_projects)})", flush=True)
-        return jsonify({'success': True, 'projects': user_projects})
+        if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+            print(
+                f"[PERF] GET /api/projects total={t_total:.1f}ms q={t_q:.1f}ms "
+                f"owned={len(owned_rows)} shared={len(shared_rows)} merged={len(user_projects)}",
+                flush=True,
+            )
+        result = {'success': True, 'projects': user_projects}
+        _redis_cache_set(f'projects:{current_user.id}', result, ttl_s=60)
+        _cache_set(('api_projects', current_user.id), result)
+        return jsonify(result)
         
     except Exception as e:
         print(f"获取项目列表时发生错误: {str(e)}")
@@ -3995,6 +4131,7 @@ def api_create_project():
             }
         }
         print(f"返回结果: {result}")
+        _redis_cache_invalidate_projects(current_user.id)
         return jsonify(result)
     except Exception as e:
         print(f"创建项目时发生异常: {str(e)}")
@@ -4082,19 +4219,22 @@ def api_get_project_edit_context(project_id):
     """编辑页专用：一次性返回最小必要上下文（project + plans + members）"""
     t0 = time.perf_counter()
     try:
-        t1 = time.perf_counter()
-        project = Project.query.get(project_id)
-        if not project:
-            return jsonify({'success': False, 'error': '项目不存在'}), 404
-        if project.user_id != current_user.id:
-            has_perm = ProjectPermission.query.filter_by(
-                user_id=current_user.id,
-                project_id=project_id
-            ).first() is not None
-            if not has_perm:
-                return jsonify({'success': False, 'error': '没有项目权限'}), 403
+        # Redis 缓存检查（优先于内存缓存，跨进程共享）
+        redis_hit, redis_cached = _redis_cache_get(f'edit-context:{project_id}')
+        if redis_hit:
+            t_total = (time.perf_counter() - t0) * 1000
+            if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+                print(f"[PERF] GET /api/projects/{project_id}/edit-context redis_hit total={t_total:.1f}ms", flush=True)
+            return jsonify(redis_cached)
 
-        t2 = time.perf_counter()
+        t_access0 = time.perf_counter()
+        project, access_err = _project_for_user_collaborator_access(project_id, current_user.id)
+        if access_err == 'not_found':
+            return jsonify({'success': False, 'error': '项目不存在'}), 404
+        if access_err == 'forbidden':
+            return jsonify({'success': False, 'error': '没有项目权限'}), 403
+
+        t_plans0 = time.perf_counter()
         # plans：沿用 /plans 的批量统计逻辑（无 N+1）
         plans = Plan.query.filter_by(project_id=project_id).all()
         children_map = {}
@@ -4103,31 +4243,33 @@ def api_get_project_edit_context(project_id):
             plan_by_id[p.id] = p
             children_map.setdefault(p.parent_id, []).append(p)
 
-        from sqlalchemy import func
         plan_ids = list(plan_by_id.keys())
         badcase_counts = {}
         bug_counts = {}
         testcase_counts = {}
-        t3 = time.perf_counter()
+        t_counts0 = time.perf_counter()
         if plan_ids:
-            badcase_counts = dict(
-                db.session.query(BadCase.plan_id, func.count(BadCase.id))
-                .filter(BadCase.plan_id.in_(plan_ids))
-                .group_by(BadCase.plan_id)
-                .all()
-            )
-            bug_counts = dict(
-                db.session.query(Bug.plan_id, func.count(Bug.id))
-                .filter(Bug.plan_id.in_(plan_ids))
-                .group_by(Bug.plan_id)
-                .all()
-            )
-            testcase_counts = dict(
-                db.session.query(TestCase.plan_id, func.count(TestCase.id))
-                .filter(TestCase.plan_id.in_(plan_ids))
-                .group_by(TestCase.plan_id)
-                .all()
-            )
+            # 单次 RTT：bad_case / bug / test_case 三个聚合（原为 3 条独立查询）
+            ids_sql = ','.join(str(int(x)) for x in plan_ids)
+            cnt_rows = db.session.execute(
+                text(
+                    "SELECT 'bc' AS k, plan_id, COUNT(*) AS c FROM bad_case "
+                    f"WHERE plan_id IN ({ids_sql}) GROUP BY plan_id "
+                    "UNION ALL SELECT 'bug', plan_id, COUNT(*) FROM bug "
+                    f"WHERE plan_id IN ({ids_sql}) GROUP BY plan_id "
+                    "UNION ALL SELECT 'tc', plan_id, COUNT(*) FROM test_case "
+                    f"WHERE plan_id IN ({ids_sql}) GROUP BY plan_id"
+                )
+            ).fetchall()
+            for row in cnt_rows:
+                k, pid, c = row[0], row[1], int(row[2])
+                if k == 'bc':
+                    badcase_counts[pid] = c
+                elif k == 'bug':
+                    bug_counts[pid] = c
+                else:
+                    testcase_counts[pid] = c
+        t_counts1 = time.perf_counter()
 
         def _sort_key(p: Plan):
             pinned = 1 if getattr(p, "is_pinned", False) else 0
@@ -4173,33 +4315,54 @@ def api_get_project_edit_context(project_id):
         root_plans = sorted(children_map.get(None, []), key=_sort_key)
         plans_tree = [build_plan_tree(p) for p in root_plans]
 
-        t5 = time.perf_counter()
-        # members：JOIN 批量取（无 N+1）
-        direct_rows = (
-            db.session.query(User.id, User.name, User.email, ProjectPermission.role)
-            .join(ProjectPermission, ProjectPermission.user_id == User.id)
-            .filter(ProjectPermission.project_id == project_id)
-            .all()
+        t_mem0 = time.perf_counter()
+        # 直接成员 + 团队成员合并为 1 次 UNION；字符串列显式 COLLATE，避免 MySQL 1271 Illegal mix of collations
+        _pid = int(project_id)
+        _ut = User.__table__.name
+        _ppt = ProjectPermission.__table__.name
+        _tmt = TeamMember.__table__.name
+        _tt = Team.__table__.name
+
+        def _qb(n):
+            return f'`{n}`' if n else n
+
+        _cs = "utf8mb4_general_ci"
+        mem_sql = text(
+            f"SELECT CONVERT('direct' USING utf8mb4) COLLATE {_cs} AS src, u.id, "
+            f"CONVERT(u.name USING utf8mb4) COLLATE {_cs} AS name, "
+            f"CONVERT(u.email USING utf8mb4) COLLATE {_cs} AS email, "
+            f"CONVERT(pp.role USING utf8mb4) COLLATE {_cs} AS role, "
+            f"CAST(NULL AS CHAR(200) CHARACTER SET utf8mb4) COLLATE {_cs} AS team_name "
+            f"FROM {_qb(_ut)} u INNER JOIN {_qb(_ppt)} pp ON pp.user_id = u.id WHERE pp.project_id = :pid "
+            f"UNION ALL "
+            f"SELECT CONVERT('team' USING utf8mb4) COLLATE {_cs} AS src, u.id, "
+            f"CONVERT(u.name USING utf8mb4) COLLATE {_cs}, "
+            f"CONVERT(u.email USING utf8mb4) COLLATE {_cs}, "
+            f"CONVERT(tm.role USING utf8mb4) COLLATE {_cs}, "
+            f"CONVERT(t.name USING utf8mb4) COLLATE {_cs} AS team_name "
+            f"FROM {_qb(_ut)} u INNER JOIN {_qb(_tmt)} tm ON tm.user_id = u.id "
+            f"INNER JOIN {_qb(_tt)} t ON t.id = tm.team_id WHERE t.project_id = :pid"
         )
-        direct_member_map = {
-            uid: {
-                'id': uid,
-                'name': name,
-                'email': email,
-                'role': role,
-                'source': 'direct_permission',
-            }
-            for uid, name, email, role in direct_rows
-        }
-        team_rows = (
-            db.session.query(User.id, User.name, User.email, TeamMember.role, Team.name)
-            .join(TeamMember, TeamMember.user_id == User.id)
-            .join(Team, Team.id == TeamMember.team_id)
-            .filter(Team.project_id == project_id)
-            .all()
-        )
+        mem_rows = db.session.execute(mem_sql, {'pid': _pid}).fetchall()
+        t_mem_fetch = time.perf_counter()
+        direct_member_map = {}
+        team_candidates = []
+        for row in mem_rows:
+            src, uid, name, email, role, team_name = (
+                row[0], row[1], row[2], row[3], row[4], row[5]
+            )
+            if src == 'direct':
+                direct_member_map[uid] = {
+                    'id': uid,
+                    'name': name,
+                    'email': email,
+                    'role': role,
+                    'source': 'direct_permission',
+                }
+            else:
+                team_candidates.append((uid, name, email, role, team_name))
         team_members = []
-        for uid, name, email, role, team_name in team_rows:
+        for uid, name, email, role, team_name in team_candidates:
             if uid in direct_member_map:
                 continue
             team_members.append({
@@ -4210,9 +4373,20 @@ def api_get_project_edit_context(project_id):
                 'source': f'team_{team_name}',
             })
 
+        t_mem1 = time.perf_counter()
         t_total = (time.perf_counter() - t0) * 1000
-        print(f"[PERF] GET /api/projects/{project_id}/edit-context total={t_total:.1f}ms project={t1-t0:.1f}ms plans={t2-t1:.1f}ms counts={t3-t2:.1f}ms members={t5-t3:.1f}ms", flush=True)
-        return jsonify({
+        if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+            print(
+                f"[PERF] GET /api/projects/{project_id}/edit-context total={t_total:.1f}ms "
+                f"access={(t_plans0 - t_access0) * 1000:.1f}ms "
+                f"plans={(t_counts0 - t_plans0) * 1000:.1f}ms "
+                f"counts={(t_counts1 - t_counts0) * 1000:.1f}ms "
+                f"tree={(t_mem0 - t_counts1) * 1000:.1f}ms "
+                f"members={(t_mem1 - t_mem0) * 1000:.1f}ms "
+                f"(members_sql={(t_mem_fetch - t_mem0) * 1000:.1f}ms members_py={(t_mem1 - t_mem_fetch) * 1000:.1f}ms)",
+                flush=True,
+            )
+        result = {
             'success': True,
             'project': {
                 'id': project.id,
@@ -4222,7 +4396,9 @@ def api_get_project_edit_context(project_id):
             },
             'plans': plans_tree,
             'members': list(direct_member_map.values()) + team_members,
-        })
+        }
+        _redis_cache_set(f'edit-context:{project_id}', result, ttl_s=30)
+        return jsonify(result)
 
     except Exception as e:
         import traceback
@@ -4327,6 +4503,8 @@ def api_update_project(project_id):
         }
         print(f"返回响应: {response_data}")
         print(f"=== 项目 {project_id} 更新完成 ===")
+        _redis_cache_invalidate_project(project_id)
+        _redis_cache_invalidate_projects(current_user.id)
         
         return jsonify(response_data)
         
@@ -4657,6 +4835,8 @@ def api_delete_project(project_id):
         }
         print(f"返回响应: {response_data}")
         print(f"=== 项目 {project_id} 删除完成 ===")
+        _redis_cache_invalidate_project(project_id)
+        _redis_cache_invalidate_projects(current_user.id)
         
         return jsonify(response_data)
         
@@ -4834,14 +5014,16 @@ def api_create_badcase():
 @app.route('/api/badcases/<int:badcase_id>', methods=['GET'])
 @login_required
 def api_get_badcase_detail(badcase_id):
-    badcase = BadCase.query.get_or_404(badcase_id)
-    
-    if not has_project_permission(current_user.id, badcase.project_id):
+    badcase, access_err = _model_for_user_collaborator_access(BadCase, badcase_id, current_user.id)
+    if access_err == 'not_found':
+        return jsonify({'success': False, 'error': 'BadCase不存在'}), 404
+    if access_err == 'forbidden':
         return jsonify({'success': False, 'error': '无权访问此BadCase'}), 403
     
-    # 评论：只取必要字段，避免 comment.user 触发 N+1
-    comments = (
-        db.session.query(Comment.id, Comment.content, Comment.user_id, Comment.created_at)
+    # 评论 + 用户名一次 JOIN；负责人姓名仍按需补查（常与评论用户不重叠）
+    comment_rows = (
+        db.session.query(Comment.id, Comment.content, Comment.user_id, Comment.created_at, User.name)
+        .outerjoin(User, User.id == Comment.user_id)
         .filter(Comment.badcase_id == badcase_id)
         .order_by(Comment.created_at.desc())
         .all()
@@ -4873,12 +5055,15 @@ def api_get_badcase_detail(badcase_id):
     assignee_ids = _parse_assignee_ids(badcase.assignee)
     assignee_id = assignee_ids[0] if assignee_ids else None
 
-    comment_user_ids = [uid for (_cid, _content, uid, _dt) in comments if uid]
-    need_user_ids = set(assignee_ids) | set(comment_user_ids)
     user_name_map = {}
-    if need_user_ids:
-        rows = db.session.query(User.id, User.name).filter(User.id.in_(list(need_user_ids))).all()
-        user_name_map = {uid: name for uid, name in rows}
+    for (_cid, _content, uid, _dt, uname) in comment_rows:
+        if uid and uid not in user_name_map:
+            user_name_map[uid] = uname or ''
+    missing_assignee = set(assignee_ids) - set(user_name_map.keys())
+    if missing_assignee:
+        rows = db.session.query(User.id, User.name).filter(User.id.in_(list(missing_assignee))).all()
+        for uid, name in rows:
+            user_name_map[uid] = name or ''
 
     if assignee_ids:
         first_name = user_name_map.get(assignee_ids[0])
@@ -4921,9 +5106,9 @@ def api_get_badcase_detail(badcase_id):
             'comments': [{
                 'id': cid,
                 'content': content,
-                'user_name': user_name_map.get(user_id, ''),
+                'user_name': uname or '',
                 'created_at': created_at.isoformat()
-            } for (cid, content, user_id, created_at) in comments]
+            } for (cid, content, user_id, created_at, uname) in comment_rows]
         }
     })
 
@@ -6827,7 +7012,7 @@ def api_create_plan():
         db.session.add(plan)
         db.session.commit()
             
-        return jsonify({
+        result = jsonify({
             'success': True,
             'message': '计划创建成功',
             'plan': {
@@ -6849,6 +7034,8 @@ def api_create_plan():
                 'updated_at': plan.updated_at.isoformat()
             }
         })
+        _redis_cache_invalidate_project(plan.project_id)
+        return result
             
     except Exception as e:
         db.session.rollback()
@@ -6968,6 +7155,7 @@ def api_update_plan(plan_id):
                 'updated_at': plan.updated_at.isoformat()
             }
         })
+        _redis_cache_invalidate_project(plan.project_id)
         
     except Exception as e:
         db.session.rollback()
@@ -7005,6 +7193,7 @@ def api_delete_plan(plan_id):
         
         db.session.delete(plan)
         db.session.commit()
+        _redis_cache_invalidate_project(plan.project_id)
         
         return jsonify({'success': True, 'message': '计划删除成功'})
         
@@ -7094,7 +7283,15 @@ def api_get_project_plans(project_id):
     """获取项目的计划树"""
     try:
         t_total0 = time.perf_counter()
-        # 短期缓存（0.5秒），减少频繁查询但保持实时性
+        # 优先查 Redis 缓存（跨进程共享，10s TTL）
+        redis_hit, redis_cached = _redis_cache_get(f'plans:{project_id}')
+        if redis_hit:
+            print(
+                f"[PERF] GET /api/projects/{project_id}/plans redis_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
+                flush=True,
+            )
+            return jsonify(redis_cached)
+        # 回退到内存缓存
         cache_hit, cached = _cache_get(('plans', project_id), ttl_s=2.0)
         if cache_hit:
             print(
@@ -7147,6 +7344,7 @@ def api_get_project_plans(project_id):
         if not plan_rows:
             payload = {'success': True, 'plans': []}
             _cache_set(('plans', project_id), payload)
+            _redis_cache_set(f'plans:{project_id}', payload, ttl_s=10)
             print(
                 f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build=0.0ms total={(time.perf_counter()-t_total0)*1000:.1f}ms (empty)",
                 flush=True,
@@ -7265,6 +7463,7 @@ def api_get_project_plans(project_id):
             'plans': plans_tree
         }
         _cache_set(('plans', project_id), payload)
+        _redis_cache_set(f'plans:{project_id}', payload, ttl_s=10)
         t_payload = (time.perf_counter() - t0) * 1000
         print(
             f"[PERF] GET /api/projects/{project_id}/plans perm={t_perm:.1f}ms sql={t_sql:.1f}ms build={t_build:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms rows={len(plan_rows)}",
@@ -7327,6 +7526,7 @@ def api_create_team():
                 'created_at': team.created_at.isoformat()
             }
         })
+        _redis_cache_invalidate_project(data['project_id'])
         
     except Exception as e:
         db.session.rollback()
@@ -7385,6 +7585,7 @@ def api_add_team_member(team_id):
                 'joined_at': team_member.joined_at.isoformat()
             }
         })
+        _redis_cache_invalidate_project(team.project_id)
         
     except Exception as e:
         db.session.rollback()
@@ -7450,6 +7651,15 @@ def api_get_project_members(project_id):
     """获取项目的所有成员（包括直接权限和团队成员）"""
     try:
         t_total0 = time.perf_counter()
+        # 优先查 Redis 缓存（跨进程共享，10s TTL）
+        redis_hit, redis_cached = _redis_cache_get(f'members:{project_id}')
+        if redis_hit:
+            print(
+                f"[PERF] GET /api/projects/{project_id}/members redis_hit total={(time.perf_counter()-t_total0)*1000:.1f}ms",
+                flush=True,
+            )
+            return jsonify(redis_cached)
+        # 回退到内存缓存
         cache_hit, cached = _cache_get(('members', project_id), ttl_s=0.5)
         if cache_hit:
             print(
@@ -7518,6 +7728,7 @@ def api_get_project_members(project_id):
             'members': all_members
         }
         _cache_set(('members', project_id), payload)
+        _redis_cache_set(f'members:{project_id}', payload, ttl_s=10)
         t_payload = (time.perf_counter() - t0) * 1000
         print(
             f"[PERF] GET /api/projects/{project_id}/members perm={t_perm:.1f}ms sql1={t_sql1:.1f}ms build1={t_build1:.1f}ms sql2={t_sql2:.1f}ms build2={t_build2:.1f}ms payload={t_payload:.1f}ms total={(time.perf_counter()-t_total0)*1000:.1f}ms direct={len(direct_rows)} team={len(team_rows)}",
@@ -7928,35 +8139,36 @@ def api_bug_detail(bug_id):
     """Bug详情接口：GET查询，PUT更新"""
     if request.method == 'GET':
         try:
-            bug = Bug.query.get(bug_id)
-            if not bug:
+            bug, access_err = _model_for_user_collaborator_access(Bug, bug_id, current_user.id)
+            if access_err == 'not_found':
                 return jsonify({'success': False, 'error': 'Bug不存在'}), 404
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, bug.project_id):
+            if access_err == 'forbidden':
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
-            
-            # 获取评论（直接查询，不使用外键关系）
+
+            # 评论 + 用户名一次 JOIN，避免 bug_comment 与 user 各查一遍
+            comment_rows = (
+                db.session.query(BugComment, User.name)
+                .outerjoin(User, User.id == BugComment.user_id)
+                .filter(BugComment.bug_id == bug_id)
+                .order_by(BugComment.created_at.asc())
+                .all()
+            )
             comments = []
-            bug_comments = BugComment.query.filter_by(bug_id=bug_id).order_by(BugComment.created_at.asc()).all()
-            for comment in bug_comments:
-                user = User.query.get(comment.user_id)
+            for comment, uname in comment_rows:
                 comments.append({
                     'id': comment.id,
                     'content': comment.content,
                     'user_id': comment.user_id,
-                    'user_name': user.name if user else '未知',
+                    'user_name': uname or '未知',
                     'created_at': comment.created_at.isoformat()
                 })
             
             cid = getattr(bug, 'card_id', None)
             navigation_plan_id = bug.plan_id
             if cid:
-                crow = Card.query.get(int(cid))
-                if crow is not None:
-                    cp = getattr(crow, 'plan_id', None)
-                    if cp is not None and int(cp or 0) > 0:
-                        navigation_plan_id = cp
+                cp = db.session.query(Card.plan_id).filter(Card.id == int(cid)).scalar()
+                if cp is not None and int(cp or 0) > 0:
+                    navigation_plan_id = cp
 
             return jsonify({
                 'success': True,
@@ -8300,12 +8512,10 @@ def api_testcase_detail(testcase_id):
     """测试用例详情接口：GET查询，PUT更新，DELETE删除"""
     if request.method == 'GET':
         try:
-            testcase = TestCase.query.get(testcase_id)
-            if not testcase:
+            testcase, access_err = _model_for_user_collaborator_access(TestCase, testcase_id, current_user.id)
+            if access_err == 'not_found':
                 return jsonify({'success': False, 'error': '测试用例不存在'}), 404
-            
-            # 检查项目权限
-            if not has_project_permission(current_user.id, testcase.project_id):
+            if access_err == 'forbidden':
                 return jsonify({'success': False, 'error': '没有项目权限'}), 403
             
             _status = testcase.status
