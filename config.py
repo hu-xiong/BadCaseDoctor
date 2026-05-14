@@ -98,6 +98,18 @@ class Config:
         DEEPSEEK_V4_PRO_MAX_TOKENS = int(_dsmpt) if _dsmpt else 0
     except ValueError:
         DEEPSEEK_V4_PRO_MAX_TOKENS = 2048
+
+    # ==================== modify 歧义意图（轻量 LLM）====================
+    # 默认开；设 MODIFY_INTENT_LLM=0 / false / off 关闭。无 DEEPSEEK_API_KEY 时不会请求。
+    MODIFY_INTENT_LLM = (os.getenv("MODIFY_INTENT_LLM") or "1").strip()
+    MODIFY_INTENT_LLM_MODEL = (os.getenv("MODIFY_INTENT_LLM_MODEL") or "deepseek-v4-flash").strip() or "deepseek-v4-flash"
+    try:
+        _milt = (os.getenv("MODIFY_INTENT_LLM_TIMEOUT") or "4").strip()
+        MODIFY_INTENT_LLM_TIMEOUT = float(_milt) if _milt else 4.0
+    except ValueError:
+        MODIFY_INTENT_LLM_TIMEOUT = 4.0
+    # modify 沙箱预览：默认 mysql_temp（原库 TEMPORARY TABLE 试写，与生产同引擎校验 UPDATE）；显式设 skip_update 可仅 diff 无试写
+    MODIFY_SANDBOX_PREVIEW_MODE = (os.getenv("MODIFY_SANDBOX_PREVIEW_MODE") or "mysql_temp").strip().lower()
     
     REDIS_DATABASE=int(os.getenv('REDIS_DATABASE', 0))
     REDIS_USERNAME=os.getenv('REDIS_USERNAME', None)

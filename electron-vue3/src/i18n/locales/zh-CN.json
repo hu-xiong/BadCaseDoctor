@@ -736,6 +736,7 @@
     "contextMenuDragHint": "按住拖动菜单位置",
     "contextMenuDrag": "拖动",
     "deletePlanConfirm": "确定要删除计划「{name}」吗？此操作无法撤销。",
+    "cantDeleteDefaultPlan": "默认迭代不能删除，每个项目需保留一个默认迭代。",
     "deletePlanOk": "计划已删除",
     "deletePlanFail": "删除计划失败：{msg}",
     "deletePlanErr": "删除计划失败",

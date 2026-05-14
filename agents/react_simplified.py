@@ -1707,6 +1707,14 @@ class SimplifiedReActEngine:
         return "badcase"
 
     @staticmethod
+    def _modify_target_from_card_grep_row(
+        row: Any,
+    ) -> Optional[Tuple[str, int, Optional[int]]]:
+        from agents.intent.resolution import infer_source_tuple_from_card_dict
+
+        return infer_source_tuple_from_card_dict(row)
+
+    @staticmethod
     def _react_modify_grep_multi_batch_enabled() -> bool:
         v = (os.getenv("REACT_MODIFY_GREP_MULTI_BATCH", "1") or "1").strip().lower()
         return v not in ("0", "false", "no", "off", "")
@@ -5742,6 +5750,21 @@ class SimplifiedReActEngine:
                     or observation.get("message")
                     or ("成功" if observation.get("success") else "失败")
                 )
+                if tool_name == "modify" and observation.get("success"):
+                    tt = observation.get("target")
+                    tid = observation.get("target_id")
+                    if tt is not None and tid is not None:
+                        if is_english_locale(getattr(self, "_ui_locale", None)):
+                            _fact = (
+                                f"(FACT: modify.target={tt}, modify.target_id={tid}; "
+                                f"Confirmed must use this entity type and id; do not write BadCase unless target is badcase.) "
+                            )
+                        else:
+                            _fact = (
+                                f"（本步事实：modify.target={tt}，modify.target_id={tid}；"
+                                f"已确认中的实体类型与 ID 必须与此一致；勿把 Bug 写成 BadCase，除非 target 为 badcase。）"
+                            )
+                        obs_summary = _fact + str(obs_summary)
                 yield {
                     "event": "observation",
                     "tool": tool_name,
@@ -6370,6 +6393,10 @@ class SimplifiedReActEngine:
         _gtt = str(params.get('target') or '').strip().lower()
         if _gtt:
             result_context['_last_grep_target'] = _gtt
+            try:
+                setattr(self, "_session_last_grep_target", _gtt)
+            except Exception:
+                pass
 
         # 优先使用 grep_tool 生成的 navigation（它已按计划/权限/可跳转过滤），避免后续 modify 误选到列表里“碰巧更像”的其它记录
         nav_ids: Dict[str, List[int]] = {
@@ -6551,6 +6578,15 @@ class SimplifiedReActEngine:
         bg_l = result_context.get('bug_list') or []
         card_l = result_context.get('card_list') or []
         plan_l = result_context.get('plan_list') or []
+        raw_bg = result_context.get('grep_modify_raw_bug_list') or []
+        raw_bc = result_context.get('grep_modify_raw_badcase_list') or []
+        raw_tc = result_context.get('grep_modify_raw_testcase_list') or []
+        params["intent_has_raw_bug_list"] = bool(raw_bg)
+        params["intent_has_raw_badcase_list"] = bool(raw_bc)
+        params["intent_has_raw_testcase_list"] = bool(raw_tc)
+        _card_rows_param = result_context.get("grep_modify_raw_card_list") or result_context.get("card_list")
+        params["intent_card_rows"] = _card_rows_param if isinstance(_card_rows_param, list) else None
+        params["intent_result_context"] = result_context
         explicit = self._infer_modify_target_explicit(user_input, todo)
         user_infer = self._infer_modify_target(user_input, todo)
         if explicit:
@@ -6564,7 +6600,31 @@ class SimplifiedReActEngine:
         elif bg_l and not tc_l and not bc_l and not card_l and not plan_l:
             target_type = 'bug'
         elif card_l and not tc_l and not bc_l and not bg_l and not plan_l:
-            target_type = 'card'
+            target_type = str(params.get("target") or user_infer or "bug").strip().lower()
+            kw_g = self._extract_title_keywords_for_grep(user_input, todo) or ''
+            tp = self._pick_best_match_from_list(card_l, kw_g, 'title')
+            cr = tp[0] if tp else (card_l[0] if card_l else None)
+            if isinstance(cr, dict):
+                from agents.intent.resolution import infer_source_tuple_from_card_dict
+
+                pr = infer_source_tuple_from_card_dict(cr)
+                for k in ("card_id", "id"):
+                    v = cr.get(k)
+                    if v is None or str(v).strip() == "":
+                        continue
+                    try:
+                        iv = int(v)
+                        if iv > 0:
+                            params["card_id"] = iv
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                if pr and params.get("target_id") is None:
+                    target_type = pr[0]
+                    try:
+                        params["target_id"] = int(pr[1])
+                    except (TypeError, ValueError):
+                        pass
         elif plan_l and not tc_l and not bc_l and not bg_l and not card_l:
             target_type = 'plan'
         _lgt = str(result_context.get('_last_grep_target') or '').lower()
@@ -6575,7 +6635,33 @@ class SimplifiedReActEngine:
         elif _lgt == 'bug' and bg_l:
             target_type = 'bug'
         elif _lgt == 'card' and card_l:
-            target_type = 'card'
+            target_type = str(params.get("target") or user_infer or "bug").strip().lower()
+            kw_g = self._normalize_rerank_keywords(
+                params.get('keywords') or result_context.get('_last_grep_keywords') or ''
+            ) or self._extract_title_keywords_for_grep(user_input, todo) or ''
+            tp = self._pick_best_match_from_list(card_l, kw_g, 'title')
+            cr = tp[0] if tp else (card_l[0] if card_l else None)
+            if isinstance(cr, dict):
+                from agents.intent.resolution import infer_source_tuple_from_card_dict
+
+                pr = infer_source_tuple_from_card_dict(cr)
+                for k in ("card_id", "id"):
+                    v = cr.get(k)
+                    if v is None or str(v).strip() == "":
+                        continue
+                    try:
+                        iv = int(v)
+                        if iv > 0:
+                            params["card_id"] = iv
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                if pr and params.get("target_id") is None:
+                    target_type = pr[0]
+                    try:
+                        params["target_id"] = int(pr[1])
+                    except (TypeError, ValueError):
+                        pass
         elif _lgt == 'plan' and plan_l:
             target_type = 'plan'
         params['target'] = target_type
@@ -6585,15 +6671,15 @@ class SimplifiedReActEngine:
         target_id = params.get("target_id")
 
         if target_type == 'bug':
-            _ctx_rows = bg_l
+            _ctx_rows = bg_l or raw_bg
         elif target_type == 'testcase':
-            _ctx_rows = tc_l
+            _ctx_rows = tc_l or raw_tc
         elif target_type == 'card':
             _ctx_rows = card_l
         elif target_type == 'plan':
             _ctx_rows = plan_l
         else:
-            _ctx_rows = bc_l
+            _ctx_rows = bc_l or raw_bc
         if target_type == "card":
             cid_v = params.get("card_id")
             if cid_v is None:
@@ -6893,6 +6979,79 @@ class SimplifiedReActEngine:
                             params[k] = v
                 print(f"[REACT-execution] 主循环 modify 已合并 _infer_modify_params 兜底: keys={list(params.keys())}")
 
+        params["intent_combined_text"] = f"{user_input or ''} {todo or ''}".strip()
+        params["intent_last_grep_target"] = str(result_context.get("_last_grep_target") or "").strip()
+
+        if str(target_type or "").strip().lower() != "plan" and not params.get("target_ids"):
+            mods_final = params.get("modifications")
+            if isinstance(mods_final, dict) and mods_final:
+                try:
+                    from agents.intent.resolution import (
+                        ModifyResolutionContext,
+                        ModifyResolutionError,
+                        normalize_modification_key_set,
+                        remap_card_layer_modification_keys,
+                        resolve_modify_target_and_id,
+                    )
+
+                    def _to_int(v):
+                        if v is None or v == "":
+                            return None
+                        try:
+                            i = int(v)
+                            return i if i > 0 else None
+                        except (TypeError, ValueError):
+                            return None
+
+                    rows_c = (
+                        result_context.get("grep_modify_raw_card_list")
+                        or result_context.get("card_list")
+                        or []
+                    )
+                    ctx = ModifyResolutionContext(
+                        last_grep_target=params.get("intent_last_grep_target"),
+                        card_id=_to_int(params.get("card_id")),
+                        target_id=_to_int(params.get("target_id")),
+                        has_raw_bug_list=bool(params.get("intent_has_raw_bug_list")),
+                        editing_surface=params.get("editing_surface"),
+                        has_raw_badcase_list=bool(params.get("intent_has_raw_badcase_list")),
+                        has_raw_testcase_list=bool(params.get("intent_has_raw_testcase_list")),
+                        card_rows=rows_c if isinstance(rows_c, list) else None,
+                    )
+                    tt, pk, cid = resolve_modify_target_and_id(
+                        mods_final,
+                        params["intent_combined_text"],
+                        ctx,
+                    )
+                    _mods_fp = tuple(
+                        sorted(
+                            normalize_modification_key_set(
+                                remap_card_layer_modification_keys(dict(mods_final))
+                            )
+                        )
+                    )
+                    params["intent_resolve_reuse"] = {
+                        "mods_fp": _mods_fp,
+                        "resolved_target": tt,
+                        "resolved_pk": pk,
+                        "resolved_card_id": cid,
+                    }
+                    target_type = tt
+                    if tt == "card":
+                        if cid is not None:
+                            params["card_id"] = cid
+                        params.pop("target_id", None)
+                    else:
+                        if pk is not None:
+                            params["target_id"] = pk
+                        if cid is not None:
+                            params["card_id"] = cid
+                except ModifyResolutionError as _mre:
+                    print(f"[REACT-planing] resolve_modify_target_and_id: {_mre}", flush=True)
+                except Exception as _re:
+                    print(f"[REACT-planing] resolve_modify_target_and_id 失败(忽略): {_re}", flush=True)
+        params["target"] = target_type
+
         try:
             from agents.tools.modify_tool import modify_tool_params_log_snapshot
 
@@ -6912,6 +7071,7 @@ class SimplifiedReActEngine:
         """
         modify 执行前需：非空 modifications，且满足其一：
         - 已有 target_id；或 target_ids（批量）；或
+        - target=card 且已提供 card_id；或
         - 提供 natural_query（交给 modify_tool 用 Text2SQL/ORM 解析 id）
         """
         if not params or not isinstance(params, dict):
@@ -6923,6 +7083,11 @@ class SimplifiedReActEngine:
         if isinstance(tids, (list, tuple)) and len(tids) > 0:
             return True
         if params.get('target_id') not in (None, ''):
+            return True
+        if str(params.get("target") or "").strip().lower() == "card" and params.get("card_id") not in (
+            None,
+            "",
+        ):
             return True
         nq = (params.get('natural_query') or '').strip()
         return bool(nq)
@@ -6973,7 +7138,7 @@ class SimplifiedReActEngine:
         events.extend(self._drain_tool_task_sse_buffer_list())
         if grep_obs.get('success'):
             self._merge_grep_observation_into_context(grep_obs, gparams, result_context)
-            for tt in ('card', 'bug', 'testcase', 'badcase'):
+            for tt in ('bug', 'testcase', 'badcase', 'card'):
                 if tt == 'card':
                     tid = self._try_target_id_from_merged_lists(
                         result_context, tt, user_input, todo
@@ -8438,6 +8603,13 @@ class SimplifiedReActEngine:
             # modify 工具内部使用 Flask/SQLAlchemy 同步 DB，会阻塞 asyncio 事件循环，导致流式一直“修改中...”
             # 放到线程池中执行，在独立线程里跑新事件循环，避免阻塞主循环，并增加超时保护
             if tool_name == 'modify':
+                _ui = str(getattr(self, "_react_stream_user_input", None) or "").strip()
+                if not str(params.get("intent_combined_text") or "").strip():
+                    params["intent_combined_text"] = _ui
+                params.setdefault(
+                    "intent_last_grep_target",
+                    str(getattr(self, "_session_last_grep_target", "") or ""),
+                )
                 print(
                     f"[REACT] modify 进入线程池执行（target_id={params.get('target_id')}, "
                     f"target_ids={params.get('target_ids')}, target={params.get('target')}）…"
@@ -8494,3 +8666,5 @@ class SimplifiedReActEngine:
             if isinstance(params, dict):
                 params.pop('progress_queue', None)
                 params.pop('progress_callback', None)
+                params.pop("intent_combined_text", None)
+                params.pop("intent_last_grep_target", None)

@@ -1176,6 +1176,14 @@ class CreateTool(BaseTool):
                         )
                         self.db.add(card)
                         self.db.commit()
+                        self.db.refresh(card)
+                        try:
+                            badcase.card_id = int(card.id)
+                            self.db.add(badcase)
+                            self.db.commit()
+                            self.db.refresh(badcase)
+                        except Exception:
+                            self.db.rollback()
                     except Exception:
                         self.db.rollback()
                     return badcase.id
@@ -1210,6 +1218,14 @@ class CreateTool(BaseTool):
                         )
                         self.db.add(card)
                         self.db.commit()
+                        self.db.refresh(card)
+                        try:
+                            testcase.card_id = int(card.id)
+                            self.db.add(testcase)
+                            self.db.commit()
+                            self.db.refresh(testcase)
+                        except Exception:
+                            self.db.rollback()
                     except Exception:
                         self.db.rollback()
                     return testcase.id

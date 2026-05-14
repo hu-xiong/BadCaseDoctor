@@ -734,6 +734,7 @@
     "contextMenuDragHint": "Drag to move",
     "contextMenuDrag": "Drag",
     "deletePlanConfirm": "Delete plan “{name}”? This cannot be undone.",
+    "cantDeleteDefaultPlan": "The default iteration cannot be deleted. Each project keeps one default iteration.",
     "deletePlanOk": "Plan deleted.",
     "deletePlanFail": "Failed to delete plan: {msg}",
     "deletePlanErr": "Failed to delete plan",

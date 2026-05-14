@@ -57,11 +57,12 @@ import random
 import string
 from config import Config
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import HTTPException
 from flask_cors import CORS
 import boto3
 from botocore.exceptions import ClientError
 import mimetypes
-from sqlalchemy import text, inspect, Enum, or_, Text, and_
+from sqlalchemy import text, inspect, Enum, or_, Text, and_, event
 from sqlalchemy.dialects.mysql import LONGTEXT
 from PIL import Image
 import io
@@ -762,11 +763,37 @@ class TeamMember(db.Model):
 
     # 不使用 backref，避免依赖外键
 
+
+def _json_snowflake_id(value):
+    """超过 JS Number.MAX_SAFE_INTEGER 的整型主键/外键：JSON 输出为字符串，避免前端精度丢失。"""
+    if value is None:
+        return None
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _json_snowflake_ids_in_list(seq):
+    """JSON 列中雪花 id 列表（如 related_defects）统一为字符串。"""
+    if seq is None:
+        return None
+    if isinstance(seq, (list, tuple)):
+        out = []
+        for x in seq:
+            if isinstance(x, dict):
+                out.append(x)
+            else:
+                out.append(_json_snowflake_id(x) if x is not None else None)
+        return out
+    return seq
+
+
 class BadCase(db.Model):
     __tablename__ = 'bad_case'
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
     project_id = db.Column(db.Integer, nullable=False)
-    plan_id = db.Column(db.Integer)  # 关联计划
+    plan_id = db.Column(db.BigInteger)  # 关联计划
     creator_id = db.Column(db.Integer, nullable=False)
     title = db.Column(db.String(200))  # BadCase标题
     case_category = db.Column(db.String(100), nullable=False)  # 问题分类
@@ -786,6 +813,7 @@ class BadCase(db.Model):
     document_type = db.Column(db.String(100))  # 文档类型
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
     assigned_users = db.Column(db.Text)  # 指派的人员，JSON格式存储
+    card_id = db.Column(db.BigInteger, nullable=True)  # 关联迭代卡片 Card.id（与 Bug.card_id 一致）
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -794,9 +822,9 @@ class BadCase(db.Model):
     def to_dict(self):
         """序列化为字典，处理枚举值"""
         return {
-            'id': self.id,
+            'id': _json_snowflake_id(self.id),
             'project_id': self.project_id,
-            'plan_id': self.plan_id,
+            'plan_id': _json_snowflake_id(self.plan_id),
             'creator_id': self.creator_id,
             'title': self.title,
             'case_category': self.case_category,
@@ -816,6 +844,7 @@ class BadCase(db.Model):
             'document_type': self.document_type,
             'attachments': self.attachments,
             'assigned_users': self.assigned_users,
+            'card_id': _json_snowflake_id(getattr(self, 'card_id', None)),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
@@ -823,14 +852,14 @@ class BadCase(db.Model):
 class Comment(db.Model):
     __tablename__ = 'comment'
     id = db.Column(db.Integer, primary_key=True)
-    badcase_id = db.Column(db.Integer, nullable=False)
+    badcase_id = db.Column(db.BigInteger, nullable=False)
     user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class Plan(db.Model):
     __tablename__ = 'plan'
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
     name = db.Column(db.String(200), nullable=False)  # 计划名称
     description = db.Column(db.Text)  # 计划描述
     status = db.Column(db.String(20), default='active')  # active, archived, completed
@@ -840,7 +869,7 @@ class Plan(db.Model):
     start_date = db.Column(db.Date)  # 开始日期
     end_date = db.Column(db.Date)  # 结束日期
     progress = db.Column(db.Float, default=0.0)  # 进度百分比 0-100
-    parent_id = db.Column(db.Integer)  # 父计划ID，支持递归
+    parent_id = db.Column(db.BigInteger)  # 父计划ID，支持递归
     project_id = db.Column(db.Integer, nullable=False)
     creator_id = db.Column(db.Integer, nullable=False)
     assignee_id = db.Column(db.Integer)  # 负责人
@@ -852,7 +881,7 @@ class Plan(db.Model):
 
 class Bug(db.Model):
     __tablename__ = 'bug'
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
     title = db.Column(db.String(200), nullable=False)  # Bug标题
     description = db.Column(db.Text)  # Bug描述，改为可选
     steps_to_reproduce = db.Column(db.Text)  # 复现步骤
@@ -866,12 +895,12 @@ class Bug(db.Model):
     browser = db.Column(db.String(50))  # 浏览器
     os = db.Column(db.String(50))  # 操作系统
     # 可为空：与「未计划的 Bug」列表（plan_id IS NULL）一致
-    plan_id = db.Column(db.Integer, nullable=True)
+    plan_id = db.Column(db.BigInteger, nullable=True)
     project_id = db.Column(db.Integer, nullable=False)
     creator_id = db.Column(db.Integer, nullable=False)
     assignee_id = db.Column(db.Integer)  # 负责人
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
-    card_id = db.Column(db.Integer, nullable=True)  # 关联的卡片ID
+    card_id = db.Column(db.BigInteger, nullable=True)  # 关联的卡片ID
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -879,7 +908,7 @@ class Bug(db.Model):
 
 class TestCase(db.Model):
     __tablename__ = 'test_case'
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
     title = db.Column(db.String(200), nullable=False)  # 用例标题
     status = db.Column(Enum(TestCaseStatus, values_callable=lambda obj: [e.value for e in obj]), default=TestCaseStatus.DRAFT, nullable=False)
     case_type = db.Column(db.String(50))  # 用例类型：功能测试/接口测试/性能测试/安全测试
@@ -911,11 +940,12 @@ class TestCase(db.Model):
     remaining_time = db.Column(db.Float)  # 剩余工时（小时）
     
     # 关联信息
-    plan_id = db.Column(db.Integer)  # 所属计划
+    plan_id = db.Column(db.BigInteger)  # 所属计划
     project_id = db.Column(db.Integer, nullable=False)
     creator_id = db.Column(db.Integer, nullable=False)
     assignee_id = db.Column(db.Integer)  # 维护人
-    
+    card_id = db.Column(db.BigInteger, nullable=True)  # 关联迭代卡片 Card.id
+
     # 版本信息
     version = db.Column(db.String(20), default='v1')  # 版本号
     
@@ -927,7 +957,7 @@ class TestCase(db.Model):
     def to_dict(self):
         """序列化为字典，处理枚举值"""
         return {
-            'id': self.id,
+            'id': _json_snowflake_id(self.id),
             'title': self.title,
             'status': self.status.value if isinstance(self.status, TestCaseStatus) else self.status,
             'case_type': self.case_type,
@@ -937,7 +967,7 @@ class TestCase(db.Model):
             'steps': self.steps,
             'remark': self.remark,
             'requirement_id': self.requirement_id,
-            'related_defects': self.related_defects,
+            'related_defects': _json_snowflake_ids_in_list(self.related_defects),
             'last_executed': self.last_executed.isoformat() if self.last_executed else None,
             'executed_by': self.executed_by,
             'execution_result': self.execution_result.value if self.execution_result and isinstance(self.execution_result, ExecutionResult) else self.execution_result,
@@ -945,10 +975,11 @@ class TestCase(db.Model):
             'estimated_time': self.estimated_time,
             'actual_time': self.actual_time,
             'remaining_time': self.remaining_time,
-            'plan_id': self.plan_id,
+            'plan_id': _json_snowflake_id(self.plan_id),
             'project_id': self.project_id,
             'creator_id': self.creator_id,
             'assignee_id': self.assignee_id,
+            'card_id': _json_snowflake_id(getattr(self, 'card_id', None)),
             'version': self.version,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -958,14 +989,14 @@ class Card(db.Model):
     """统一的卡片模型，支持Bug、BadCase、TestCase三种类型"""
     __tablename__ = 'card'
     
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
     title = db.Column(db.String(200), nullable=False)
     type = db.Column(Enum(CardType, values_callable=lambda obj: [e.value for e in obj]), default=CardType.BADCASE, nullable=False)
     priority = db.Column(db.String(10), default='p3')
     assignee_id = db.Column(db.Integer)
     project_id = db.Column(db.Integer, nullable=False)
-    creator_id = db.Column(db.Integer, nullable=False)
-    plan_id = db.Column(db.Integer, nullable=True)
+    plan_id = db.Column(db.BigInteger, nullable=True)
+    creator_id = db.Column(db.Integer, nullable=True)  # 与 POST /api/cards、to_dict 一致；历史行可为 NULL
     description = db.Column(db.Text)
     
     # Bug特有字段
@@ -1007,7 +1038,7 @@ class Card(db.Model):
     
     # 数据迁移追溯字段
     source_type = db.Column(db.String(30), nullable=True)  # 'bug', 'bad_case', 'test_case', NULL表示新创建的卡片
-    source_id = db.Column(db.Integer, nullable=True)  # 源表中的ID
+    source_id = db.Column(db.BigInteger, nullable=True)  # 源表中的ID
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -1016,18 +1047,19 @@ class Card(db.Model):
     
     def to_dict(self):
         """序列化为字典，处理枚举值"""
+        # id / plan_id / source_id 可能超过 JS Number.MAX_SAFE_INTEGER，JSON 数字会被截断，必须作字符串返回
         result = {
-            'id': self.id,
+            'id': _json_snowflake_id(self.id),
             'title': self.title,
             'type': self.type.value if isinstance(self.type, CardType) else self.type,
             'priority': self.priority,
             'assignee_id': self.assignee_id,
             'project_id': self.project_id,
             'creator_id': self.creator_id,
-            'plan_id': self.plan_id,
+            'plan_id': _json_snowflake_id(self.plan_id),
             'description': self.description,
             'source_type': self.source_type,
-            'source_id': self.source_id,
+            'source_id': _json_snowflake_id(self.source_id),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
@@ -1075,6 +1107,93 @@ class Card(db.Model):
             })
         
         return result
+
+
+_ENTITY_SNOWFLAKE_PK_REGISTERED = False
+
+
+def _register_entity_snowflake_pk_hooks() -> None:
+    """Bug / BadCase / TestCase / Card / Plan 主键共用雪花 id（同一序列空间，跨表不撞号）。"""
+    global _ENTITY_SNOWFLAKE_PK_REGISTERED
+    if _ENTITY_SNOWFLAKE_PK_REGISTERED:
+        return
+    from utils.snowflake import next_entity_snowflake_id
+
+    def _assign_snowflake_pk(mapper, connection, target) -> None:
+        if getattr(target, "id", None) in (None, 0):
+            setattr(target, "id", int(next_entity_snowflake_id()))
+
+    for _m in (Bug, BadCase, TestCase, Card, Plan):
+        event.listen(_m, "before_insert", _assign_snowflake_pk, propagate=True)
+    _ENTITY_SNOWFLAKE_PK_REGISTERED = True
+
+
+_register_entity_snowflake_pk_hooks()
+
+
+def repair_card_source_link_if_missing(card) -> bool:
+    """
+    数据补全：源表行已用 card_id 指向本卡，但 Card.source_type/source_id 为空时反填。
+    支持 Bug / BadCase / TestCase 卡片（与 Card.type 一致）；幂等；成功则 commit。
+    """
+    if card is None:
+        return False
+    try:
+        st = (getattr(card, "source_type", None) or "").strip()
+        sid = getattr(card, "source_id", None)
+    except Exception:
+        return False
+    if (st or "").strip() and sid is not None:
+        return False
+    ctype = getattr(card, "type", None)
+    pid = getattr(card, "project_id", None)
+    if pid is None:
+        return False
+    try:
+        cid = int(card.id)
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+
+    src_type_val = None
+    src_id_val = None
+
+    if ctype == CardType.BUG:
+        row = Bug.query.filter(Bug.card_id == cid, Bug.project_id == pid).first()
+        if row is not None:
+            src_type_val, src_id_val = "bug", int(row.id)
+    elif ctype == CardType.BADCASE:
+        row = BadCase.query.filter(BadCase.card_id == cid, BadCase.project_id == pid).first()
+        if row is not None:
+            src_type_val, src_id_val = "badcase", int(row.id)
+    elif ctype == CardType.TESTCASE:
+        row = TestCase.query.filter(TestCase.card_id == cid, TestCase.project_id == pid).first()
+        if row is not None:
+            src_type_val, src_id_val = "testcase", int(row.id)
+    else:
+        return False
+
+    if not src_type_val or src_id_val is None or int(src_id_val) <= 0:
+        return False
+    try:
+        card.source_type = src_type_val
+        card.source_id = int(src_id_val)
+        db.session.add(card)
+        db.session.commit()
+        print(
+            f"[Card] repair_card_source_link: card.id={cid} project={pid} -> "
+            f"{src_type_val}.id={src_id_val}",
+            flush=True,
+        )
+        return True
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Card] repair_card_source_link 失败: {e}", flush=True)
+        return False
+
+
+# 兼容旧调用名
+repair_card_bug_source_if_missing = repair_card_source_link_if_missing
 
 
 class CardTypeDefinition(db.Model):
@@ -1126,8 +1245,8 @@ class CardPlanRelation(db.Model):
     __tablename__ = 'card_plan_relation'
     
     id = db.Column(db.Integer, primary_key=True)
-    card_id = db.Column(db.Integer, nullable=False)
-    plan_id = db.Column(db.Integer, nullable=False)
+    card_id = db.Column(db.Integer, nullable=False)  # 对应 Card.id；与 __table_args__ / to_dict 一致
+    plan_id = db.Column(db.BigInteger, nullable=False)
     
     # 关联关系类型
     relation_type = db.Column(db.String(20), default='primary')  # primary(主要), related(关联), blocked_by(被阻塞)
@@ -1152,8 +1271,8 @@ class CardPlanRelation(db.Model):
     def to_dict(self):
         return {
             'id': self.id,
-            'card_id': self.card_id,
-            'plan_id': self.plan_id,
+            'card_id': _json_snowflake_id(self.card_id),
+            'plan_id': _json_snowflake_id(self.plan_id),
             'relation_type': self.relation_type,
             'status_in_plan': self.status_in_plan,
             'added_at': self.added_at.isoformat() if self.added_at else None,
@@ -1287,8 +1406,8 @@ class DiffReviewState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, nullable=False, index=True)
     target = db.Column(db.String(32), nullable=False, index=True)  # badcase/bug/testcase
-    target_id = db.Column(db.Integer, nullable=False, index=True)
-    plan_id = db.Column(db.Integer, nullable=True, index=True)
+    target_id = db.Column(db.BigInteger, nullable=False, index=True)
+    plan_id = db.Column(db.BigInteger, nullable=True, index=True)
     lifecycle_id = db.Column(db.Integer, default=1, nullable=False)
     diff_fingerprint = db.Column(db.String(64), nullable=False, default='')
     status = db.Column(db.String(20), nullable=False, default='pending', index=True)
@@ -1308,7 +1427,7 @@ class DiffReviewState(db.Model):
 class BugComment(db.Model):
     __tablename__ = 'bug_comment'
     id = db.Column(db.Integer, primary_key=True)
-    bug_id = db.Column(db.Integer, nullable=False)
+    bug_id = db.Column(db.BigInteger, nullable=False)
     user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -1374,7 +1493,7 @@ class WorkflowInAppNotification(db.Model):
     actor_name = db.Column(db.String(120), nullable=True)
     event = db.Column(db.String(40), nullable=False)
     entity_type = db.Column(db.String(20), nullable=False, index=True)
-    entity_id = db.Column(db.Integer, nullable=False, index=True)
+    entity_id = db.Column(db.BigInteger, nullable=False, index=True)
     title = db.Column(db.String(500), nullable=True)
     project_id = db.Column(db.Integer, nullable=True, index=True)
     project_name = db.Column(db.String(200), nullable=True)
@@ -2815,8 +2934,8 @@ def api_upsert_diff_review(project_id):
                 'id': row.id,
                 'project_id': row.project_id,
                 'target': row.target,
-                'target_id': row.target_id,
-                'plan_id': row.plan_id,
+                'target_id': _json_snowflake_id(row.target_id),
+                'plan_id': _json_snowflake_id(row.plan_id),
                 'status': row.status,
                 'lifecycle_id': row.lifecycle_id,
                 'diff_fingerprint': row.diff_fingerprint,
@@ -2843,7 +2962,7 @@ def api_resolve_diff_review(project_id):
 
         rows = (
             DiffReviewState.query
-            .filter_by(project_id=project_id, target=target, target_id=int(target_id))
+            .filter_by(project_id=project_id, target=target, target_id=int(str(target_id)))
             .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
             .all()
         )
@@ -2920,8 +3039,8 @@ def api_list_diff_reviews(project_id):
                 mods = {}
             result.append({
                 'target': r.target,
-                'target_id': r.target_id,
-                'plan_id': r.plan_id,
+                'target_id': _json_snowflake_id(r.target_id),
+                'plan_id': _json_snowflake_id(r.plan_id),
                 'status': r.status,
                 'lifecycle_id': r.lifecycle_id,
                 'diff_fingerprint': r.diff_fingerprint,
@@ -4292,7 +4411,7 @@ def api_get_project_edit_context(project_id):
                 bug += c.get('bug_count', 0)
                 tc += c.get('test_case_count', 0)
             return {
-                'id': plan.id,
+                'id': _json_snowflake_id(plan.id),
                 'name': plan.name,
                 'description': plan.description,
                 'status': plan.status,
@@ -4666,14 +4785,15 @@ def api_get_project_badcases(project_id):
                 assignee_display = str(bc.assignee)
 
             badcases.append({
-                'id': bc.id,
+                'id': _json_snowflake_id(bc.id),
                 'title': bc.title,
                 'case_category': bc.case_category,
                 'base_problem': (bc.base_problem[:100] + '...') if bc.base_problem and len(bc.base_problem) > 100 else (bc.base_problem or ''),
                 'priority': bc.priority,
                 'status': bc.status.value if hasattr(bc.status, 'value') else bc.status,  # 枚举类型转换为值
                 'assignee': assignee_display,
-                'plan_id': bc.plan_id,  # 添加计划ID字段
+                'plan_id': _json_snowflake_id(bc.plan_id),  # 添加计划ID字段
+                'card_id': _json_snowflake_id(getattr(bc, 'card_id', None)),
                 'created_at': bc.created_at.isoformat()
             })
         
@@ -4987,7 +5107,7 @@ def api_create_badcase():
         return jsonify({
             'success': True,
             'badcase': {
-                'id': badcase.id,
+                'id': _json_snowflake_id(badcase.id),
                 'title': badcase.title,
                 'project_id': badcase.project_id,
                 'creator_id': badcase.creator_id,
@@ -5081,9 +5201,10 @@ def api_get_badcase_detail(badcase_id):
     return jsonify({
         'success': True,
         'badcase': {
-            'id': badcase.id,
+            'id': _json_snowflake_id(badcase.id),
             'project_id': badcase.project_id,  # 添加项目ID字段
-            'plan_id': badcase.plan_id,
+            'plan_id': _json_snowflake_id(badcase.plan_id),
+            'card_id': _json_snowflake_id(getattr(badcase, 'card_id', None)),
             'title': badcase.title,
             'case_category': badcase.case_category,
             'base_problem': badcase.base_problem,
@@ -5592,13 +5713,17 @@ def api_get_card_detail(card_id):
     
     try:
         card = Card.query.get_or_404(card_id)
-        
+        repair_card_source_link_if_missing(card)
+        db.session.refresh(card)
+
         # 检查权限
         if not has_project_permission(current_user.id, card.project_id):
             return jsonify({'success': False, 'error': '无权访问此卡片'}), 403
         
         return jsonify({'success': True, 'data': card.to_dict()})
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ 获取卡片详情失败: {e}")
         return jsonify({'success': False, 'error': f'获取卡片详情失败: {str(e)}'}), 500
@@ -5710,6 +5835,8 @@ def api_update_card(card_id):
         print(f"✅ 卡片更新成功: {card.id}")
         return jsonify({'success': True, 'data': card.to_dict()})
     
+    except HTTPException:
+        raise
     except Exception as e:
         db.session.rollback()
         print(f"❌ 更新卡片失败: {e}")
@@ -5734,6 +5861,8 @@ def api_delete_card(card_id):
         print(f"✅ 卡片删除成功: {card.id}")
         return jsonify({'success': True, 'message': '卡片删除成功'})
     
+    except HTTPException:
+        raise
     except Exception as e:
         db.session.rollback()
         print(f"❌ 删除卡片失败: {e}")
@@ -5869,6 +5998,8 @@ def api_move_card(card_id):
             'message': f'卡片已移动至{"计划 " + str(target_plan_id) if target_plan_id else "未计划"}'
         })
     
+    except HTTPException:
+        raise
     except Exception as e:
         db.session.rollback()
         print(f"❌ 移动卡片失败: {e}")
@@ -6159,7 +6290,7 @@ def api_get_card_plan_history(card_id):
             if plan:
                 history.append({
                     'relation_id': rel.id,
-                    'plan_id': rel.plan_id,
+                    'plan_id': _json_snowflake_id(rel.plan_id),
                     'plan_name': plan.name,
                     'relation_type': rel.relation_type,
                     'status_in_plan': rel.status_in_plan,
@@ -6228,7 +6359,7 @@ def sync_database_schema():
                 dialect = (db.engine.dialect.name or '').lower()
                 if dialect == 'mysql':
                     print("[DB] 迁移: bug.plan_id 允许 NULL（未计划 Bug / create 预览 plan_id 为空）")
-                    db.session.execute(text('ALTER TABLE bug MODIFY COLUMN plan_id INT NULL'))
+                    db.session.execute(text('ALTER TABLE bug MODIFY COLUMN plan_id BIGINT NULL'))
                     db.session.commit()
                 elif dialect in ('postgresql', 'postgres'):
                     db.session.execute(text('ALTER TABLE bug ALTER COLUMN plan_id DROP NOT NULL'))
@@ -6242,6 +6373,179 @@ def sync_database_schema():
 
         _migrate_bad_case_answer_fields()
         _migrate_bug_plan_id_nullable()
+
+        def _migrate_badcase_testcase_card_id_columns():
+            """bad_case / test_case 增加 card_id，并从已有 Card.source_type/source_id 回填。"""
+            try:
+
+                def _ensure_col(table: str) -> None:
+                    ins = inspect(db.engine)
+                    if not ins.has_table(table):
+                        return
+                    cols = {c.get("name") for c in (ins.get_columns(table) or [])}
+                    if "card_id" in cols:
+                        return
+                    dialect = (db.engine.dialect.name or "").lower()
+                    print(f"[DB] 迁移: {table}.card_id 可空 BIGINT（雪花/跨表 id）")
+                    if dialect == "mysql":
+                        db.session.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN card_id BIGINT NULL")
+                        )
+                    else:
+                        db.session.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN card_id INTEGER")
+                        )
+                    db.session.commit()
+
+                _ensure_col("bad_case")
+                _ensure_col("test_case")
+
+                # 从 Card 映射回填源表 card_id（老数据仅有 source_* 时）
+                if inspect(db.engine).has_table("bad_case") and inspect(
+                    db.engine
+                ).has_table("card"):
+                    qcards = (
+                        Card.query.filter(
+                            Card.type == CardType.BADCASE,
+                            or_(
+                                Card.source_type == "badcase",
+                                Card.source_type == "bad_case",
+                            ),
+                            Card.source_id.isnot(None),
+                        )
+                        .all()
+                    )
+                    nbc = 0
+                    for c in qcards:
+                        try:
+                            bid = int(c.source_id)
+                        except (TypeError, ValueError):
+                            continue
+                        bc = BadCase.query.get(bid)
+                        if (
+                            bc
+                            and int(bc.project_id) == int(c.project_id)
+                            and (getattr(bc, "card_id", None) in (None, 0))
+                        ):
+                            bc.card_id = int(c.id)
+                            nbc += 1
+                    if nbc:
+                        db.session.commit()
+                        print(f"[DB] 回填 bad_case.card_id 自 Card: {nbc} 条", flush=True)
+
+                if inspect(db.engine).has_table("test_case") and inspect(
+                    db.engine
+                ).has_table("card"):
+                    qcards = (
+                        Card.query.filter(
+                            Card.type == CardType.TESTCASE,
+                            or_(
+                                Card.source_type == "testcase",
+                                Card.source_type == "test_case",
+                            ),
+                            Card.source_id.isnot(None),
+                        )
+                        .all()
+                    )
+                    ntc = 0
+                    for c in qcards:
+                        try:
+                            tid = int(c.source_id)
+                        except (TypeError, ValueError):
+                            continue
+                        tc = TestCase.query.get(tid)
+                        if (
+                            tc
+                            and int(tc.project_id) == int(c.project_id)
+                            and (getattr(tc, "card_id", None) in (None, 0))
+                        ):
+                            tc.card_id = int(c.id)
+                            ntc += 1
+                    if ntc:
+                        db.session.commit()
+                        print(f"[DB] 回填 test_case.card_id 自 Card: {ntc} 条", flush=True)
+            except Exception as e:
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+                print(
+                    f"[DB] ⚠️ bad_case/test_case card_id 迁移失败(可手动 ALTER): {e}",
+                    flush=True,
+                )
+
+        _migrate_badcase_testcase_card_id_columns()
+
+        def _migrate_mysql_entity_ids_bigint_for_snowflake():
+            """MySQL：将 Bug/Card/BadCase/TestCase/Plan 主键及引用列扩为 BIGINT，便于雪花 id。需 SNOWFLAKE_ENTITY_PK_MIGRATE=1。"""
+            if (db.engine.dialect.name or "").lower() != "mysql":
+                return
+            if (os.getenv("SNOWFLAKE_ENTITY_PK_MIGRATE") or "").strip() != "1":
+                return
+            stmts = [
+                "ALTER TABLE bug MODIFY COLUMN plan_id BIGINT NULL",
+                "ALTER TABLE bad_case MODIFY COLUMN plan_id BIGINT NULL",
+                "ALTER TABLE test_case MODIFY COLUMN plan_id BIGINT NULL",
+                "ALTER TABLE card MODIFY COLUMN plan_id BIGINT NULL",
+                "ALTER TABLE card_plan_relation MODIFY COLUMN plan_id BIGINT NOT NULL",
+                "ALTER TABLE diff_review_state MODIFY COLUMN plan_id BIGINT NULL",
+                "ALTER TABLE bug MODIFY COLUMN card_id BIGINT NULL",
+                "ALTER TABLE bad_case MODIFY COLUMN card_id BIGINT NULL",
+                "ALTER TABLE test_case MODIFY COLUMN card_id BIGINT NULL",
+                "ALTER TABLE card MODIFY COLUMN source_id BIGINT NULL",
+                "ALTER TABLE comment MODIFY COLUMN badcase_id BIGINT NOT NULL",
+                "ALTER TABLE bug_comment MODIFY COLUMN bug_id BIGINT NOT NULL",
+                "ALTER TABLE card_plan_relation MODIFY COLUMN card_id BIGINT NOT NULL",
+                "ALTER TABLE diff_review_state MODIFY COLUMN target_id BIGINT NOT NULL",
+                "ALTER TABLE workflow_in_app_notification MODIFY COLUMN entity_id BIGINT NOT NULL",
+                "ALTER TABLE bug MODIFY COLUMN id BIGINT NOT NULL",
+                "ALTER TABLE bad_case MODIFY COLUMN id BIGINT NOT NULL",
+                "ALTER TABLE test_case MODIFY COLUMN id BIGINT NOT NULL",
+                "ALTER TABLE card MODIFY COLUMN id BIGINT NOT NULL",
+                "ALTER TABLE plan MODIFY COLUMN parent_id BIGINT NULL",
+                "ALTER TABLE plan MODIFY COLUMN id BIGINT NOT NULL",
+            ]
+            for sql in stmts:
+                try:
+                    db.session.execute(text(sql))
+                    db.session.commit()
+                    print(f"[DB] 雪花列迁移 OK: {sql}", flush=True)
+                except Exception as ex:
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+                    print(f"[DB] 雪花列迁移跳过: {sql} ({ex})", flush=True)
+
+        _migrate_mysql_entity_ids_bigint_for_snowflake()
+
+        def _warn_mysql_int_entity_pk_if_needed():
+            if (db.engine.dialect.name or "").lower() != "mysql":
+                return
+            if (os.getenv("SNOWFLAKE_ENTITY_PK_MIGRATE") or "").strip() == "1":
+                return
+            try:
+                insp = inspect(db.engine)
+                if not insp.has_table("bug"):
+                    return
+                for c in insp.get_columns("bug") or []:
+                    if c.get("name") != "id":
+                        continue
+                    t = c.get("type")
+                    tn = (getattr(t, "__visit_name__", None) or str(t)).lower()
+                    if "bigint" in tn:
+                        return
+                    print(
+                        "[DB] 提示：Bug/Card/Plan 等主键已改为应用层雪花；MySQL 表 bug.id 等仍为整型时，"
+                        "请先设环境变量 SNOWFLAKE_ENTITY_PK_MIGRATE=1 启动一次以执行 ALTER 扩 BIGINT，"
+                        "否则新插入雪花 id 会失败。",
+                        flush=True,
+                    )
+                    break
+            except Exception:
+                pass
+
+        _warn_mysql_int_entity_pk_if_needed()
 
         # 重要：SQLite ALTER TABLE 后 inspector 可能缓存旧列信息，重新创建 inspector 避免重复加列
         inspector = inspect(db.engine)
@@ -6290,9 +6594,9 @@ def sync_database_schema():
             },
             'bad_case': {
                 'columns': [
-                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'id BIGINT PRIMARY KEY',
                     'project_id INT NOT NULL',
-                    'plan_id INT',
+                    'plan_id BIGINT',
                     'creator_id INT NOT NULL',
                     'title VARCHAR(200)',
                     'case_category VARCHAR(100) NOT NULL',
@@ -6322,7 +6626,7 @@ def sync_database_schema():
             'comment': {
                 'columns': [
                     'id INTEGER PRIMARY KEY AUTOINCREMENT',
-                    'badcase_id INT NOT NULL',
+                    'badcase_id BIGINT NOT NULL',
                     'user_id INT NOT NULL',
                     'content TEXT NOT NULL',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
@@ -6366,7 +6670,7 @@ def sync_database_schema():
             },
             'plan': {
                 'columns': [
-                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'id BIGINT PRIMARY KEY',
                     'name VARCHAR(200) NOT NULL',
                     'description TEXT',
                     'status VARCHAR(20) DEFAULT "active"',
@@ -6375,7 +6679,7 @@ def sync_database_schema():
                     'start_date DATE',
                     'end_date DATE',
                     'progress FLOAT DEFAULT 0.0',
-                    'parent_id INT',
+                    'parent_id BIGINT',
                     'project_id INT NOT NULL',
                     'creator_id INT NOT NULL',
                     'assignee_id INT',
@@ -6390,7 +6694,7 @@ def sync_database_schema():
             },
             'bug': {
                 'columns': [
-                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'id BIGINT PRIMARY KEY',
                     'title VARCHAR(200) NOT NULL',
                     'description TEXT NOT NULL',
                     'steps_to_reproduce TEXT',
@@ -6403,7 +6707,7 @@ def sync_database_schema():
                     'environment VARCHAR(100)',
                     'browser VARCHAR(50)',
                     'os VARCHAR(50)',
-                    'plan_id INT',
+                    'plan_id BIGINT',
                     'project_id INT NOT NULL',
                     'creator_id INT NOT NULL',
                     'assignee_id INT',
@@ -6419,7 +6723,7 @@ def sync_database_schema():
             'bug_comment': {
                 'columns': [
                     'id INTEGER PRIMARY KEY AUTOINCREMENT',
-                    'bug_id INT NOT NULL',
+                    'bug_id BIGINT NOT NULL',
                     'user_id INT NOT NULL',
                     'content TEXT NOT NULL',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
@@ -6429,7 +6733,7 @@ def sync_database_schema():
             },
             'test_case': {
                 'columns': [
-                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'id BIGINT PRIMARY KEY',
                     'title VARCHAR(200) NOT NULL',
                     'status VARCHAR(20) DEFAULT "draft"',
                     'case_type VARCHAR(50) DEFAULT "功能测试"',
@@ -6448,7 +6752,7 @@ def sync_database_schema():
                     'executed_by INT',
                     'execution_result VARCHAR(20)',
                     'version VARCHAR(20) DEFAULT "v1"',
-                    'plan_id INT',
+                    'plan_id BIGINT',
                     'project_id INT NOT NULL',
                     'creator_id INT',
                     'assignee_id INT',
@@ -6468,7 +6772,7 @@ def sync_database_schema():
                     'actor_name VARCHAR(120)',
                     'event VARCHAR(40) NOT NULL',
                     'entity_type VARCHAR(20) NOT NULL',
-                    'entity_id INT NOT NULL',
+                    'entity_id BIGINT NOT NULL',
                     'title VARCHAR(500)',
                     'project_id INT',
                     'project_name VARCHAR(200)',
@@ -6527,8 +6831,8 @@ def sync_database_schema():
                     'id INTEGER PRIMARY KEY AUTOINCREMENT',
                     'project_id INT NOT NULL',
                     'target VARCHAR(32) NOT NULL',
-                    'target_id INT NOT NULL',
-                    'plan_id INT',
+                    'target_id BIGINT NOT NULL',
+                    'plan_id BIGINT',
                     'lifecycle_id INT DEFAULT 1',
                     'diff_fingerprint VARCHAR(64) DEFAULT ""',
                     'status VARCHAR(20) DEFAULT "pending"',
@@ -7016,7 +7320,7 @@ def api_create_plan():
             'success': True,
             'message': '计划创建成功',
             'plan': {
-                'id': plan.id,
+                'id': _json_snowflake_id(plan.id),
                 'name': plan.name,
                 'description': plan.description,
                 'status': plan.status,
@@ -7026,7 +7330,7 @@ def api_create_plan():
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
                 'scope_notification': plan.scope_notification,
-                'parent_id': plan.parent_id,
+                'parent_id': _json_snowflake_id(plan.parent_id),
                 'project_id': plan.project_id,
                 'creator_id': plan.creator_id,
                 'assignee_id': plan.assignee_id,
@@ -7059,7 +7363,7 @@ def api_get_plan_detail(plan_id):
         child_rows = Plan.query.filter_by(parent_id=plan.id).all()
         children = [
             {
-                'id': child.id,
+                'id': _json_snowflake_id(child.id),
                 'name': child.name,
                 'status': child.status,
                 'progress': child.progress,
@@ -7075,7 +7379,7 @@ def api_get_plan_detail(plan_id):
         return jsonify({
             'success': True,
             'plan': {
-                'id': plan.id,
+                'id': _json_snowflake_id(plan.id),
                 'name': plan.name,
                 'description': plan.description,
                 'status': plan.status,
@@ -7083,7 +7387,7 @@ def api_get_plan_detail(plan_id):
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
-                'parent_id': plan.parent_id,
+                'parent_id': _json_snowflake_id(plan.parent_id),
                 'project_id': plan.project_id,
                 'creator_id': plan.creator_id,
                 'assignee_id': plan.assignee_id,
@@ -7138,7 +7442,7 @@ def api_update_plan(plan_id):
             'success': True,
             'message': '计划更新成功',
             'plan': {
-                'id': plan.id,
+                'id': _json_snowflake_id(plan.id),
                 'name': plan.name,
                 'description': plan.description,
                 'status': plan.status,
@@ -7147,7 +7451,7 @@ def api_update_plan(plan_id):
                 'start_date': plan.start_date.isoformat() if plan.start_date else None,
                 'end_date': plan.end_date.isoformat() if plan.end_date else None,
                 'progress': plan.progress,
-                'parent_id': plan.parent_id,
+                'parent_id': _json_snowflake_id(plan.parent_id),
                 'project_id': plan.project_id,
                 'creator_id': plan.creator_id,
                 'assignee_id': plan.assignee_id,
@@ -7407,7 +7711,7 @@ def api_get_project_plans(project_id):
                 tc += c.get('test_case_count', 0)
             st, st_type = _plan_api_status_and_type(plan.status)
             return {
-                'id': plan.id,
+                'id': _json_snowflake_id(plan.id),
                 'name': plan.name,
                 'description': plan.description,
                 'status': st,
@@ -7435,8 +7739,12 @@ def api_get_project_plans(project_id):
         # 二次校验：用一次 GROUP BY 拿到所有 plan 的 test_case 数，再写回树，确保与 DB 一致
         def _collect_ids(nodes, out):
             for n in (nodes if isinstance(nodes, list) else [nodes]):
-                if n.get('id') is not None:
-                    out.append(n['id'])
+                pid = n.get('id')
+                if pid is not None:
+                    try:
+                        out.append(int(str(pid)))
+                    except (TypeError, ValueError):
+                        pass
                 if n.get('children'):
                     _collect_ids(n['children'], out)
         plan_ids_tree = []
@@ -7452,7 +7760,11 @@ def api_get_project_plans(project_id):
                 for n in (nodes if isinstance(nodes, list) else [nodes]):
                     pid = n.get('id')
                     if pid is not None:
-                        n['test_case_count'] = int(tc_patch.get(pid, 0))
+                        try:
+                            pk = int(str(pid))
+                            n['test_case_count'] = int(tc_patch.get(pk, 0))
+                        except (TypeError, ValueError):
+                            n['test_case_count'] = 0
                     if n.get('children'):
                         _patch(n['children'])
             _patch(plans_tree)
@@ -8030,15 +8342,15 @@ def api_create_bug():
             'success': True,
             'message': 'Bug创建成功',
             'bug': {
-                'id': bug.id,
+                'id': _json_snowflake_id(bug.id),
                 'title': bug.title,
                 'description': bug.description,
                 'severity': bug.severity,
                 'priority': bug.priority,
                 'status': bug.status,
                 'bug_type': bug.bug_type,
-                'plan_id': bug.plan_id,
-                'card_id': bug.card_id,
+                'plan_id': _json_snowflake_id(bug.plan_id),
+                'card_id': _json_snowflake_id(bug.card_id),
                 'project_id': bug.project_id,
                 'creator_id': bug.creator_id,
                 'assignee_id': bug.assignee_id,
@@ -8105,15 +8417,15 @@ def api_get_project_bugs(project_id):
                     assignee_name = user.name
             
             bugs.append({
-                'id': bug.id,
+                'id': _json_snowflake_id(bug.id),
                 'title': bug.title,
                 'description': bug.description,
                 'bug_type': bug.bug_type,
                 'priority': bug.priority,
                 'status': bug.status,
                 'assignee': assignee_name,
-                'plan_id': bug.plan_id,
-                'card_id': bug.card_id,
+                'plan_id': _json_snowflake_id(bug.plan_id),
+                'card_id': _json_snowflake_id(bug.card_id),
                 'created_at': bug.created_at.isoformat()
             })
         
@@ -8173,7 +8485,7 @@ def api_bug_detail(bug_id):
             return jsonify({
                 'success': True,
                 'bug': {
-                    'id': bug.id,
+                    'id': _json_snowflake_id(bug.id),
                     'title': bug.title,
                     'description': bug.description,
                     'steps_to_reproduce': bug.steps_to_reproduce,
@@ -8186,9 +8498,9 @@ def api_bug_detail(bug_id):
                     'environment': bug.environment,
                     'browser': bug.browser,
                     'os': bug.os,
-                    'plan_id': bug.plan_id,
-                    'navigation_plan_id': navigation_plan_id,
-                    'card_id': cid,
+                    'plan_id': _json_snowflake_id(bug.plan_id),
+                    'navigation_plan_id': _json_snowflake_id(navigation_plan_id),
+                    'card_id': _json_snowflake_id(cid),
                     'project_id': bug.project_id,
                     'creator_id': bug.creator_id,
                     'assignee_id': bug.assignee_id,
@@ -8295,7 +8607,7 @@ def api_bug_detail(bug_id):
                 'success': True,
                 'message': 'Bug更新成功',
                 'bug': {
-                    'id': bug.id,
+                    'id': _json_snowflake_id(bug.id),
                     'title': bug.title,
                     'status': bug.status,
                     'updated_at': bug.updated_at.isoformat()
@@ -8320,6 +8632,43 @@ def api_bug_detail(bug_id):
             _rec = _workflow_merge_creator_if_empty(
                 _workflow_recipients_bug(bug), bug.creator_id
             )
+            # 先清依赖行，避免 MySQL 外键 / 孤儿约束导致 delete bug 500
+            try:
+                BugComment.query.filter(BugComment.bug_id == int(bug_id)).delete(
+                    synchronize_session=False
+                )
+            except Exception as _e:
+                print(f"[DELETE-BUG] 清理 bug_comment 失败（继续）: {_e}")
+            try:
+                nt_bug = _normalize_diff_target("bug")
+                for _dr in DiffReviewState.query.filter(
+                    DiffReviewState.project_id == _pid,
+                    DiffReviewState.target == nt_bug,
+                    DiffReviewState.target_id == int(bug_id),
+                ).all():
+                    db.session.delete(_dr)
+            except Exception as _e:
+                print(f"[DELETE-BUG] 清理 diff_review_state 失败（继续）: {_e}")
+            _cid = getattr(bug, "card_id", None)
+            if _cid:
+                try:
+                    bug.card_id = None
+                    db.session.flush()
+                except Exception as _e:
+                    print(f"[DELETE-BUG] 解除 bug.card_id 失败（继续）: {_e}")
+                try:
+                    CardPlanRelation.query.filter(
+                        CardPlanRelation.card_id == int(_cid)
+                    ).delete(synchronize_session=False)
+                except Exception as _e:
+                    print(f"[DELETE-BUG] 清理 card_plan_relation 失败（继续）: {_e}")
+                try:
+                    _card = Card.query.get(int(_cid))
+                    if _card is not None:
+                        db.session.delete(_card)
+                except Exception as _e:
+                    print(f"[DELETE-BUG] 删除关联 Card id={_cid} 失败（继续）: {_e}")
+
             db.session.delete(bug)
             db.session.commit()
             _cache_invalidate_plans(_pid)
@@ -8491,7 +8840,7 @@ def api_create_testcase():
             'success': True,
             'message': '测试用例创建成功',
             'testcase': {
-                'id': testcase.id,
+                'id': _json_snowflake_id(testcase.id),
                 'title': str(testcase.title),
                 'status': _st,
                 'priority': str(testcase.priority) if testcase.priority else 'P3',
@@ -8527,7 +8876,7 @@ def api_testcase_detail(testcase_id):
             return jsonify({
                 'success': True,
                 'testcase': {
-                    'id': testcase.id,
+                    'id': _json_snowflake_id(testcase.id),
                     'title': testcase.title,
                     'status': _status,
                     'case_type': testcase.case_type,
@@ -8537,7 +8886,7 @@ def api_testcase_detail(testcase_id):
                     'steps': testcase.steps,
                     'remark': testcase.remark,
                     'requirement_id': testcase.requirement_id,
-                    'related_defects': testcase.related_defects,
+                    'related_defects': _json_snowflake_ids_in_list(testcase.related_defects),
                     'baseline': testcase.baseline,
                     'estimated_time': testcase.estimated_time,
                     'actual_time': testcase.actual_time,
@@ -8546,10 +8895,11 @@ def api_testcase_detail(testcase_id):
                     'executed_by': testcase.executed_by,
                     'execution_result': _exec,
                     'version': testcase.version,
-                    'plan_id': testcase.plan_id,
+                    'plan_id': _json_snowflake_id(testcase.plan_id),
                     'project_id': testcase.project_id,
                     'creator_id': testcase.creator_id,
                     'assignee_id': testcase.assignee_id,
+                    'card_id': _json_snowflake_id(getattr(testcase, 'card_id', None)),
                     'created_at': testcase.created_at.isoformat(),
                     'updated_at': testcase.updated_at.isoformat()
                 }
@@ -8664,7 +9014,7 @@ def api_testcase_detail(testcase_id):
                 'success': True,
                 'message': '测试用例更新成功',
                 'testcase': {
-                    'id': testcase.id,
+                    'id': _json_snowflake_id(testcase.id),
                     'title': testcase.title,
                     'status': status_val,
                     'updated_at': testcase.updated_at.isoformat()
@@ -8752,7 +9102,7 @@ def api_get_plan_testcases(plan_id):
         testcase_list = []
         for tc in testcases:
             testcase_list.append({
-                'id': tc.id,
+                'id': _json_snowflake_id(tc.id),
                 'title': tc.title,
                 'status': tc.status,
                 'case_type': tc.case_type,
@@ -8794,7 +9144,7 @@ def api_get_plan_bugs(plan_id):
         bug_list = []
         for bug in bugs:
             bug_list.append({
-                'id': bug.id,
+                'id': _json_snowflake_id(bug.id),
                 'title': bug.title,
                 'status': bug.status,
                 'priority': bug.priority,
@@ -9307,13 +9657,14 @@ def api_get_project_testcases(project_id):
                     assignee_name = user.name
             
             testcases.append({
-                'id': tc.id,
+                'id': _json_snowflake_id(tc.id),
                 'title': tc.title,
                 'status': tc.status.value if hasattr(tc.status, 'value') else str(tc.status),
                 'case_type': tc.case_type,
                 'priority': tc.priority,
                 'assignee': assignee_name,
-                'plan_id': tc.plan_id,
+                'plan_id': _json_snowflake_id(tc.plan_id),
+                'card_id': _json_snowflake_id(getattr(tc, 'card_id', None)),
                 'created_at': tc.created_at.isoformat()
             })
         

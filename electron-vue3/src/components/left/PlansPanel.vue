@@ -102,7 +102,7 @@
                     <span class="menu-icon">📦</span>
                     <span>{{ t('project.menuArchive') }}</span>
                   </div>
-                  <div class="menu-item" @click="onDeletePlan(plan)">
+                  <div v-if="!plan.is_default" class="menu-item" @click="onDeletePlan(plan)">
                     <span class="menu-icon">🗑️</span>
                     <span>{{ t('project.menuDelete') }}</span>
                   </div>
@@ -160,6 +160,49 @@
                   <button class="action-btn" @click.stop="onShowContextMenu(childPlan, $event)">
                     ⚙️
                   </button>
+                </div>
+
+                <div
+                  v-if="contextMenu?.visible && contextMenu?.planId === childPlan.id"
+                  class="context-menu"
+                  :class="{ 'is-dragging': contextMenuDragActive }"
+                  :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }"
+                  @mousedown.stop
+                >
+                  <div
+                    class="context-menu-drag-handle"
+                    :title="t('project.contextMenuDragHint')"
+                    @mousedown.stop="onContextMenuDragStart"
+                  >
+                    <span class="drag-grip">⋮⋮</span>
+                    <span class="drag-label">{{ t('project.contextMenuDrag') }}</span>
+                  </div>
+                  <div class="context-menu-body">
+                    <div class="menu-item" @click="onCreateSubPlan(childPlan)">
+                      <span class="menu-icon">➕</span>
+                      <span>{{ t('project.menuSubPlan') }}</span>
+                    </div>
+                    <div class="menu-item" @click="onCreateSiblingPlan(childPlan)">
+                      <span class="menu-icon">📝</span>
+                      <span>{{ t('project.menuSiblingPlan') }}</span>
+                    </div>
+                    <div class="menu-item" @click="onEditPlan(childPlan)">
+                      <span class="menu-icon">✏️</span>
+                      <span>{{ t('project.menuEdit') }}</span>
+                    </div>
+                    <div class="menu-item" @click="onArchivePlan(childPlan)">
+                      <span class="menu-icon">📦</span>
+                      <span>{{ t('project.menuArchive') }}</span>
+                    </div>
+                    <div v-if="!childPlan.is_default" class="menu-item" @click="onDeletePlan(childPlan)">
+                      <span class="menu-icon">🗑️</span>
+                      <span>{{ t('project.menuDelete') }}</span>
+                    </div>
+                    <div class="menu-item" @click="onPinPlan(childPlan)">
+                      <span class="menu-icon">📌</span>
+                      <span>{{ childPlan.is_pinned ? t('project.unpin') : t('project.pin') }}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

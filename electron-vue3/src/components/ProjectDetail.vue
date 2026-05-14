@@ -1873,12 +1873,52 @@ const totalCards = ref(0)
       if (!Number.isFinite(id) || id <= 0) return null
       let tt = (target || 'badcase').toString().toLowerCase()
       if (tt === 'test_case') tt = 'testcase'
+
+      /** 当前列表已含目标行时直接取 plan_id，避免误把 Card.id 当 Bug.id 去打详情 404 */
+      const planFromLoadedList = () => {
+        const rows = Array.isArray(badcases.value) ? badcases.value : []
+        if (tt === 'bug') {
+          const b = rows.find(
+            (x) => Number(x?.id) === id || Number(x?.card_id ?? x?.cardId) === id
+          )
+          if (b && b.plan_id != null && b.plan_id !== '') {
+            return parsePositivePlanId(b.plan_id)
+          }
+        } else if (tt === 'badcase') {
+          const b = rows.find((x) => Number(x?.id) === id)
+          if (b && b.plan_id != null && b.plan_id !== '') {
+            return parsePositivePlanId(b.plan_id)
+          }
+        } else if (tt === 'testcase') {
+          const b = rows.find((x) => Number(x?.id) === id)
+          if (b && b.plan_id != null && b.plan_id !== '') {
+            return parsePositivePlanId(b.plan_id)
+          }
+        }
+        return null
+      }
+      const cached = planFromLoadedList()
+      if (cached) return cached
+
       try {
         if (tt === 'bug') {
-          const res = await getBugDetail(id)
-          if (res?.data?.success && res.data.bug) {
-            const b = res.data.bug
-            return parsePositivePlanId(b.navigation_plan_id ?? b.plan_id)
+          try {
+            const res = await getBugDetail(id)
+            if (res?.data?.success && res.data.bug) {
+              const b = res.data.bug
+              return parsePositivePlanId(b.navigation_plan_id ?? b.plan_id)
+            }
+          } catch (_e) {
+            /* Bug 不存在或 id 实为卡片主键：再试 Card */
+          }
+          try {
+            const res = await getCardDetail(id)
+            const card = res?.data?.data
+            if (res?.data?.success && card) {
+              return parsePositivePlanId(card.plan_id)
+            }
+          } catch (_e2) {
+            /* ignore */
           }
         } else if (tt === 'badcase') {
           const res = await getBadcaseDetail(id)
@@ -2381,12 +2421,11 @@ const totalCards = ref(0)
       const m = meta || {}
       const cid = m.cardId
       if (cid == null || cid === '') return ''
-      const n = typeof cid === 'number' ? cid : parseInt(String(cid), 10)
-      if (!Number.isFinite(n) || n <= 0) return ''
+      const sid = String(cid)
       const lists = [filteredCards.value, cards.value]
       for (const list of lists) {
         if (!Array.isArray(list)) continue
-        const row = list.find((c) => Number(c.id) === n)
+        const row = list.find((c) => String(c.id) === sid)
         if (row?.title) return String(row.title)
       }
       return ''
@@ -2831,11 +2870,10 @@ const totalCards = ref(0)
         if (meta.cardTitle != null && String(meta.cardTitle).trim() !== '') return
         const cid = meta.cardId
         if (cid == null || cid === '') return
-        const n = typeof cid === 'number' ? cid : parseInt(String(cid), 10)
-        if (!Number.isFinite(n) || n <= 0) return
+        const sid = String(cid)
         const row =
-          (Array.isArray(filteredCards.value) && filteredCards.value.find((c) => Number(c.id) === n)) ||
-          (Array.isArray(cards.value) && cards.value.find((c) => Number(c.id) === n))
+          (Array.isArray(filteredCards.value) && filteredCards.value.find((c) => String(c.id) === sid)) ||
+          (Array.isArray(cards.value) && cards.value.find((c) => String(c.id) === sid))
         if (!row?.title) return
         upsertWorkbenchTab({
           id: tab.id,
@@ -3048,7 +3086,8 @@ const totalCards = ref(0)
       
       // 如果有 cardId，尝试使用 card 的类型
       if (cardId) {
-        const card = filteredCards.value.find(c => c.id === cardId || c.id === parseInt(cardId))
+        const sid = String(cardId)
+        const card = filteredCards.value.find((c) => String(c.id) === sid)
         if (card && card.type) {
           console.log(`[getPlanListApiKindByPlanId] 使用Card类型: ${card.type}, cardId: ${cardId}`)
           const raw = card.type.toString().toLowerCase()
@@ -3432,23 +3471,23 @@ const totalCards = ref(0)
             ? planId
             : parseInt(String(planId), 10)
           : NaN
-      const cid =
-        cardId != null ? (typeof cardId === 'number' ? cardId : parseInt(String(cardId), 10)) : NaN
-      if (Number.isNaN(pid) || pid <= 0 || Number.isNaN(cid) || cid <= 0) return
+      const cidStr =
+        cardId != null && String(cardId).trim() !== '' ? String(cardId).trim() : ''
+      if (Number.isNaN(pid) || pid <= 0 || !cidStr) return
       const tl =
         type === 'badcase'
           ? 'badcase'
           : type === 'testcase' || type === 'test_case'
             ? 'testcase'
             : 'bug'
-      const tabId = `type-list-${tl}-${pid}-${cid}`
+      const tabId = `type-list-${tl}-${pid}-${cidStr}`
       const title = truncateForTab(
         cardTitle || `${tl}列表`,
         t('tab.planFallback', { id: pid })
       )
       logListNav('openTypeListTab', {
         planId: pid,
-        cardId: cid,
+        cardId: cidStr,
         type: tl,
         tabTitle: title,
         tabId
@@ -3457,7 +3496,7 @@ const totalCards = ref(0)
         id: tabId,
         kind: 'type-list',
         title,
-        meta: { type: tl, planId: pid, cardTitle, cardId: cid }
+        meta: { type: tl, planId: pid, cardTitle, cardId: cidStr }
       })
       await activateWorkbenchTab(tabId)
       await nextTick()
@@ -3691,9 +3730,14 @@ const totalCards = ref(0)
     const handleQuickUpdate = async (updateData) => {
       console.log('[handleQuickUpdate] 快速更新卡片:', updateData)
       console.log('[handleQuickUpdate] 传递的 type:', updateData.type)
+      const cardIdStr = updateData.id != null ? String(updateData.id) : ''
+      if (!cardIdStr) {
+        console.error('[handleQuickUpdate] 缺少卡片 id')
+        return
+      }
       
       try {
-        const response = await updateCard(updateData.id, {
+        const response = await updateCard(cardIdStr, {
           title: updateData.title,
           type: updateData.type
         })
@@ -3703,8 +3747,8 @@ const totalCards = ref(0)
         console.log('[handleQuickUpdate] 后端返回的卡片:', updatedCard)
         
         if (response.data.success) {
-          // 更新列表中的卡片数据
-          const index = filteredCards.value.findIndex(c => c.id === updateData.id)
+          // 更新列表中的卡片数据（id 与后端统一为字符串，避免雪花精度问题）
+          const index = filteredCards.value.findIndex((c) => String(c.id) === cardIdStr)
           if (index !== -1) {
             // 使用后端返回的完整卡片数据（API 为 data，兼容 card）
             if (updatedCard && typeof updatedCard === 'object') {
@@ -3724,7 +3768,8 @@ const totalCards = ref(0)
         }
       } catch (err) {
         console.error('[handleQuickUpdate] 更新卡片失败:', err)
-        alert('更新卡片失败')
+        const msg = err?.response?.data?.error || err?.message || '更新卡片失败'
+        alert(msg)
       }
     }
     
@@ -3760,19 +3805,18 @@ const totalCards = ref(0)
       let entityIdForEditor = itemId
       let cardRowForId = null
       if (itemType === 'card') {
+        const idKey = itemId != null ? String(itemId).trim() : ''
         cardRowForId =
-          (Array.isArray(filteredCards.value) && filteredCards.value.find((c) => c.id == itemId)) ||
-          (Array.isArray(cards.value) && cards.value.find((c) => c.id == itemId)) ||
+          (Array.isArray(filteredCards.value) && filteredCards.value.find((c) => String(c.id) === idKey)) ||
+          (Array.isArray(cards.value) && cards.value.find((c) => String(c.id) === idKey)) ||
           null
-        const cid =
-          typeof itemId === 'number' ? itemId : parseInt(String(itemId), 10)
-        if (!cardRowForId && Number.isFinite(cid) && cid > 0) {
+        if (!cardRowForId && idKey) {
           try {
-            const res = await getCardDetail(cid)
+            const res = await getCardDetail(idKey)
             const c = res?.data?.data ?? res?.data?.card
             if (res?.data?.success && c && (c.id != null || c.title != null || c.type != null)) {
               cardRowForId = {
-                id: c.id ?? cid,
+                id: c.id ?? idKey,
                 type: c.type,
                 source_type: c.source_type,
                 source_id: c.source_id,
@@ -3780,14 +3824,14 @@ const totalCards = ref(0)
                 plan_id: c.plan_id
               }
               console.log('[MAIN-EDITOR] itemType=card 本地无行，已用 getCardDetail 补全', {
-                cardId: cid,
+                cardId: idKey,
                 type: cardRowForId.type,
                 source_type: cardRowForId.source_type,
                 source_id: cardRowForId.source_id
               })
             }
           } catch (e) {
-            console.warn('[MAIN-EDITOR] getCardDetail 失败，无法解析卡片实体', cid, e)
+            console.warn('[MAIN-EDITOR] getCardDetail 失败，无法解析卡片实体', idKey, e)
           }
         }
         if (cardRowForId) {
@@ -3798,8 +3842,7 @@ const totalCards = ref(0)
           else editorSourceType = 'badcase'
           const sid = cardRowForId.source_id
           if (sid != null && sid !== '') {
-            const sn = typeof sid === 'number' ? sid : parseInt(String(sid), 10)
-            if (Number.isFinite(sn) && sn > 0) entityIdForEditor = sn
+            entityIdForEditor = sid
           }
           console.log('[MAIN-EDITOR] itemType=card 已解析卡片行', {
             cardId: itemId,
@@ -5289,6 +5332,10 @@ const totalCards = ref(0)
     
     const deletePlan = async (plan) => {
       closeContextMenu()
+      if (plan.is_default) {
+        alert(t('project.cantDeleteDefaultPlan'))
+        return
+      }
       if (confirm(t('project.deletePlanConfirm', { name: plan.name }))) {
         try {
           console.log('开始删除计划:', plan.name, 'ID:', plan.id)
@@ -5312,17 +5359,20 @@ const totalCards = ref(0)
           console.error('错误响应:', error.response)
           console.error('错误状态:', error.response?.status)
           console.error('错误数据:', error.response?.data)
-          
-          let errorMessage = t('project.deletePlanErr')
-          if (error.response) {
-            errorMessage += `: ${error.response.status} - ${error.response.data?.error || error.response.statusText}`
-          } else if (error.request) {
-            errorMessage += ': ' + t('project.networkUnreachable')
+          const serverMsg = error.response?.data?.error
+          if (serverMsg) {
+            alert(t('project.deletePlanFail', { msg: serverMsg }))
           } else {
-            errorMessage += `: ${error.message}`
+            let errorMessage = t('project.deletePlanErr')
+            if (error.response) {
+              errorMessage += `: ${error.response.status} - ${error.response.statusText}`
+            } else if (error.request) {
+              errorMessage += ': ' + t('project.networkUnreachable')
+            } else {
+              errorMessage += `: ${error.message}`
+            }
+            alert(errorMessage)
           }
-          
-          alert(errorMessage)
         }
       }
     }
@@ -7668,26 +7718,6 @@ const totalCards = ref(0)
       }
     }
 
-    /** Card 上改 status/负责人 等实际落在源表时，应打开计划下 Bug/BadCase/测试用例子列表，而非迭代卡片总表 */
-    const inferWorkbenchListTypeFromCardSnapshot = (detail) => {
-      const raw = String(detail?.before?.type ?? detail?.after?.type ?? '').toLowerCase()
-      if (raw.includes('test') || raw === 'test_case') return 'testcase'
-      if (raw.includes('bad')) return 'badcase'
-      return 'bug'
-    }
-
-    const cardModifyTouchesLinkedSourceListColumns = (fieldKeys) =>
-      fieldKeys.some((f) => {
-        const nk = normalizeDiffFieldKey(f)
-        return ['status', 'assignee', 'title', 'priority'].includes(nk)
-      })
-
-    const listTypeToUrlContentType = (lt) => {
-      if (lt === 'badcase') return 'badcase'
-      if (lt === 'testcase') return 'test_case'
-      return 'bug'
-    }
-
     const handleShowModifyInList = async (event) => {
           const dtop = event.detail || {}
           if (dtop.__modifyListBatch === true && Array.isArray(dtop.items) && dtop.items.length > 0) {
@@ -7848,30 +7878,8 @@ const totalCards = ref(0)
               else selectedPlan.value = null
             } else {
               let openedTypeList = false
-              if (targetPlanId && target === 'card' && hasListFieldChangesPre) {
-                const listType = inferWorkbenchListTypeFromCardSnapshot(dtop)
-                selectedPlan.value = targetPlanId
-                expandPlanTreeToPlanId(targetPlanId)
-                await fetchCards()
-                await nextTick()
-                const cardTitle =
-                  (dtop.before && dtop.before.title) ||
-                  (dtop.after && dtop.after.title) ||
-                  ''
-                await upsertAndActivateTypeListTab({
-                  planId: targetPlanId,
-                  cardId: intTargetId,
-                  type: listType,
-                  cardTitle
-                })
-                urlContentType.value = listTypeToUrlContentType(listType)
-                openedTypeList = true
-                listLoadedByTabNavigation = true
-                const linked = badcases.value.find(
-                  (b) => Number(b.card_id ?? b.cardId) === intTargetId
-                )
-                highlightRowId.value = linked ? linked.id : intTargetId
-              } else if (targetPlanId && target === 'card') {
+              // target=card 时统一打开迭代「卡片表」并高亮 Card 行；勿因 title 等列表字段钻进 Bug/BadCase 子 Tab
+              if (targetPlanId && target === 'card') {
                 selectedPlan.value = targetPlanId
                 expandPlanTreeToPlanId(targetPlanId)
                 await fetchCards()
@@ -7925,20 +7933,10 @@ const totalCards = ref(0)
                     )
                   ]
                 : [intTargetId]
-            if (
-              target === 'card' &&
-              hasListFieldChangesPre &&
-              batchFlashIds.length === 1
-            ) {
-              const lk = badcases.value.find(
-                (b) => Number(b.card_id ?? b.cardId) === intTargetId
-              )
-              if (lk) {
-                highlightRowId.value = lk.id
-                batchFlashIds = [lk.id]
-              } else {
-                highlightRowId.value = intTargetId
-              }
+            const isCardLayerTarget = target === 'card'
+            if (isCardLayerTarget) {
+              highlightRowId.value = intTargetId
+              batchFlashIds = [intTargetId]
             } else {
               highlightRowId.value = intTargetId
             }
@@ -7947,7 +7945,10 @@ const totalCards = ref(0)
               await nextTick()
               await new Promise((resolve) => setTimeout(resolve, i === 0 ? 280 : 130))
               for (const bid of batchFlashIds) {
-                const el = document.querySelector(`[data-bug-id="${bid}"]`)
+                const el = isCardLayerTarget
+                  ? document.querySelector(`[data-item-id="${bid}"]`) ||
+                    document.querySelector(`[data-card-id="${bid}"]`)
+                  : document.querySelector(`[data-bug-id="${bid}"]`)
                 if (el) {
                   anchorRow = el
                   break
@@ -7961,7 +7962,10 @@ const totalCards = ref(0)
             requestAnimationFrame(() => {
               const els = []
               for (const bid of batchFlashIds) {
-                const el = document.querySelector(`[data-bug-id="${bid}"]`)
+                const el = isCardLayerTarget
+                  ? document.querySelector(`[data-item-id="${bid}"]`) ||
+                    document.querySelector(`[data-card-id="${bid}"]`)
+                  : document.querySelector(`[data-bug-id="${bid}"]`)
                 if (el) els.push(el)
               }
               for (const el of els) {
@@ -8219,30 +8223,8 @@ const totalCards = ref(0)
             else selectedPlan.value = null
           } else {
             let openedTypeList = false
-            if (targetPlanId && target === 'card' && hasListFieldChanges) {
-              const listType = inferWorkbenchListTypeFromCardSnapshot(event.detail || {})
-              selectedPlan.value = targetPlanId
-              expandPlanTreeToPlanId(targetPlanId)
-              await fetchCards()
-              await nextTick()
-              const cardTitle =
-                (event.detail?.before && event.detail.before.title) ||
-                (event.detail?.after && event.detail.after.title) ||
-                ''
-              await upsertAndActivateTypeListTab({
-                planId: targetPlanId,
-                cardId: intTargetId,
-                type: listType,
-                cardTitle
-              })
-              urlContentType.value = listTypeToUrlContentType(listType)
-              openedTypeList = true
-              listLoadedByTabNavigation = true
-              const linked = badcases.value.find(
-                (b) => Number(b.card_id ?? b.cardId) === intTargetId
-              )
-              highlightRowId.value = linked ? linked.id : intTargetId
-            } else if (targetPlanId && target === 'card') {
+            // target=card：统一打开迭代「卡片表」；勿因 title 等列表字段打开 Bug/BadCase 子 Tab
+            if (targetPlanId && target === 'card') {
               selectedPlan.value = targetPlanId
               expandPlanTreeToPlanId(targetPlanId)
               await fetchCards()
@@ -8369,13 +8351,6 @@ const totalCards = ref(0)
           let targetRow = null
           let scrollRid = intTargetId
           let scrollNavTarget = String(target || 'bug').toLowerCase()
-          if (scrollNavTarget === 'card' && hasListFieldChanges) {
-            const lk = badcases.value.find((b) => Number(b.card_id ?? b.cardId) === intTargetId)
-            if (lk) {
-              scrollRid = lk.id
-              scrollNavTarget = inferWorkbenchListTypeFromCardSnapshot(event.detail || {})
-            }
-          }
           if (scrollNavTarget === 'test_case') scrollNavTarget = 'testcase'
 
           for (let i = 0; i < 12; i++) {
@@ -8396,12 +8371,14 @@ const totalCards = ref(0)
       const detail = event.detail || {}
       const mergedFromLegacyPre = detail.merged_from_legacy
       /**
-       * 沙箱/聊天仍带 target=card 时：若该行实为 Bug/BadCase/测例卡片，应进类型子列表而非「纯 Card 总表」或主区编辑器。
-       * getCardDetail 可补 plan_id；有 source_id 时列表高亮用源表主键。
+       * 历史：曾将 target=card 提升为 bug/badcase/testcase 以打开「子类型列表」。
+       * grep 点击卡片（prefer_card_layer）与改卡片标题等须留在迭代「卡片表」层，故遇 prefer_card_layer 则跳过。
+       * 其它仍带 target=card 且无 prefer 的入口（如旧链）可继续提升。
        */
       const maybePromoteCardNavDetail = async () => {
         const t0 = String(detail.target || '').toLowerCase()
         if (t0 !== 'card' || mergedFromLegacyPre) return
+        if (detail.prefer_card_layer === true) return
         const ridRaw =
           detail.recordId != null && detail.recordId !== ''
             ? detail.recordId
@@ -9002,6 +8979,7 @@ const totalCards = ref(0)
       createPlan,
       createPlanAndContinue,
       fetchBadcases,
+      fetchBadcasesByPlan,
       refreshBadcases,
       getBadcaseStatusText,
       getBadcaseTypeText,

@@ -7,12 +7,27 @@ export const BACKEND_BASE_URL =
   (import.meta.env.DEV ? '' : 'http://localhost:5000')
 
 const api = axios.create({
-  baseURL: BACKEND_BASE_URL,
-  timeout: 30000, // 增加超时时间到30秒
-  withCredentials: true // 如需携带cookie
+    baseURL: BACKEND_BASE_URL,
+    timeout: 30000, // 增加超时时间到30秒
+    withCredentials: true // 如需携带cookie
 })
 
 export { api }
+
+/** URL 路径中的实体 id（雪花 BigInt）：一律字符串 + encode，避免 JS Number 精度丢失 */
+export function apiPathId(id) {
+  return encodeURIComponent(String(id == null ? '' : id))
+}
+
+/** 查询参数中的 plan_id / card_id 等：避免 axios 把大整数序列化成不精确数字 */
+function stringifySnowflakeQueryParams(params) {
+  const o = { ...(params || {}) }
+  const keys = ['plan_id', 'card_id', 'badcase_id', 'bug_id', 'testcase_id', 'baseline_id']
+  for (const k of keys) {
+    if (o[k] != null && o[k] !== '') o[k] = String(o[k])
+  }
+  return o
+}
 
 // 登录
 export function login(data) {
@@ -48,7 +63,7 @@ export function getProjectEditContext(projectId) {
 }
 // 获取项目BadCase列表（分页）
 export function getProjectBadcases(projectId, page = 1, perPage = 10, additionalParams = {}) {
-  const params = { page, per_page: perPage, ...additionalParams }
+  const params = { page, per_page: perPage, ...stringifySnowflakeQueryParams(additionalParams) }
   return api.get(`/api/projects/${projectId}/badcases`, { params })
 }
 // 获取项目计划列表
@@ -57,11 +72,11 @@ export function getProjectPlans(projectId) {
 }
 // 获取计划下的Bug列表
 export function getPlanBugs(planId) {
-  return api.get(`/api/plans/${planId}/bugs`)
+  return api.get(`/api/plans/${apiPathId(planId)}/bugs`)
 }
 // 计划详情（用于新建页补全「所属计划」名称等）
 export function getPlanDetail(planId) {
-  return api.get(`/api/plans/${planId}`)
+  return api.get(`/api/plans/${apiPathId(planId)}`)
 }
 // 创建计划
 export function createPlan(data) {
@@ -69,15 +84,15 @@ export function createPlan(data) {
 }
 // 更新计划
 export function updatePlan(id, data) {
-  return api.put(`/api/plans/${id}`, data)
+  return api.put(`/api/plans/${apiPathId(id)}`, data)
 }
 // 删除计划
 export function deletePlan(id) {
-  return api.delete(`/api/plans/${id}`)
+  return api.delete(`/api/plans/${apiPathId(id)}`)
 }
 // 置顶/取消置顶计划
 export function pinPlan(id) {
-  return api.post(`/api/plans/${id}/pin`)
+  return api.post(`/api/plans/${apiPathId(id)}/pin`)
 }
 
 // 团队管理
@@ -155,11 +170,11 @@ export function createBadcase(data) {
 }
 // 更新 BadCase
 export function updateBadcase(id, data) {
-  return api.put(`/api/badcases/${id}`, data)
+  return api.put(`/api/badcases/${apiPathId(id)}`, data)
 }
 // 获取 BadCase 详情
 export function getBadcaseDetail(id) {
-  return api.get(`/api/badcases/${id}`)
+  return api.get(`/api/badcases/${apiPathId(id)}`)
 }
 
 // 邀请成员
@@ -172,25 +187,25 @@ export function removeMember(project_id, user_id) {
 }
 // 更新 BadCase 状态和指派
 export function updateBadcaseStatus(id, data) {
-  return api.post(`/api/badcases/${id}/status`, data)
+  return api.post(`/api/badcases/${apiPathId(id)}/status`, data)
 }
 
 // 更新 BadCase 的计划关联
 export function updateBadcasePlan(id, planId) {
-  return api.put(`/api/badcases/${id}`, { plan_id: planId })
+  return api.put(`/api/badcases/${apiPathId(id)}`, { plan_id: planId != null ? String(planId) : planId })
 }
 // 添加 BadCase 评论
 export function addBadcaseComment(id, data) {
-  return api.post(`/api/badcases/${id}/comment`, data)
+  return api.post(`/api/badcases/${apiPathId(id)}/comment`, data)
 }
 // 标记 BadCase 已解决
 export function closeBadcase(id) {
-  return api.post(`/api/badcases/${id}/close`)
+  return api.post(`/api/badcases/${apiPathId(id)}/close`)
 }
 
 // 删除 BadCase
 export function deleteBadcase(id) {
-  return api.delete(`/api/badcases/${id}`)
+  return api.delete(`/api/badcases/${apiPathId(id)}`)
 }
 // 导入Excel
 export function importExcel(formData) {
@@ -279,28 +294,28 @@ export function createBug(data) {
 
 // 更新 Bug
 export function updateBug(id, data) {
-  return api.put(`/api/bugs/${id}`, data)
+  return api.put(`/api/bugs/${apiPathId(id)}`, data)
 }
 
 // 获取 Bug 详情
 export function getBugDetail(id) {
-  return api.get(`/api/bugs/${id}`)
+  return api.get(`/api/bugs/${apiPathId(id)}`)
 }
 
 // 获取项目 Bug 列表
 export function getProjectBugs(projectId, page = 1, perPage = 10, additionalParams = {}) {
-  const params = { page, per_page: perPage, ...additionalParams }
+  const params = { page, per_page: perPage, ...stringifySnowflakeQueryParams(additionalParams) }
   return api.get(`/api/projects/${projectId}/bugs`, { params })
 }
 
 // 更新 Bug 状态
 export function updateBugStatus(id, data) {
-  return api.post(`/api/bugs/${id}/status`, data)
+  return api.post(`/api/bugs/${apiPathId(id)}/status`, data)
 }
 
 // 删除 Bug
 export function deleteBug(id) {
-  return api.delete(`/api/bugs/${id}`)
+  return api.delete(`/api/bugs/${apiPathId(id)}`)
 }
 
 // ==================== TestCase API ====================
@@ -312,36 +327,36 @@ export function createTestCase(data) {
 
 // 更新TestCase
 export function updateTestCase(id, data) {
-  return api.put(`/api/testcases/${id}`, data)
+  return api.put(`/api/testcases/${apiPathId(id)}`, data)
 }
 
 // 获取TestCase详情
 export function getTestCaseDetail(id) {
-  return api.get(`/api/testcases/${id}`)
+  return api.get(`/api/testcases/${apiPathId(id)}`)
 }
 
 // 删除TestCase
 export function deleteTestCase(id) {
-  return api.delete(`/api/testcases/${id}`)
+  return api.delete(`/api/testcases/${apiPathId(id)}`)
 }
 
 // 获取计划下的TestCase数量（与列表统计一致）
 export function getPlanTestCaseCount(planId) {
-  return api.get(`/api/plans/${planId}/testcases`, { params: { count_only: 1 } })
+  return api.get(`/api/plans/${apiPathId(planId)}/testcases`, { params: { count_only: 1 } })
 }
 
 // 获取计划下的TestCase列表
 export function getPlanTestCases(planId) {
-  return api.get(`/api/plans/${planId}/testcases`)
+  return api.get(`/api/plans/${apiPathId(planId)}/testcases`)
 }
 
 // 获取项目的TestCase列表（分页）
 export function getProjectTestCases(projectId, page = 1, perPage = 10, params = {}) {
-  const queryParams = new URLSearchParams({
-    page,
-    per_page: perPage,
-    ...params
-  })
+  const merged = stringifySnowflakeQueryParams({ page, per_page: perPage, ...params })
+  const queryParams = new URLSearchParams()
+  for (const [k, v] of Object.entries(merged)) {
+    if (v != null && v !== '') queryParams.set(k, String(v))
+  }
   return api.get(`/api/projects/${projectId}/testcases?${queryParams}`)
 }
 
@@ -349,7 +364,7 @@ export function getProjectTestCases(projectId, page = 1, perPage = 10, params = 
 
 // 获取计划的基线列表
 export function getPlanBaselines(planId) {
-  return api.get(`/api/plans/${planId}/baselines`)
+  return api.get(`/api/plans/${apiPathId(planId)}/baselines`)
 }
 
 // 创建基线
@@ -416,23 +431,23 @@ export function createCard(data) {
 
 // 获取项目卡片列表
 export function getProjectCards(projectId, page = 1, perPage = 10, additionalParams = {}) {
-  const params = { page, per_page: perPage, ...additionalParams }
+  const params = { page, per_page: perPage, ...stringifySnowflakeQueryParams(additionalParams) }
   return api.get(`/api/projects/${projectId}/cards`, { params })
 }
 
 // 获取卡片详情
 export function getCardDetail(cardId) {
-  return api.get(`/api/cards/${cardId}`)
+  return api.get(`/api/cards/${apiPathId(cardId)}`)
 }
 
 // 更新卡片
 export function updateCard(cardId, data) {
-  return api.put(`/api/cards/${cardId}`, data)
+  return api.put(`/api/cards/${apiPathId(cardId)}`, data)
 }
 
 // 删除卡片
 export function deleteCard(cardId) {
-  return api.delete(`/api/cards/${cardId}`)
+  return api.delete(`/api/cards/${apiPathId(cardId)}`)
 }
 
 // 全局搜索卡片
@@ -445,7 +460,9 @@ export function searchCards(params) {
 
 // 移动卡片到指定计划
 export function moveCard(cardId, planId) {
-  return api.post(`/api/cards/${cardId}/move`, { plan_id: planId })
+  return api.post(`/api/cards/${apiPathId(cardId)}/move`, {
+    plan_id: planId != null && planId !== '' ? String(planId) : planId
+  })
 }
 
 // 获取卡片类型列表
@@ -485,7 +502,7 @@ export function deleteCardPlanRelation(relationId) {
 
 // 获取卡片计划变更历史
 export function getCardPlanHistory(cardId) {
-  return api.get(`/api/cards/${cardId}/history`)
+  return api.get(`/api/cards/${apiPathId(cardId)}/history`)
 }
 
 export default api 

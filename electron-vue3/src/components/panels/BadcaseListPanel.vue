@@ -200,7 +200,11 @@
             <span class="date-text">{{ new Date(badcase.created_at).toLocaleDateString() }}</span>
           </div>
 
-          <div v-if="pendingModifications[badcase.id] || modifyPendingOverlay(badcase)" class="row-actions" @click.stop>
+          <div
+            v-if="pendingModifications[badcase.id]?._pendingDelete || modifyPendingOverlay(badcase)"
+            class="row-actions"
+            @click.stop
+          >
             <template v-if="pendingModifications[badcase.id]?._pendingDelete">
               <template v-if="isLastInConsecutiveDeleteGroup(badcase.id)">
                 <span v-if="getConsecutiveDeleteGroupSize(badcase.id) > 1" class="batch-count">{{ t('common.nItems', { n: getConsecutiveDeleteGroupSize(badcase.id) }) }}</span>
@@ -376,15 +380,16 @@ export default {
       const fn = this.editItem || this.editBadcase
       if (typeof fn === 'function') fn(id)
     },
-    /** target=card 时 pending 挂在 Card.id，与 Bug 行主键 id 不同，需用 card_id 对齐 */
+    /** target=card 时 pending 挂在 Card.id；Bug 行主键可能与 Card.id 数字相同，须排除 _target=card 以免卡片沙箱误投影到 Bug 子表 */
     modifyPendingOverlay(badcase) {
       const pm = this.pendingModifications
+      const isCardLayer = (p) => p && String(p._target || '').toLowerCase() === 'card'
       const a = pm[badcase.id]
-      if (a && !a._pendingDelete) return a
+      if (a && !a._pendingDelete && !isCardLayer(a)) return a
       const cid = Number(badcase.card_id ?? badcase.cardId)
       if (Number.isFinite(cid) && cid > 0) {
         const c = pm[cid]
-        if (c && !c._pendingDelete) return c
+        if (c && !c._pendingDelete && !isCardLayer(c)) return c
       }
       return null
     },
@@ -394,9 +399,10 @@ export default {
     },
     modifyPendingMapKey(badcase) {
       const pm = this.pendingModifications
-      if (pm[badcase.id] && !pm[badcase.id]._pendingDelete) return badcase.id
+      const isCardLayer = (p) => p && String(p._target || '').toLowerCase() === 'card'
+      if (pm[badcase.id] && !pm[badcase.id]._pendingDelete && !isCardLayer(pm[badcase.id])) return badcase.id
       const cid = Number(badcase.card_id ?? badcase.cardId)
-      if (Number.isFinite(cid) && cid > 0 && pm[cid] && !pm[cid]._pendingDelete) return cid
+      if (Number.isFinite(cid) && cid > 0 && pm[cid] && !pm[cid]._pendingDelete && !isCardLayer(pm[cid])) return cid
       return badcase.id
     },
     /** pending 里旧状态为空时，用当前行列表数据兜底，避免误显示「未设置」而库内实为 closed 等 */

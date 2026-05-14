@@ -2471,14 +2471,24 @@ const handleNavigation = (navigation) => {
 
   const recordId = navigation.record_id ?? navigation.bug_id
   const navTarget = (navigation.target || 'bug').toString().toLowerCase()
-  
-  // 发送自定义事件给父组件ProjectDetail
+  const normalizedTarget = navTarget === 'test_case' ? 'testcase' : navTarget
+  const cardIdNav =
+    navigation.card_id != null && navigation.card_id !== ''
+      ? navigation.card_id
+      : normalizedTarget === 'card'
+        ? recordId
+        : undefined
+
+  // 发送自定义事件给父组件 ProjectDetail
   const event = new CustomEvent('grep-navigate', {
     detail: {
       planId: navigation.plan_id,
       bugId: recordId,
       recordId,
-      target: navTarget === 'test_case' ? 'testcase' : navTarget
+      target: normalizedTarget,
+      ...(cardIdNav != null && cardIdNav !== '' ? { card_id: cardIdNav, cardId: cardIdNav } : {}),
+      /** grep 明确为卡片命中时：进迭代「卡片表」层，勿把 Card 提升成 Bug 子列表 */
+      ...(normalizedTarget === 'card' ? { prefer_card_layer: true } : {})
     }
   })
   window.dispatchEvent(event)

@@ -483,17 +483,30 @@ def modify_modifications_kv_summary(modifications: Dict[str, Any], locale: Optio
 
 
 def modify_target_display_name(target: str, locale: Optional[str]) -> str:
+    t = (target or "").strip().lower()
     if is_english_locale(locale):
-        if target == "bug":
+        if t == "bug":
             return "Bug"
-        if target == "testcase":
+        if t == "testcase":
             return "test case"
-        return "BadCase"
-    if target == "bug":
+        if t == "badcase":
+            return "BadCase"
+        if t == "card":
+            return "Card"
+        if t == "plan":
+            return "Plan"
+        return t or "record"
+    if t == "bug":
         return "Bug"
-    if target == "testcase":
+    if t == "testcase":
         return "测试用例"
-    return "BadCase"
+    if t == "badcase":
+        return "BadCase"
+    if t == "card":
+        return "卡片"
+    if t == "plan":
+        return "迭代计划"
+    return t or "记录"
 
 
 def modify_tool_progress(key: str, locale: Optional[str], **kw: Any) -> str:
@@ -1102,6 +1115,7 @@ Required format:
 - **Next steps**: pending actions (including "user must confirm/reject preview in UI"); may complement Confirmed but do not hide factual outcomes that belong under Confirmed.
 - **Risks and blockers**: "- None" when there are none.
 - Keep facts, no invention.
+- **When the tool is `modify`**: any entity name (Bug / BadCase / test case / Card) in Confirmed must match the **fact line** `target` below; do **not** write BadCase just because the product name contains "BadCase"; IDs must match `target_id`.
 
 Previous summary:
 {prev_block}
@@ -1127,6 +1141,7 @@ Output only the new summary."""
 - **待办与建议下一步**：写尚未完成的动作（含需在界面确认/拒绝的沙箱预览）；可与已确认互补，但不要把本应属于已确认的可核对事实只写在待办里。
 - **风险与阻塞**：无则写「- 无」。
 - 忠实合并，不编造。
+- **modify 工具**：若观察摘要或待办中出现「Bug / BadCase / 测试用例」等实体名，**必须与下方「事实行」中的 target 一致**；**禁止**因产品名含「BadCase」就把 Bug 写成 BadCase；ID 须与 target_id 一致。
 
 已有总览：
 {prev_block}

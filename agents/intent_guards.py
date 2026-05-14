@@ -738,6 +738,9 @@ def user_text_implies_card_entity_type(text: Optional[str]) -> bool:
         return False
     zh = text
     u = text.lower()
+    # 看板/迭代列表上展示名常对应 Card.title，与 Bug.title 可不同步
+    if "看板" in zh and any(k in zh for k in ("标题", "名称", "重命名")):
+        return True
     has_card = ("卡片" in zh) or ("card" in u)
     if not has_card:
         return False
