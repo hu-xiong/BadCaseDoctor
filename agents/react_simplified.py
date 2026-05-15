@@ -46,13 +46,13 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 - REACT_UNIFIED_THINK_SSE_MIN_CHARS：统一流里 ``agent_thought`` 合并下发前的最小字符数（默认 **4**，至少 **1**）。过小会增加 SSE 条数；过大则首轮思考区长时间空白、末段「一整块冒出」。内部仍按字符解析 ``<decision>``/``<observation>``。
 - REACT_PLAN_SSE_LIVE_STEPS=1（默认）：每轮同步 ``plan_update``（单 in_progress）；``=0`` 关闭。
 - REACT_UNIFIED_FIRST_ROUND_TASK_PLAN=1（默认）：统一流首轮提示词允许模型**仅在复杂多步**时在 ``<thinking>`` 内输出 ``<task_plan>``；简单单步不应输出。有输出则解析并注入后续轮 ``<current_todo>``、下发 ``plan_init``/``plan_update``。``=0`` 关闭。
-- REACT_UNIFIED_PLAN_MAX_STEPS：首轮 ``task_plan`` 最大步数（默认 **12**，上限 32）。
+- REACT_UNIFIED_PLAN_MAX_STEPS：首轮 ``task_plan`` 最大步数（默认 **8**，上限 32）。
 - REACT_UNIFIED_SNAPSHOT_ROUNDS：统一流在拼 LLM prompt **前**打印 ``result_ctx`` / ``prev_*`` 摘要的轮次（**1-based**，逗号分隔；默认 **3**；``0``/``off`` 关闭；``all``=每轮）。
 - REACT_UNIFIED_ERROR_DIAG：统一流 ``stream error`` 时是否打印 traceback + 同上摘要（默认 **1**；``0`` 关闭）。
 - REACT_UNIFIED_PARSE_RETRY：统一流若无法解析三段式（如缺少 ``</decision>``），是否追加严格格式提示并**再请求一次** LLM；默认 **1**（多一次）；``0`` 关闭；额外次数上限 **2**。
 - REACT_MAX_ROUNDS：统一流主循环硬性上限（默认 **30**，上限 500）；用尽后 ``done.status=partial``、``stop_reason=max_rounds``。
-- REACT_DUPLICATE_ACTION_WINDOW：连续相同工具+参数签名达到此次数后中断（默认 **3**，范围 2～8）；``done.stop_reason=duplicate_action``。
-- REACT_PLAN_STEP_MAX_RETRIES：存在 ``task_plan`` 时单步连续失败达到此次数则跳过该步（默认 **3**）。
+- REACT_DUPLICATE_ACTION_WINDOW：连续相同工具+参数签名达到此次数后中断（默认 **2**，范围 2～8）；``done.stop_reason=duplicate_action``。
+- REACT_PLAN_STEP_MAX_RETRIES：存在 ``task_plan`` 时单步连续失败达到此次数则跳过该步（默认 **1**，即同一步失败一次即跳过，避免长时间套娃；可用环境变量调大）。
 - REACT_MERGE_FIRST_THINK_INTO_DECIDE=1：跳过独立首轮 THINK；``todo_items``（及可选 ``first_tool``/``first_params``）在 **主循环第 0 步** 通过 **submit_react_think** 一次 FC 完成（须 ``REACT_DECIDE_FUNCTION_CALL=1`` 且 LLM 支持 FC）。默认 ``0``。
 - REACT_THINK_QUEUE_POLL_S：首轮 THINK 从队列取块时的轮询间隔秒数（默认 ``0.03``）；略缩可更快响应首 token，过小占 CPU。范围约 0.02～0.2
 - REACT_CHAT_REPLY_STREAM=1（默认）：纯对话路径用 ``summary_stream`` 分块输出；``REACT_CHAT_REPLY_STREAM_CHARS`` 每块字符数（默认 2）
@@ -409,9 +409,9 @@ def _unified_first_round_task_plan_enabled() -> bool:
 
 def _cap_unified_task_plan_steps(steps: List[str]) -> List[str]:
     try:
-        cap = int((os.getenv("REACT_UNIFIED_PLAN_MAX_STEPS", "12") or "12").strip())
+        cap = int((os.getenv("REACT_UNIFIED_PLAN_MAX_STEPS", "8") or "8").strip())
     except Exception:
-        cap = 12
+        cap = 8
     cap = max(2, min(cap, 32))
     if len(steps) > cap:
         if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
@@ -482,21 +482,21 @@ def _react_max_rounds_cap() -> int:
 
 
 def _react_duplicate_action_window() -> int:
-    """连续相同 (tool, params) 签名达到此次数则视为卡死；``REACT_DUPLICATE_ACTION_WINDOW`` 默认 3。"""
+    """连续相同 (tool, params) 签名达到此次数则视为卡死；``REACT_DUPLICATE_ACTION_WINDOW`` 默认 2。"""
     try:
-        w = int(os.getenv("REACT_DUPLICATE_ACTION_WINDOW", "3") or "3")
+        w = int(os.getenv("REACT_DUPLICATE_ACTION_WINDOW", "2") or "2")
         return max(2, min(w, 8))
     except Exception:
-        return 3
+        return 2
 
 
 def _react_plan_step_max_retries() -> int:
-    """有计划步时，单步连续失败次数上限，超过则跳过该步；``REACT_PLAN_STEP_MAX_RETRIES`` 默认 3。"""
+    """有计划步时，单步连续失败次数上限，超过则跳过该步；``REACT_PLAN_STEP_MAX_RETRIES`` 默认 1（失败一次即跳过）。"""
     try:
-        r = int(os.getenv("REACT_PLAN_STEP_MAX_RETRIES", "3") or "3")
+        r = int(os.getenv("REACT_PLAN_STEP_MAX_RETRIES", "1") or "1")
         return max(1, min(r, 20))
     except Exception:
-        return 3
+        return 1
 
 
 def _tool_params_signature(tool: str, params: Dict[str, Any]) -> str:

@@ -384,11 +384,13 @@ export default {
     modifyPendingOverlay(badcase) {
       const pm = this.pendingModifications
       const isCardLayer = (p) => p && String(p._target || '').toLowerCase() === 'card'
-      const a = pm[badcase.id]
+      const bidStr = badcase.id != null && badcase.id !== '' ? String(badcase.id).trim() : ''
+      const a = bidStr && pm[bidStr] ? pm[bidStr] : pm[badcase.id]
       if (a && !a._pendingDelete && !isCardLayer(a)) return a
-      const cid = Number(badcase.card_id ?? badcase.cardId)
-      if (Number.isFinite(cid) && cid > 0) {
-        const c = pm[cid]
+      const cidRaw = badcase.card_id ?? badcase.cardId
+      const cidStr = cidRaw != null && cidRaw !== '' ? String(cidRaw).trim() : ''
+      if (cidStr && /^\d+$/.test(cidStr)) {
+        const c = pm[cidStr]
         if (c && !c._pendingDelete && !isCardLayer(c)) return c
       }
       return null
@@ -400,10 +402,20 @@ export default {
     modifyPendingMapKey(badcase) {
       const pm = this.pendingModifications
       const isCardLayer = (p) => p && String(p._target || '').toLowerCase() === 'card'
-      if (pm[badcase.id] && !pm[badcase.id]._pendingDelete && !isCardLayer(pm[badcase.id])) return badcase.id
-      const cid = Number(badcase.card_id ?? badcase.cardId)
-      if (Number.isFinite(cid) && cid > 0 && pm[cid] && !pm[cid]._pendingDelete && !isCardLayer(pm[cid])) return cid
-      return badcase.id
+      const bidStr = badcase.id != null && badcase.id !== '' ? String(badcase.id).trim() : ''
+      if (bidStr && pm[bidStr] && !pm[bidStr]._pendingDelete && !isCardLayer(pm[bidStr])) return bidStr
+      const cidRaw = badcase.card_id ?? badcase.cardId
+      const cidStr = cidRaw != null && cidRaw !== '' ? String(cidRaw).trim() : ''
+      if (
+        cidStr &&
+        /^\d+$/.test(cidStr) &&
+        pm[cidStr] &&
+        !pm[cidStr]._pendingDelete &&
+        !isCardLayer(pm[cidStr])
+      ) {
+        return cidStr
+      }
+      return bidStr || String(badcase.id ?? '')
     },
     /** pending 里旧状态为空时，用当前行列表数据兜底，避免误显示「未设置」而库内实为 closed 等 */
     pendingStatusOldForRow(badcase) {

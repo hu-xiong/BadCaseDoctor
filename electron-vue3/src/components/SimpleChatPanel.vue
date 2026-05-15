@@ -840,6 +840,7 @@ import {
 import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
 import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
   pingLocalGoProxy as sharedPingLocalGoProxy
@@ -1085,9 +1086,9 @@ function isPlaceholderSessionTitle(title) {
     }
     // 分组/批量项上常缺 before：从本会话合并后的待采纳 payload 补 status（与列表、详情 reconcile 一致）
     if (isStatus && (which === 'old' || which === 'new')) {
-      const tid = Number(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+      const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
       const nt = tgt || 'bug'
-      if (Number.isFinite(tid) && tid > 0 && Array.isArray(messages.value)) {
+      if (tid && Array.isArray(messages.value)) {
         try {
           const merged = getMergedPendingForTarget(messages.value, nt, tid)
           if (which === 'old') {
@@ -1104,8 +1105,8 @@ function isPlaceholderSessionTitle(title) {
     }
     // target=card 时 before 常缺 status（或沙箱库未联到 Bug）：用 source_id 或同会话中带 card_id 的源表快照补旧状态
     if (isStatus && which === 'old' && tgt === 'card' && Array.isArray(messages.value)) {
-      const sid = Number(ctx?.before?.source_id ?? ctx?.after?.source_id)
-      if (Number.isFinite(sid) && sid > 0) {
+      const sid = snowflakeIdStr(ctx?.before?.source_id ?? ctx?.after?.source_id)
+      if (sid) {
         for (const st of ['bug', 'badcase', 'testcase']) {
           try {
             const m = getMergedPendingForTarget(messages.value, st, sid)
@@ -1116,8 +1117,8 @@ function isPlaceholderSessionTitle(title) {
           }
         }
       }
-      const cardId = Number(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-      if (Number.isFinite(cardId) && cardId > 0) {
+      const cardId = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+      if (cardId) {
         for (const msg of messages.value) {
           if (!msg || msg.isUser) continue
           const nav = msg.modifyNavigation
@@ -1130,7 +1131,7 @@ function isPlaceholderSessionTitle(title) {
           for (const block of blocks) {
             const bb = block?.before
             if (!bb || typeof bb !== 'object') continue
-            if (Number(bb.card_id ?? bb.cardId) !== cardId) continue
+            if (snowflakeIdStr(bb.card_id ?? bb.cardId) !== cardId) continue
             const stv = String(bb.status ?? '').trim()
             if (stv) return stv
           }
@@ -1138,7 +1139,7 @@ function isPlaceholderSessionTitle(title) {
             for (const it of grp.items || []) {
               const bb = it?.before
               if (!bb || typeof bb !== 'object') continue
-              if (Number(bb.card_id ?? bb.cardId) !== cardId) continue
+              if (snowflakeIdStr(bb.card_id ?? bb.cardId) !== cardId) continue
               const stv = String(bb.status ?? '').trim()
               if (stv) return stv
             }
@@ -2470,8 +2471,9 @@ const handleNavigation = (navigation) => {
   console.log('[NAV] 执行导航:', navigation)
 
   const recordId = navigation.record_id ?? navigation.bug_id
-  const navTarget = (navigation.target || 'bug').toString().toLowerCase()
-  const normalizedTarget = navTarget === 'test_case' ? 'testcase' : navTarget
+  const navTarget = (navigation.target || 'bug').toString().toLowerCase().replace(/-/g, '_')
+  let normalizedTarget = navTarget === 'test_case' || navTarget === 'testcase' ? 'testcase' : navTarget
+  if (normalizedTarget === 'bad_case' || normalizedTarget === 'badcase') normalizedTarget = 'badcase'
   const cardIdNav =
     navigation.card_id != null && navigation.card_id !== ''
       ? navigation.card_id
@@ -2479,16 +2481,47 @@ const handleNavigation = (navigation) => {
         ? recordId
         : undefined
 
+  const mergedLegacyRaw =
+    navigation.merged_from_legacy != null && String(navigation.merged_from_legacy).trim() !== ''
+      ? String(navigation.merged_from_legacy).trim().toLowerCase().replace(/-/g, '_')
+      : null
+  const mergedLegacy =
+    mergedLegacyRaw === 'bad_case'
+      ? 'badcase'
+      : mergedLegacyRaw === 'test_case'
+        ? 'testcase'
+        : mergedLegacyRaw
+  const legacyRowId =
+    navigation.legacy_row_id != null && navigation.legacy_row_id !== ''
+      ? navigation.legacy_row_id
+      : navigation.source_id != null && navigation.source_id !== ''
+        ? navigation.source_id
+        : null
+
   // 发送自定义事件给父组件 ProjectDetail
   const event = new CustomEvent('grep-navigate', {
     detail: {
       planId: navigation.plan_id,
+      plan_id: navigation.plan_id,
       bugId: recordId,
       recordId,
       target: normalizedTarget,
+      title: navigation.title,
+      navTitle: navigation.navTitle ?? navigation.title,
+      ...(mergedLegacy
+        ? {
+            merged_from_legacy: mergedLegacy,
+            mergedFromLegacy: mergedLegacy
+          }
+        : {}),
+      ...(legacyRowId != null && legacyRowId !== ''
+        ? { legacy_row_id: legacyRowId, legacyRowId }
+        : {}),
       ...(cardIdNav != null && cardIdNav !== '' ? { card_id: cardIdNav, cardId: cardIdNav } : {}),
-      /** grep 明确为卡片命中时：进迭代「卡片表」层，勿把 Card 提升成 Bug 子列表 */
-      ...(normalizedTarget === 'card' ? { prefer_card_layer: true } : {})
+      /**
+       * 纯「卡片层」命中须留在迭代卡片表；grep 合并项（merged_from_legacy）要进子类型列表，勿标 prefer_card_layer。
+       */
+      ...(normalizedTarget === 'card' && !mergedLegacy ? { prefer_card_layer: true } : {})
     }
   })
   window.dispatchEvent(event)
@@ -2532,7 +2565,9 @@ const handleConfirmModify = async (modifyData) => {
  * 用于 diff review：已采纳的不参与；后面对话对前面 diff 的合并形成新diff
  * @returns {{ modifications: {}, diff: [], plan_id, messageId } | null}
  */
-function getMergedPendingForTarget(msgs, target, targetId) {
+function getMergedPendingForTarget(msgs, target, targetIdRaw) {
+  const want = snowflakeIdStr(targetIdRaw)
+  if (!want) return null
   const items = []
   for (let i = 0; i < (msgs || []).length; i++) {
     const msg = msgs[i]
@@ -2540,8 +2575,8 @@ function getMergedPendingForTarget(msgs, target, targetId) {
     const msgIdx = i
     for (const group of msg.modifyGroups || []) {
       for (const item of group.items || []) {
-        const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
-        if (isNaN(tid) || tid !== targetId) continue
+        const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
+        if (!tid || tid !== want) continue
         if (item.target && item.target !== target) continue
         if (item.cancelled === true) continue
         const itTarget = item.target || group.target || target
@@ -2567,8 +2602,8 @@ function getMergedPendingForTarget(msgs, target, targetId) {
     const nav = msg.modifyNavigation
     if (nav?.batch_modify && nav.batch_results?.length) {
       for (const r of nav.batch_results) {
-        const tid = parseInt(r.target_id, 10)
-        if (isNaN(tid) || tid !== targetId) continue
+        const tid = snowflakeIdStr(r.target_id)
+        if (!tid || tid !== want) continue
         if (r.cancelled === true) continue
         if (r.target && r.target !== target) continue
         const itTarget = r.target || nav.target || target
@@ -2591,8 +2626,8 @@ function getMergedPendingForTarget(msgs, target, targetId) {
         })
       }
     } else if (nav && !nav.batch_modify && !nav.is_create && nav.cancelled !== true) {
-      const tid = parseInt(nav.target_id ?? nav.targetId, 10)
-      if (isNaN(tid) || tid !== targetId || (nav.target || 'badcase') !== target) {
+      const tid = snowflakeIdStr(nav.target_id ?? nav.targetId)
+      if (!tid || tid !== want || (nav.target || 'badcase') !== target) {
         continue
       }
       const pk = makePersistDiffKey(target, tid)
@@ -2694,8 +2729,8 @@ const getModifyJumpButtonLabel = (target) => {
 
 const makePersistDiffKey = (target, targetId) => {
   const nt = normalizeModifyTarget(target)
-  const tid = Number(targetId)
-  if (!nt || !Number.isFinite(tid) || tid <= 0) return ''
+  const tid = snowflakeIdStr(targetId)
+  if (!nt || !tid) return ''
   return `${nt}:${tid}`
 }
 
@@ -2792,8 +2827,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
   const messageIsHistorical = !!(msgObj && msgObj.isHistorical)
 
   const peerTargetIds = group.items
-    .map((it) => parseInt(it?.target_id ?? it?.targetId ?? it?.id))
-    .filter((id) => !isNaN(id))
+    .map((it) => snowflakeIdStr(it?.target_id ?? it?.targetId ?? it?.id))
+    .filter((id) => !!id)
 
   const batchItems = []
   /** 已采纳：合并为一次 grep-navigate，避免逐条异步定位造成「一行行」闪高亮 */
@@ -2805,8 +2840,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
       console.warn('[MODIFY] 跳过无效 item:', item)
       continue
     }
-    const intTargetId = parseInt(rawId)
-    if (isNaN(intTargetId)) {
+    const idStr = snowflakeIdStr(rawId)
+    if (!idStr) {
       console.warn('[MODIFY] 跳过无效 target_id:', rawId)
       continue
     }
@@ -2815,10 +2850,10 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
     alreadyProcessed = resolveAlreadyProcessedByPersisted(
       alreadyProcessed,
       tgt,
-      intTargetId,
+      idStr,
       messageIsHistorical
     )
-    const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
+    const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, idStr) : null
     const payload = merged
       ? {
           diff: merged.diff,
@@ -2839,15 +2874,32 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
 
     if (alreadyProcessed) {
       const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
+      const navCidAdopted =
+        item.card_id ??
+        item.cardId ??
+        payload.before?.card_id ??
+        payload.before?.cardId ??
+        payload.after?.card_id ??
+        payload.after?.cardId
+      const navCidAdoptedStr =
+        navCidAdopted != null && String(navCidAdopted).trim() !== ''
+          ? snowflakeIdStr(navCidAdopted) || String(navCidAdopted).trim()
+          : null
       adoptedNav.push({
-        intTargetId,
+        intTargetId: idStr,
         tgt,
         openDetail,
-        planId: payload.plan_id ?? group.plan_id ?? null
+        planId: payload.plan_id ?? group.plan_id ?? null,
+        ...(navCidAdoptedStr ? { navCardId: navCidAdoptedStr } : {})
       })
     } else {
+      const gCardNav = (() => {
+        const c = item.card_id ?? item.cardId ?? item.before?.card_id ?? item.before?.cardId
+        if (c == null || String(c).trim() === '') return null
+        return snowflakeIdStr(c) || String(c).trim()
+      })()
       batchItems.push({
-        targetId: intTargetId,
+        targetId: idStr,
         target: tgt,
         diff: payload.diff,
         modifications: payload.modifications,
@@ -2857,13 +2909,15 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
         batchIndex: index,
         peerTargetIds,
         before: payload.before ?? null,
-        after: payload.after ?? null
+        after: payload.after ?? null,
+        ...(gCardNav ? { card_id: gCardNav } : {})
       })
     }
   }
   if (adoptedNav.length > 0) {
     const detailFirst = adoptedNav.find((x) => x.openDetail)
     const planId = adoptedNav[0].planId ?? group.plan_id ?? null
+    const cardFromAdopted = adoptedNav.find((x) => x.navCardId)?.navCardId
     window.dispatchEvent(
       new CustomEvent('grep-navigate', {
         detail: {
@@ -2873,7 +2927,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
           openDetail: !!detailFirst,
           ...(detailFirst
             ? { recordId: detailFirst.intTargetId, bugId: detailFirst.intTargetId }
-            : {})
+            : {}),
+          ...(cardFromAdopted ? { card_id: cardFromAdopted, cardId: cardFromAdopted } : {})
         },
         bubbles: true
       })
@@ -2907,11 +2962,18 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   if (modifyData.navigate_to_existing && modifyData.created_id != null) {
     const pv = modifyData.preview || {}
     const planId = modifyData.plan_id ?? pv.plan_id ?? pv.planId
+    const cidNav = pv.card_id ?? pv.cardId ?? modifyData.card_id ?? modifyData.cardId
+    const cidStr =
+      cidNav != null && String(cidNav).trim() !== ''
+        ? snowflakeIdStr(cidNav) || String(cidNav).trim()
+        : null
     window.dispatchEvent(new CustomEvent('grep-navigate', {
       detail: {
         planId,
         bugId: modifyData.created_id,
-        target: modifyData.target || 'bug'
+        recordId: modifyData.created_id,
+        target: modifyData.target || 'bug',
+        ...(cidStr ? { card_id: cidStr, cardId: cidStr } : {})
       },
       bubbles: true
     }))
@@ -2922,8 +2984,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   if (modifyData.batch_modify && modifyData.batch_results && Array.isArray(modifyData.batch_results) && modifyData.batch_results.length > 0) {
     console.log('[MODIFY] 批量修改，合并为单次列表事件')
     const peerTargetIds = modifyData.batch_results
-      .map((r) => parseInt(r.target_id))
-      .filter((id) => !isNaN(id))
+      .map((r) => snowflakeIdStr(r?.target_id))
+      .filter((id) => !!id)
     const batchItems = []
     const adoptedNavBatch = []
     for (let index = 0; index < modifyData.batch_results.length; index++) {
@@ -2932,8 +2994,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         console.warn('[MODIFY] 跳过无效 result:', result)
         continue
       }
-      const intTargetId = parseInt(result.target_id)
-      if (isNaN(intTargetId)) {
+      const idStr = snowflakeIdStr(result.target_id)
+      if (!idStr) {
         console.warn('[MODIFY] 跳过无效 target_id:', result.target_id)
         continue
       }
@@ -2942,10 +3004,10 @@ const handleShowModifyInList = async (modifyData, messageId) => {
       alreadyProcessed = resolveAlreadyProcessedByPersisted(
         alreadyProcessed,
         tgt,
-        intTargetId,
+        idStr,
         messageIsHistorical
       )
-      const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
+      const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, idStr) : null
       const payload = merged || {
         diff: result.diff || [],
         modifications: result.modifications || {},
@@ -2957,14 +3019,19 @@ const handleShowModifyInList = async (modifyData, messageId) => {
       if (alreadyProcessed) {
         const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
         adoptedNavBatch.push({
-          intTargetId,
+          intTargetId: idStr,
           tgt,
           openDetail,
           planId: payload.plan_id ?? result.plan_id ?? modifyData.plan_id ?? null
         })
       } else {
+        const cardNavStr = (() => {
+          const c = result.card_id ?? result.cardId ?? result.before?.card_id ?? result.before?.cardId
+          if (c == null || String(c).trim() === '') return null
+          return snowflakeIdStr(c) || String(c).trim()
+        })()
         batchItems.push({
-          targetId: intTargetId,
+          targetId: idStr,
           target: tgt,
           diff: payload.diff,
           modifications: payload.modifications,
@@ -2974,13 +3041,29 @@ const handleShowModifyInList = async (modifyData, messageId) => {
           batchIndex: index,
           peerTargetIds,
           before: payload.before ?? null,
-          after: payload.after ?? null
+          after: payload.after ?? null,
+          ...(cardNavStr ? { card_id: cardNavStr } : {})
         })
       }
     }
     if (adoptedNavBatch.length > 0) {
       const detailFirst = adoptedNavBatch.find((x) => x.openDetail)
       const planId = adoptedNavBatch[0].planId ?? modifyData.plan_id ?? null
+      const cardFromBatch = (() => {
+        for (const br of modifyData.batch_results || []) {
+          const c =
+            br?.card_id ??
+            br?.cardId ??
+            br?.before?.card_id ??
+            br?.before?.cardId ??
+            br?.after?.card_id ??
+            br?.after?.cardId
+          if (c != null && String(c).trim() !== '') {
+            return snowflakeIdStr(c) || String(c).trim()
+          }
+        }
+        return null
+      })()
       window.dispatchEvent(
         new CustomEvent('grep-navigate', {
           detail: {
@@ -2990,7 +3073,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
             openDetail: !!detailFirst,
             ...(detailFirst
               ? { recordId: detailFirst.intTargetId, bugId: detailFirst.intTargetId }
-              : {})
+              : {}),
+            ...(cardFromBatch ? { card_id: cardFromBatch, cardId: cardFromBatch } : {})
           },
           bubbles: true
         })
@@ -3029,11 +3113,21 @@ const handleShowModifyInList = async (modifyData, messageId) => {
 
   // 单个修改
   const rawId = modifyData.target_id ?? modifyData.targetId ?? modifyData.id
-  const intTargetId = parseInt(rawId)
-  if (isNaN(intTargetId)) {
+  const targetIdStr = snowflakeIdStr(rawId)
+  if (!targetIdStr) {
     console.error('[MODIFY] 无效的 target_id:', rawId)
     return
   }
+
+  const navCardStr = (() => {
+    const c =
+      modifyData.card_id ??
+      modifyData.cardId ??
+      modifyData.before?.card_id ??
+      modifyData.before?.cardId
+    if (c == null || String(c).trim() === '') return null
+    return snowflakeIdStr(c) || String(c).trim()
+  })()
   
   let alreadyProcessed =
     modifyData.cancelled === true ||
@@ -3042,10 +3136,10 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   alreadyProcessed = resolveAlreadyProcessedByPersisted(
     alreadyProcessed,
     tgt,
-    intTargetId,
+    targetIdStr,
     messageIsHistorical
   )
-  const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
+  const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, targetIdStr) : null
   const payload = merged || {
     diff: modifyData.diff || [],
     modifications: modifyData.modifications || {},
@@ -3056,20 +3150,32 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   }
   if (alreadyProcessed) {
     const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
+    const grepCardStr = (() => {
+      const c =
+        modifyData.card_id ??
+        modifyData.cardId ??
+        payload.before?.card_id ??
+        payload.before?.cardId ??
+        payload.after?.card_id ??
+        payload.after?.cardId
+      if (c == null || String(c).trim() === '') return null
+      return snowflakeIdStr(c) || String(c).trim()
+    })()
     window.dispatchEvent(new CustomEvent('grep-navigate', {
       detail: {
         planId: payload.plan_id ?? modifyData.plan_id ?? null,
-        recordId: intTargetId,
-        bugId: intTargetId,
+        recordId: targetIdStr,
+        bugId: targetIdStr,
         target: tgt,
-        openDetail
+        openDetail,
+        ...(grepCardStr ? { card_id: grepCardStr, cardId: grepCardStr } : {})
       },
       bubbles: true
     }))
   } else {
     const event = new CustomEvent('show-modify-in-list', {
       detail: {
-        targetId: intTargetId,
+        targetId: targetIdStr,
         target: tgt,
         diff: payload.diff,
         modifications: payload.modifications,
@@ -3077,7 +3183,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         executed: alreadyProcessed,
         messageId: payload.messageId ?? messageId,
         before: payload.before ?? null,
-        after: payload.after ?? null
+        after: payload.after ?? null,
+        ...(navCardStr ? { card_id: navCardStr } : {})
       },
       bubbles: true
     })
@@ -3261,9 +3368,10 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
       for (const r of toolData.results) {
         const obs = r && r.result && typeof r.result === 'object' ? r.result : {}
         const tid = r?.id ?? r?.target_id ?? obs.target_id
-        if (tid == null || !Number.isFinite(Number(tid))) continue
+        const tidStr = snowflakeIdStr(tid)
+        if (!tidStr) continue
         batch_results_flat.push({
-          target_id: Number(tid),
+          target_id: tidStr,
           plan_id: r?.plan_id ?? obs.plan_id ?? null,
           target: tgt || obs.target || 'badcase',
           diff: obs.diff || [],
@@ -3320,8 +3428,8 @@ const rebuildModifyGroupsFromBatchNav = (modifyNav, mergeFn) => {
   const normalizedItems = modifyNav.batch_results
     .map((r, idx) => {
       const rawId = r?.target_id ?? r?.targetId ?? r?.id
-      const tid = Number(rawId)
-      if (!Number.isFinite(tid)) return null
+      const tid = snowflakeIdStr(rawId)
+      if (!tid) return null
       return {
         ...r,
         target_id: tid,
@@ -3637,8 +3745,8 @@ const normalizeModifyTarget = (target) => {
 const isSandboxModifyItemPending = (item, message = null) => {
   if (!item || typeof item !== 'object') return false
   if (item.cancelled === true) return false
-  const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
-  if (Number.isNaN(tid)) return false
+  const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
+  if (!tid) return false
   const tgt = normalizeModifyTarget(item.target || 'badcase')
   const pk = makePersistDiffKey(tgt, tid)
   if (persistedPendingLoaded.value && pk) {
@@ -3687,8 +3795,8 @@ const messageHasPendingSandboxConfirm = (message) => {
 const handleRequestPendingModifyForPlan = async (event) => {
   const planId = event.detail?.planId
   const suppressAutoOpenDetail = event.detail?.suppressAutoOpenDetail === true
-  const pid = Number(planId)
-  if (!Number.isFinite(pid)) return
+  const planKey = snowflakeIdStr(planId)
+  if (!planKey) return
   await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
   const hasBackendPendingRow = (target, targetId) => {
     if (!persistedPendingLoaded.value) return false
@@ -3703,24 +3811,24 @@ const handleRequestPendingModifyForPlan = async (event) => {
 
     if (msg.modifyGroups?.length) {
       for (const group of msg.modifyGroups) {
-        if (Number(group.plan_id) !== pid) continue
+        if (snowflakeIdStr(group.plan_id) !== planKey) continue
         const peerTargetIds = (group.items || [])
-          .map((it) => parseInt(it?.target_id ?? it?.targetId ?? it?.id, 10))
-          .filter((id) => !isNaN(id))
+          .map((it) => snowflakeIdStr(it?.target_id ?? it?.targetId ?? it?.id))
+          .filter((id) => !!id)
         for (const item of group.items || []) {
           const rawId = item?.target_id ?? item?.targetId ?? item?.id
-          const intTargetId = parseInt(rawId, 10)
-          if (isNaN(intTargetId)) continue
+          const idStr = snowflakeIdStr(rawId)
+          if (!idStr) continue
           const tgt = item.target || 'badcase'
           if (item.cancelled === true) continue
-          if (!hasBackendPendingRow(tgt, intTargetId)) continue
-          const key = `${tgt}:${intTargetId}`
+          if (!hasBackendPendingRow(tgt, idStr)) continue
+          const key = `${tgt}:${idStr}`
           if (seen.has(key)) continue
           seen.add(key)
-          const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
+          const merged = getMergedPendingForTarget(messages.value, tgt, idStr)
           if (!merged) continue
           batchItems.push({
-            targetId: intTargetId,
+            targetId: idStr,
             target: tgt,
             diff: merged.diff,
             modifications: merged.modifications,
@@ -3742,23 +3850,23 @@ const handleRequestPendingModifyForPlan = async (event) => {
 
     if (nav.batch_modify && nav.batch_results?.length) {
       const peerTargetIds = nav.batch_results
-        .map((r) => parseInt(r.target_id, 10))
-        .filter((id) => !isNaN(id))
+        .map((r) => snowflakeIdStr(r?.target_id))
+        .filter((id) => !!id)
       for (const result of nav.batch_results) {
         const tplPid = result.plan_id ?? nav.plan_id
-        if (Number(tplPid) !== pid) continue
-        const intTargetId = parseInt(result.target_id, 10)
-        if (isNaN(intTargetId)) continue
+        if (snowflakeIdStr(tplPid) !== planKey) continue
+        const idStr = snowflakeIdStr(result.target_id)
+        if (!idStr) continue
         const tgt = result.target || 'badcase'
         if (result.cancelled === true) continue
-        if (!hasBackendPendingRow(tgt, intTargetId)) continue
-        const key = `${tgt}:${intTargetId}`
+        if (!hasBackendPendingRow(tgt, idStr)) continue
+        const key = `${tgt}:${idStr}`
         if (seen.has(key)) continue
         seen.add(key)
-        const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
+        const merged = getMergedPendingForTarget(messages.value, tgt, idStr)
         if (!merged) continue
         batchItems.push({
-          targetId: intTargetId,
+          targetId: idStr,
           target: tgt,
           diff: merged.diff,
           modifications: merged.modifications,
@@ -3778,25 +3886,25 @@ const handleRequestPendingModifyForPlan = async (event) => {
     if (!nav.batch_modify && !nav.is_create) {
       if (nav.cancelled === true) continue
       const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
-      if (Number(tplPid) !== pid) continue
-      const intTargetId = parseInt(nav.target_id ?? nav.targetId, 10)
-      if (isNaN(intTargetId)) continue
+      if (snowflakeIdStr(tplPid) !== planKey) continue
+      const idStr = snowflakeIdStr(nav.target_id ?? nav.targetId)
+      if (!idStr) continue
       const tgt = nav.target || 'badcase'
-      if (!hasBackendPendingRow(tgt, intTargetId)) continue
-      const key = `${tgt}:${intTargetId}`
+      if (!hasBackendPendingRow(tgt, idStr)) continue
+      const key = `${tgt}:${idStr}`
       if (seen.has(key)) continue
       seen.add(key)
-      const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
+      const merged = getMergedPendingForTarget(messages.value, tgt, idStr)
       if (!merged) continue
       batchItems.push({
-        targetId: intTargetId,
+        targetId: idStr,
         target: tgt,
         diff: merged.diff,
         modifications: merged.modifications,
         plan_id: merged.plan_id ?? tplPid,
         executed: false,
         messageId: merged.messageId,
-        peerTargetIds: [intTargetId],
+        peerTargetIds: [idStr],
         suppressAutoOpenDetail,
         before: merged.before ?? null,
         after: merged.after ?? null
@@ -4561,6 +4669,118 @@ watch(
   }
 )
 
+const _normAdoptTargetType = (t) =>
+  String(t || 'bug')
+    .toLowerCase()
+    .replace(/-/g, '_')
+
+const navRecordIdMatchesAdoptTarget = (item, targetNorm, want) => {
+  if (!item || typeof item !== 'object') return false
+  const tt = _normAdoptTargetType(item.target || 'bug')
+  if (tt !== targetNorm) return false
+  let rid = item.record_id
+  if (rid == null) {
+    if (targetNorm === 'bug') rid = item.bug_id
+    else if (targetNorm === 'badcase' || targetNorm === 'testcase') rid = item.source_id
+    else if (targetNorm === 'card') rid = item.card_id ?? item.id
+  }
+  return rid != null && snowflakeIdStr(rid) === want
+}
+
+const patchGrepNavItemsForAdoptTitle = (items, targetNorm, want, newTitle) => {
+  if (!Array.isArray(items) || !newTitle) return false
+  let changed = false
+  for (const it of items) {
+    if (!navRecordIdMatchesAdoptTarget(it, targetNorm, want)) continue
+    it.title = newTitle
+    if (targetNorm === 'bug') it.bug_title = newTitle
+    changed = true
+  }
+  return changed
+}
+
+const patchExecutionResultsTitlesForAdopt = (obj, targetNorm, want, newTitle) => {
+  if (!newTitle) return false
+  let changed = false
+  if (Array.isArray(obj)) {
+    for (const x of obj) {
+      if (patchExecutionResultsTitlesForAdopt(x, targetNorm, want, newTitle)) changed = true
+    }
+    return changed
+  }
+  if (obj && typeof obj === 'object') {
+    const tid = obj.target_id != null ? obj.target_id : obj.targetId
+    if (tid != null && snowflakeIdStr(tid) === want) {
+      const ot = _normAdoptTargetType(obj.target || '')
+      if (!ot || ot === targetNorm || (targetNorm === 'bug' && ot === 'bug')) {
+        for (const side of ['before', 'after']) {
+          const sub = obj[side]
+          if (sub && typeof sub === 'object' && 'title' in sub) {
+            sub.title = newTitle
+            changed = true
+          }
+        }
+      }
+    }
+    for (const v of Object.values(obj)) {
+      if (patchExecutionResultsTitlesForAdopt(v, targetNorm, want, newTitle)) changed = true
+    }
+  }
+  return changed
+}
+
+/** 列表采纳改标题后：同步本条助手消息里的「定位结果」grep 文案与沙箱/执行结果里的 before.after.title，避免刷新前 UI 陈旧 */
+const patchMessageLocateTitlesAfterAdopt = (msg, want, targetType, newTitle) => {
+  const nt = String(newTitle || '').trim()
+  if (!nt || !want) return false
+  const tn = _normAdoptTargetType(targetType)
+  let touched = false
+  const nav = msg.navigation
+  if (nav && nav.type === 'multiple' && Array.isArray(nav.items)) {
+    if (patchGrepNavItemsForAdoptTitle(nav.items, tn, want, nt)) touched = true
+  }
+  const steps = msg.steps
+  if (Array.isArray(steps)) {
+    for (const s of steps) {
+      const gn = s && s.grepNavigation
+      if (gn && gn.type === 'multiple' && Array.isArray(gn.items)) {
+        if (patchGrepNavItemsForAdoptTitle(gn.items, tn, want, nt)) touched = true
+      }
+    }
+  }
+  const er = msg.executionResults
+  if (er != null && patchExecutionResultsTitlesForAdopt(er, tn, want, nt)) touched = true
+
+  const patchModifyShape = (navObj) => {
+    if (!navObj || snowflakeIdStr(navObj.target_id ?? navObj.targetId) !== want) return
+    for (const side of ['before', 'after']) {
+      const sub = navObj[side]
+      if (sub && typeof sub === 'object' && 'title' in sub) {
+        sub.title = nt
+        touched = true
+      }
+    }
+  }
+  const mn = msg.modifyNavigation
+  if (mn) {
+    if (mn.batch_modify && Array.isArray(mn.batch_results)) {
+      for (const br of mn.batch_results) patchModifyShape(br)
+    } else {
+      patchModifyShape(mn)
+    }
+  }
+  if (msg.modifyGroups && Array.isArray(msg.modifyGroups)) {
+    for (const g of msg.modifyGroups) {
+      const items = g && g.items
+      if (!Array.isArray(items)) continue
+      for (const it of items) {
+        patchModifyShape(it)
+      }
+    }
+  }
+  return touched
+}
+
 onMounted(() => {
   scrollToBottom()
   // 初始化textarea高度
@@ -4586,9 +4806,9 @@ onMounted(() => {
 // 处理修改取消事件
 const handleModifyCancelled = (event) => {
   const { targetId } = event.detail
-  const intTargetId = parseInt(targetId)
-  console.log('[MODIFY] 收到取消事件，targetId:', intTargetId)
-  if (isNaN(intTargetId)) return
+  const want = snowflakeIdStr(targetId)
+  console.log('[MODIFY] 收到取消事件，targetId:', want)
+  if (!want) return
 
   // 与确认事件保持一致：同步标记 modifyGroups / batch_results / modifyNavigation
   messages.value.forEach((msg, msgIdx) => {
@@ -4598,7 +4818,7 @@ const handleModifyCancelled = (event) => {
       msg.modifyGroups.forEach((group) => {
         if (!group.items || !Array.isArray(group.items)) return
         const itemIdx = group.items.findIndex(
-          (i) => Number(i.target_id ?? i.targetId ?? i.id) === intTargetId
+          (i) => snowflakeIdStr(i.target_id ?? i.targetId ?? i.id) === want
         )
         if (itemIdx !== -1) {
           const newItem = {
@@ -4616,7 +4836,7 @@ const handleModifyCancelled = (event) => {
     if (msg.modifyNavigation) {
       if (msg.modifyNavigation.batch_modify && Array.isArray(msg.modifyNavigation.batch_results)) {
         const resultIdx = msg.modifyNavigation.batch_results.findIndex(
-          (r) => Number(r.target_id ?? r.targetId ?? r.id) === intTargetId
+          (r) => snowflakeIdStr(r.target_id ?? r.targetId ?? r.id) === want
         )
         if (resultIdx !== -1) {
           msg.modifyNavigation.batch_results.splice(resultIdx, 1, {
@@ -4627,7 +4847,7 @@ const handleModifyCancelled = (event) => {
           })
           updated = true
         }
-      } else if (Number(msg.modifyNavigation.target_id ?? msg.modifyNavigation.targetId) === intTargetId) {
+      } else if (snowflakeIdStr(msg.modifyNavigation.target_id ?? msg.modifyNavigation.targetId) === want) {
         msg.modifyNavigation = {
           ...msg.modifyNavigation,
           cancelled: true,
@@ -4640,7 +4860,7 @@ const handleModifyCancelled = (event) => {
 
     if (updated) {
       messages.value[msgIdx] = { ...messages.value[msgIdx] }
-      console.log('[MODIFY] 已标记消息为已更新', msg.id, 'targetId:', intTargetId)
+      console.log('[MODIFY] 已标记消息为已更新', msg.id, 'targetId:', want)
     }
   })
   void refreshPersistedPendingDiffKeys(true)
@@ -4648,26 +4868,30 @@ const handleModifyCancelled = (event) => {
 
 // 处理修改确认事件
 const handleModifyConfirmed = (event) => {
-  const { targetId } = event.detail
-  const intTargetId = parseInt(targetId)
-  console.log('[MODIFY] 收到确认事件，targetId:', intTargetId)
-  
-  if (isNaN(intTargetId)) {
+  const detail = event.detail || {}
+  const { targetId, newTitle: evNewTitle, oldTitle: evOldTitle, targetType: evTargetType } = detail
+  const want = snowflakeIdStr(targetId)
+  const newTitle = typeof evNewTitle === 'string' ? evNewTitle.trim() : ''
+  const oldTitle = typeof evOldTitle === 'string' ? evOldTitle.trim() : ''
+  const targetType = evTargetType || 'bug'
+  console.log('[MODIFY] 收到确认事件，targetId:', want, 'newTitle:', newTitle)
+
+  if (!want) {
     console.error('[MODIFY] 无效的 targetId:', targetId)
     return
   }
-  
+
   // 找到对应的 modifyNavigation / modifyGroups 并标记为已执行
   messages.value.forEach((msg, msgIdx) => {
     let updated = false
-    
+
     // 处理 modifyGroups
     if (msg.modifyGroups && Array.isArray(msg.modifyGroups)) {
       msg.modifyGroups.forEach((group, groupIdx) => {
         if (!group.items || !Array.isArray(group.items)) return
-        
+
         const itemIdx = group.items.findIndex(
-          (i) => Number(i.target_id ?? i.targetId) === intTargetId
+          (i) => snowflakeIdStr(i.target_id ?? i.targetId) === want
         )
         if (itemIdx !== -1) {
           // 创建新对象触发响应式更新
@@ -4679,8 +4903,8 @@ const handleModifyConfirmed = (event) => {
           // 替换数组中的项
           group.items.splice(itemIdx, 1, newItem)
           updated = true
-          console.log('[MODIFY] modifyGroups 中标记项为已执行:', intTargetId)
-          
+          console.log('[MODIFY] modifyGroups 中标记项为已执行:', want)
+
           // 检查组内是否全部确认完成
           const allGroupConfirmed = group.items.every(
             (i) => i.confirmation_required === false || i.cancelled === true
@@ -4691,13 +4915,13 @@ const handleModifyConfirmed = (event) => {
         }
       })
     }
-    
+
     // 处理 modifyNavigation
     if (msg.modifyNavigation) {
       // 批量修改：标记 batch_results 中对应的项
       if (msg.modifyNavigation.batch_modify && msg.modifyNavigation.batch_results) {
         const resultIdx = msg.modifyNavigation.batch_results.findIndex(
-          (r) => Number(r.target_id) === intTargetId
+          (r) => snowflakeIdStr(r.target_id) === want
         )
         if (resultIdx !== -1) {
           // 创建新对象触发响应式更新
@@ -4707,8 +4931,8 @@ const handleModifyConfirmed = (event) => {
             success: true
           })
           updated = true
-          console.log('[MODIFY] 批量修改中标记项为已执行:', intTargetId)
-          
+          console.log('[MODIFY] 批量修改中标记项为已执行:', want)
+
           // 检查是否所有项都已确认
           const allConfirmed = msg.modifyNavigation.batch_results.every(
             (r) => r.confirmation_required === false || r.cancelled === true
@@ -4719,7 +4943,7 @@ const handleModifyConfirmed = (event) => {
         }
       }
       // 单个修改：标记整个 modifyNavigation
-      else if (Number(msg.modifyNavigation.target_id) === intTargetId) {
+      else if (snowflakeIdStr(msg.modifyNavigation.target_id) === want) {
         msg.modifyNavigation = {
           ...msg.modifyNavigation,
           success: true,
@@ -4729,12 +4953,24 @@ const handleModifyConfirmed = (event) => {
         console.log('[MODIFY] 已标记消息为已执行', msg.id)
       }
     }
-    
+
+    if (newTitle && patchMessageLocateTitlesAfterAdopt(msg, want, targetType, newTitle)) {
+      updated = true
+    }
+
     // 触发响应式更新
     if (updated) {
       messages.value[msgIdx] = { ...messages.value[msgIdx] }
     }
   })
+
+  if (oldTitle && newTitle && oldTitle !== newTitle) {
+    const cur = String(sessionTitleRef.value || '')
+    if (cur.includes(oldTitle)) {
+      sessionTitleRef.value = cur.split(oldTitle).join(newTitle)
+    }
+  }
+
   void refreshPersistedPendingDiffKeys(true)
 }
 

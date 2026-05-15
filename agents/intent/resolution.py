@@ -1,11 +1,19 @@
 """
 确定性 modify 目标解析（歧义可走轻量 LLM；`MODIFY_INTENT_LLM=0` 关闭）。
 
+已绑定源表 `target_id` 且无 `card_id`、用户未明示改卡片层时，对 title/description 等歧义字段
+**直接走源表、不调用 LLM**（与雪花 id 及列表 flag 无关）。
+
 主入口：resolve_modify_target_and_id(modifications, user_input, context)
+
+调试：终端搜 `[MODIFY-RESOLVE]`。
+- 失败行以 `FAIL` 开头，**始终**打印（无需环境变量）。
+- 完整进入/分支跟踪：设置环境变量 `MODIFY_RESOLVE_LOG=1`。
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
@@ -93,6 +101,26 @@ class ModifyResolutionError(ValueError):
     """意图解析无法继续（如改卡片但未选中卡片）。"""
 
 
+def _modify_resolve_trace_enabled() -> bool:
+    """设为 MODIFY_RESOLVE_LOG=1 打印完整歧义解析路径（默认关，避免刷屏）。"""
+    return (os.getenv("MODIFY_RESOLVE_LOG", "0") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _log_resolve(msg: str) -> None:
+    if _modify_resolve_trace_enabled():
+        print("[MODIFY-RESOLVE] " + msg, flush=True)
+
+
+def _log_resolve_fail(msg: str) -> None:
+    """失败时始终打印一行，便于对照终端定位（与 MODIFY_RESOLVE_LOG 无关）。"""
+    print("[MODIFY-RESOLVE] FAIL " + msg, flush=True)
+
+
 @dataclass
 class ModifyResolutionContext:
     """结构化上下文（无 LLM）；enrich 负责填充。"""
@@ -106,6 +134,8 @@ class ModifyResolutionContext:
     has_raw_badcase_list: bool = False
     has_raw_testcase_list: bool = False
     card_rows: Optional[List[Dict[str, Any]]] = None
+    #: modify_tool 在 resolve 前用 DB 做的源表消歧（同 project 下雪花生 id 唯一命中），避免仅 status 等字段时误默认 bug
+    db_reconciled_target: Optional[str] = None
 
 
 def canonical_modify_field_name(key: str) -> str:
@@ -189,10 +219,16 @@ def _disambiguate_title(user_input: str, context: ModifyResolutionContext) -> st
     """返回 'card' 或 'source'（歧义 title/description 层）。"""
     t = user_input or ""
     # 「修改卡片 xxx 的标题」中间可有计划名等，未必出现连续「卡片标题」；与 intent_guards 对齐
-    from agents.intent_guards import user_text_implies_card_entity_type
+    from agents.intent_guards import (
+        user_text_implies_bug_entity_type,
+        user_text_implies_card_entity_type,
+    )
 
     if user_text_implies_card_entity_type(t):
         return CARD
+    # 明确谈 Bug/缺陷 的标题时，不得因上一步 grep 用了 card 就判成改 Card.title
+    if user_text_implies_bug_entity_type(t):
+        return SOURCE
     if "卡片标题" in t or "看板标题" in t:
         return CARD
     if any(x in t for x in ("缺陷标题", "Bug标题", "bug标题", "案例标题")):
@@ -204,6 +240,14 @@ def _disambiguate_title(user_input: str, context: ModifyResolutionContext) -> st
         return SOURCE
     lgt = (context.last_grep_target or "").strip().lower()
     if lgt == "card":
+        tid = _as_int(context.target_id)
+        cid = _as_int(context.card_id)
+        # 引擎已解析出源表主键（如 Bug.id）、但未选卡片层 card_id 时，常见于「合并 grep / last_grep=card」；
+        # 此时若仍判 CARD，会误要求「请先选中卡片」。改 Bug 标题应走源表。
+        if tid is not None and cid is None:
+            _log_resolve("disambig_title: last_grep=card, tid set, cid empty -> SOURCE")
+            return SOURCE
+        _log_resolve("disambig_title: last_grep=card -> CARD (需 ctx.card_id 或唯一 card_rows)")
         return CARD
     if lgt in SOURCE_TABLES:
         return SOURCE
@@ -215,11 +259,24 @@ def _disambiguate_title(user_input: str, context: ModifyResolutionContext) -> st
     return SOURCE
 
 
+def _user_implies_card_layer(text: Optional[str]) -> bool:
+    """用户话术是否明确要求改统一卡片层（与 _disambiguate_title 首步一致）。"""
+    from agents.intent_guards import user_text_implies_card_entity_type
+
+    return user_text_implies_card_entity_type(text or "")
+
+
 def _infer_source_table(keys: FrozenSet[str], context: ModifyResolutionContext) -> str:
     if keys & _TESTCASE_HINT_KEYS:
         return "testcase"
     if keys & _BADCASE_HINT_KEYS:
         return "badcase"
+    # 已由上层用 Bug/BadCase/TestCase 表做过「该 id 唯一落在哪张源表」的判定（与 grep 列表 flag 无关）
+    db_rt = getattr(context, "db_reconciled_target", None)
+    if isinstance(db_rt, str):
+        rtl = db_rt.strip().lower()
+        if rtl in SOURCE_TABLES:
+            return rtl
     if context.has_raw_testcase_list and not context.has_raw_bug_list and not context.has_raw_badcase_list:
         return "testcase"
     if context.has_raw_badcase_list and not context.has_raw_bug_list and not context.has_raw_testcase_list:
@@ -244,6 +301,10 @@ def resolve_modify_target_and_id(
     mods = remap_card_layer_modification_keys(dict(modifications or {}))
     keys = normalize_modification_key_set(mods)
     if not keys:
+        _log_resolve_fail(
+            "modifications 为空或无可识别字段 | "
+            f"raw_mod_keys={list((modifications or {}).keys())[:40]!r}"
+        )
         raise ModifyResolutionError("modifications 为空或无可识别字段")
 
     tables_needed: Set[str] = set()
@@ -263,8 +324,19 @@ def resolve_modify_target_and_id(
     pk: Optional[int]
     out_card: Optional[int] = _as_int(context.card_id)
 
+    _nrows = len(context.card_rows) if isinstance(context.card_rows, list) else 0
+    _log_resolve(
+        "enter "
+        f"keys={sorted(keys)!r} tables_needed={sorted(tables_needed)!r} "
+        f"last_grep={context.last_grep_target!r} ctx_target_id={context.target_id!r} ctx_card_id={context.card_id!r} "
+        f"flags_bug/bc/tc={context.has_raw_bug_list}/{context.has_raw_badcase_list}/{context.has_raw_testcase_list} "
+        f"editing_surface={context.editing_surface!r} user_len={len(user_input or '')} "
+        f"user_head={(user_input or '')[:180]!r} card_rows_n={_nrows}"
+    )
+
     if tables_needed == {CARD}:
         target = "card"
+        _log_resolve("branch tables_needed=={CARD} -> target=card（如仅 plan_id / card_title 等）")
     elif SOURCE in tables_needed:
         target = _infer_source_table(keys, context)
     elif tables_needed <= {AMBIGUOUS} or keys == frozenset({"title"}):
@@ -274,8 +346,36 @@ def resolve_modify_target_and_id(
         elif es0 == "bug_title":
             target = _infer_source_table(keys, context)
         else:
-            if _disambiguate_title(user_input, context) == CARD:
-                target = "card"
+            # 仅有 title/description 等歧义字段时：若上下文已绑定源表主键且无卡片层 id，
+            # 可执行的只能是改源表记录，不必再走 LLM（雪花 id 与列表 flag 无关）。
+            # 用户若明示「改卡片标题」等，仍走下方 disambig，最终 target=card 并提示选卡。
+            _tid_early = _as_int(context.target_id)
+            _cid_early = _as_int(context.card_id)
+            if (
+                _tid_early is not None
+                and _cid_early is None
+                and not _user_implies_card_layer(user_input)
+            ):
+                target = _infer_source_table(keys, context)
+                _log_resolve(
+                    "ambiguous + target_id 已设且无 card_id、未明示卡片层："
+                    f"直接源表 target={target!r}（不调 LLM）"
+                )
+            elif _disambiguate_title(user_input, context) == CARD:
+                _tid_d = _as_int(context.target_id)
+                _cid_d = _as_int(context.card_id)
+                if (
+                    _tid_d is not None
+                    and _cid_d is None
+                    and not _user_implies_card_layer(user_input)
+                ):
+                    target = _infer_source_table(keys, context)
+                    _log_resolve(
+                        "disambig_title=CARD 但 ctx.target_id 已设且无 card_id、未明示卡片层，"
+                        f"覆盖为源表 target={target!r}"
+                    )
+                else:
+                    target = "card"
             else:
                 llm_target: Optional[str] = None
                 if _modify_intent_llm.modify_intent_llm_enabled():
@@ -291,11 +391,28 @@ def resolve_modify_target_and_id(
                         keys=keys,
                     )
                 if llm_target in ("card", "bug", "badcase", "testcase"):
-                    target = llm_target
+                    _tid_llm = _as_int(context.target_id)
+                    _cid_llm = _as_int(context.card_id)
+                    # 已绑定源表主键、未选卡片层时，LLM 常误判为 card（无 user 文本时尤甚），会导致「请先选中卡片」
+                    if (
+                        llm_target == "card"
+                        and _tid_llm is not None
+                        and _cid_llm is None
+                        and not _user_implies_card_layer(user_input)
+                    ):
+                        target = _infer_source_table(keys, context)
+                        _log_resolve(
+                            f"llm_target=card 但 ctx.target_id={_tid_llm} 且无 card_id、未明示卡片层，"
+                            f"覆盖为源表 target={target!r}（忽略误判 card）"
+                        )
+                    else:
+                        target = llm_target
                 else:
                     target = _infer_source_table(keys, context)
     else:
         target = _infer_source_table(keys, context)
+
+    _log_resolve(f"target_chosen={target!r} tables_needed={sorted(tables_needed)!r}")
 
     if target == "card":
         cid = _as_int(context.card_id)
@@ -304,6 +421,16 @@ def resolve_modify_target_and_id(
             if isinstance(row0, dict):
                 cid = _as_int(row0.get("card_id")) or _as_int(row0.get("id"))
         if cid is None:
+            row0_dbg = None
+            if isinstance(context.card_rows, list) and len(context.card_rows) == 1:
+                row0_dbg = context.card_rows[0]
+            _log_resolve_fail(
+                "请先选中卡片 | cause=歧义或字段归属已定为 target=card，但 ctx.card_id 为空且无法从唯一 card_rows 取 id | "
+                f"mods_keys={sorted(keys)} tables_needed={sorted(tables_needed)} target={target!r} "
+                f"last_grep={context.last_grep_target!r} ctx_target_id={context.target_id!r} ctx_card_id={context.card_id!r} "
+                f"editing_surface={context.editing_surface!r} user_head={(user_input or '')[:200]!r} "
+                f"single_row={row0_dbg!r}"
+            )
             raise ModifyResolutionError("请先选中卡片")
         pk = None
         out_card = cid
@@ -312,6 +439,12 @@ def resolve_modify_target_and_id(
     # 源表
     pk = _as_int(context.target_id)
     if pk is None:
+        _log_resolve_fail(
+            "请先选中要修改的记录（缺少源表 target_id） | "
+            f"target={target!r} mods_keys={sorted(keys)} tables_needed={sorted(tables_needed)} "
+            f"last_grep={context.last_grep_target!r} ctx_card_id={context.card_id!r} "
+            f"user_head={(user_input or '')[:200]!r}"
+        )
         raise ModifyResolutionError("请先选中要修改的记录（缺少源表 target_id）")
 
     rows = context.card_rows or []

@@ -637,6 +637,7 @@
     "badcaseStatus": {
       "new": "New",
       "pending": "Pending",
+      "reopen": "Reopened",
       "reopened": "Reopened",
       "closed": "Closed",
       "close": "Closed",
@@ -726,6 +727,10 @@
     "newBadcase": "New BadCase",
     "newBug": "New Bug",
     "newTestCase": "New Test Case",
+    "editBadcase": "Edit BadCase",
+    "editBug": "Edit Bug",
+    "editTestCase": "Edit Test Case",
+    "editCard": "Edit Card",
     "errorNoProjectId": "Error: project ID missing",
     "sessionCreateFail": "Failed to create session: {msg}",
     "sessionCreateError": "Failed to create session",

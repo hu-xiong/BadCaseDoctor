@@ -4,6 +4,7 @@
     class="selectable-title-tip"
     @mouseenter="onTriggerEnter"
     @mouseleave="onTriggerLeave"
+    @mousedown="onTriggerMouseDown"
   >
     <!-- 锚点：fit-content 收缩到实际文字宽度，避免 flex:1 整列占位导致悬浮层跑偏 -->
     <span ref="triggerRef" class="selectable-title-tip__trigger"><slot /></span>
@@ -25,7 +26,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 
 const props = defineProps({
   /** 悬浮层内完整文案（可选中后右键复制）；为空则不渲染悬浮层 */
@@ -43,11 +44,20 @@ const fullText = computed(() => String(props.text ?? '').trim())
 
 let showTimer = null
 let hideTimer = null
+/** 打开后监听：点 Tab / 进子列表等不会触发锚点 mouseleave，需在 document 上关掉浮层 */
+let offDocPointerDown = null
 
 function clearShowHideTimers() {
   if (showTimer) clearTimeout(showTimer)
   if (hideTimer) clearTimeout(hideTimer)
   showTimer = hideTimer = null
+}
+
+function detachDocPointerDown() {
+  if (offDocPointerDown) {
+    document.removeEventListener('pointerdown', offDocPointerDown, true)
+    offDocPointerDown = null
+  }
 }
 
 function detachGlobalListeners() {
@@ -138,6 +148,25 @@ function closePanel() {
   clearShowHideTimers()
   open.value = false
   detachGlobalListeners()
+  detachDocPointerDown()
+}
+
+function attachDocPointerDown() {
+  if (offDocPointerDown) return
+  offDocPointerDown = (e) => {
+    const node = e.target
+    const t = triggerRef.value
+    const p = panelRef.value
+    if (t && typeof t.contains === 'function' && t.contains(node)) return
+    if (p && typeof p.contains === 'function' && p.contains(node)) return
+    closePanel()
+  }
+  document.addEventListener('pointerdown', offDocPointerDown, true)
+}
+
+/** 点击进详情/子 Tab 时锚点可能直接卸载，来不及 mouseleave */
+function onTriggerMouseDown() {
+  closePanel()
 }
 
 function onTriggerEnter() {
@@ -153,6 +182,7 @@ function onTriggerEnter() {
       })
       window.addEventListener('scroll', updatePosition, true)
       window.addEventListener('resize', updatePosition)
+      attachDocPointerDown()
     })
   }, 260)
 }
@@ -172,13 +202,12 @@ function onPanelLeave() {
   hideTimer = setTimeout(closePanel, 160)
 }
 
-watch(fullText, (v) => {
-  if (!v) closePanel()
+watch(fullText, () => {
+  closePanel()
 })
 
-onUnmounted(() => {
-  clearShowHideTimers()
-  detachGlobalListeners()
+onBeforeUnmount(() => {
+  closePanel()
 })
 </script>
 

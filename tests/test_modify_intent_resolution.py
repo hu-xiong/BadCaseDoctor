@@ -21,6 +21,20 @@ def test_status_forces_source_bug():
     assert pk == 14
 
 
+def test_status_db_reconciled_badcase_overrides_bug_list_flags():
+    """仅 status 等歧义字段时：DB 已唯一定位 BadCase 行，不得再因 has_raw_bug_list 默认成 bug。"""
+    ctx = ModifyResolutionContext(
+        last_grep_target="badcase",
+        target_id=710034601191411712,
+        has_raw_bug_list=True,
+        has_raw_badcase_list=True,
+        db_reconciled_target="badcase",
+    )
+    t, pk, _cid = resolve_modify_target_and_id({"status": "reopened"}, "", ctx)
+    assert t == "badcase"
+    assert pk == 710034601191411712
+
+
 def test_mixed_source_and_card_fields_prefers_source():
     ctx = ModifyResolutionContext(target_id=5, card_id=5, has_raw_bug_list=True)
     t, pk, cid = resolve_modify_target_and_id(
@@ -82,6 +96,76 @@ def test_title_explicit_bug_heading():
     t, pk, cid = resolve_modify_target_and_id({"title": "X"}, "改Bug标题为 X", ctx)
     assert t == "bug"
     assert pk == 14
+
+
+def test_title_modify_bug_chinese_lowercase_not_card_layer():
+    """「修改bug…的标题」中间有名称，无连续 bug标题；不得因 last_grep=card 判成改 Card。"""
+    ctx = ModifyResolutionContext(
+        last_grep_target="card",
+        card_id=3,
+        target_id=14,
+        has_raw_bug_list=True,
+        card_rows=[{"id": 3, "source_type": "bug", "source_id": 14}],
+    )
+    t, pk, cid = resolve_modify_target_and_id(
+        {"title": "登录bug忘记密码"},
+        "修改bug登录bug的标题为登录bug忘记密码",
+        ctx,
+    )
+    assert t == "bug"
+    assert pk == 14
+
+
+def test_title_source_id_beats_last_grep_card_without_user_text():
+    """合并 grep 后 intent 文本常为空：已绑定 Bug 主键时不得仅因 last_grep=card 判成改 Card.title。"""
+    ctx = ModifyResolutionContext(
+        last_grep_target="card",
+        card_id=None,
+        target_id=709974124503502848,
+        has_raw_bug_list=True,
+    )
+    t, pk, _cid = resolve_modify_target_and_id({"title": "登录bug忘记密码"}, "", ctx)
+    assert t == "bug"
+    assert pk == 709974124503502848
+
+
+def test_llm_says_card_but_target_id_bound_without_card_id_uses_source(monkeypatch):
+    """INTENT_LLM 误判 card 且 intent 无文本时：已有源表 target_id 不得走 Card 层（与终端复现一致）。"""
+    called = []
+
+    def _fake_llm(*a, **k):
+        called.append(1)
+        return "card"
+
+    monkeypatch.setenv("MODIFY_INTENT_LLM", "1")
+    monkeypatch.setattr(
+        "agents.intent.modify_intent_llm.llm_classify_modify_ambiguous_target",
+        _fake_llm,
+    )
+    ctx = ModifyResolutionContext(
+        last_grep_target="",
+        card_id=None,
+        target_id=709974124503502848,
+        has_raw_bug_list=False,
+        has_raw_badcase_list=False,
+        has_raw_testcase_list=False,
+    )
+    t, pk, _ = resolve_modify_target_and_id({"title": "新标题"}, "", ctx)
+    assert t == "bug"
+    assert pk == 709974124503502848
+    assert called == [], "有 target_id 且无 card_id 时应短路，不调用 LLM"
+
+
+def test_explicit_card_title_intent_with_tid_no_card_id_still_requires_card():
+    """明示改卡片层时：不得因有 bug target_id 且无 card_id 就静默改源表标题。"""
+    ctx = ModifyResolutionContext(
+        last_grep_target="",
+        card_id=None,
+        target_id=14,
+        has_raw_bug_list=True,
+    )
+    with pytest.raises(ModifyResolutionError, match="请先选中卡片"):
+        resolve_modify_target_and_id({"title": "X"}, "修改卡片标题为 X", ctx)
 
 
 def test_editing_surface_bug_title():

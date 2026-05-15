@@ -569,7 +569,6 @@
               </div>
             </div>
             <select v-model="badcase.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
-              <option value="">请选择优先级</option>
               <option value="p1">P1 - 紧急</option>
               <option value="p2">P2 - 高</option>
               <option value="p3">P3 - 中</option>
@@ -732,6 +731,7 @@ import { ref, reactive, onMounted, computed, nextTick, watch, inject } from 'vue
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
@@ -886,7 +886,7 @@ export default {
       correct_answer: '',
       problem_reason: '',
       solution: '',
-      priority: '',
+      priority: 'p3', // 与后端 BadCase.priority 默认一致
       status: 'new',
       assignee: [],
       plan: '',
@@ -898,6 +898,17 @@ export default {
       document_type: '其他文档',
       attachments: []
     })
+
+    /** 编辑加载后：空或非法优先级与下拉对齐，默认 p3（与后端一致） */
+    const normalizeBadcasePriorityForForm = () => {
+      const raw = String(badcase.priority ?? '').trim()
+      const low = raw.toLowerCase()
+      if (['p1', 'p2', 'p3', 'p4'].includes(low)) {
+        badcase.priority = low
+        return
+      }
+      if (!raw) badcase.priority = 'p3'
+    }
 
     // 获取状态文本
     const getStatusText = (status) => {
@@ -1215,6 +1226,7 @@ export default {
             console.log('复现步骤类型:', typeof response.data.badcase.reproduction_steps)
             
             Object.assign(badcase, response.data.badcase)
+            normalizeBadcasePriorityForForm()
             console.log('BadCase信息加载成功:', badcase)
             console.log('加载后的复现步骤:', badcase.reproduction_steps)
             console.log('原始数据中的项目ID:', response.data.badcase.project_id, '类型:', typeof response.data.badcase.project_id)
@@ -1338,6 +1350,7 @@ export default {
               const response = await getBadcaseDetail(fallbackId)
               if (response.data.success && response.data.badcase) {
                 Object.assign(badcase, response.data.badcase)
+                normalizeBadcasePriorityForForm()
                 console.log('兜底编辑模式：BadCase信息加载成功:', badcase)
               } else {
                 alert('获取BadCase信息失败')
@@ -1448,11 +1461,13 @@ export default {
           badcase.plan_id != null && badcase.plan_id !== '' ? badcase.plan_id : badcase.plan
         let plan_id = null
         if (rawPlanKey != null && rawPlanKey !== '' && String(rawPlanKey) !== 'unplanned') {
-          const n = parseInt(String(rawPlanKey), 10)
-          if (!Number.isNaN(n)) plan_id = n
+          const ps = snowflakeIdStr(rawPlanKey)
+          if (ps) plan_id = ps
         }
-        // 仅新建模式添加 card_id，用于后端校验卡片类型
-        const cardIdValue = !isEdit.value && props.card_id ? parseInt(props.card_id) : null
+        // 仅新建模式添加 card_id，用于后端校验卡片类型（雪花勿 parseInt）
+        const cardIdStr =
+          !isEdit.value && props.card_id != null && props.card_id !== '' ? snowflakeIdStr(props.card_id) : ''
+        const cardIdValue = cardIdStr || null
         const badcaseData = {
           title: badcase.title,
           case_category: badcase.case_category,
@@ -1969,6 +1984,19 @@ export default {
         // 如果是 show_diff 场景：过滤掉已采纳的字段（当前 DB 值已等于 diff 的 new 值）
         const queryForPrefill = route.query
         const showDiffModeForPrefill = props.show_diff || queryForPrefill.show_diff === 'true'
+        const clearPendingModifyIfNotThisBadcase = () => {
+          if (!showDiffModeForPrefill || !pendingDiff.value?.modifications) return
+          const pd = pendingDiff.value
+          const tid = pd.targetId != null ? String(pd.targetId).trim() : ''
+          const cur = badcaseId.value ? String(badcaseId.value).trim() : ''
+          const tgt = String(pd.target || '').toLowerCase().replace(/-/g, '_')
+          const isBc = tgt === 'badcase' || tgt === 'bad_case' || tgt === ''
+          if (!isBc || (isEdit.value && cur && tid && tid !== cur)) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+          }
+        }
+        clearPendingModifyIfNotThisBadcase()
         if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
           const mods = pendingDiff.value.modifications
           for (const [field, data] of Object.entries(mods)) {

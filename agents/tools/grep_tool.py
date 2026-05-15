@@ -3,6 +3,7 @@ Grep Tool - 缺陷定位工具
 模拟人类测试工程师的思维模式，精准定位 BadCase/Bug/测试用例的归属关系
 """
 from typing import Dict, Any, List, Callable, Optional, Tuple
+from collections import defaultdict
 import json
 import os
 import time
@@ -253,24 +254,22 @@ class GrepTool(BaseTool):
                                         pass
                                 if not ids:
                                     return
-                                st_variants = [st]
-                                if st == "badcase":
-                                    st_variants = ["badcase", "bad_case"]
-                                elif st == "testcase":
-                                    st_variants = ["testcase", "test_case"]
+                                sid_set = list(set(ids))
                                 rows = (
                                     _db.session.query(_Card)
                                     .filter(_Card.project_id == int(project_id))
-                                    .filter(_Card.source_type.in_(st_variants))
-                                    .filter(_Card.source_id.in_(list(set(ids))))
+                                    .filter(_Card.source_id.in_(sid_set))
                                     .all()
                                 )
-                                m = {int(r.source_id): int(r.id) for r in rows if getattr(r, "source_id", None) is not None}
-                                titles = {
-                                    int(r.source_id): (getattr(r, "title", None) or "").strip()
-                                    for r in rows
-                                    if getattr(r, "source_id", None) is not None
-                                }
+                                by_sid: Dict[int, List[Any]] = defaultdict(list)
+                                for r in rows:
+                                    si = getattr(r, "source_id", None)
+                                    if si is None:
+                                        continue
+                                    try:
+                                        by_sid[int(si)].append(r)
+                                    except Exception:
+                                        continue
                                 for it in items:
                                     if it.get("card_id") is not None:
                                         continue
@@ -278,15 +277,17 @@ class GrepTool(BaseTool):
                                         sid = int(it.get("id"))
                                     except Exception:
                                         continue
-                                    cid = m.get(sid)
-                                    if cid is not None:
-                                        it["card_id"] = cid
-                                    ct = titles.get(sid)
-                                    if ct:
-                                        it["card_title"] = ct
-                                        # 源表 title 为空时，用卡片层标题便于导航/模型阅读
-                                        if not (it.get("title") or "").strip():
-                                            it["title"] = ct
+                                    picked = self._pick_card_orm_from_candidates(by_sid.get(sid) or [], st)
+                                    if picked is not None:
+                                        try:
+                                            it["card_id"] = int(getattr(picked, "id"))
+                                        except (TypeError, ValueError):
+                                            pass
+                                        ct = (getattr(picked, "title", None) or "").strip()
+                                        if ct:
+                                            it["card_title"] = ct
+                                            if not (it.get("title") or "").strip():
+                                                it["title"] = ct
 
                             _attach_card_ids(bug_list, "bug")
                             _attach_card_ids(badcase_list, "badcase")
@@ -656,6 +657,43 @@ class GrepTool(BaseTool):
         """同一 record_id 合并时优先保留「统一卡片」跳转，避免 target=all 下列四条重复。"""
         t = (target or "").strip().lower()
         return {"card": 0, "bug": 1, "badcase": 2, "testcase": 3, "plan": 4}.get(t, 9)
+
+    @staticmethod
+    def _pick_card_orm_from_candidates(candidates: List[Any], target_kind: str) -> Optional[Any]:
+        """与 modify_tool._find_card_for_source_row 一致：不按 source_type SQL 硬过滤，避免库内枚举写法不一致导致丢关联。"""
+        if not candidates:
+            return None
+        try:
+            from app import CardType
+        except Exception:
+            CardType = None  # type: ignore
+
+        tk = (target_kind or "").strip().lower()
+        aliases = {
+            "bug": ["bug"],
+            "badcase": ["badcase", "bad_case"],
+            "testcase": ["testcase", "test_case"],
+        }
+        norm_set = {a.replace("-", "_").lower() for a in aliases.get(tk, [])}
+        expected_ct = None
+        if CardType is not None:
+            expected_ct = {
+                "bug": CardType.BUG,
+                "badcase": CardType.BADCASE,
+                "testcase": CardType.TESTCASE,
+            }.get(tk)
+
+        for c in candidates:
+            st = str(getattr(c, "source_type", None) or "").strip().lower().replace("-", "_")
+            if st in norm_set:
+                return c
+        if expected_ct is not None:
+            for c in candidates:
+                if getattr(c, "type", None) == expected_ct:
+                    return c
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     def _collapse_navigation_merge_keys(
         self,

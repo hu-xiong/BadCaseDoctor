@@ -482,7 +482,7 @@ export default {
       
       try {
         const updateData = {
-          id: editingItem.value.id,
+          id: editingItem.value.id != null ? String(editingItem.value.id) : editingItem.value.id,
           title: title,
           type: editingType.value
         }

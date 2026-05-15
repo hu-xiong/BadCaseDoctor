@@ -638,6 +638,7 @@
     "badcaseStatus": {
       "new": "新建",
       "pending": "待处理",
+      "reopen": "重新打开",
       "reopened": "重新打开",
       "closed": "已关闭",
       "close": "已关闭",
@@ -728,6 +729,10 @@
     "newBadcase": "新建 BadCase",
     "newBug": "新建 Bug",
     "newTestCase": "新建 测试用例",
+    "editBadcase": "编辑 BadCase",
+    "editBug": "编辑 Bug",
+    "editTestCase": "编辑 测试用例",
+    "editCard": "编辑卡片",
     "errorNoProjectId": "错误：项目 ID 不存在",
     "sessionCreateFail": "新建会话失败: {msg}",
     "sessionCreateError": "新建会话异常",

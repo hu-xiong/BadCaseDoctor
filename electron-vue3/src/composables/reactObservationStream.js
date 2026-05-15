@@ -3,9 +3,94 @@
  * 从 SimpleChatPanel 迁入，便于单测与继续收敛解析路径。
  */
 import { nextTick } from 'vue'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import { getStableCreatedId } from '../utils/createPreviewKeys.js'
 import { i18n } from '../i18n/index.js'
 import { freezeThoughtSnapshotForStep } from './thoughtSnapshot.js'
+
+/** modify 预览：从工具结果或 before 快照取关联 Card.id，供列表跳转（与 Bug 源表 id 区分） */
+function pickModifyNavCardId(rr, r, toolData) {
+  const top =
+    rr?.card_id ??
+    r?.card_id ??
+    rr?.cardId ??
+    r?.cardId ??
+    toolData?.card_id ??
+    toolData?.cardId
+  if (top != null && String(top).trim() !== '') {
+    return snowflakeIdStr(top) || String(top).trim()
+  }
+  const b = rr?.before || r?.before
+  if (b && typeof b === 'object') {
+    const c = b.card_id ?? b.cardId
+    if (c != null && String(c).trim() !== '') return snowflakeIdStr(c) || String(c).trim()
+  }
+  const a = rr?.after || r?.after
+  if (a && typeof a === 'object') {
+    const c = a.card_id ?? a.cardId
+    if (c != null && String(c).trim() !== '') return snowflakeIdStr(c) || String(c).trim()
+  }
+  return null
+}
+
+/**
+ * modify 预览缺少 before.card_id 时：从本轮或上一步 grep 的 navigation / grepNavigation 补 card_id
+ *（合并为 target=card 时用 legacy_row_id + merged_from_legacy 对齐源表 id）
+ */
+function pickModifyNavCardIdFromGrepNav(aiMessage, toolData) {
+  const tgt = String(toolData?.target || '')
+    .trim()
+    .toLowerCase()
+  if (!['bug', 'badcase', 'testcase'].includes(tgt)) return null
+  const tidRaw = toolData?.target_id ?? toolData?.targetId
+  if (tidRaw == null || tidRaw === '') return null
+  const tidStr = snowflakeIdStr(tidRaw) || String(tidRaw).trim()
+  if (!tidStr) return null
+
+  const cardIdFromNavItem = (it) => {
+    if (!it || typeof it !== 'object') return null
+    const t = String(it.target || '')
+      .trim()
+      .toLowerCase()
+    const cidRaw = it.card_id ?? it.cardId
+    if (t === 'card') {
+      const legRaw = it.legacy_row_id
+      const leg =
+        legRaw != null && legRaw !== '' ? snowflakeIdStr(legRaw) || String(legRaw).trim() : ''
+      const mf = String(it.merged_from_legacy || '')
+        .trim()
+        .toLowerCase()
+      if (mf === tgt && leg === tidStr && cidRaw != null && String(cidRaw).trim() !== '') {
+        return snowflakeIdStr(cidRaw) || String(cidRaw).trim()
+      }
+      return null
+    }
+    const ridRaw = it.record_id
+    const rid = ridRaw != null && ridRaw !== '' ? snowflakeIdStr(ridRaw) || String(ridRaw).trim() : ''
+    if (t === tgt && rid === tidStr && cidRaw != null && String(cidRaw).trim() !== '') {
+      return snowflakeIdStr(cidRaw) || String(cidRaw).trim()
+    }
+    return null
+  }
+
+  const scanNav = (nav) => {
+    if (!nav || nav.type !== 'multiple' || !Array.isArray(nav.items)) return null
+    for (const it of nav.items) {
+      const x = cardIdFromNavItem(it)
+      if (x) return x
+    }
+    return null
+  }
+
+  let found = scanNav(aiMessage?.navigation)
+  if (found) return found
+  const steps = aiMessage?.steps || []
+  for (let i = steps.length - 1; i >= 0; i--) {
+    found = scanNav(steps[i]?.grepNavigation)
+    if (found) return found
+  }
+  return null
+}
 
 /** 详情字段列表（不在列表中显示的字段，用于沙箱预览分组） */
 export const DETAIL_FIELDS = [
@@ -490,12 +575,14 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           resultsArray.forEach((r) => {
             const rr =
               r && typeof r === 'object' && r.result && typeof r.result === 'object' ? r.result : r
-            const itemId = parseInt(rr?.target_id || r?.target_id || rr?.id || r?.id)
+            const itemIdRaw = rr?.target_id ?? r?.target_id ?? rr?.id ?? r?.id
+            const itemId = snowflakeIdStr(itemIdRaw)
+            const praw = rr?.plan_id ?? r?.plan_id
             const itemPlanId =
-              (rr?.plan_id ?? r?.plan_id) != null ? parseInt(rr?.plan_id ?? r?.plan_id) : null
+              praw != null && praw !== '' ? snowflakeIdStr(praw) || String(praw).trim() : null
 
-            if (isNaN(itemId)) {
-              console.warn('[MODIFY] 跳过无效 ID:', r.target_id || r.id)
+            if (!itemId) {
+              console.warn('[MODIFY] 跳过无效 ID:', itemIdRaw)
               return
             }
 
@@ -544,6 +631,13 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
                 null,
               batchOrder: batchOrderSeq++
             }
+            const navCid =
+              pickModifyNavCardId(rr, r, toolData) ||
+              pickModifyNavCardIdFromGrepNav(aiMessage, {
+                target: resolveBatchModifyItemTarget(rr, r, toolData),
+                target_id: itemIdRaw
+              })
+            if (navCid) baseItemInfo.card_id = navCid
 
             if (listFieldDiff.length === 0 && detailFieldDiff.length === 0 && rawDiff.length > 0) {
               allItems.push({
@@ -577,7 +671,10 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           } else {
             const planGroups = {}
             allItems.forEach((item) => {
-              const planKey = item.plan_id !== null ? String(item.plan_id) : 'unplanned'
+              const planKey =
+              item.plan_id !== null && item.plan_id !== undefined && item.plan_id !== ''
+                ? String(item.plan_id)
+                : 'unplanned'
               if (!planGroups[planKey]) {
                 planGroups[planKey] = []
               }
@@ -600,7 +697,12 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
                   } else {
                     if (currentGroup.length > 0) {
                       modifyGroups.push({
-                        plan_id: planId === 'unplanned' ? null : parseInt(planId),
+                        plan_id:
+                          planId === 'unplanned'
+                            ? null
+                            : /^\d+$/.test(String(planId))
+                              ? String(planId)
+                              : null,
                         target: currentGroup[0]?.target || resolvedToolTarget,
                         items: [...currentGroup]
                       })
@@ -612,7 +714,12 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
 
               if (currentGroup.length > 0) {
                 modifyGroups.push({
-                  plan_id: planId === 'unplanned' ? null : parseInt(planId),
+                  plan_id:
+                    planId === 'unplanned'
+                      ? null
+                      : /^\d+$/.test(String(planId))
+                        ? String(planId)
+                        : null,
                   target: currentGroup[0]?.target || resolvedToolTarget,
                   items: [...currentGroup]
                 })
@@ -645,9 +752,13 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           console.error('[MODIFY] 分组处理异常:', err)
         }
       } else if (toolData.confirmation_required && toolData.diff) {
+        const navCid =
+          pickModifyNavCardId(toolData, toolData, toolData) ||
+          pickModifyNavCardIdFromGrepNav(aiMessage, toolData)
         aiMessage.modifyNavigation = {
           target: resolveModifyNavigationTarget(toolData),
-          target_id: toolData.target_id,
+          target_id: snowflakeIdStr(toolData.target_id) || toolData.target_id,
+          ...(navCid ? { card_id: navCid } : {}),
           diff: toolData.diff,
           modifications: toolData.modifications,
           confirmation_required: true,
@@ -656,9 +767,13 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         }
         console.log('[MODIFY] 存储沙箱预览导航:', aiMessage.modifyNavigation)
       } else if (toolData.diff && toolData.before && toolData.after) {
+        const navCid2 =
+          pickModifyNavCardId(toolData, toolData, toolData) ||
+          pickModifyNavCardIdFromGrepNav(aiMessage, toolData)
         aiMessage.modifyNavigation = {
           target: resolveModifyNavigationTarget(toolData),
-          target_id: toolData.target_id,
+          target_id: snowflakeIdStr(toolData.target_id) || toolData.target_id,
+          ...(navCid2 ? { card_id: navCid2 } : {}),
           diff: toolData.diff,
           before: toolData.before,
           after: toolData.after,

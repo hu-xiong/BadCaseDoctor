@@ -1131,6 +1131,39 @@ def _register_entity_snowflake_pk_hooks() -> None:
 _register_entity_snowflake_pk_hooks()
 
 
+def _apply_card_type_change_defaults(card: Card, old_type: CardType) -> None:
+    """
+    行内切换 Card.type（无 Bug/BadCase/TestCase 源表行时）补全新类型常用字段，
+    避免 MySQL NOT NULL / 业务必填导致 commit 失败。
+    """
+    if old_type == card.type:
+        return
+    new_t = card.type
+    if not isinstance(new_t, CardType):
+        return
+    if new_t == CardType.BUG:
+        if not (getattr(card, 'severity', None) or '').strip():
+            card.severity = 'medium'
+        if not (getattr(card, 'bug_type', None) or '').strip():
+            card.bug_type = '其他'
+    elif new_t == CardType.BADCASE:
+        if not (getattr(card, 'case_category', None) or '').strip():
+            card.case_category = '未分类'
+        if not (getattr(card, 'base_problem', None) or '').strip():
+            card.base_problem = (card.title or '').strip() or '（待补充）'
+        if not (getattr(card, 'badcase_result', None) or '').strip():
+            card.badcase_result = '（待补充）'
+        if not (getattr(card, 'answer', None) or '').strip():
+            card.answer = '（待补充）'
+    elif new_t == CardType.TESTCASE:
+        if not (getattr(card, 'version', None) or '').strip():
+            card.version = 'v1'
+        if not (getattr(card, 'case_type_test', None) or '').strip():
+            card.case_type_test = '功能测试'
+        if not (getattr(card, 'test_type', None) or '').strip():
+            card.test_type = '手动'
+
+
 def repair_card_source_link_if_missing(card) -> bool:
     """
     数据补全：源表行已用 card_id 指向本卡，但 Card.source_type/source_id 为空时反填。
@@ -1194,6 +1227,86 @@ def repair_card_source_link_if_missing(card) -> bool:
 
 # 兼容旧调用名
 repair_card_bug_source_if_missing = repair_card_source_link_if_missing
+
+
+def _find_card_linking_source_record(project_id, source_id, entity_kind, prefer_plan_id=None):
+    """
+    源表 card_id 为空时，用 Card.source_id 反查看板卡片（迁移/历史数据常见）。
+    entity_kind: 'bug' | 'badcase' | 'testcase'
+    """
+    if project_id is None or source_id is None:
+        return None
+    try:
+        pid = int(project_id)
+        sid = int(source_id)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or sid <= 0:
+        return None
+    ek = str(entity_kind or '').strip().lower()
+    st_expect = {
+        'bug': {'bug'},
+        'badcase': {'bad_case', 'badcase'},
+        'testcase': {'test_case', 'testcase'},
+    }.get(ek, set())
+    ctype_expect = {
+        'bug': CardType.BUG,
+        'badcase': CardType.BADCASE,
+        'testcase': CardType.TESTCASE,
+    }.get(ek)
+
+    rows = (
+        Card.query.filter(Card.project_id == pid, Card.source_id == sid)
+        .order_by(Card.id.desc())
+        .all()
+    )
+    if not rows:
+        return None
+
+    def _norm_st(val):
+        return str(val or '').strip().lower().replace('-', '_')
+
+    if prefer_plan_id is not None:
+        try:
+            pp = int(prefer_plan_id)
+            for c in rows:
+                cp = getattr(c, 'plan_id', None)
+                if cp is not None and int(cp) == pp:
+                    return c
+        except (TypeError, ValueError):
+            pass
+
+    for c in rows:
+        st = _norm_st(getattr(c, 'source_type', None))
+        if st in st_expect:
+            return c
+    if ctype_expect is not None:
+        for c in rows:
+            if getattr(c, 'type', None) == ctype_expect:
+                return c
+    return rows[0] if len(rows) == 1 else None
+
+
+def _try_repair_badcase_card_id_from_source_card(bc):
+    """若 bad_case.card_id 为空但 Card 已挂 source_id，则写回 ORM。返回是否修改（调用方 commit）。"""
+    if bc is None:
+        return False
+    cid = getattr(bc, 'card_id', None)
+    try:
+        if cid is not None and int(cid) > 0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    card = _find_card_linking_source_record(
+        bc.project_id, bc.id, 'badcase', prefer_plan_id=getattr(bc, 'plan_id', None)
+    )
+    if card is None:
+        return False
+    try:
+        bc.card_id = int(card.id)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 class CardTypeDefinition(db.Model):
@@ -1858,6 +1971,55 @@ def _cache_invalidate_plans(project_id: int):
         _PROJECT_CTX_CACHE.pop(k, None)
     # 同步清除 Redis 中该项目的所有相关缓存
     _redis_cache_invalidate_project(project_id)
+
+
+def _cache_invalidate_cards(project_id: int):
+    """卡片列表短缓存失效；避免返回旧 JSON（含错误 number id）。"""
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+    to_del = [
+        k
+        for k in list(_PROJECT_CTX_CACHE.keys())
+        if isinstance(k, tuple) and len(k) >= 2 and k[0] == 'cards' and k[1] == pid
+    ]
+    for k in to_del:
+        _PROJECT_CTX_CACHE.pop(k, None)
+
+
+def _parse_query_optional_int64(arg_name: str):
+    """从 request.args 解析可选雪花 id（查询串用字符串，避免依赖 type=int）。"""
+    raw = request.args.get(arg_name)
+    if raw is None or str(raw).strip() == '':
+        return None
+    try:
+        v = int(str(raw).strip())
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_query_int_optional(arg_name: str):
+    """读取 query 中的整数（含 0）；缺失为 None。用于 plan_id=0 表示未计划等。"""
+    raw = request.args.get(arg_name)
+    if raw is None or str(raw).strip() == '':
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_bigint_json(val):
+    """请求 JSON 中的可选雪花 id，写入 ORM BigInteger 列。"""
+    if val is None or val == '':
+        return None
+    try:
+        v = int(str(val).strip())
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ==================== Redis 缓存层 ====================
@@ -2830,7 +2992,7 @@ def _upsert_diff_review_state(
 ):
     """主表仅 pending：无则插入；有 pending 则更新；遗留 adopted/rejected/superseded 整键删掉后新建 pending。"""
     nt = _normalize_diff_target(target)
-    tid = int(target_id)
+    tid = int(str(target_id).strip())
     canonical_mods = _canonical_modifications(modifications)
     fp = _fingerprint_for_diff(nt, tid, canonical_mods)
     now = datetime.utcnow()
@@ -3084,8 +3246,140 @@ def _safe_mysql_int_fk_id(value):
     return n
 
 
-def _nullify_chat_message_modify_preview(message_id):
-    """采纳成功后清空 chat_message 上沙箱 JSON，避免历史会话仍带 confirmation_required 导致列表再次 pending。"""
+def _grep_nav_item_record_id(item, target_norm):
+    """与 grep_tool 导航项一致：按 target 取 record_id / bug_id / source_id / card_id。"""
+    if not isinstance(item, dict):
+        return None
+    t = str(item.get('target') or '').strip().lower().replace('-', '_')
+    if t == 'test_case':
+        t = 'testcase'
+    if t != target_norm:
+        return None
+    rid = item.get('record_id')
+    if rid is None:
+        if target_norm == 'bug':
+            rid = item.get('bug_id')
+        elif target_norm in ('badcase', 'testcase'):
+            rid = item.get('source_id')
+        elif target_norm == 'card':
+            rid = item.get('card_id') if item.get('card_id') is not None else item.get('id')
+    try:
+        return int(rid) if rid is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _patch_grep_nav_items_list(items, target_norm, entity_id_int, new_title):
+    if not isinstance(items, list) or not new_title:
+        return False
+    changed = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        rid = _grep_nav_item_record_id(it, target_norm)
+        if rid is None or int(entity_id_int) != int(rid):
+            continue
+        it['title'] = new_title
+        if target_norm == 'bug':
+            it['bug_title'] = new_title
+        changed = True
+    return changed
+
+
+def _patch_navigation_blob_for_title(nav, target_norm, entity_id_int, new_title):
+    if not isinstance(nav, dict) or nav.get('type') != 'multiple':
+        return False
+    return _patch_grep_nav_items_list(nav.get('items'), target_norm, entity_id_int, new_title)
+
+
+def _patch_steps_blob_for_title(steps, target_norm, entity_id_int, new_title):
+    if not isinstance(steps, list):
+        return False
+    changed = False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        gn = step.get('grepNavigation')
+        if isinstance(gn, dict) and gn.get('type') == 'multiple':
+            if _patch_grep_nav_items_list(gn.get('items'), target_norm, entity_id_int, new_title):
+                changed = True
+    return changed
+
+
+def _patch_execution_results_modify_titles(obj, target_norm, entity_id_int, new_title):
+    """递归修正 modify 相关块里 before/after.title，避免清空 modify_navigation 后仍从 execution_results 恢复旧标题。"""
+    changed = False
+    if isinstance(obj, dict):
+        tid = obj.get('target_id') if obj.get('target_id') is not None else obj.get('targetId')
+        if tid is not None:
+            try:
+                if int(tid) == int(entity_id_int):
+                    ot = str(obj.get('target') or '').strip().lower().replace('-', '_')
+                    if ot == 'test_case':
+                        ot = 'testcase'
+                    if not ot or ot == target_norm or (target_norm == 'bug' and ot == 'bug'):
+                        for side in ('before', 'after'):
+                            sub = obj.get(side)
+                            if isinstance(sub, dict) and 'title' in sub:
+                                sub['title'] = new_title
+                                changed = True
+            except (TypeError, ValueError):
+                pass
+        for v in obj.values():
+            if _patch_execution_results_modify_titles(v, target_norm, entity_id_int, new_title):
+                changed = True
+    elif isinstance(obj, list):
+        for x in obj:
+            if _patch_execution_results_modify_titles(x, target_norm, entity_id_int, new_title):
+                changed = True
+    return changed
+
+
+def _patch_chat_message_record_titles(msg, target, target_id, new_title):
+    """将本条助手消息上 grep 导航、步骤内 grep、execution_results 中与 target_id 相关的展示标题统一为 new_title。"""
+    import json
+
+    tgt = _normalize_diff_target(target)
+    if tgt not in ('bug', 'badcase', 'testcase', 'card'):
+        tgt = str(target or '').strip().lower().replace('-', '_')
+        if tgt == 'test_case':
+            tgt = 'testcase'
+    try:
+        eid = int(str(target_id).strip())
+    except (TypeError, ValueError):
+        return
+    nt = (new_title or '').strip()
+    if not nt:
+        return
+    if msg.navigation:
+        try:
+            nav = json.loads(msg.navigation) if isinstance(msg.navigation, str) else msg.navigation
+            if _patch_navigation_blob_for_title(nav, tgt, eid, nt):
+                msg.navigation = json.dumps(nav, ensure_ascii=False)
+        except Exception as e:
+            print(f"[MODIFY-BG] patch navigation 失败: {e}")
+    if msg.steps:
+        try:
+            steps = json.loads(msg.steps) if isinstance(msg.steps, str) else msg.steps
+            if _patch_steps_blob_for_title(steps, tgt, eid, nt):
+                msg.steps = json.dumps(steps, ensure_ascii=False)
+        except Exception as e:
+            print(f"[MODIFY-BG] patch steps 失败: {e}")
+    if msg.execution_results:
+        try:
+            er = (
+                json.loads(msg.execution_results)
+                if isinstance(msg.execution_results, str)
+                else msg.execution_results
+            )
+            if _patch_execution_results_modify_titles(er, tgt, eid, nt):
+                msg.execution_results = json.dumps(er, ensure_ascii=False)
+        except Exception as e:
+            print(f"[MODIFY-BG] patch execution_results 失败: {e}")
+
+
+def _finalize_chat_message_after_modify_adopt(message_id, target=None, target_id=None, modifications=None):
+    """采纳落库成功后：若有标题变更则同步修正本条消息上的定位/执行结果文案，再清空沙箱预览字段。"""
     mid = _normalize_chat_message_id(message_id)
     if mid is None:
         return
@@ -3093,15 +3387,25 @@ def _nullify_chat_message_modify_preview(message_id):
         db.session.expire_all()
         msg = db.session.get(ChatMessage, mid)
         if not msg:
-            print(f"[MODIFY-BG] ChatMessage id={mid} 不存在，跳过清理预览字段")
+            print(f"[MODIFY-BG] ChatMessage id={mid} 不存在，跳过 finalize")
             return
+        new_title = None
+        if isinstance(modifications, dict):
+            tv = modifications.get('title')
+            if isinstance(tv, str) and tv.strip():
+                new_title = tv.strip()
+        if new_title and target is not None and target_id is not None:
+            try:
+                _patch_chat_message_record_titles(msg, target, target_id, new_title)
+            except Exception as e:
+                print(f"[MODIFY-BG] 记录标题同步失败 id={mid}: {e}")
         msg.modify_groups = None
         msg.modify_navigation = None
         msg.delete_navigation = None
         db.session.commit()
-        print(f"[MODIFY-BG] 已清空消息 {mid} 的 modify_groups / modify_navigation / delete_navigation")
+        print(f"[MODIFY-BG] 已 finalize 消息 {mid}（标题同步 + 清空 modify_*）")
     except Exception as e:
-        print(f"[MODIFY-BG] 清空消息预览字段失败 id={mid}: {e}")
+        print(f"[MODIFY-BG] finalize 消息失败 id={mid}: {e}")
         db.session.rollback()
 
 
@@ -3124,7 +3428,12 @@ def _run_modify_in_background(
                 natural_query=natural_query,
             ))
             if result.get('success') and message_id:
-                _nullify_chat_message_modify_preview(message_id)
+                _finalize_chat_message_after_modify_adopt(
+                    message_id,
+                    target=target,
+                    target_id=int(target_id),
+                    modifications=dict(modifications or {}),
+                )
         except Exception as e:
             print(f"[MODIFY-BG] 后台采纳失败: {e}")
 
@@ -3138,6 +3447,7 @@ def _run_modify_batch_in_background(project_id, target, items, message_id, db_ur
 
         modify_tool = ModifyTool(db.session, database_uri=db_uri)
         any_success = False
+        succeeded_items = []
         try:
             for it in items:
                 tid = int(it["target_id"])
@@ -3155,10 +3465,37 @@ def _run_modify_batch_in_background(project_id, target, items, message_id, db_ur
                 )
                 if result.get("success"):
                     any_success = True
+                    succeeded_items.append(it)
         except Exception as e:
             print(f"[MODIFY-BG-BATCH] 批量采纳失败: {e}")
         if any_success and message_id:
-            _nullify_chat_message_modify_preview(message_id)
+            mid = _normalize_chat_message_id(message_id)
+            if mid is None:
+                return
+            try:
+                db.session.expire_all()
+                msg = db.session.get(ChatMessage, mid)
+                if not msg:
+                    print(f"[MODIFY-BG-BATCH] ChatMessage id={mid} 不存在，跳过 finalize")
+                    return
+                for it in succeeded_items:
+                    mods = dict(it.get("modifications") or {})
+                    tv = mods.get("title")
+                    if isinstance(tv, str) and tv.strip():
+                        try:
+                            _patch_chat_message_record_titles(
+                                msg, target, int(it["target_id"]), tv.strip()
+                            )
+                        except Exception as e:
+                            print(f"[MODIFY-BG-BATCH] 标题同步失败 tid={it.get('target_id')}: {e}")
+                msg.modify_groups = None
+                msg.modify_navigation = None
+                msg.delete_navigation = None
+                db.session.commit()
+                print(f"[MODIFY-BG-BATCH] 已 finalize 消息 {mid}（批量标题同步 + 清空 modify_*）")
+            except Exception as e:
+                print(f"[MODIFY-BG-BATCH] finalize 失败 id={mid}: {e}")
+                db.session.rollback()
 
 
 @app.route('/api/projects/<int:project_id>/modify', methods=['POST'])
@@ -4705,7 +5042,7 @@ def api_get_project_badcases(project_id):
         per_page = request.args.get('per_page', 10, type=int)
         
         # 获取计划ID参数
-        plan_id = request.args.get('plan_id', type=int)
+        plan_id = _parse_query_int_optional('plan_id')
         
         # 获取状态类型和内容类型参数
         status_type = request.args.get('status_type')
@@ -4742,6 +5079,17 @@ def api_get_project_badcases(project_id):
         if _repaired:
             db.session.commit()
             _cache_invalidate_plans(project_id)
+
+        _card_repaired = False
+        for _bc in pagination.items:
+            if _try_repair_badcase_card_id_from_source_card(_bc):
+                _card_repaired = True
+        if _card_repaired:
+            try:
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"[BadCase列表] card_id 反查补写 commit 失败: {e}", flush=True)
 
         # 批量解析 assignee -> user.name，避免 N+1
         def _parse_assignee_ids(raw):
@@ -5198,6 +5546,13 @@ def api_get_badcase_detail(badcase_id):
         db.session.commit()
         _cache_invalidate_plans(badcase.project_id)
 
+    if _try_repair_badcase_card_id_from_source_card(badcase):
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"[BadCase详情] card_id 反查补写失败: {e}", flush=True)
+
     return jsonify({
         'success': True,
         'badcase': {
@@ -5599,6 +5954,7 @@ def api_create_card():
 
         db.session.add(card)
         db.session.commit()
+        _cache_invalidate_cards(project_id)
         
         print(f"✅ 卡片创建成功: {card.id}")
         return jsonify({'success': True, 'data': card.to_dict()})
@@ -5652,7 +6008,7 @@ def api_get_project_cards(project_id):
         # 获取卡片类型参数
         card_type = request.args.get('type')
         # 迭代计划下卡片列表：与前端 selectedPlan 对齐
-        plan_id_param = request.args.get('plan_id', type=int)
+        plan_id_param = _parse_query_optional_int64('plan_id')
         
         # 短期缓存 key（须包含 plan 维度，避免错命中）
         cache_key = ('cards', project_id, card_type or '', plan_id_param if plan_id_param is not None else '', page, per_page)
@@ -5745,6 +6101,8 @@ def api_update_card(card_id):
         if not has_project_permission(current_user.id, card.project_id):
             return jsonify({'success': False, 'error': '无权修改此卡片'}), 403
         
+        old_card_type = card.type
+        
         # 更新字段
         if 'title' in data:
             card.title = data['title']
@@ -5753,7 +6111,7 @@ def api_update_card(card_id):
         if 'assignee_id' in data:
             card.assignee_id = data['assignee_id']
         if 'plan_id' in data:
-            card.plan_id = data['plan_id']
+            card.plan_id = _coerce_optional_bigint_json(data['plan_id'])
         if 'description' in data:
             card.description = data['description']
         
@@ -5829,8 +6187,11 @@ def api_update_card(card_id):
             if 'version' in data:
                 card.version = data['version']
         
+        _apply_card_type_change_defaults(card, old_card_type)
+        
         card.updated_at = datetime.utcnow()
         db.session.commit()
+        _cache_invalidate_cards(card.project_id)
         
         print(f"✅ 卡片更新成功: {card.id}")
         return jsonify({'success': True, 'data': card.to_dict()})
@@ -5855,8 +6216,10 @@ def api_delete_card(card_id):
         if not has_project_permission(current_user.id, card.project_id):
             return jsonify({'success': False, 'error': '无权删除此卡片'}), 403
         
+        _pid = card.project_id
         db.session.delete(card)
         db.session.commit()
+        _cache_invalidate_cards(_pid)
         
         print(f"✅ 卡片删除成功: {card.id}")
         return jsonify({'success': True, 'message': '卡片删除成功'})
@@ -5978,18 +6341,23 @@ def api_move_card(card_id):
         target_plan_id = data.get('plan_id')  # None表示移至未计划
         
         # 验证目标计划存在（如果指定了）
-        if target_plan_id:
-            plan = Plan.query.get(target_plan_id)
+        if target_plan_id is not None and str(target_plan_id).strip() != '':
+            tid = _coerce_optional_bigint_json(target_plan_id)
+            plan = Plan.query.get(tid) if tid is not None else None
             if not plan:
                 return jsonify({'success': False, 'error': '目标计划不存在'}), 404
             if plan.project_id != card.project_id:
                 return jsonify({'success': False, 'error': '目标计划不属于同一项目'}), 400
+            target_plan_id = tid
+        else:
+            target_plan_id = None
         
         old_plan_id = card.plan_id
         card.plan_id = target_plan_id
         card.updated_at = datetime.utcnow()
         
         db.session.commit()
+        _cache_invalidate_cards(card.project_id)
         
         print(f"✅ 卡片移动成功: {card.id}, 从计划 {old_plan_id} -> {target_plan_id}")
         return jsonify({
@@ -6158,8 +6526,8 @@ def api_get_card_plan_relations():
     print(f"=== 获取卡片计划关联关系 ===")
     
     try:
-        card_id = request.args.get('card_id', type=int)
-        plan_id = request.args.get('plan_id', type=int)
+        card_id = _parse_query_optional_int64('card_id')
+        plan_id = _parse_query_optional_int64('plan_id')
         include_removed = request.args.get('include_removed', 'false').lower() == 'true'
         
         query = CardPlanRelation.query
@@ -8381,10 +8749,10 @@ def api_get_project_bugs(project_id):
         per_page = request.args.get('per_page', 10, type=int)
         
         # 获取计划ID参数
-        plan_id = request.args.get('plan_id', type=int)
+        plan_id = _parse_query_int_optional('plan_id')
         
         # 获取卡片ID参数（优先使用card_id过滤，因为卡片分类型）
-        card_id = request.args.get('card_id', type=int)
+        card_id = _parse_query_optional_int64('card_id')
         
         # 获取状态类型参数
         status_type = request.args.get('status_type')
@@ -8402,6 +8770,19 @@ def api_get_project_bugs(project_id):
             print(f"过滤未计划的Bug (status_type=unplanned)")
         elif plan_id is not None:
             query = query.filter_by(plan_id=plan_id)
+            # 迭代计划下列表：默认只返回已挂卡片的 Bug，避免出现「计划根下直接挂 Bug」的孤儿行（与看板 Card 层对齐）。
+            # 数据修复/排查需包含无卡记录时：GET ...&include_cardless_bugs=1
+            _inc_cardless = (request.args.get('include_cardless_bugs') or '').strip().lower() in (
+                '1',
+                'true',
+                'yes',
+                'on',
+            )
+            if not _inc_cardless:
+                query = query.filter(Bug.card_id.isnot(None))
+                print(f"按 plan_id={plan_id} 过滤 Bug，且排除 card_id 为空的记录（include_cardless_bugs 未开启）")
+            else:
+                print(f"按 plan_id={plan_id} 过滤 Bug，包含无卡片关联记录（include_cardless_bugs=1）")
         
         # 分页查询Bug
         pagination = query.order_by(Bug.created_at.desc())\
@@ -9627,7 +10008,7 @@ def api_get_project_testcases(project_id):
         per_page = request.args.get('per_page', 10, type=int)
         
         # 获取计划ID参数
-        plan_id = request.args.get('plan_id', type=int)
+        plan_id = _parse_query_int_optional('plan_id')
         
         # 获取状态类型参数
         status_type = request.args.get('status_type')

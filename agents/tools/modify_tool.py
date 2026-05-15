@@ -34,6 +34,7 @@ import difflib
 import json
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import time
 import uuid
@@ -47,6 +48,40 @@ except ImportError:
 
 # 批量预览流式事件：经 progress_queue 透传到 SSE（前缀 + JSON）
 MODIFY_BATCH_ROW_PREFIX = "__MODIFY_BATCH_ROW__"
+
+
+def _json_safe_id(value: Any) -> Any:
+    """前端 JSON.parse 会丢大整数精度：对外 payload 中主键一律用十进制字符串。"""
+    if value is None:
+        return None
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _json_safe_row(snapshot: Any) -> Any:
+    """before/after 快照中的整型主键/外键转为字符串再 JSON 下发。"""
+    if not isinstance(snapshot, dict):
+        return snapshot
+    out = dict(snapshot)
+    for k in (
+        "id",
+        "plan_id",
+        "card_id",
+        "source_id",
+        "assignee_id",
+        "parent_id",
+        "bug_id",
+        "badcase_id",
+        "testcase_id",
+        "navigation_plan_id",
+        "copy_from_card_id",
+        "created_id",
+    ):
+        if k in out and out[k] is not None:
+            out[k] = _json_safe_id(out[k])
+    return out
 
 
 def modify_tool_params_log_snapshot(
@@ -292,83 +327,149 @@ class ModifyTool(BaseTool):
         except (TypeError, ValueError):
             return tl
         try:
-            from app import app as flask_app, db as flask_db, Bug, BadCase, Card, TestCase
+            from app import app as flask_app
 
-            with flask_app.app_context():
-                cards = (
-                    flask_db.session.query(Card)
-                    .filter(Card.project_id == pid, Card.source_id == tid)
-                    .all()
-                )
-                if len(cards) == 1:
-                    c0 = cards[0]
-                    canon = self._canonical_target_from_card_source_type(
-                        getattr(c0, "source_type", None)
-                    )
-                    if not canon:
-                        ct = getattr(c0, "type", None)
-                        ct_s = (
-                            ct.value
-                            if ct is not None and hasattr(ct, "value")
-                            else (str(ct) if ct is not None else "")
+            def _enumish(v: Any) -> Optional[str]:
+                if v is None:
+                    return None
+                if hasattr(v, "value"):
+                    return str(getattr(v, "value"))
+                s = str(v).strip()
+                return s if s else None
+
+            def _card_rows_snapshot() -> List[Dict[str, Any]]:
+                with flask_app.app_context():
+                    from app import db as _db, Card as _Card
+
+                    try:
+                        rows = (
+                            _db.session.query(_Card)
+                            .filter(_Card.project_id == pid, _Card.source_id == tid)
+                            .all()
                         )
-                        canon = self._canonical_target_from_card_source_type(
-                            str(ct_s or "").lower()
+                        return [
+                            {
+                                "id": int(r.id),
+                                "source_type": _enumish(getattr(r, "source_type", None)),
+                                "type": _enumish(getattr(r, "type", None)),
+                            }
+                            for r in rows
+                        ]
+                    finally:
+                        try:
+                            _db.session.remove()
+                        except Exception:
+                            pass
+
+            def _has_bug_row() -> bool:
+                with flask_app.app_context():
+                    from app import db as _db, Bug as _B
+
+                    try:
+                        return (
+                            _db.session.query(_B.id)
+                            .filter(_B.project_id == pid, _B.id == tid)
+                            .first()
+                            is not None
                         )
-                    if canon and canon != tl:
-                        print(
-                            f"[MODIFY] 按 Card.source_type/type 校正 target: {tl!r} → {canon!r} "
-                            f"(card.id={getattr(c0, 'id', None)}, source_id={tid})",
-                            flush=True,
+                    finally:
+                        try:
+                            _db.session.remove()
+                        except Exception:
+                            pass
+
+            def _has_badcase_row() -> bool:
+                with flask_app.app_context():
+                    from app import db as _db, BadCase as _Bc
+
+                    try:
+                        return (
+                            _db.session.query(_Bc.id)
+                            .filter(_Bc.project_id == pid, _Bc.id == tid)
+                            .first()
+                            is not None
                         )
-                        return canon
-                if len(cards) > 1:
-                    # 多条 Card 同源 id 属数据异常：不提前 return，继续用源表唯一命中 / modifications 消歧
+                    finally:
+                        try:
+                            _db.session.remove()
+                        except Exception:
+                            pass
+
+            def _has_testcase_row() -> bool:
+                with flask_app.app_context():
+                    from app import db as _db, TestCase as _Tc
+
+                    try:
+                        return (
+                            _db.session.query(_Tc.id)
+                            .filter(_Tc.project_id == pid, _Tc.id == tid)
+                            .first()
+                            is not None
+                        )
+                    finally:
+                        try:
+                            _db.session.remove()
+                        except Exception:
+                            pass
+
+            def _safe_result(name: str, fut, default):
+                try:
+                    return fut.result(timeout=45)
+                except Exception as e:
+                    print(f"[MODIFY] reconcile 并发任务 {name} 失败，回退默认值: {e}", flush=True)
+                    return default
+
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                f_card = ex.submit(_card_rows_snapshot)
+                f_bug = ex.submit(_has_bug_row)
+                f_bad = ex.submit(_has_badcase_row)
+                f_tc = ex.submit(_has_testcase_row)
+                cards_payload = _safe_result("cards", f_card, [])
+                has_bug = bool(_safe_result("bug", f_bug, False))
+                has_bad = bool(_safe_result("badcase", f_bad, False))
+                has_tc = bool(_safe_result("testcase", f_tc, False))
+
+            if len(cards_payload) == 1:
+                c0 = cards_payload[0]
+                canon = self._canonical_target_from_card_source_type(c0.get("source_type"))
+                if not canon:
+                    ct_s = str(c0.get("type") or "").strip().lower()
+                    canon = self._canonical_target_from_card_source_type(ct_s)
+                if canon and canon != tl:
                     print(
-                        f"[MODIFY] WARN 多条 Card 共用 source_id={tid}（n={len(cards)}），"
-                        f"尝试源表消歧当前 target={tl!r}",
+                        f"[MODIFY] 按 Card.source_type/type 校正 target: {tl!r} → {canon!r} "
+                        f"(card.id={c0.get('id')}, source_id={tid})",
                         flush=True,
                     )
+                    return canon
+            if len(cards_payload) > 1:
+                print(
+                    f"[MODIFY] WARN 多条 Card 共用 source_id={tid}（n={len(cards_payload)}），"
+                    f"尝试源表消歧当前 target={tl!r}",
+                    flush=True,
+                )
 
-                has_bug = (
-                    flask_db.session.query(Bug.id)
-                    .filter(Bug.project_id == pid, Bug.id == tid)
-                    .first()
-                    is not None
+            hits: List[str] = []
+            if has_bug:
+                hits.append("bug")
+            if has_bad:
+                hits.append("badcase")
+            if has_tc:
+                hits.append("testcase")
+            if len(hits) == 1 and hits[0] != tl:
+                print(
+                    f"[MODIFY] 按源表唯一命中校正 target: {tl!r} → {hits[0]!r} (id={tid})",
+                    flush=True,
                 )
-                has_bad = (
-                    flask_db.session.query(BadCase.id)
-                    .filter(BadCase.project_id == pid, BadCase.id == tid)
-                    .first()
-                    is not None
-                )
-                has_tc = (
-                    flask_db.session.query(TestCase.id)
-                    .filter(TestCase.project_id == pid, TestCase.id == tid)
-                    .first()
-                    is not None
-                )
-                hits: List[str] = []
-                if has_bug:
-                    hits.append("bug")
-                if has_bad:
-                    hits.append("badcase")
-                if has_tc:
-                    hits.append("testcase")
-                if len(hits) == 1 and hits[0] != tl:
+                return hits[0]
+            if len(hits) > 1:
+                hinted = self._infer_modify_target_from_modification_keys(modifications or {})
+                if hinted and hinted in hits and hinted != tl:
                     print(
-                        f"[MODIFY] 按源表唯一命中校正 target: {tl!r} → {hits[0]!r} (id={tid})",
+                        f"[MODIFY] 按 modifications 字段校正 target: {tl!r} → {hinted!r} (id={tid})",
                         flush=True,
                     )
-                    return hits[0]
-                if len(hits) > 1:
-                    hinted = self._infer_modify_target_from_modification_keys(modifications or {})
-                    if hinted and hinted in hits and hinted != tl:
-                        print(
-                            f"[MODIFY] 按 modifications 字段校正 target: {tl!r} → {hinted!r} (id={tid})",
-                            flush=True,
-                        )
-                        return hinted
+                    return hinted
         except Exception as e:
             print(f"[MODIFY] target 校正查询异常，沿用 {tl!r}: {e}", flush=True)
         return tl
@@ -450,6 +551,18 @@ class ModifyTool(BaseTool):
         except Exception:
             return None
 
+    def _nav_card_pk_for_source_orm_row(
+        self, session: Any, target: str, row: Any, project_id: Any
+    ) -> Optional[int]:
+        """列表跳转用：Bug/BadCase/TestCase 行关联的 Card.id（优先行上 card_id，否则按 source 反查）。"""
+        card = self._find_card_for_source_row(session, target, row, project_id)
+        if card is None:
+            return None
+        try:
+            return int(getattr(card, "id", None))
+        except (TypeError, ValueError):
+            return None
+
     def _card_sync_from_source_enabled(self) -> bool:
         """modify 写入源表后是否镜像更新 Card；默认开启，MODIFY_SYNC_CARD_FROM_SOURCE=0 关闭。"""
         return self._env_flag_enabled("MODIFY_SYNC_CARD_FROM_SOURCE", "1")
@@ -461,36 +574,51 @@ class ModifyTool(BaseTool):
         if row is None:
             return None
         try:
-            from app import Card
+            from app import Card, CardType
 
             pid = int(project_id)
             cid = getattr(row, "card_id", None)
             if cid is not None:
-                card = (
-                    session.query(Card)
-                    .filter(Card.id == int(cid), Card.project_id == pid)
-                    .first()
-                )
-                if card is not None:
-                    return card
+                try:
+                    ci = int(cid)
+                except (TypeError, ValueError):
+                    ci = None
+                if ci is not None and ci > 0:
+                    card = (
+                        session.query(Card)
+                        .filter(Card.id == ci, Card.project_id == pid)
+                        .first()
+                    )
+                    if card is not None:
+                        return card
             rid = int(getattr(row, "id"))
             aliases = {
                 "bug": ["bug"],
                 "badcase": ["badcase", "bad_case"],
                 "testcase": ["testcase", "test_case"],
             }
-            for st in aliases.get(target, []):
-                card = (
-                    session.query(Card)
-                    .filter(
-                        Card.project_id == pid,
-                        Card.source_id == rid,
-                        Card.source_type == st,
-                    )
-                    .first()
-                )
-                if card is not None:
-                    return card
+            norm_set = {a.replace("-", "_").lower() for a in aliases.get(target, [])}
+            expected_ct = {
+                "bug": CardType.BUG,
+                "badcase": CardType.BADCASE,
+                "testcase": CardType.TESTCASE,
+            }.get(target)
+
+            candidates = (
+                session.query(Card)
+                .filter(Card.project_id == pid, Card.source_id == rid)
+                .all()
+            )
+            for c in candidates:
+                st = str(getattr(c, "source_type", None) or "").strip().lower().replace("-", "_")
+                if st in norm_set:
+                    return c
+            if expected_ct is not None:
+                for c in candidates:
+                    if getattr(c, "type", None) == expected_ct:
+                        return c
+            if len(candidates) == 1:
+                return candidates[0]
             return None
         except Exception as e:
             print(f"[MODIFY] 查找 Card 失败: {e}")
@@ -1131,6 +1259,9 @@ class ModifyTool(BaseTool):
                 status_snap = self._snapshot_status_string(getattr(bug, "status", None))
                 if not status_snap:
                     status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
+                nav_cid = self._nav_card_pk_for_source_orm_row(
+                    flask_db.session, "bug", bug, project_id
+                )
                 out[bug.id] = {
                     "id": bug.id,
                     "title": bug.title,
@@ -1141,6 +1272,7 @@ class ModifyTool(BaseTool):
                     "assignee_id": bug.assignee_id,
                     "assignee": assignee_name,
                     "plan_id": bug.plan_id,
+                    "card_id": nav_cid,
                     "steps_to_reproduce": bug.steps_to_reproduce or "",
                     "expected_result": bug.expected_result or "",
                     "actual_result": bug.actual_result or "",
@@ -1158,6 +1290,9 @@ class ModifyTool(BaseTool):
                 st_snap = self._snapshot_status_string(getattr(bc, "status", None))
                 if not st_snap:
                     st_snap = self._badcase_status_sql_fallback(flask_db, bc.id, project_id)
+                nav_cid = self._nav_card_pk_for_source_orm_row(
+                    flask_db.session, "badcase", bc, project_id
+                )
                 out[bc.id] = {
                     "id": bc.id,
                     "title": bc.title,
@@ -1165,6 +1300,7 @@ class ModifyTool(BaseTool):
                     "priority": bc.priority,
                     "assignee": bc.assignee or "",
                     "plan_id": bc.plan_id,
+                    "card_id": nav_cid,
                     "reproduction_steps": bc.reproduction_steps or "",
                     "answer": bc.answer or "",
                     "correct_answer": bc.correct_answer or "",
@@ -1200,6 +1336,9 @@ class ModifyTool(BaseTool):
                 tc_st = self._snapshot_status_string(getattr(testcase, "status", None))
                 if not tc_st:
                     tc_st = self._testcase_status_sql_fallback(flask_db, testcase.id, project_id)
+                nav_cid = self._nav_card_pk_for_source_orm_row(
+                    flask_db.session, "testcase", testcase, project_id
+                )
                 out[testcase.id] = {
                     "id": testcase.id,
                     "title": testcase.title,
@@ -1222,6 +1361,7 @@ class ModifyTool(BaseTool):
                     "estimated_time": testcase.estimated_time or "",
                     "actual_time": testcase.actual_time or "",
                     "baseline": testcase.baseline or "",
+                    "card_id": nav_cid,
                 }
             return out
         return {}
@@ -1442,12 +1582,14 @@ class ModifyTool(BaseTool):
                 }
 
         # 已定位源表主键：按 Card / 源表实际类型校正 target，避免 summary 出现「预览修改 BadCase」实为 Bug 行
+        db_reconciled_for_resolve = None
         if target_id is not None and project_id is not None:
             tl0 = str(target or "").strip().lower()
             if tl0 not in ("card", "plan"):
                 target = self._reconcile_modify_target_from_db(
                     target, target_id, project_id, dict(modifications or {})
                 )
+                db_reconciled_for_resolve = str(target).strip().lower()
         target = str(target or "bug").strip().lower()
         
         modifications = dict(modifications or {})
@@ -1475,7 +1617,8 @@ class ModifyTool(BaseTool):
                     nid = reuse.get("resolved_pk")
                     nc = reuse.get("resolved_card_id")
                     print(
-                        "[MODIFY] intent_resolve_reuse 命中，跳过二次 resolve_modify_target_and_id",
+                        "[MODIFY] intent_resolve_reuse 命中，跳过二次 resolve_modify_target_and_id | "
+                        f"resolved_target={tt!r} resolved_pk={nid!r} resolved_card_id={nc!r} mods_fp={_fp_now!r}",
                         flush=True,
                     )
                 else:
@@ -1502,10 +1645,24 @@ class ModifyTool(BaseTool):
                         has_raw_badcase_list=bool(kwargs.get("intent_has_raw_badcase_list")),
                         has_raw_testcase_list=bool(kwargs.get("intent_has_raw_testcase_list")),
                         card_rows=cr_rows if isinstance(cr_rows, list) else None,
+                        db_reconciled_target=db_reconciled_for_resolve,
+                    )
+                    _comb = (kwargs.get("intent_combined_text") or natural_query or "").strip()
+                    print(
+                        "[MODIFY] resolve_modify_target_and_id 调用前: "
+                        f"target_pre={target!r} target_id_pre={target_id!r} card_id_pre={card_id!r} "
+                        f"intent_last_grep={kwargs.get('intent_last_grep_target')!r} "
+                        f"has_bug/bc/tc_raw={kwargs.get('intent_has_raw_bug_list')}/"
+                        f"{kwargs.get('intent_has_raw_badcase_list')}/{kwargs.get('intent_has_raw_testcase_list')} "
+                        f"editing_surface={kwargs.get('editing_surface')!r} "
+                        f"mod_keys={list(modifications.keys())} "
+                        f"card_rows_n={len(cr_rows) if isinstance(cr_rows, list) else 0} "
+                        f"combined_len={len(_comb)} combined_head={_comb[:200]!r}",
+                        flush=True,
                     )
                     tt, nid, nc = resolve_modify_target_and_id(
                         modifications,
-                        (kwargs.get("intent_combined_text") or natural_query or "").strip(),
+                        _comb,
                         ctx_r,
                     )
                 target = str(tt).strip().lower()
@@ -1517,6 +1674,12 @@ class ModifyTool(BaseTool):
                     if nc is not None:
                         card_id = nc
             except ModifyResolutionError as _mre:
+                print(
+                    "[MODIFY] resolve_modify_target_and_id 抛出: "
+                    f"{_mre!s} | target_id={target_id!r} card_id={card_id!r} target={target!r} "
+                    f"mod_keys={list(modifications.keys()) if modifications else []}",
+                    flush=True,
+                )
                 return {
                     "success": False,
                     "error": str(_mre),
@@ -1524,6 +1687,19 @@ class ModifyTool(BaseTool):
                 }
             except Exception as _ie2:
                 print(f"[MODIFY] resolve_modify_target_and_id 跳过: {_ie2}", flush=True)
+
+        # resolve / intent_resolve_reuse 仅靠 grep 列表 flag 可能默认 bug；雪花 id 已在 DB 唯一定位源表时以 reconcile 为准
+        if (
+            db_reconciled_for_resolve
+            and db_reconciled_for_resolve in ("bug", "badcase", "testcase")
+            and str(target or "").strip().lower() not in ("card", "plan")
+            and str(target or "").strip().lower() != db_reconciled_for_resolve
+        ):
+            print(
+                f"[MODIFY] intent 解析 target={target!r} 与 DB 源表唯一命中 {db_reconciled_for_resolve!r} 不一致，采用 DB 结果",
+                flush=True,
+            )
+            target = db_reconciled_for_resolve
 
         _progress(modify_tool_progress("located_validate", loc, target_id=target_id))
         
@@ -1585,9 +1761,9 @@ class ModifyTool(BaseTool):
                         'message': modify_message_readonly_no_modifications(loc),
                         'summary': modify_summary_readonly_snapshot(target, target_id, loc),
                         'target': target,
-                        'target_id': target_id,
-                        'before': original_data,
-                        'after': dict(original_data),
+                        'target_id': _json_safe_id(target_id),
+                        'before': _json_safe_row(original_data),
+                        'after': _json_safe_row(dict(original_data)),
                         'diff': diff_empty,
                         'modifications': {},
                         'sandbox_preview': {
@@ -1770,14 +1946,17 @@ class ModifyTool(BaseTool):
                         )
                     _progress(modify_tool_progress("sandbox_wait_confirm", loc))
                     mod_summary = modify_modifications_kv_summary(modifications, loc)
-                    return {
+                    out_preview = {
                         'success': True, 'confirmation_required': True,
                         'message': modify_message_sandbox_done(loc),
                         'summary': modify_summary_preview(target, target_id, mod_summary, loc),
-                        'target': target, 'target_id': target_id,
-                        'before': original_data, 'after': modified_data, 'diff': diff_result,
+                        'target': target, 'target_id': _json_safe_id(target_id),
+                        'before': _json_safe_row(original_data), 'after': _json_safe_row(modified_data), 'diff': diff_result,
                         'modifications': modifications, 'sandbox_preview': sandbox_result
                     }
+                    if isinstance(original_data, dict) and original_data.get("card_id") is not None:
+                        out_preview["card_id"] = _json_safe_id(original_data.get("card_id"))
+                    return out_preview
                 
                 # confirm=True: 采纳即落库，快速路径（跳过 Text2SQL 和原始数据获取）
                 print(f"[MODIFY] 正在应用修改到数据库（ORM）…", flush=True)
@@ -2084,6 +2263,9 @@ class ModifyTool(BaseTool):
             status_snap = self._snapshot_status_string(getattr(bug, "status", None))
             if not status_snap:
                 status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
+            nav_card_id = self._nav_card_pk_for_source_orm_row(
+                flask_db.session, "bug", bug, project_id
+            )
             return {
                 'id': bug.id,
                 'title': bug.title,
@@ -2094,6 +2276,7 @@ class ModifyTool(BaseTool):
                 'assignee_id': bug.assignee_id,
                 'assignee': assignee_name,  # 添加用户名字段用于显示
                 'plan_id': bug.plan_id,
+                'card_id': nav_card_id,
                 'steps_to_reproduce': bug.steps_to_reproduce or '',
                 'expected_result': bug.expected_result or '',
                 'actual_result': bug.actual_result or ''
@@ -2114,6 +2297,9 @@ class ModifyTool(BaseTool):
             if not status_snap:
                 status_snap = self._badcase_status_sql_fallback(flask_db, badcase.id, project_id)
 
+            nav_card_id = self._nav_card_pk_for_source_orm_row(
+                flask_db.session, "badcase", badcase, project_id
+            )
             return {
                 'id': badcase.id,
                 'title': badcase.title,
@@ -2121,6 +2307,7 @@ class ModifyTool(BaseTool):
                 'priority': badcase.priority,
                 'assignee': badcase.assignee or '',
                 'plan_id': badcase.plan_id,
+                'card_id': nav_card_id,
                 'reproduction_steps': badcase.reproduction_steps or '',
                 'answer': badcase.answer or '',
                 'correct_answer': badcase.correct_answer or '',
@@ -2154,6 +2341,9 @@ class ModifyTool(BaseTool):
             if not tc_status:
                 tc_status = self._testcase_status_sql_fallback(flask_db, testcase.id, project_id)
 
+            nav_card_id = self._nav_card_pk_for_source_orm_row(
+                flask_db.session, "testcase", testcase, project_id
+            )
             return {
                 'id': testcase.id,
                 'title': testcase.title,
@@ -2170,7 +2360,9 @@ class ModifyTool(BaseTool):
                 'executed_by': executed_by_name,
                 'estimated_time': testcase.estimated_time or '',
                 'actual_time': testcase.actual_time or '',
-                'baseline': testcase.baseline or ''
+                'baseline': testcase.baseline or '',
+                'plan_id': testcase.plan_id,
+                'card_id': nav_card_id,
             }
 
         elif target == "card":
@@ -2970,12 +3162,12 @@ class ModifyTool(BaseTool):
                         "index": idx,
                         "total": n_total,
                         "target": target,
-                        "target_id": tid_i,
-                        "plan_id": _resolved_plan_id,
+                        "target_id": _json_safe_id(tid_i),
+                        "plan_id": _json_safe_id(_resolved_plan_id),
                         "record_title": (original_data or {}).get("title"),
                         "diff": diff_result,
-                        "before": original_data,
-                        "after": modified_data,
+                        "before": _json_safe_row(original_data),
+                        "after": _json_safe_row(modified_data),
                     }
                 )
                 _stream_one = (time.perf_counter() - _ts0) * 1000.0
@@ -2997,13 +3189,21 @@ class ModifyTool(BaseTool):
                 "message": modify_message_sandbox_done(loc),
                 "summary": modify_summary_preview(target, tid_i, mod_summary, loc),
                 "target": target,
-                "target_id": tid_i,
-                "before": original_data,
-                "after": modified_data,
+                "target_id": _json_safe_id(tid_i),
+                "before": _json_safe_row(original_data),
+                "after": _json_safe_row(modified_data),
                 "diff": diff_result,
                 "modifications": modifications,
             }
-            all_results.append({"id": tid_i, "plan_id": _resolved_plan_id, "result": row_obs})
+            if isinstance(original_data, dict) and original_data.get("card_id") is not None:
+                row_obs["card_id"] = _json_safe_id(original_data.get("card_id"))
+            all_results.append(
+                {
+                    "id": _json_safe_id(tid_i),
+                    "plan_id": _json_safe_id(_resolved_plan_id),
+                    "result": row_obs,
+                }
+            )
         timings["diff_ms"] = (time.perf_counter() - _t_diff0) * 1000.0
         timings["enrich_ms"] = enrich_ms_acc
         timings["line_diff_ms"] = line_diff_ms_acc
@@ -3055,21 +3255,22 @@ class ModifyTool(BaseTool):
         batch_results_flat: List[Dict[str, Any]] = []
         for r in all_results:
             obs = r["result"]
-            batch_results_flat.append(
-                {
-                    "target_id": r.get("id"),
-                    "plan_id": r.get("plan_id"),
+            br_entry = {
+                    "target_id": _json_safe_id(r.get("id")),
+                    "plan_id": _json_safe_id(r.get("plan_id")),
                     "target": target,
                     "diff": obs.get("diff", []),
                     "modifications": modifications,
-                    "before": obs.get("before", {}),
-                    "after": obs.get("after", {}),
+                    "before": _json_safe_row(obs.get("before") or {}),
+                    "after": _json_safe_row(obs.get("after") or {}),
                     "confirmation_required": obs.get("confirmation_required", True),
                     "success": obs.get("success", False),
                     "record_title": (obs.get("before") or {}).get("title"),
                     "result": obs,
                 }
-            )
+            if obs.get("card_id") is not None:
+                br_entry["card_id"] = obs.get("card_id")
+            batch_results_flat.append(br_entry)
 
         ok = bool(sandbox_result.get("success")) and all(
             r["result"].get("success") for r in all_results

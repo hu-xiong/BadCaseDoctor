@@ -459,17 +459,46 @@
                 
         <!-- 问题分类和优先级 -->
         <div class="category-section">
-          <div class="form-row">
+          <div class="form-row form-row--stack-field" :class="{ 'has-diff': pendingDiff?.modifications?.case_category }">
             <label class="form-label required">问题分类:</label>
-            <select v-model="bug.case_category" class="form-select">
-              <option value="">请选择问题分类</option>
-              <option value="功能缺陷">功能缺陷</option>
-              <option value="性能问题">性能问题</option>
-              <option value="界面问题">界面问题</option>
-              <option value="兼容性问题">兼容性问题</option>
-              <option value="安全问题">安全问题</option>
-              <option value="其他">其他</option>
+            <div class="form-row-field-col">
+              <div
+                v-if="pendingDiff?.modifications?.case_category"
+                id="diff-field-case_category"
+                class="field-diff-panel field-diff-panel--stacked"
+              >
+                <div class="diff-header">
+                  <span class="diff-label">问题分类修改预览:</span>
+                  <div class="diff-actions">
+                    <button type="button" @click="applyFieldChange('case_category')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                    <button type="button" @click="cancelFieldChange('case_category')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value">{{ pendingDiff.modifications.case_category?.old || '未设置' }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value">{{ pendingDiff.modifications.case_category?.new }}</span>
+                  </div>
+                </div>
+              </div>
+              <select
+                v-model="bug.case_category"
+                class="form-select"
+                :class="{ 'field-with-diff': pendingDiff?.modifications?.case_category }"
+              >
+            <option value="">请选择问题分类</option>
+            <option value="功能缺陷">功能缺陷</option>
+            <option value="性能问题">性能问题</option>
+            <option value="界面问题">界面问题</option>
+            <option value="兼容性问题">兼容性问题</option>
+            <option value="安全问题">安全问题</option>
+            <option value="其他">其他</option>
             </select>
+            </div>
           </div>
           <div class="form-row form-row--stack-field" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
             <label class="form-label required">优先级:</label>
@@ -661,6 +690,7 @@
 import { ref, reactive, onMounted, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import user from '../store/user.js'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
@@ -741,6 +771,7 @@ export default {
     /** 主表单内已有「字段上方」diff 区，勿再放入顶部 pending 汇总（含嵌入模式） */
     const PENDING_DETAIL_INLINE_FIELDS = new Set([
       'priority',
+      'case_category',
       'reproduction_steps',
       'steps_to_reproduce',
       'reproduce_steps',
@@ -1017,10 +1048,10 @@ export default {
     /** 一次请求拉齐 project + plans + members（与 /edit-context 对齐），避免 /plans + /members 各打一遍 */
     const projectWorkspaceLoaded = ref(false)
     const applyProjectEditContext = async (projectId) => {
-      const pid = Number(projectId)
-      if (!projectId || !Number.isFinite(pid) || pid <= 0) return false
+      const pidStr = snowflakeIdStr(projectId) || (projectId != null && String(projectId).trim() !== '' ? String(projectId).trim() : '')
+      if (!pidStr) return false
       try {
-        const resp = await getProjectEditContext(pid)
+        const resp = await getProjectEditContext(pidStr)
         if (!resp.data?.success) return false
         projectInfo.value = resp.data.project || projectInfo.value
         projectMembers.value = resp.data.members || []
@@ -1197,14 +1228,15 @@ export default {
         const isEditMode = props.edit || query.edit === 'true'
         const itemId = props.id || query.id
         
-        if (isEditMode && itemId) {
+        const normalizedBugId = snowflakeIdStr(itemId) || (itemId != null && String(itemId).trim() !== '' ? String(itemId).trim() : '')
+        if (isEditMode && normalizedBugId) {
           console.log('编辑模式，Bug ID:', itemId)
           isEdit.value = true
-          bugId.value = itemId
+          bugId.value = normalizedBugId
           loading.value = true
         
         try {
-          const response = await getBugDetail(itemId)
+          const response = await getBugDetail(normalizedBugId)
           if (response.data.success && response.data.bug) {
             console.log('=== Bug详情API响应 ===')
             console.log('完整响应:', response.data)
@@ -1303,7 +1335,9 @@ export default {
               }
               if (bug.assignee && bug.assignee.length > 0) {
                 const assigneeId = bug.assignee[0]
-                const memberMatch = projectMembers.value.find(m => m.id === parseInt(assigneeId) || m.id.toString() === assigneeId)
+                const memberMatch = projectMembers.value.find(
+                  m => m.id != null && String(m.id) === String(assigneeId)
+                )
                 console.log(`负责人 ${assigneeId} 匹配结果:`, memberMatch ? `✓ 找到 (${memberMatch.name})` : '✗ 未找到')
               }
             } else {
@@ -1348,7 +1382,7 @@ export default {
           console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
           // 兜底：按 ID 拉项目详情，确保下拉和标题有数据
           try {
-            const detail = await getProjectDetail(Number(bug.project_id))
+            const detail = await getProjectDetail(snowflakeIdStr(bug.project_id) || String(bug.project_id))
             if (detail.data?.success && detail.data.project) {
               const prj = detail.data.project
               if (!availableProjects.value.find(p => p.id == prj.id)) {
@@ -1428,9 +1462,15 @@ export default {
 
       saveLoading.value = true
       try {
-        // 仅新建模式添加 card_id，用于后端校验卡片类型
-        const cardIdValue = !isEdit.value && props.card_id ? parseInt(props.card_id) : null
+        // 仅新建模式添加 card_id，用于后端校验卡片类型（雪花 ID 勿 parseInt/Number）
+        const cardIdStr = !isEdit.value && props.card_id != null && props.card_id !== '' ? snowflakeIdStr(props.card_id) : ''
+        const cardIdValue = cardIdStr || null
         console.log('[saveBug] cardIdValue:', cardIdValue, 'props.card_id:', props.card_id, 'isEdit:', isEdit.value)
+        const planIdStr = bug.plan && bug.plan !== 'unplanned' ? snowflakeIdStr(bug.plan) : ''
+        const projectIdStr = bug.project_id ? snowflakeIdStr(bug.project_id) : ''
+        const assigneeRaw =
+          Array.isArray(bug.assignee) && bug.assignee.length > 0 ? bug.assignee[0] : bug.assignee
+        const assigneeStr = assigneeRaw != null && assigneeRaw !== '' ? snowflakeIdStr(assigneeRaw) : ''
         const bugData = {
           title: bug.title,
           bug_type: bug.case_category, // 对应后端的 bug_type
@@ -1440,9 +1480,9 @@ export default {
           actual_result: bug.actual_result || '待确认',
           priority: bug.priority,
           status: bug.status,
-          plan_id: (bug.plan && bug.plan !== 'unplanned') ? parseInt(bug.plan) : null, // 对应后端的 plan_id
-          project_id: bug.project_id ? parseInt(bug.project_id) : null,
-          assignee_id: (Array.isArray(bug.assignee) && bug.assignee.length > 0) ? parseInt(bug.assignee[0]) : (bug.assignee ? parseInt(bug.assignee) : null), // Bug模型只支持单负责人ID
+          plan_id: planIdStr || null,
+          project_id: projectIdStr || null,
+          assignee_id: assigneeStr || null, // Bug模型只支持单负责人ID
           attachments: JSON.stringify(bug.attachments.map(att => ({
             name: att.name,
             size: att.size
@@ -1813,15 +1853,22 @@ export default {
       console.log('=== 组件挂载开始 ===')
       
       try {
-        // 先预读取 diff（不依赖 show_diff，避免跳转后漏读；且不阻塞首屏）
-        const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
-        if (diffDataStrEarly) {
-          try {
-            pendingDiff.value = JSON.parse(diffDataStrEarly)
-            console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
-          } catch (e) {
-            console.error('[DIFF] 预读取 diff 失败:', e)
+        const query = route.query
+        const showDiffMode = props.show_diff || query.show_diff === 'true'
+        // 与 NewBadcase 一致：普通编辑不得读 session 里的待采纳 diff，否则会误把（如卡片）title 覆盖到刚拉取的 Bug 上
+        if (showDiffMode) {
+          const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+          if (diffDataStrEarly) {
+            try {
+              pendingDiff.value = JSON.parse(diffDataStrEarly)
+              console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
+            } catch (e) {
+              console.error('[DIFF] 预读取 diff 失败:', e)
+            }
           }
+        } else {
+          sessionStorage.removeItem('pendingModifyDiff')
+          pendingDiff.value = null
         }
 
         // 后台并行加载用户信息（不阻塞首屏）
@@ -1845,6 +1892,20 @@ export default {
           const prj = availableProjects.value.find((p) => String(p.id) === String(ctxProjectId))
           if (prj) projectInfo.value = prj
         }
+
+        const clearPendingModifyIfNotThisBug = () => {
+          if (!showDiffMode || !pendingDiff.value?.modifications) return
+          const pd = pendingDiff.value
+          const tid = pd.targetId != null ? String(pd.targetId).trim() : ''
+          const cur = bugId.value ? String(bugId.value).trim() : ''
+          const tgt = String(pd.target || 'bug').toLowerCase().replace(/-/g, '_')
+          const isBug = tgt === 'bug' || tgt === ''
+          if (!isBug || (isEdit.value && cur && tid && tid !== cur)) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+          }
+        }
+        clearPendingModifyIfNotThisBug()
 
         // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
         if (pendingDiff.value?.modifications) {

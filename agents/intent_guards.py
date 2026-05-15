@@ -722,12 +722,18 @@ def user_text_implies_bug_entity_type(text: Optional[str]) -> bool:
     """
     用户是否在谈「Bug 缺陷」实体类型（而非标题里的 bug 前缀如 bug1.2、debug 等）。
     - 中文「缺陷」视为明确缺陷意图
-    - 英文仅匹配整词 bug / bugs（\\b）
+    - 常见「修改bug / bug的标题」：中英之间无空格，re \\b 不可靠，单独用子串/短模式匹配
+    - 英文仍匹配整词 bug / bugs（\\b），避免 debug 等误伤
     """
     if not text:
         return False
     zh = text
     if "缺陷" in zh:
+        return True
+    # 「登录bug的标题」「修改bug xxx」等
+    if re.search(r"(?i)bug的标题|bug的名称|bug的\s*标题", zh):
+        return True
+    if re.search(r"(?i)(修改|更改|变更|改|更新|编辑)\s*bug(?=\s|[\u4e00-\u9fff]|$)", zh):
         return True
     return bool(_BUG_ENTITY_WORD_RE.search(text))
 

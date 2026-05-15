@@ -708,6 +708,7 @@
 import { ref, reactive, onMounted, computed, nextTick, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectEditContext, getProjectDetail, getProjectPlans, getPlanDetail, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
 import { defineAsyncComponent } from 'vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
@@ -759,25 +760,33 @@ export default {
     const route = useRoute()
     const router = useRouter()
 
-    const toPositiveIntOrNull = (v) => {
+    const idStrOrNull = (v) => {
       const raw = Array.isArray(v) ? v[0] : v
       if (raw == null || raw === '') return null
       // 兼容父组件误传 ref 对象（极少见），优先取 value
       const x = (typeof raw === 'object' && raw !== null && 'value' in raw) ? raw.value : raw
-      const n = parseInt(String(x), 10)
-      return Number.isFinite(n) && n > 0 ? n : null
+      const s = snowflakeIdStr(x)
+      return s || null
     }
 
-    /** 与路由、props 同步解析项目 ID（避免 NaN、数组 query、路由复用时丢参） */
+    /** 与路由、props 同步解析项目 ID（雪花勿 parseInt/Number） */
     const readProjectIdFromRoute = () => {
       return (
-        toPositiveIntOrNull(route.query.project_id) ??
-        toPositiveIntOrNull(props.project_id)
+        idStrOrNull(route.query.project_id) ??
+        idStrOrNull(props.project_id)
       )
     }
 
-
-    const testcaseId = props.id ? Number(props.id) : (route.query.id ? Number(route.query.id) : null)
+    const rawTestcaseId =
+      props.id != null && props.id !== ''
+        ? props.id
+        : route.query.id != null && route.query.id !== ''
+          ? route.query.id
+          : null
+    const testcaseId =
+      rawTestcaseId != null && String(rawTestcaseId).trim() !== ''
+        ? (idStrOrNull(rawTestcaseId) || String(rawTestcaseId).trim())
+        : null
     const isEdit = !!testcaseId
 
     const openDiagnosticTerminal = inject('openDiagnosticTerminal', null)
@@ -859,9 +868,9 @@ export default {
     /** 当前页面应使用的 project_id（编辑/新建/嵌入都兜底） */
     const currentProjectId = computed(() => {
       return (
-        toPositiveIntOrNull(route.query.project_id) ??
-        toPositiveIntOrNull(props.project_id) ??
-        toPositiveIntOrNull(testcase.project_id)
+        idStrOrNull(route.query.project_id) ??
+        idStrOrNull(props.project_id) ??
+        idStrOrNull(testcase.project_id)
       )
     })
 
@@ -946,8 +955,7 @@ export default {
         testcase.plan_id = null
       } else {
         testcase.plan = String(planValue)
-        const n = Number(planValue)
-        testcase.plan_id = Number.isFinite(n) ? n : null
+        testcase.plan_id = idStrOrNull(planValue)
       }
       showPlanDropdown.value = false
     }
@@ -965,7 +973,8 @@ export default {
       const key = String(planKey)
       if (testcasePlans.value.some(p => String(p.value) === key)) return
       try {
-        const resp = await getPlanDetail(Number(key))
+        const planKeyForApi = idStrOrNull(key) || String(key)
+        const resp = await getPlanDetail(planKeyForApi)
         if (resp.data?.success && resp.data.plan) {
           const pl = resp.data.plan
           testcasePlans.value = [
@@ -1075,10 +1084,10 @@ export default {
     }
 
     const loadProjectWorkspace = async (pid) => {
-      if (pid == null || !Number.isFinite(Number(pid)) || Number(pid) <= 0) return
-      const projectId = Number(pid)
+      const projectIdStr = idStrOrNull(pid)
+      if (!projectIdStr) return
       try {
-        const resp = await getProjectEditContext(projectId)
+        const resp = await getProjectEditContext(projectIdStr)
         if (resp.data?.success) {
           const prj = resp.data.project
           if (prj) {
@@ -1093,14 +1102,14 @@ export default {
       } catch (e) {
         console.error('获取编辑页上下文失败:', e)
         try {
-          const detail = await getProjectDetail(projectId)
+          const detail = await getProjectDetail(projectIdStr)
           if (detail.data?.success && detail.data.project) {
             const prj = detail.data.project
             Object.assign(projectInfo, { name: prj.name || '' })
             mergeProjectIntoOptions(prj)
           }
-          await fetchProjectPlans(projectId)
-          await fetchProjectMembers(projectId)
+          await fetchProjectPlans(projectIdStr)
+          await fetchProjectMembers(projectIdStr)
         } catch (e2) {
           console.error('回退加载项目详情失败:', e2)
         }
@@ -1172,7 +1181,7 @@ export default {
       console.log('navigateToDefect: 准备导航到 Bug', { planId, bugId, defect })
       
       // 如果 planId 无效（如 'unplanned'），不传递 navigate_plan 参数
-      if (!planId || planId === 'unplanned' || isNaN(parseInt(planId))) {
+      if (!planId || planId === 'unplanned' || !idStrOrNull(planId)) {
         console.log('navigateToDefect: 无有效计划ID，跳转到项目详情页')
         router.push(`/project-detail/${testcase.project_id}`)
         return
@@ -1286,11 +1295,10 @@ export default {
     })
 
     const handleProjectChange = () => {
-      const pid = testcase.project_id
-      const projectId = pid != null && pid !== '' ? Number(pid) : NaN
-      if (Number.isFinite(projectId) && projectId > 0) {
-        fetchProjectPlans(projectId)
-        fetchProjectMembers(projectId)
+      const sid = idStrOrNull(testcase.project_id)
+      if (sid) {
+        fetchProjectPlans(sid)
+        fetchProjectMembers(sid)
       } else {
         testcasePlans.value = [{ value: 'unplanned', label: '未计划', icon: '📋' }]
         projectMembers.value = []
@@ -1300,7 +1308,7 @@ export default {
 
     const onProjectSelectChange = (e) => {
       const raw = e.target.value
-      testcase.project_id = raw === '' ? null : Number(raw)
+      testcase.project_id = raw === '' ? null : (idStrOrNull(raw) || String(raw).trim())
       handleProjectChange()
     }
 
@@ -1347,8 +1355,8 @@ export default {
               .filter(Boolean)
               .map(d => (typeof d === 'object' ? d?.id : d))
               .filter(v => v != null && String(v).trim() !== '')
-              .map(v => parseInt(v, 10))
-              .filter(v => Number.isFinite(v) && v > 0)
+              .map(v => snowflakeIdStr(v))
+              .filter(v => v)
           : []
         
         // 处理 assignee：取第一个作为 assignee_id
@@ -1356,27 +1364,31 @@ export default {
           ? testcase.assignee[0] 
           : testcase.assignee_id
         
-        // plan_id：从测试用例计划“快速新建”时 route 带 plan_id（必为 test_case 计划），优先使用；否则用表单选中
+        // plan_id：从测试用例计划「快速新建」时 route 带 plan_id（必为 test_case 计划），优先使用；否则用表单选中
         let planId = null
-        const routePlanId = route.query.plan_id ? parseInt(route.query.plan_id) : null
+        const routePlanSid = route.query.plan_id ? idStrOrNull(route.query.plan_id) : null
+        const planInOptions = (pidStr) =>
+          !!pidStr &&
+          testcasePlans.value.some(
+            p => p.value !== 'unplanned' && idStrOrNull(p.value) === pidStr
+          )
         if (isEdit) {
           if (testcase.plan && testcase.plan !== 'unplanned') {
-            const pid = parseInt(testcase.plan)
-            if (testcasePlans.value.some(p => p.value !== 'unplanned' && parseInt(p.value) === pid)) planId = pid
+            const pid = idStrOrNull(testcase.plan)
+            if (pid && planInOptions(pid)) planId = pid
           } else {
-            planId = testcase.plan_id
+            planId = testcase.plan_id != null ? idStrOrNull(testcase.plan_id) : null
           }
-        } else if (routePlanId && !isNaN(routePlanId)) {
-          // 新建且 URL 有 plan_id：来自测试用例迭代计划“快速新建”，该计划必为 test_case 类型
-          planId = routePlanId
+        } else if (routePlanSid) {
+          planId = routePlanSid
         } else if (testcase.plan && testcase.plan !== 'unplanned') {
-          const pid = parseInt(testcase.plan)
-          if (testcasePlans.value.some(p => p.value !== 'unplanned' && parseInt(p.value) === pid)) planId = pid
+          const pid = idStrOrNull(testcase.plan)
+          if (pid && planInOptions(pid)) planId = pid
         }
         // 兜底：嵌入在 ProjectDetail 的创建 Tab 时可能只通过 props.plan_id 传入
-        if (!isEdit && (planId == null)) {
-          const fallbackPid = props.plan_id != null && props.plan_id !== '' ? parseInt(String(props.plan_id), 10) : null
-          if (fallbackPid && !isNaN(fallbackPid)) {
+        if (!isEdit && planId == null) {
+          const fallbackPid = props.plan_id != null && props.plan_id !== '' ? idStrOrNull(props.plan_id) : null
+          if (fallbackPid) {
             planId = fallbackPid
           }
         }
@@ -1384,8 +1396,8 @@ export default {
         // 创建/编辑时 project_id：统一走兜底解析，避免引用未定义变量 projectId
         const pidFallback = currentProjectId.value
         const rawProjectId = testcase.associate_project ? (testcase.project_id || pidFallback) : pidFallback
-        const finalProjectId = rawProjectId != null && rawProjectId !== '' ? parseInt(rawProjectId) : null
-        if (!isEdit && (!finalProjectId || isNaN(finalProjectId))) {
+        const finalProjectId = idStrOrNull(rawProjectId)
+        if (!isEdit && !finalProjectId) {
           alert('请选择所属项目，或从项目详情页进入新建')
           saving.value = false
           return
@@ -1411,8 +1423,9 @@ export default {
           execution_result: (testcase.execution_result && String(testcase.execution_result).trim()) ? testcase.execution_result : null
         }
         // 新建时添加卡片ID，用于后端校验卡片类型
-        if (!isEdit && props.card_id) {
-          payload.card_id = parseInt(props.card_id)
+        if (!isEdit && props.card_id != null && props.card_id !== '') {
+          const cid = snowflakeIdStr(props.card_id)
+          if (cid) payload.card_id = cid
         }
 
         if (isEdit) {
@@ -1559,15 +1572,21 @@ export default {
       
       loading.value = true
       try {
-        // 先预读取 diff（不依赖 show_diff，避免跳转后漏读；且不阻塞首屏）
-        const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
-        if (diffDataStrEarly) {
-          try {
-            pendingDiff.value = JSON.parse(diffDataStrEarly)
-            console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
-          } catch (e) {
-            console.error('[DIFF] 预读取 diff 失败:', e)
+        const query = route.query
+        const showDiffMode = props.show_diff || query.show_diff === 'true'
+        if (showDiffMode) {
+          const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+          if (diffDataStrEarly) {
+            try {
+              pendingDiff.value = JSON.parse(diffDataStrEarly)
+              console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
+            } catch (e) {
+              console.error('[DIFF] 预读取 diff 失败:', e)
+            }
           }
+        } else {
+          sessionStorage.removeItem('pendingModifyDiff')
+          pendingDiff.value = null
         }
 
         const bgTasks = []
@@ -1640,6 +1659,20 @@ export default {
           await ensurePlanOptionVisible(testcase.plan)
         }
 
+        const clearPendingModifyIfNotThisTestcase = () => {
+          if (!showDiffMode || !pendingDiff.value?.modifications) return
+          const pd = pendingDiff.value
+          const tid = pd.targetId != null ? String(pd.targetId).trim() : ''
+          const cur = testcaseId ? String(testcaseId).trim() : ''
+          const tgt = String(pd.target || '').toLowerCase().replace(/-/g, '_')
+          const isTc = tgt === 'testcase' || tgt === 'test_case' || tgt === ''
+          if (!isTc || (isEdit && cur && tid && tid !== cur)) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+          }
+        }
+        clearPendingModifyIfNotThisTestcase()
+
         // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
         if (pendingDiff.value?.modifications) {
           const mods = pendingDiff.value.modifications
@@ -1701,9 +1734,10 @@ export default {
     watch(
       () => readProjectIdFromRoute(),
       async (pid) => {
-        if (pid == null || !Number.isFinite(pid)) return
-        if (testcase.project_id === pid) return
-        testcase.project_id = pid
+        const sid = idStrOrNull(pid)
+        if (!sid) return
+        if (String(testcase.project_id) === sid) return
+        testcase.project_id = sid
         await loadUserProjectsForSelect()
         await loadProjectWorkspace(pid)
       }
@@ -1711,7 +1745,7 @@ export default {
 
     // 嵌入模式下 id 可能由父组件稍后传入，监听后补拉详情
     watch(() => props.id, async (newId) => {
-      const id = newId ? Number(newId) : null
+      const id = newId != null && String(newId).trim() !== '' ? (idStrOrNull(newId) || String(newId).trim()) : null
       if (!id || !props.embedded) return
       loading.value = true
       try {
