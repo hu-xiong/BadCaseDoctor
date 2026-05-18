@@ -50,7 +50,7 @@ export const BadCaseStatusText = {
 // 测试用例状态枚举
 export const TestCaseStatus = {
   DRAFT: 'draft',       // 草稿
-  REVIEW: 'review',     // 规绩
+  REVIEW: 'review',     // 评审
   ACTIVE: 'active',     // 生效
   ARCHIVED: 'archived'  // 归档
 }
@@ -58,7 +58,7 @@ export const TestCaseStatus = {
 // 测试用例状态显示文本
 export const TestCaseStatusText = {
   [TestCaseStatus.DRAFT]: '草稿',
-  [TestCaseStatus.REVIEW]: '规绩',
+  [TestCaseStatus.REVIEW]: '评审',
   [TestCaseStatus.ACTIVE]: '生效',
   [TestCaseStatus.ARCHIVED]: '归档'
 }

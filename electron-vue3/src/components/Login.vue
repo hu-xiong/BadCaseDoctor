@@ -239,7 +239,7 @@ export default {
               } else {
                 console.error('创建默认项目失败:', defaultProjectResponse.data.error)
                 // 如果创建失败，仍然跳转到dashboard
-                router.push('/dashboard')
+                router.push('/project-manage')
                 return
               }
             }
@@ -249,12 +249,12 @@ export default {
               router.push(`/project-detail/${projectId}`)
             } else {
               // 以防万一，跳转到dashboard
-              router.push('/dashboard')
+              router.push('/project-manage')
             }
           } else {
             console.error('获取项目列表失败:', projectsResponse.data.error)
             // 如果获取失败，仍然跳转到dashboard
-            router.push('/dashboard')
+            router.push('/project-manage')
           }
         } else {
           alert(response.data.error || t('auth.loginFailed'))
@@ -308,12 +308,12 @@ export default {
             } else {
               console.error('创建默认项目失败:', defaultProjectResponse.data.error)
               // 如果创建失败，跳转到dashboard
-              router.push('/dashboard')
+              router.push('/project-manage')
             }
           } else {
             console.error('自动登录失败:', loginResponse.data.error)
             // 如果自动登录失败，跳转到dashboard
-            router.push('/dashboard')
+            router.push('/project-manage')
           }
         } else {
           alert(response.data.error || t('auth.registerFailed'))

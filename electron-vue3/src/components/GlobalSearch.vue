@@ -34,7 +34,7 @@
 
       <div v-else class="results-container">
         <div
-          v-for="(group, type) in groupedResults"
+          v-for="{ type, items } in groupedResultsToShow"
           :key="type"
           class="result-group"
         >
@@ -42,14 +42,14 @@
           <div class="group-header" @click="toggleGroup(type)">
             <span class="group-icon">{{ getTypeIcon(type) }}</span>
             <span class="group-title">{{ getTypeLabel(type) }}</span>
-            <span class="group-count">{{ group.length }}</span>
+            <span class="group-count">{{ items.length }}</span>
             <span class="group-arrow" :class="{ collapsed: collapsedGroups.includes(type) }">▼</span>
           </div>
 
           <!-- 卡片列表 -->
           <div v-if="!collapsedGroups.includes(type)" class="group-items">
             <div
-              v-for="result in group"
+              v-for="result in items"
               :key="`${type}-${result.type}-${result.id}`"
               class="result-card"
               @click="handleSelectCard(result)"
@@ -84,7 +84,7 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
-import { getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectPlans, searchCards } from '../api'
+import { globalSearch } from '../api'
 
 const props = defineProps({
   projectId: { type: [String, Number, null], default: null },
@@ -92,32 +92,6 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'select-card', 'select-detail'])
-
-/** Promise.allSettled 中 axios 响应体 */
-function settledBody(r) {
-  if (!r || r.status !== 'fulfilled' || !r.value?.data) return null
-  return r.value.data
-}
-
-function flattenPlans(nodes, acc = []) {
-  for (const n of nodes || []) {
-    if (n && typeof n === 'object') acc.push(n)
-    if (n?.children?.length) flattenPlans(n.children, acc)
-  }
-  return acc
-}
-
-function textHaystack(obj, keys) {
-  return keys
-    .map((k) => obj?.[k])
-    .filter((v) => v != null && String(v).trim() !== '')
-    .map((v) => String(v).toLowerCase())
-}
-
-function entityMatchesQuery(item, query, extraKeys = []) {
-  const chunks = textHaystack(item, ['title', 'name', 'description', ...extraKeys])
-  return chunks.some((c) => c.includes(query))
-}
 
 /** 迭代卡片（Card）在侧边分组：与列表「类型」列一致 */
 function cardRowGroupKey(cardType) {
@@ -138,205 +112,42 @@ const searchResults = ref([])
 const loading = ref(false)
 const collapsedGroups = ref([])
 
-// Debounce timer
+// Debounce timer + 丢弃过期请求
 let searchTimer = null
+let searchSeq = 0
 
 // Methods
 const handleSearch = () => {
   clearTimeout(searchTimer)
   if (!searchQuery.value.trim()) {
     searchResults.value = []
+    loading.value = false
     return
   }
 
   searchTimer = setTimeout(async () => {
+    const pid = Number(props.projectId)
+    if (!pid || Number.isNaN(pid)) {
+      searchResults.value = []
+      return
+    }
+
+    const qRaw = searchQuery.value.trim()
+    const seq = ++searchSeq
     loading.value = true
     try {
-      const query = searchQuery.value.toLowerCase().trim()
-
-      const pid = Number(props.projectId)
-      if (!pid || Number.isNaN(pid)) {
-        searchResults.value = []
-        loading.value = false
-        return
-      }
-
-      const qRaw = searchQuery.value.trim()
-
-      // 并行：计划树、卡片全文搜索、三类独立实体列表（兼容历史表）
-      const [plansRes, cardsSearchRes, badcasesRes, bugsRes, testcasesRes] = await Promise.allSettled([
-        getProjectPlans(pid).catch(() => ({ data: {} })),
-        searchCards({ query: qRaw, project_id: pid, per_page: 100, page: 1, types: 'bug,badcase,testcase' }).catch(
-          () => ({ data: {} })
-        ),
-        getProjectBadcases(pid, 1, 300).catch(() => ({ data: {} })),
-        getProjectBugs(pid, 1, 300).catch(() => ({ data: {} })),
-        getProjectTestCases(pid, 1, 300).catch(() => ({ data: {} }))
-      ])
-
-      const results = []
-
-      // 迭代计划：GET .../plans 返回 { success, plans: 树 }
-      const plansBody = settledBody(plansRes)
-      const planFlat = flattenPlans(plansBody?.plans || [])
-      planFlat.forEach((item) => {
-        if (entityMatchesQuery(item, query)) {
-          results.push({
-            type: 'plan',
-            id: item.id,
-            title: item.name || item.title || `Plan#${item.id}`,
-            status: item.status || '',
-            status_text: item.status_text || '',
-            details: []
-          })
-        }
-      })
-
-      // 迭代卡片：后端 /api/cards/search（标题+描述 ilike）
-      const cardSearchBody = settledBody(cardsSearchRes)
-      const cardHits = cardSearchBody?.data?.results || cardSearchBody?.results || []
-      cardHits.forEach((item) => {
-        const gk = cardRowGroupKey(item.type)
-        results.push({
-          type: 'card',
-          groupKey: gk,
-          id: item.id,
-          title: item.title,
-          plan_id: item.plan_id,
-          cardType: item.type,
-          status: item.status || '',
-          status_text: item.status_text || '',
-          details: item.details || []
-        })
-      })
-
-      // BadCase 实体表
-      const badcases = settledBody(badcasesRes)?.badcases || []
-      badcases.forEach((item) => {
-        if (
-          entityMatchesQuery(item, query, [
-            'base_problem',
-            'case_category',
-            'reproduction_steps',
-            'answer',
-            'correct_answer'
-          ])
-        ) {
-          results.push({
-            type: 'badcase',
-            groupKey: 'badcase',
-            id: item.id,
-            title: item.title,
-            status: item.status || 'open',
-            status_text: item.status_text || '',
-            details: item.details || []
-          })
-        }
-        if (item.details?.length) {
-          const matchedDetails = item.details.filter(
-            (d) =>
-              (d.description || '').toLowerCase().includes(query) ||
-              (d.title || '').toLowerCase().includes(query)
-          )
-          if (matchedDetails.length) {
-            const alreadyAdded = results.some((r) => r.type === 'badcase' && String(r.id) === String(item.id))
-            if (!alreadyAdded) {
-              results.push({
-                type: 'badcase',
-                groupKey: 'badcase',
-                id: item.id,
-                title: item.title,
-                status: item.status || 'open',
-                status_text: item.status_text || '',
-                details: matchedDetails
-              })
-            }
-          }
-        }
-      })
-
-      // Bug 实体表（接口复用 badcases 键名）
-      const bugs = settledBody(bugsRes)?.badcases || []
-      bugs.forEach((item) => {
-        if (entityMatchesQuery(item, query, ['description', 'bug_type'])) {
-          results.push({
-            type: 'bug',
-            groupKey: 'bug',
-            id: item.id,
-            title: item.title,
-            status: item.status || 'open',
-            status_text: item.status_text || '',
-            details: item.details || []
-          })
-        }
-        if (item.details?.length) {
-          const matchedDetails = item.details.filter(
-            (d) =>
-              (d.description || '').toLowerCase().includes(query) ||
-              (d.title || '').toLowerCase().includes(query)
-          )
-          if (matchedDetails.length) {
-            const alreadyAdded = results.some((r) => r.type === 'bug' && String(r.id) === String(item.id))
-            if (!alreadyAdded) {
-              results.push({
-                type: 'bug',
-                groupKey: 'bug',
-                id: item.id,
-                title: item.title,
-                status: item.status || 'open',
-                status_text: item.status_text || '',
-                details: matchedDetails
-              })
-            }
-          }
-        }
-      })
-
-      // 测试用例实体表
-      const testcases = settledBody(testcasesRes)?.badcases || []
-      testcases.forEach((item) => {
-        if (entityMatchesQuery(item, query, ['case_type', 'remark'])) {
-          results.push({
-            type: 'testcase',
-            groupKey: 'testcase',
-            id: item.id,
-            title: item.title,
-            status: item.status || 'active',
-            status_text: item.status_text || '',
-            details: item.details || []
-          })
-        }
-        if (item.details?.length) {
-          const matchedDetails = item.details.filter(
-            (d) =>
-              (d.description || '').toLowerCase().includes(query) ||
-              (d.title || '').toLowerCase().includes(query)
-          )
-          if (matchedDetails.length) {
-            const alreadyAdded = results.some((r) => r.type === 'testcase' && String(r.id) === String(item.id))
-            if (!alreadyAdded) {
-              results.push({
-                type: 'testcase',
-                groupKey: 'testcase',
-                id: item.id,
-                title: item.title,
-                status: item.status || 'active',
-                status_text: item.status_text || '',
-                details: matchedDetails
-              })
-            }
-          }
-        }
-      })
-
-      searchResults.value = results
+      const res = await globalSearch(pid, qRaw, 30)
+      if (seq !== searchSeq) return
+      const body = res?.data
+      searchResults.value = body?.results || []
     } catch (error) {
+      if (seq !== searchSeq) return
       console.error('搜索失败:', error)
       searchResults.value = []
     } finally {
-      loading.value = false
+      if (seq === searchSeq) loading.value = false
     }
-  }, 300)
+  }, 400)
 }
 
 const groupedResults = computed(() => {
@@ -360,6 +171,16 @@ const groupedResults = computed(() => {
     }
   })
   return groups
+})
+
+/** 仅展示有命中条目的分组，隐藏计数为 0 的分类 */
+const GROUP_DISPLAY_ORDER = ['plan', 'bug', 'badcase', 'testcase', 'card']
+const groupedResultsToShow = computed(() => {
+  const g = groupedResults.value
+  return GROUP_DISPLAY_ORDER.filter((type) => (g[type] || []).length > 0).map((type) => ({
+    type,
+    items: g[type]
+  }))
 })
 
 const toggleGroup = (type) => {

@@ -3,7 +3,7 @@
     <!-- 顶部导航栏：与 ProjectDetail 保持一致 -->
     <div class="top-bar">
       <div class="top-left">
-        <div class="logo" style="cursor: pointer;" @click="$emit('goToDashboard')">
+        <div class="logo">
           <span class="logo-text">BadCase Doctor</span>
           <span class="star-icon">⭐</span>
         </div>
@@ -123,7 +123,6 @@ const userInitials = computed(() => {
 })
 
 defineEmits([
-  'goToDashboard',
   'setLayout',
   'toggleUserDropdown',
   'showNotifications',
@@ -152,7 +151,8 @@ defineEmits([
 /* 叠在右侧 fixed 对话层之上，避免全高侧栏挡住顶栏点击；对话层仍从视口顶铺满（类似 Cursor 覆盖） */
 .top-bar {
   position: relative;
-  z-index: 2100;
+  z-index: 10100;
+  pointer-events: auto;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -173,11 +173,7 @@ defineEmits([
   display: flex;
   align-items: center;
   gap: 8px;
-  transition: opacity 0.2s;
-}
-
-.logo:hover {
-  opacity: 0.8;
+  user-select: none;
 }
 
 .logo-text {

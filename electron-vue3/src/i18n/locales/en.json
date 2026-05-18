@@ -408,7 +408,7 @@
     "createPreviewExpandRest": "Show {n} more",
     "createPreviewCollapseFields": "Show fewer",
     "detailFieldsHint": "Only long-text/detail fields here; titles still show in the list. Click the card to view the pending row.",
-    "sandboxFooter": "After reviewing in the sandbox, jump to the list and use inline ✓ to accept or ✗ to reject before saving.",
+    "sandboxFooter": "After reviewing in the sandbox, click the card to jump to the list or the detail editor (detail-only fields such as priority open the editor). Use inline ✓ to accept or ✗ to reject before saving.",
     "alreadyAdoptedLocate": "Matches a previously accepted create stored in this browser; we tried to locate it. If missing, check another plan, the record may be deleted, or accept create again from the list.",
     "navRecords": "{n} records",
     "navExpandAll": "Show all",
@@ -643,7 +643,11 @@
       "close": "Closed",
       "resolved": "Resolved",
       "hold": "On hold",
-      "not_badcase": "Not a BadCase"
+      "not_badcase": "Not a BadCase",
+      "draft": "Draft",
+      "review": "In review",
+      "active": "Active",
+      "archived": "Archived"
     }
   },
   "project": {
@@ -793,7 +797,7 @@
   "cardCreate": {
     "title": "Create card",
     "titleLabel": "Title",
-    "titlePlaceholder": "Enter card title",
+    "titlePlaceholder": "Card title — Enter to save, Esc to cancel",
     "typeLabel": "Type",
     "cancel": "Cancel",
     "confirm": "OK",
@@ -831,13 +835,20 @@
     "bugInfo": "Bug info",
     "severity": "Severity",
     "priority": "Priority",
+    "caseCategory": "Problem category",
     "reproducer": "Steps to reproduce",
     "badcaseInfo": "BadCase info",
     "scenario": "Scenario",
     "expected": "Expected result",
     "actual": "Actual result",
     "testcaseInfo": "Test case info",
-    "steps": "Steps",
+    "preconditions": "Preconditions",
+    "remark": "Remark",
+    "baseline": "Baseline",
+    "testType": "Test type",
+    "caseType": "Case type",
+    "title": "Title",
+    "steps": "Test steps",
     "expectedResult": "Expected result",
     "testResult": "Test result",
     "bug": "Bug",
@@ -975,6 +986,9 @@
     "createFirstCard": "Create first card",
     "confirmDelete": "Are you sure you want to delete card \"{title}\"?",
     "confirmBatchDelete": "Are you sure you want to delete {count} selected cards?",
+    "cascadeBadcaseSecondConfirm": "This BadCase card is still linked to {count} BadCase record(s). Deleting the card will permanently remove those BadCases (including comments) and pending reviews. Continue?",
+    "cascadeBugSecondConfirm": "This Bug card is still linked to {count} bug record(s). Deleting the card will permanently remove those bugs (including comments) and pending reviews. Continue?",
+    "cascadeTestcaseSecondConfirm": "This test case card is still linked to {count} test case record(s). Deleting the card will permanently remove those test cases and pending reviews. Continue?",
     "deleteFailed": "Delete failed, please retry"
   }
 }

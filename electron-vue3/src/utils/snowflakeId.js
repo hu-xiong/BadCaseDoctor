@@ -15,3 +15,15 @@ export function snowflakeIdStr(v) {
   const s = String(v).trim()
   return /^\d+$/.test(s) ? s : ''
 }
+
+/** 表单中无有效计划（空或历史「未计划」占位） */
+export function isEmptyPlanKey(v) {
+  const s = v == null ? '' : String(v).trim()
+  return s === '' || s === 'unplanned'
+}
+
+/** 计划/迭代 id：无效返回 null，其余为十进制字符串（避免 Number 精度丢失） */
+export function normalizePlanId(v) {
+  if (isEmptyPlanKey(v)) return null
+  return snowflakeIdStr(v) || (/^\d+$/.test(String(v).trim()) ? String(v).trim() : null)
+}

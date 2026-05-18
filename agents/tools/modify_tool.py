@@ -33,6 +33,7 @@ from config import Config
 import difflib
 import json
 import os
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
@@ -1072,8 +1073,31 @@ class ModifyTool(BaseTool):
 
     def _normalize_status(self, status_value: str, target: str) -> str:
         """将中文状态描述映射到数据库定义的英文状态值"""
-        status_value = str(status_value).strip().lower()
-        
+        raw = str(status_value).strip()
+        t = (target or "").strip().lower().replace("-", "_")
+
+        testcase_status_map = {
+            "草稿": "draft",
+            "draft": "draft",
+            "评审": "review",
+            "review": "review",
+            "规绩": "review",  # 历史文案/笔误兼容
+            "生效": "active",
+            "active": "active",
+            "归档": "archived",
+            "archived": "archived",
+        }
+        testcase_valid = ("draft", "review", "active", "archived")
+        if t in ("testcase", "test_case"):
+            sl = raw.lower()
+            if sl in testcase_valid:
+                return sl
+            if raw in testcase_status_map:
+                return testcase_status_map[raw]
+            return testcase_status_map.get(sl, sl)
+
+        status_value = raw.lower()
+
         bug_status_map = {
             '新建': 'new', '新': 'new',
             '已分配': 'assigned', '分配': 'assigned',
@@ -1103,6 +1127,100 @@ class ModifyTool(BaseTool):
             if status_value in badcase_valid_status:
                 return status_value
             return badcase_status_map.get(status_value, status_value)
+
+    def _coerce_testcase_status_enum(self, value: Any):
+        """TestCase.status 列为 TestCaseStatus 枚举，须用 review 等英文值，不能写「评审」等中文。"""
+        from app import TestCaseStatus
+
+        norm = self._normalize_status(str(value), "testcase")
+        return TestCaseStatus(norm)
+
+    def _normalize_priority(self, value: Any, target: str) -> str:
+        """将自然语言、UI 文案、混写形式映射为各实体在 DB 中使用的 priority 字符串。"""
+        if value is None:
+            return ""
+        raw = str(value).strip()
+        if not raw:
+            return ""
+        t = (target or "").strip().lower().replace("-", "_")
+        testcase_style = t in ("testcase", "test_case")
+        plan_target = t == "plan"
+        if plan_target:
+            return raw
+
+        sl = raw.lower().replace(" ", "").replace("_", "")
+
+        m = re.search(r"p([0-4])", sl)
+        if m:
+            n = int(m.group(1))
+            if not testcase_style and n == 0:
+                n = 1
+            return f"P{n}" if testcase_style else f"p{n}"
+
+        sev = sl
+        if sev in ("critical", "blocker", "block", "fatal"):
+            return "P0" if testcase_style else "p1"
+        if sev in ("high", "major", "important"):
+            return "P2" if testcase_style else "p2"
+        if sev in ("medium", "normal", "moderate", "default"):
+            return "P3" if testcase_style else "p3"
+        if sev in ("low", "minor", "trivial"):
+            return "P4" if testcase_style else "p4"
+
+        if (
+            any(x in raw for x in ("紧急", "立刻", "立即", "火急", "加急"))
+            or "urgent" in sl
+        ):
+            return "P1" if testcase_style else "p1"
+        if "最高" in raw or "很严重" in raw:
+            return "P1" if testcase_style else "p1"
+        if "高优" in raw or ("高" in raw and "紧急" not in raw):
+            return "P2" if testcase_style else "p2"
+        if "中" in raw:
+            return "P3" if testcase_style else "p3"
+        if "低" in raw:
+            return "P4" if testcase_style else "p4"
+
+        return raw if testcase_style else (sl or raw)
+
+    _BADCASE_CASE_CATEGORY_CANON = (
+        "功能缺陷",
+        "性能问题",
+        "界面问题",
+        "兼容性问题",
+        "安全问题",
+        "其他",
+    )
+
+    def _normalize_badcase_case_category(self, value: Any) -> str:
+        """BadCase.case_category：与前端下拉选项对齐，兼容简称与英文口语。"""
+        if value is None:
+            return ""
+        s = str(value).strip()
+        if not s:
+            return ""
+        if s in self._BADCASE_CASE_CATEGORY_CANON:
+            return s
+        collapsed = s.replace(" ", "").replace("\u3000", "")
+        for o in self._BADCASE_CASE_CATEGORY_CANON:
+            if collapsed == o.replace(" ", ""):
+                return o
+            if len(s) >= 2 and (o.startswith(s) or (len(o) >= 2 and s.startswith(o[:2]))):
+                return o
+        sl = s.lower()
+        en = {
+            "functional": "功能缺陷",
+            "function": "功能缺陷",
+            "performance": "性能问题",
+            "ui": "界面问题",
+            "ux": "界面问题",
+            "compatibility": "兼容性问题",
+            "security": "安全问题",
+            "other": "其他",
+        }
+        if sl in en:
+            return en[sl]
+        return s
 
     @staticmethod
     def _snapshot_status_string(value: Any) -> str:
@@ -1298,6 +1416,7 @@ class ModifyTool(BaseTool):
                     "title": bc.title,
                     "status": st_snap,
                     "priority": bc.priority,
+                    "case_category": getattr(bc, "case_category", None) or "",
                     "assignee": bc.assignee or "",
                     "plan_id": bc.plan_id,
                     "card_id": nav_cid,
@@ -1782,7 +1901,7 @@ class ModifyTool(BaseTool):
         # 字段名映射（LLM 可能返回 owner，需要映射为 assignee）
         normalized_modifications = {}
         for field, value in modifications.items():
-            mapped_field = self._map_field_name(field, target)
+            mapped_field = self._resolve_db_column_name(target, field)
             normalized_modifications[mapped_field] = value
         modifications = normalized_modifications
         _progress(modify_tool_progress("fields_mapped", loc, keys=list(modifications.keys())))
@@ -1831,6 +1950,40 @@ class ModifyTool(BaseTool):
                     "status_norm", loc, orig=original_status, norm=normalized_status
                 )
             )
+
+        t_norm = (target or "").strip().lower().replace("-", "_")
+        if t_norm in ("badcase", "bad_case") and "severity" in modifications:
+            sev = modifications.pop("severity")
+            if "priority" not in modifications or not str(
+                modifications.get("priority") or ""
+            ).strip():
+                modifications["priority"] = sev
+        if "priority" in modifications and t_norm != "plan":
+            original_priority = modifications["priority"]
+            normalized_priority = self._normalize_priority(original_priority, target)
+            modifications["priority"] = normalized_priority
+            _progress(
+                modify_tool_progress(
+                    "priority_norm", loc, orig=original_priority, norm=normalized_priority
+                )
+            )
+
+        if (
+            "case_category" in modifications
+            and t_norm in ("badcase", "bad_case")
+        ):
+            original_cc = modifications["case_category"]
+            normalized_cc = self._normalize_badcase_case_category(original_cc)
+            if normalized_cc:
+                modifications["case_category"] = normalized_cc
+                _progress(
+                    modify_tool_progress(
+                        "case_category_norm",
+                        loc,
+                        orig=original_cc,
+                        norm=normalized_cc,
+                    )
+                )
 
         force_fast_commit = (
             self._env_flag_enabled("MODIFY_ALLOW_FAST_APPLY", "0")
@@ -2284,7 +2437,7 @@ class ModifyTool(BaseTool):
         
         elif target == 'badcase':
             _prog(modify_tool_progress("querying_badcase", loc))
-            from app import BadCase
+            from app import BadCase, ensure_badcase_card_link
             badcase = flask_db.session.query(BadCase).filter(
                 BadCase.id == target_id,
                 BadCase.project_id == project_id
@@ -2297,14 +2450,30 @@ class ModifyTool(BaseTool):
             if not status_snap:
                 status_snap = self._badcase_status_sql_fallback(flask_db, badcase.id, project_id)
 
+            # 仅补全已有映射（行上 card_id / Card.source_id），禁止在此自动新建 Card：
+            # 否则会把孤儿 BadCase 绑到新卡，用户原「卡片 Tab」下列表会丢行。
+            repaired_cid = ensure_badcase_card_link(badcase, auto_create=False, commit=True)
+            if repaired_cid is not None:
+                print(
+                    f"[MODIFY] badcase id={badcase.id} card_id 已从已有 Card 补全为 {repaired_cid}",
+                    flush=True,
+                )
             nav_card_id = self._nav_card_pk_for_source_orm_row(
                 flask_db.session, "badcase", badcase, project_id
             )
+            if nav_card_id is None:
+                print(
+                    f"[MODIFY] badcase id={badcase.id} 仍无可用 card_id: "
+                    f"orm.card_id={getattr(badcase, 'card_id', None)!r}，"
+                    f"且无 Card.source_id 指向该记录（未自动建卡）",
+                    flush=True,
+                )
             return {
                 'id': badcase.id,
                 'title': badcase.title,
                 'status': status_snap,
                 'priority': badcase.priority,
+                'case_category': getattr(badcase, "case_category", None) or '',
                 'assignee': badcase.assignee or '',
                 'plan_id': badcase.plan_id,
                 'card_id': nav_card_id,
@@ -2592,6 +2761,27 @@ class ModifyTool(BaseTool):
         """返回目标类型可修改的字段列表（英文字段名 + 标签，随 UI 语言）。"""
         return modify_modifiable_fields_rows(target, normalize_locale(ui_locale))
     
+    @staticmethod
+    def _strip_html_for_diff_display(raw: Any) -> str:
+        """富文本字段做 diff 时去掉 HTML 标签，避免沙箱只显示「1」等片段。"""
+        if raw is None:
+            return ''
+        s = str(raw)
+        if not s.strip():
+            return ''
+        if not re.search(r'<[a-z][\s\S]*>', s, re.I):
+            return s.strip()
+        s = re.sub(r'<br\s*/?>', '\n', s, flags=re.I)
+        s = re.sub(r'</p>', '\n', s, flags=re.I)
+        s = re.sub(r'<[^>]+>', '', s)
+        s = s.replace('&nbsp;', ' ')
+        return re.sub(r'\s+\n', '\n', s).strip()
+
+    def _diff_field_display_value(self, field: str, value: Any) -> str:
+        if field in ('preconditions', 'remark'):
+            return self._strip_html_for_diff_display(value)
+        return str(value) if value is not None else ''
+
     def _generate_line_diff(
         self,
         before: Dict,
@@ -2622,8 +2812,8 @@ class ModifyTool(BaseTool):
                 after_value = str(after.get('assignee_display') or after.get('assignee') or '')
                 out_field = 'assignee'
             else:
-                before_value = str(before.get(field, ''))
-                after_value = str(after.get(field, ''))
+                before_value = self._diff_field_display_value(field, before.get(field, ''))
+                after_value = self._diff_field_display_value(field, after.get(field, ''))
                 out_field = field
             
             # 构造 diff 行
@@ -3028,7 +3218,7 @@ class ModifyTool(BaseTool):
                 print(f"[MODIFY-SANDBOX] 跳过不可修改字段: {field}")
                 continue
             actual_value = value["new"] if isinstance(value, dict) and "new" in value else value
-            field_name = self._map_field_name(field, target)
+            field_name = self._resolve_db_column_name(target, field)
             if field in ["assignee", "assignee_id", "负责人", "creator", "创建人"] and target != "badcase":
                 resolved_value = self._resolve_user_value(actual_value, project_id)
                 if resolved_value != actual_value:
@@ -3877,7 +4067,16 @@ class ModifyTool(BaseTool):
             elif target == 'testcase':
                 from app import TestCase
                 q = flask_db.session.query(TestCase).filter(TestCase.project_id == project_id, TestCase.id.in_(ids))
-                update_map = {self._map_field_name(k, target): v for k, v in resolved_modifications.items()}
+                update_map = {}
+                for k, v in resolved_modifications.items():
+                    mk = self._map_field_name(k, target)
+                    if mk == "status":
+                        try:
+                            v = self._coerce_testcase_status_enum(v)
+                        except (ValueError, TypeError) as ex:
+                            print(f"[MODIFY] 批量 TestCase status 无效: {v!r} -> {ex}", flush=True)
+                            return False
+                    update_map[mk] = v
             elif target == "card":
                 from app import Card
 
@@ -3971,15 +4170,30 @@ class ModifyTool(BaseTool):
             '解决方式': 'solution',
             '问题原因': 'problem_reason',
             '前置条件': 'preconditions',
+            'precondition': 'preconditions',
             '测试步骤': 'steps',
             '备注': 'remark',
             '基线': 'baseline',
         }
         
         if target == 'badcase':
+            badcase_labels = dict(label_to_field)
+            badcase_labels['严重程度'] = 'priority'
+            badcase_labels['严重级别'] = 'priority'
+            badcase_labels['严重性'] = 'priority'
+            badcase_labels['classification'] = 'case_category'
+            badcase_labels['category'] = 'case_category'
+            badcase_labels['问题分类'] = 'case_category'
+            badcase_labels['问题类型'] = 'case_category'
+            badcase_labels['复现步骤'] = 'reproduction_steps'
+            badcase_labels['similar_questions'] = 'base_problem'
+            badcase_labels['similar_question'] = 'base_problem'
+            badcase_labels['related_questions'] = 'base_problem'
+            badcase_labels['reproduce_steps'] = 'reproduction_steps'
+            badcase_labels['steps_to_reproduce'] = 'reproduction_steps'
             field_mapping = {
                 **common_mapping,
-                **label_to_field,
+                **badcase_labels,
                 'creator': 'creator_id',
                 '创建人': 'creator_id',
                 'conect_answer': 'answer',
@@ -4017,7 +4231,29 @@ class ModifyTool(BaseTool):
         
         if field in field_mapping:
             return field_mapping[field]
+        tgt = (target or "").strip().lower().replace("-", "_")
+        if tgt in ("testcase", "test_case"):
+            fl = (field or "").strip().lower().replace("-", "_")
+            if fl in ("precondition", "pre_conditions"):
+                return "preconditions"
+            if fl in ("test_step", "test_steps"):
+                return "steps"
         return field
+
+    def _resolve_db_column_name(self, target: str, field: str) -> str:
+        """逻辑/LLM 字段名 → 数据库物理列名（沙箱 UPDATE、ORM setattr 共用）。"""
+        mapped = self._map_field_name(field, target)
+        tgt = (target or "").strip().lower().replace("-", "_")
+        if tgt in ("testcase", "test_case"):
+            kl = (mapped or field or "").strip().lower().replace("-", "_")
+            aliases = {
+                "precondition": "preconditions",
+                "pre_conditions": "preconditions",
+                "test_step": "steps",
+                "test_steps": "steps",
+            }
+            return aliases.get(kl, mapped)
+        return mapped
     
     def _resolve_user_value(self, value: Any, project_id: int = None) -> Any:
         """
@@ -4196,9 +4432,18 @@ class ModifyTool(BaseTool):
                 if not testcase:
                     return False
                 for field, value in modifications.items():
-                    actual_field = field_mapping.get(field, field)
+                    actual_field = self._resolve_db_column_name(target, field)
                     if hasattr(testcase, actual_field):
                         actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+                        if actual_field == "status":
+                            try:
+                                actual_value = self._coerce_testcase_status_enum(actual_value)
+                            except (ValueError, TypeError) as ex:
+                                print(
+                                    f"[MODIFY] TestCase status 无效: {actual_value!r} -> {ex}",
+                                    flush=True,
+                                )
+                                return False
                         setattr(testcase, actual_field, actual_value)
                 
                 self._sync_card_from_source_row(

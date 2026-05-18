@@ -4,7 +4,7 @@
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
       <div class="container-fluid">
         <div class="navbar-nav">
-          <a class="nav-link" href="#" @click="$router.push('/dashboard')">
+          <a class="nav-link" href="#" @click="$router.push('/project-manage')">
             <i class="bi bi-arrow-left me-1"></i>
             返回仪表板
           </a>

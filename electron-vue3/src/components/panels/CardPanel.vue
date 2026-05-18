@@ -20,6 +20,18 @@
         <button class="quick-create-btn" @click="startCreate">
           {{ t('list.quickCreate', { type: itemTypeLabel }) }}
         </button>
+        <div v-if="props.itemType === 'card'" class="filter-dropdown">
+          <select
+            :value="currentTypeFilter || 'all'"
+            class="filter-select"
+            @change="onToolbarTypeFilterChange"
+          >
+            <option value="all">{{ t('unplannedCards.allTypes') }}</option>
+            <option value="bug">{{ t('list.types.bug') }}</option>
+            <option value="badcase">{{ t('list.types.badcase') }}</option>
+            <option value="testcase">{{ t('list.types.testCase') }}</option>
+          </select>
+        </div>
       </div>
 
       <div class="toolbar-right">
@@ -100,7 +112,7 @@
           </div>
         </div>
         <!-- 新建行（输入框 + 类型选择） -->
-        <div v-if="isCreating" class="table-row creating-row">
+        <div v-if="isCreating" class="table-row creating-row" @click.stop>
           <div class="row-checkbox">
             <span class="new-indicator">🆕</span>
           </div>
@@ -111,13 +123,17 @@
               type="text"
               class="create-input"
               :placeholder="t('cardCreate.titlePlaceholder')"
-              @keyup.enter="submitQuickCreate"
-              @keyup.esc="abortQuickCreate"
-              @blur="handleCreateBlur"
+              @keydown.enter="onCreateInputKeydown"
+              @keydown.esc.prevent="abortQuickCreate"
             />
           </div>
           <div class="row-status">
-            <select v-model="newCardType" class="type-select">
+            <select
+              v-model="newCardType"
+              class="type-select"
+              @keydown.enter="onCreateInputKeydown"
+              @keydown.esc.prevent="abortQuickCreate"
+            >
               <option value="bug">{{ t('list.types.bug') }}</option>
               <option value="badcase">{{ t('list.types.badcase') }}</option>
               <option value="testcase">{{ t('list.types.testCase') }}</option>
@@ -178,8 +194,8 @@
               type="text"
               class="create-input"
               :placeholder="t('cardCreate.titlePlaceholder')"
-              @keyup.enter="confirmEdit"
-              @keyup.esc="cancelEdit"
+              @keydown.enter="onEditInputKeydown"
+              @keydown.esc.prevent="cancelEdit"
               @click.stop
             />
             <!-- 普通模式 -->
@@ -207,6 +223,8 @@
               v-model="editingType"
               class="type-select"
               @click.stop
+              @keydown.enter="onEditInputKeydown"
+              @keydown.esc.prevent="cancelEdit"
             >
               <option value="bug">{{ t('list.types.bug') }}</option>
               <option value="badcase">{{ t('list.types.badcase') }}</option>
@@ -294,7 +312,7 @@
 <script>
 import { ref, nextTick, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { deleteCard } from '../../api.js'
+import { deleteCardWithCascadeConfirm, cascadeCardDeleteConfirmText } from '../../api.js'
 import SelectableTitleTip from '../SelectableTitleTip.vue'
 
 export default {
@@ -361,6 +379,9 @@ export default {
   emits: ['edit', 'delete', 'refresh', 'search', 'update:searchText', 'update:page', 'quickCreate', 'create', 'quickUpdate', 'openTypeList'],
   setup(props, { emit }) {
     const { t } = useI18n()
+
+    const cascadeCardDeleteConfirm = (payload) =>
+      confirm(cascadeCardDeleteConfirmText(t, { ...payload, source_kind: payload.source_kind || 'badcase' }))
     
     // 新建状态
     const isCreating = ref(false)
@@ -402,6 +423,13 @@ export default {
     const clearTypeFilter = () => {
       currentTypeFilter.value = ''
     }
+
+    const onToolbarTypeFilterChange = (e) => {
+      const v = (e?.target?.value ?? '').toString()
+      currentTypeFilter.value = v === 'all' ? '' : v
+    }
+
+    const defaultNewCardType = () => currentTypeFilter.value || 'bug'
     
     const itemTypeLabel = computed(() => {
       if (props.itemType === 'bug') return t('list.types.bug')
@@ -515,7 +543,7 @@ export default {
     const startCreate = async () => {
       isCreating.value = true
       newCardTitle.value = ''
-      newCardType.value = 'bug' // 重置为默认类型
+      newCardType.value = defaultNewCardType()
       await nextTick()
       const inputEl = Array.isArray(createInputRef.value) ? createInputRef.value[0] : createInputRef.value
       if (inputEl) {
@@ -523,6 +551,29 @@ export default {
       }
     }
     
+    const onCreateInputKeydown = (e) => {
+      if (e.isComposing || e.shiftKey) return
+      e.preventDefault()
+      // select 下拉用 Enter 确认选项时，先让 v-model 落盘再保存
+      const fromSelect = e.target?.tagName === 'SELECT'
+      if (fromSelect) {
+        requestAnimationFrame(() => submitQuickCreate())
+        return
+      }
+      submitQuickCreate()
+    }
+
+    const onEditInputKeydown = (e) => {
+      if (e.isComposing || e.shiftKey) return
+      e.preventDefault()
+      const fromSelect = e.target?.tagName === 'SELECT'
+      if (fromSelect) {
+        requestAnimationFrame(() => confirmEdit())
+        return
+      }
+      confirmEdit()
+    }
+
     const submitQuickCreate = async () => {
       const title = newCardTitle.value.trim()
       if (!title) return
@@ -549,16 +600,7 @@ export default {
     const abortQuickCreate = () => {
       isCreating.value = false
       newCardTitle.value = ''
-      newCardType.value = 'bug'
-    }
-    
-    const handleCreateBlur = (e) => {
-      // 延迟检查，因为可能点击的是确认/取消按钮
-      setTimeout(() => {
-        if (isCreating.value && !newCardTitle.value.trim()) {
-          abortQuickCreate()
-        }
-      }, 150)
+      newCardType.value = defaultNewCardType()
     }
 
     /** 仅展示 target=card 的 pending，避免与其它表主键数字冲突 */
@@ -599,14 +641,15 @@ export default {
 
       if (!confirm(t('list.batchDeleteConfirm', { n: ids.length, type: itemTypeLabel.value }))) return
 
+      let failed = 0
       try {
-        const requests = ids.map((id) => deleteCard(id))
-        const results = await Promise.allSettled(requests)
-        const failed = results.filter((r) => {
-          if (r.status !== 'fulfilled') return true
-          const ok = r.value?.data?.success === true
-          return !ok
-        }).length
+        for (const id of ids) {
+          const res = await deleteCardWithCascadeConfirm(id, { confirmFn: cascadeCardDeleteConfirm })
+          if (res?.data?.cancelled) break
+          if (!(res?.data?.success === true)) {
+            failed += 1
+          }
+        }
 
         if (failed > 0) {
           alert(t('list.batchDeletePartial', { failed }))
@@ -626,7 +669,8 @@ export default {
       const title = rowDisplayTitle(item)
       if (!confirm(t('unplannedCards.confirmDelete', { title }))) return
       try {
-        const res = await deleteCard(item.id)
+        const res = await deleteCardWithCascadeConfirm(item.id, { confirmFn: cascadeCardDeleteConfirm })
+        if (res?.data?.cancelled) return
         if (res?.data?.success === false) {
           alert(t('unplannedCards.deleteFailed'))
           return
@@ -661,12 +705,14 @@ export default {
       startEdit,
       startCreate,
       submitQuickCreate,
+      onCreateInputKeydown,
+      onEditInputKeydown,
       abortQuickCreate,
-      handleCreateBlur,
       isCreating,
       newCardTitle,
       newCardType,
       createInputRef,
+      onToolbarTypeFilterChange,
       isNewItem,
       batchDeleteSelected,
       deleteOneCard,

@@ -217,7 +217,7 @@
               <div class="plan-selected-display">
                 <span class="refresh-icon" @click.stop="refreshProjectPlans">🔄</span>
                 <span class="plan-selected-text">
-                  所属计划 {{ getSelectedPlanDisplayText() }}
+                  所属计划 {{ getSelectedPlanDisplayText }}
                 </span>
                 <span class="arrow-icon" :class="{ 'rotated': showPlanDropdown }">▼</span>
               </div>
@@ -250,10 +250,9 @@
                       v-if="plan"
                       class="plan-option"
                       :class="{ 
-                        'selected': bug.plan === plan.value, 
+                        'selected': isPlanSelected(plan.value), 
                         'expandable': plan.children && plan.children.length > 0,
-                        'pinned': plan.is_pinned,
-                        'unplanned': plan.value === 'unplanned'
+                        'pinned': plan.is_pinned
                       }"
                       :data-level="plan.level || 0"
                       @click.stop="selectPlan(plan.value)"
@@ -289,7 +288,7 @@
                         :key="childPlan.value"
                         class="plan-option sub-plan"
                         :class="{ 
-                          'selected': bug.plan === childPlan.value,
+                          'selected': isPlanSelected(childPlan.value),
                           'expandable': childPlan.children && childPlan.children.length > 0
                         }"
                         :data-level="(plan.level || 0) + 1"
@@ -325,7 +324,7 @@
                             v-for="grandChildPlan in childPlan.children" 
                             :key="grandChildPlan.value"
                             class="plan-option sub-plan level-2"
-                            :class="{ 'selected': bug.plan === grandChildPlan.value }"
+                            :class="{ 'selected': isPlanSelected(grandChildPlan.value) }"
                             :data-level="(plan.level || 0) + 2"
                             @click.stop="selectPlan(grandChildPlan.value)"
                           >
@@ -687,11 +686,12 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
+import { ref, reactive, onMounted, onActivated, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects } from '../api.js'
-import { snowflakeIdStr } from '../utils/snowflakeId.js'
-import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
+import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
+import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
+import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/richTextContent.js'
+import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import user from '../store/user.js'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 
@@ -807,15 +807,11 @@ export default {
     
     // 已展开的计划ID列表
     const expandedPlans = ref([])
+    /** 计划树未命中时的展示名（避免直接显示雪花 id） */
+    const selectedPlanDisplayName = ref('')
     
     // 可用计划列表 - 将从当前项目动态获取
-    const availablePlans = ref([
-      // 默认显示"未计划"选项，确保下拉框至少有一个选项
-      { value: 'unplanned', label: '未计划', icon: '📋' },
-      // 临时添加一些测试数据，确保下拉框能正常显示
-      { value: 'test1', label: '测试计划1', icon: '📁' },
-      { value: 'test2', label: '测试计划2', icon: '📁' }
-    ])
+    const availablePlans = ref([])
     
     // 过滤后的计划列表（用于搜索）
     const filteredPlans = computed(() => {
@@ -823,9 +819,9 @@ export default {
       console.log('filteredPlans计算属性被调用，searchText:', searchText)
       console.log('availablePlans.value:', availablePlans.value)
       
+      const list = availablePlans.value.filter((p) => p?.value !== 'unplanned')
       if (!searchText) {
-        console.log('没有搜索文本，返回所有计划:', availablePlans.value)
-        return availablePlans.value
+        return list
       }
       
       // 递归搜索计划
@@ -848,7 +844,7 @@ export default {
         return filtered
       }
       
-      const result = searchPlansRecursively(availablePlans.value)
+      const result = searchPlansRecursively(list)
       console.log('搜索结果:', result)
       return result
     })
@@ -986,14 +982,10 @@ export default {
         if (isEdit.value && oldProjectId && oldProjectId.toString() === projectId.toString()) {
           console.log('编辑模式下项目ID未真正改变，保持现有数据')
         } else {
-          // 清空计划选择
           bug.plan = ''
           // 清空负责人选择
           bug.assignee = []
-          // 重置计划列表
-          availablePlans.value = [
-            { value: 'unplanned', label: '未计划', icon: '📋' }
-          ]
+          availablePlans.value = []
           // 清空项目成员
           projectMembers.value = []
         }
@@ -1069,9 +1061,7 @@ export default {
 
     // 使用后端 plans 树直接生成下拉选项（避免额外请求 /plans）
     const setAvailablePlansFromTree = async (plansTree) => {
-      const formattedPlans = [
-        { value: 'unplanned', label: '未计划', icon: '📋' }
-      ]
+      const formattedPlans = []
 
       const processPlans = (planList, level = 0) => {
         const processedPlans = []
@@ -1079,12 +1069,13 @@ export default {
           const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
 
           const isBugPlan = true
-          const isSelected = bug.plan && bug.plan.toString() === plan.id.toString()
+          const planIdStr = snowflakeIdStr(plan.id) || String(plan.id)
+          const isSelected = bug.plan && snowflakeIdStr(bug.plan) === planIdStr
           const hasVisibleChildren = children.length > 0
 
           if (isBugPlan || isSelected || hasVisibleChildren) {
             const planOption = {
-              value: plan.id.toString(),
+              value: planIdStr,
               label: plan.name,
               level,
               is_pinned: plan.is_pinned || false,
@@ -1117,31 +1108,85 @@ export default {
     }
     
     // 获取选中计划的显示文本
-    const getSelectedPlanDisplayText = () => {
-      console.log('getSelectedPlanDisplayText: bug.plan =', bug.plan)
-      console.log('getSelectedPlanDisplayText: availablePlans =', availablePlans.value)
-      
-      if (!bug.plan || bug.plan === 'unplanned') {
-        return '未选择计划'
+    const planIdsMatch = (a, b) => {
+      const sa = snowflakeIdStr(a) || String(a ?? '')
+      const sb = snowflakeIdStr(b) || String(b ?? '')
+      return sa !== '' && sb !== '' && sa === sb
+    }
+
+    const findPlanLabelInTree = (plans, planId) => {
+      for (const plan of plans) {
+        if (planIdsMatch(plan.value, planId)) return plan.label
+        if (plan.children?.length) {
+          const found = findPlanLabelInTree(plan.children, planId)
+          if (found) return found
+        }
       }
-      
-      // 查找选中的计划
-      const findPlan = (plans, planId) => {
-        for (const plan of plans) {
-          if (plan.value === planId) {
-            return plan.label
+      return null
+    }
+
+    const planExistsInTree = (plans, planId) => {
+      for (const plan of plans) {
+        if (planIdsMatch(plan.value, planId)) return true
+        if (plan.children?.length && planExistsInTree(plan.children, planId)) return true
+      }
+      return false
+    }
+
+    const ensurePlanOptionVisible = async (planKey) => {
+      const key = normalizePlanId(planKey)
+      if (!key) {
+        selectedPlanDisplayName.value = ''
+        return
+      }
+      const label = findPlanLabelInTree(availablePlans.value, key)
+      if (label) {
+        selectedPlanDisplayName.value = label
+        return
+      }
+      if (planExistsInTree(availablePlans.value, key)) return
+      try {
+        const resp = await getPlanDetail(key)
+        if (resp.data?.success && resp.data.plan) {
+          const pl = resp.data.plan
+          const idStr = snowflakeIdStr(pl.id) || String(pl.id)
+          selectedPlanDisplayName.value = pl.name || ''
+          const opt = {
+            value: idStr,
+            label: pl.name,
+            level: 0,
+            is_pinned: pl.is_pinned || false,
+            icon: pl.icon || '📁',
+            bug_count: pl.bug_count || 0,
+            status: pl.status
           }
-          if (plan.children && plan.children.length > 0) {
-            const found = findPlan(plan.children, planId)
-            if (found) return found
+          if (!planExistsInTree(availablePlans.value, idStr)) {
+            availablePlans.value = [
+              ...availablePlans.value.filter((p) => !planIdsMatch(p.value, idStr)),
+              opt
+            ]
           }
         }
-        return null
+      } catch (e) {
+        console.warn('补全计划名称失败:', e)
       }
-      
-      const planName = findPlan(availablePlans.value, bug.plan)
-      console.log('getSelectedPlanDisplayText: 找到的计划名称 =', planName)
-      return planName || '未选择计划'
+    }
+
+    const getSelectedPlanDisplayText = computed(() => {
+      if (isEmptyPlanKey(bug.plan)) {
+        return '请选择计划'
+      }
+      return (
+        findPlanLabelInTree(availablePlans.value, bug.plan) ||
+        selectedPlanDisplayName.value ||
+        '…'
+      )
+    })
+
+    const applyInitialPlanForCreate = (query, planIdProp) => {
+      const raw = query.plan_id ?? planIdProp
+      const id = normalizePlanId(raw)
+      bug.plan = id || ''
     }
     
     // 刷新项目计划
@@ -1201,17 +1246,11 @@ export default {
           await setAvailablePlansFromTree(response.data.plans || [])
         } else {
           console.error('API返回失败:', response.data)
-          // 如果API失败，至少显示"未计划"选项
-          availablePlans.value = [
-            { value: 'unplanned', label: '未计划', icon: '📋' }
-          ]
+          availablePlans.value = []
         }
       } catch (error) {
         console.error('获取项目计划失败:', error)
-        // 如果获取失败，至少显示"未计划"选项
-        availablePlans.value = [
-          { value: 'unplanned', label: '未计划', icon: '📋' }
-        ]
+        availablePlans.value = []
       }
     }
     
@@ -1254,7 +1293,7 @@ export default {
             bug.priority = response.data.bug.priority
             bug.status = response.data.bug.status
             bug.project_id = response.data.bug.project_id?.toString()
-            bug.plan = response.data.bug.plan_id?.toString()
+            bug.plan = normalizePlanId(response.data.bug.plan_id) || ''
             
             // 处理负责人：后端是单个 assignee_id，前端期待数组 [id]
             if (response.data.bug.assignee_id) {
@@ -1314,6 +1353,7 @@ export default {
               }
               
               await applyProjectEditContext(bug.project_id)
+              await ensurePlanOptionVisible(bug.plan)
               
               // 确保数据同步
               console.log('编辑模式初始化完成后，当前状态:')
@@ -1395,13 +1435,13 @@ export default {
           }
         }
         
-        // 可选：新建时预设 plan_id（优先 route.query，其次 props.plan_id）
-        if (query.plan_id || props.plan_id) {
-          bug.plan = String(query.plan_id || props.plan_id)
-        }
-
         console.log('开始获取项目计划/成员（edit-context），项目ID:', bug.project_id)
         await applyProjectEditContext(bug.project_id)
+        if (!isEdit.value) {
+          applyInitialPlanForCreate(query, props.plan_id)
+          await ensurePlanOptionVisible(bug.plan)
+          applyDefaultAssigneeOnCreate(bug, user.value, { isEdit: false })
+        }
         
         // 确保数据同步
         console.log('初始化完成后，当前状态:')
@@ -1455,7 +1495,7 @@ export default {
         return
       }
       
-      if (!reproductionStepsPlain.value) {
+      if (!richTextHtmlHasContent(bug.reproduction_steps)) {
         alert('请输入复现步骤')
         return
       }
@@ -1466,7 +1506,7 @@ export default {
         const cardIdStr = !isEdit.value && props.card_id != null && props.card_id !== '' ? snowflakeIdStr(props.card_id) : ''
         const cardIdValue = cardIdStr || null
         console.log('[saveBug] cardIdValue:', cardIdValue, 'props.card_id:', props.card_id, 'isEdit:', isEdit.value)
-        const planIdStr = bug.plan && bug.plan !== 'unplanned' ? snowflakeIdStr(bug.plan) : ''
+        const planIdStr = isEmptyPlanKey(bug.plan) ? '' : snowflakeIdStr(bug.plan)
         const projectIdStr = bug.project_id ? snowflakeIdStr(bug.project_id) : ''
         const assigneeRaw =
           Array.isArray(bug.assignee) && bug.assignee.length > 0 ? bug.assignee[0] : bug.assignee
@@ -1580,16 +1620,7 @@ export default {
 
     const bugDraftPreset = inject('bugDraftPreset', null)
 
-    const htmlToPlain = (html) => {
-      if (!html) return ''
-      const d = document.createElement('div')
-      d.innerHTML = html
-      return (d.textContent || d.innerText || '').trim()
-    }
-
-    const reproductionStepsPlain = computed(() => htmlToPlain(bug.reproduction_steps))
-
-    const stepsLength = computed(() => reproductionStepsPlain.value.length)
+    const stepsLength = computed(() => richTextHtmlDisplayLength(bug.reproduction_steps))
     
     const _escHtml = (s) =>
       String(s)
@@ -1686,9 +1717,12 @@ export default {
 
     // 选择计划
     const selectPlan = (planValue) => {
-      bug.plan = planValue
+      bug.plan = normalizePlanId(planValue) || String(planValue)
+      selectedPlanDisplayName.value = findPlanLabelInTree(availablePlans.value, bug.plan) || ''
       showPlanDropdown.value = false
     }
+
+    const isPlanSelected = (planValue) => planIdsMatch(bug.plan, planValue)
     
     // 确认字段修改
     const confirmFieldChange = (field) => {
@@ -1748,6 +1782,64 @@ export default {
       }
       return map[s] || String(v).trim()
     }
+
+    const applyPendingModificationsToBugForm = () => {
+      if (!pendingDiff.value?.modifications) return
+      for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+        if (String(field).startsWith('_')) continue
+        const storeKey = resolvePendingModifyStoreKey(field)
+        if (!storeKey || !data || typeof data !== 'object' || !('new' in data)) continue
+        const nv = data.new
+        if (nv === undefined || String(nv).trim() === '') continue
+        if (
+          storeKey === 'steps_to_reproduce' ||
+          storeKey === 'reproduction_steps' ||
+          storeKey === 'reproduce_steps'
+        ) {
+          bug.reproduction_steps = nv
+        } else if (bug.hasOwnProperty(storeKey)) {
+          bug[storeKey] = nv
+        }
+      }
+    }
+
+    const reloadPendingDiffFromSession = () => {
+      if (!props.embedded) return
+      if (!props.show_diff) {
+        pendingDiff.value = null
+        return
+      }
+      const raw = sessionStorage.getItem('pendingModifyDiff')
+      if (!raw) {
+        pendingDiff.value = null
+        return
+      }
+      try {
+        const pd = JSON.parse(raw)
+        const tid = pd?.targetId != null ? String(pd.targetId).trim() : ''
+        const cur =
+          props.id != null ? String(props.id).trim() : bugId.value ? String(bugId.value).trim() : ''
+        const tgt = String(pd?.target || 'bug').toLowerCase().replace(/-/g, '_')
+        const isBug = tgt === 'bug' || tgt === ''
+        if (!isBug || (cur && tid && tid !== cur)) return
+        pendingDiff.value = pd
+        applyPendingModificationsToBugForm()
+      } catch (e) {
+        console.error('[DIFF] reloadPendingDiffFromSession 失败:', e)
+      }
+    }
+
+    watch(
+      () => [props.show_diff, props.id],
+      () => {
+        reloadPendingDiffFromSession()
+      },
+      { flush: 'post' }
+    )
+
+    onActivated(() => {
+      reloadPendingDiffFromSession()
+    })
 
     // 取消字段修改
     const cancelFieldChange = (field) => {
@@ -1838,7 +1930,7 @@ export default {
       if (bug.project_id) {
         const targetUrl = `/project-detail/${bug.project_id}`
         // 如果有计划ID，添加到URL参数中，让ProjectDetail自动展开
-        if (bug.plan && bug.plan !== 'unplanned') {
+        if (!isEmptyPlanKey(bug.plan)) {
           router.push(`${targetUrl}?expand_plan=${bug.plan}`)
         } else {
           router.push(targetUrl)
@@ -1872,9 +1964,8 @@ export default {
         }
 
         // 后台并行加载用户信息（不阻塞首屏）
-        const bgTasks = []
-        console.log('开始后台加载用户信息...')
-        bgTasks.push(fetchCurrentUser())
+        console.log('开始加载用户信息...')
+        await fetchCurrentUser()
         
         // 先拉项目列表再 initBug，避免竞态下 initBug 误以为列表为空再次请求 /api/projects
         await fetchProjects()
@@ -1949,11 +2040,6 @@ export default {
         }
         
         await nextTick()
-
-        // 后台等待全量请求完成（不阻塞首屏）；忽略失败
-        Promise.allSettled(bgTasks).then(() => {
-          console.log('后台用户/上下文加载完成')
-        })
         
         // 添加全局点击事件监听器，点击外部关闭下拉框
         document.addEventListener('click', (event) => {
@@ -2012,6 +2098,7 @@ export default {
       toggleAssignee,
       togglePlanDropdown,
       selectPlan,
+      isPlanSelected,
       searchPlans,
       clearPlanSearch,
       getSelectedPlanDisplayText,
@@ -3015,7 +3102,7 @@ export default {
   margin-bottom: 32px;
   border: 1px solid #e9ecef;
   border-radius: 8px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .editor-toolbar {

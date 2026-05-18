@@ -15,6 +15,11 @@ export default defineConfig({
         changeOrigin: true,
         secure: false
       },
+      '/upload': {
+        target: 'http://127.0.0.1:5000',
+        changeOrigin: true,
+        secure: false
+      },
       '/__badcase_local_go': {
         target: 'http://127.0.0.1:8794',
         changeOrigin: true,

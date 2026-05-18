@@ -142,10 +142,13 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { getCards, deleteCard as apiDeleteCard } from '../api.js'
+import { getCards, deleteCardWithCascadeConfirm, cascadeCardDeleteConfirmText } from '../api.js'
 import CardMoveDialog from './CardMoveDialog.vue'
 
 const { t } = useI18n()
+
+const cascadeCardDeleteConfirm = (payload) =>
+  confirm(cascadeCardDeleteConfirmText(t, { ...payload, source_kind: payload.source_kind || 'badcase' }))
 
 const props = defineProps({
   projectId: {
@@ -296,7 +299,12 @@ const handleDeleteCard = async (card) => {
   }
   
   try {
-    await apiDeleteCard(card.id)
+    const res = await deleteCardWithCascadeConfirm(card.id, { confirmFn: cascadeCardDeleteConfirm })
+    if (res?.data?.cancelled) return
+    if (res?.data?.success === false) {
+      alert(t('unplannedCards.deleteFailed'))
+      return
+    }
     cards.value = cards.value.filter(c => c.id !== card.id)
   } catch (error) {
     console.error('删除卡片失败:', error)
@@ -329,7 +337,12 @@ const handleBatchDelete = async () => {
   
   try {
     for (const cardId of selectedCards.value) {
-      await apiDeleteCard(cardId)
+      const res = await deleteCardWithCascadeConfirm(cardId, { confirmFn: cascadeCardDeleteConfirm })
+      if (res?.data?.cancelled) break
+      if (res?.data?.success === false) {
+        alert(t('unplannedCards.deleteFailed'))
+        return
+      }
     }
     cards.value = cards.value.filter(c => !selectedCards.value.includes(c.id))
     clearSelection()

@@ -6476,7 +6476,16 @@ class SimplifiedReActEngine:
             if not ids:
                 return [] if has_nav else (lst or [])
             idset = set(ids)
-            return [x for x in (lst or []) if isinstance(x, dict) and x.get("id") in idset]
+
+            def _row_id_in_nav_set(xid: Any) -> bool:
+                if xid is None:
+                    return False
+                try:
+                    return int(xid) in idset
+                except (TypeError, ValueError):
+                    return False
+
+            return [x for x in (lst or []) if isinstance(x, dict) and _row_id_in_nav_set(x.get("id"))]
 
         badcase_list_nav = _restrict_by_nav(badcase_list, nav_ids.get("badcase") or [])
         bug_list_nav = _restrict_by_nav(bug_list, nav_ids.get("bug") or [])

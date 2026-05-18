@@ -70,7 +70,7 @@ import time
 from collections import defaultdict
 import redis
 import base64
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 import subprocess
 import threading
 import time
@@ -128,7 +128,7 @@ class BadCaseStatus(enum.Enum):
 
 class TestCaseStatus(enum.Enum):
     DRAFT = 'draft'        # 草稿
-    REVIEW = 'review'      # 规绩
+    REVIEW = 'review'      # 评审
     ACTIVE = 'active'      # 生效
     ARCHIVED = 'archived'  # 归档
 
@@ -464,20 +464,23 @@ def upload_file_to_minio(file, folder_path=''):
             file_extension = 'jpg'  # 压缩后统一为JPEG格式
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_name = original_filename
+        if file_extension and original_filename.lower().endswith(f'.{file_extension}'):
+            base_name = original_filename[: -(len(file_extension) + 1)]
         
         # 如果是头像上传，添加项目ID到文件名中
         if folder_path == 'avatar':
             # 从请求中获取项目ID（如果有的话）
             project_id = request.args.get('project_id', 'unknown')
             if file_extension:
-                safe_filename = f"project_{project_id}_{timestamp}_{original_filename}.{file_extension}"
+                safe_filename = f"project_{project_id}_{timestamp}_{base_name}.{file_extension}"
             else:
-                safe_filename = f"project_{project_id}_{timestamp}_{original_filename}.jpg"
+                safe_filename = f"project_{project_id}_{timestamp}_{base_name}.jpg"
         else:
             if file_extension:
-                safe_filename = f"{timestamp}_{original_filename}.{file_extension}"
+                safe_filename = f"{timestamp}_{base_name}.{file_extension}"
             else:
-                safe_filename = f"{timestamp}_{original_filename}.jpg"
+                safe_filename = f"{timestamp}_{base_name}.jpg"
         
         # 构建完整的文件路径
         file_path = f"{MINIO_CONFIG['saas_file_path']}{folder_path}/{safe_filename}" if folder_path else f"{MINIO_CONFIG['saas_file_path']}{safe_filename}"
@@ -501,29 +504,36 @@ def upload_file_to_minio(file, folder_path=''):
                 }
             })
         
-        # 上传文件到MinIO
+        # 读入内存一次：上传 MinIO 的同时写入 Redis，富文本插图 GET 可立即命中缓存
+        from io import BytesIO
+        file.seek(0)
+        raw_bytes = file.read()
+        file.seek(0)
         client.upload_fileobj(
-            file,
+            BytesIO(raw_bytes),
             MINIO_CONFIG['bucket_name'],
             file_path,
             ExtraArgs=extra_args
         )
+        if content_type.startswith('image/') and raw_bytes:
+            set_image_to_cache(get_upload_image_cache_key(file_path), raw_bytes, 3600)
         
-        # 返回文件的访问URL - 使用MinIO的直接访问URL
-        # 不使用预签名URL，避免重启后URL过期的问题
-        file_url = f"{MINIO_CONFIG['endpoint']}/{MINIO_CONFIG['bucket_name']}/{file_path}"
+        # 浏览器侧走同源代理，避免 MinIO 桶私有 / 跨域导致富文本内 img 无法加载
+        file_url = build_upload_image_proxy_url(file_path)
+        minio_direct_url = f"{MINIO_CONFIG['endpoint']}/{MINIO_CONFIG['bucket_name']}/{file_path}"
         
-        # 添加调试信息
         print(f"文件上传成功:")
         print(f"  - 文件名: {safe_filename}")
         print(f"  - 文件路径: {file_path}")
-        print(f"  - 访问URL: {file_url}")
+        print(f"  - 代理URL: {file_url}")
+        print(f"  - MinIO直链: {minio_direct_url}")
         
         return {
             'success': True,
             'url': file_url,
             'filename': safe_filename,
-            'path': file_path
+            'path': file_path,
+            'minio_url': minio_direct_url,
         }
         
     except ClientError as e:
@@ -538,6 +548,49 @@ def upload_file_to_minio(file, folder_path=''):
             'success': False,
             'error': f"文件上传异常: {str(e)}"
         }
+
+
+def build_upload_image_proxy_url(file_path: str) -> str:
+    """将 MinIO 对象键转为前端可加载的同源图片地址（需登录）。"""
+    key = (file_path or '').strip().lstrip('/')
+    if not key:
+        return ''
+    return f"/api/uploads/image/{quote(key, safe='/')}"
+
+
+def minio_direct_url_to_proxy(url: str) -> str:
+    """历史数据中的 MinIO 直链转为代理地址；无法识别则原样返回。"""
+    raw = (url or '').strip()
+    if not raw or raw.startswith('/api/uploads/image/'):
+        return raw
+    prefix = f"{MINIO_CONFIG['endpoint'].rstrip('/')}/{MINIO_CONFIG['bucket_name']}/"
+    if raw.startswith(prefix):
+        return build_upload_image_proxy_url(raw[len(prefix):].split('?')[0])
+    bucket_prefix = f"/{MINIO_CONFIG['bucket_name']}/"
+    idx = raw.find(bucket_prefix)
+    if idx >= 0:
+        return build_upload_image_proxy_url(raw[idx + len(bucket_prefix):].split('?')[0])
+    return raw
+
+
+def read_minio_object_bytes(get_object_response):
+    """读取 boto3 get_object 结果；兼容 dict(Body=...) 与 StreamingBody。"""
+    resp = get_object_response
+    if isinstance(resp, dict):
+        body = resp.get('Body')
+        if body is None:
+            raise ValueError('MinIO响应缺少Body字段')
+        data = body.read()
+        if hasattr(body, 'close'):
+            body.close()
+        return data
+    if hasattr(resp, 'read'):
+        data = resp.read()
+        if hasattr(resp, 'close'):
+            resp.close()
+        return data
+    raise TypeError(f'不支持的MinIO响应类型: {type(resp)}')
+
 
 # 从MinIO删除文件
 def delete_file_from_minio(file_path):
@@ -591,6 +644,10 @@ def set_image_to_cache(cache_key, image_data, expire_time=600):
 def get_image_cache_key(filename):
     """生成图片缓存键"""
     return f"avatar:{filename}"
+
+
+def get_upload_image_cache_key(file_path: str) -> str:
+    return f"upload_img:{(file_path or '').strip().lstrip('/')}"
 
 db = SQLAlchemy(app)
 
@@ -1307,6 +1364,152 @@ def _try_repair_badcase_card_id_from_source_card(bc):
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _badcase_assignee_id_for_card(badcase):
+    """BadCase.assignee 常为 user id 字符串，转为 Card.assignee_id。"""
+    av = getattr(badcase, 'assignee', None)
+    if av is not None and str(av).strip().isdigit():
+        try:
+            return int(str(av).strip())
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _link_card_source_to_badcase(card, badcase):
+    """已有 Card 行时补写 source_type/source_id（创建自卡片 Tab 时常见）。"""
+    if card is None or badcase is None:
+        return False
+    changed = False
+    try:
+        bid = int(badcase.id)
+    except (TypeError, ValueError):
+        return False
+    st = (getattr(card, 'source_type', None) or '').strip()
+    sid = getattr(card, 'source_id', None)
+    if not st or sid is None:
+        card.source_type = 'badcase'
+        card.source_id = bid
+        changed = True
+    elif int(sid) != bid:
+        print(
+            f"[BadCase] Card id={card.id} 已关联 source_id={sid}，"
+            f"跳过绑定 badcase id={bid}",
+            flush=True,
+        )
+    return changed
+
+
+def ensure_badcase_card_link(badcase, auto_create=False, commit=True):
+    """
+    确保 BadCase 与 Card 双向关联，返回 card_id 或 None。
+    auto_create=True 时若无任何关联则新建 Card（与 api_create_bug 一致；仅用于创建 API，
+    勿在 modify 预览/取数路径开启，否则会改写 card_id 导致从原卡片 Tab 消失）。
+    """
+    if badcase is None:
+        return None
+    cid_raw = getattr(badcase, 'card_id', None)
+    try:
+        if cid_raw is not None and int(cid_raw) > 0:
+            card = Card.query.get(int(cid_raw))
+            if card is not None:
+                if _link_card_source_to_badcase(card, badcase):
+                    db.session.add(card)
+                    if commit:
+                        db.session.commit()
+                return int(cid_raw)
+    except (TypeError, ValueError):
+        pass
+
+    if _try_repair_badcase_card_id_from_source_card(badcase):
+        if commit:
+            try:
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"[BadCase] card_id 反查补写 commit 失败: {e}", flush=True)
+                return None
+        try:
+            return int(badcase.card_id)
+        except (TypeError, ValueError):
+            pass
+
+    if not auto_create:
+        return None
+
+    # 避免重复建卡：同计划下已有同标题、未挂 source 的 BadCase 卡片则复用
+    try:
+        pid = int(badcase.project_id)
+        pp = getattr(badcase, 'plan_id', None)
+        title_key = (badcase.title or '').strip()
+        orphan_q = Card.query.filter(
+            Card.project_id == pid,
+            Card.type == CardType.BADCASE,
+            or_(Card.source_id.is_(None), Card.source_id == 0),
+        )
+        if pp is not None:
+            try:
+                orphan_q = orphan_q.filter(Card.plan_id == int(pp))
+            except (TypeError, ValueError):
+                pass
+        if title_key:
+            orphan_q = orphan_q.filter(Card.title == title_key)
+        orphan = orphan_q.order_by(Card.id.desc()).first()
+        if orphan is not None:
+            badcase.card_id = int(orphan.id)
+            if _link_card_source_to_badcase(orphan, badcase):
+                db.session.add(orphan)
+            if commit:
+                db.session.commit()
+            print(
+                f"[BadCase] 复用已有 Card id={orphan.id} 绑定 badcase id={badcase.id}",
+                flush=True,
+            )
+            return int(orphan.id)
+    except Exception as e:
+        print(f"[BadCase] 复用 Card 失败: {e}", flush=True)
+
+    try:
+        _card = Card(
+            title=badcase.title or '',
+            type=CardType.BADCASE,
+            priority=badcase.priority or 'p3',
+            assignee_id=_badcase_assignee_id_for_card(badcase),
+            project_id=badcase.project_id,
+            creator_id=badcase.creator_id,
+            plan_id=badcase.plan_id,
+            description=badcase.base_problem,
+            case_category=badcase.case_category,
+            base_problem=badcase.base_problem,
+            reproduction_steps=badcase.reproduction_steps,
+            badcase_result=badcase.badcase_result,
+            answer=badcase.answer,
+            correct_answer=badcase.correct_answer,
+            problem_reason=badcase.problem_reason,
+            solution=badcase.solution,
+            source_type='badcase',
+            source_id=int(badcase.id),
+        )
+        db.session.add(_card)
+        if commit:
+            db.session.commit()
+            db.session.refresh(_card)
+        else:
+            db.session.flush()
+        badcase.card_id = int(_card.id)
+        if commit:
+            db.session.commit()
+            db.session.refresh(badcase)
+        print(
+            f"[BadCase] 已为 id={badcase.id} 自动创建 Card id={_card.id}",
+            flush=True,
+        )
+        return int(_card.id)
+    except Exception as e:
+        db.session.rollback()
+        print(f"[BadCase] 自动创建 Card 失败 id={getattr(badcase, 'id', None)}: {e}", flush=True)
+        return None
 
 
 class CardTypeDefinition(db.Model):
@@ -2924,6 +3127,100 @@ def _normalize_diff_target(target):
     return t or 'badcase'
 
 
+def _collect_badcases_for_badcase_card(card):
+    """
+    与某张 BadCase 类型看板卡片关联的全部 BadCase：
+    - bad_case.card_id 指向该卡片；
+    - 或卡片 source 指向某条 BadCase（与 card_id 互补的历史数据）。
+    """
+    if card is None:
+        return []
+    pid = getattr(card, 'project_id', None)
+    cid = getattr(card, 'id', None)
+    if pid is None or cid is None:
+        return []
+    try:
+        pid = int(pid)
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return []
+    by_id = {}
+    for bc in BadCase.query.filter(BadCase.project_id == pid, BadCase.card_id == cid).all():
+        by_id[int(bc.id)] = bc
+    st = str(getattr(card, 'source_type', None) or '').strip().lower().replace('-', '_')
+    sid = getattr(card, 'source_id', None)
+    if sid is not None:
+        try:
+            bid = int(sid)
+        except (TypeError, ValueError):
+            bid = None
+        if bid and st in ('badcase', 'bad_case'):
+            bc = BadCase.query.filter(BadCase.project_id == pid, BadCase.id == bid).first()
+            if bc:
+                by_id[int(bc.id)] = bc
+    return list(by_id.values())
+
+
+def _collect_bugs_for_bug_card(card):
+    """与 Bug 类型看板卡片关联的全部 Bug：bug.card_id 或卡片 source 指向 Bug。"""
+    if card is None:
+        return []
+    pid = getattr(card, 'project_id', None)
+    cid = getattr(card, 'id', None)
+    if pid is None or cid is None:
+        return []
+    try:
+        pid = int(pid)
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return []
+    by_id = {}
+    for b in Bug.query.filter(Bug.project_id == pid, Bug.card_id == cid).all():
+        by_id[int(b.id)] = b
+    st = str(getattr(card, 'source_type', None) or '').strip().lower().replace('-', '_')
+    sid = getattr(card, 'source_id', None)
+    if sid is not None:
+        try:
+            bid = int(sid)
+        except (TypeError, ValueError):
+            bid = None
+        if bid and st in ('bug',):
+            b = Bug.query.filter(Bug.project_id == pid, Bug.id == bid).first()
+            if b:
+                by_id[int(b.id)] = b
+    return list(by_id.values())
+
+
+def _collect_testcases_for_testcase_card(card):
+    """与 TestCase 类型看板卡片关联的全部用例：test_case.card_id 或卡片 source 指向用例。"""
+    if card is None:
+        return []
+    pid = getattr(card, 'project_id', None)
+    cid = getattr(card, 'id', None)
+    if pid is None or cid is None:
+        return []
+    try:
+        pid = int(pid)
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return []
+    by_id = {}
+    for tc in TestCase.query.filter(TestCase.project_id == pid, TestCase.card_id == cid).all():
+        by_id[int(tc.id)] = tc
+    st = str(getattr(card, 'source_type', None) or '').strip().lower().replace('-', '_')
+    sid = getattr(card, 'source_id', None)
+    if sid is not None:
+        try:
+            tid = int(sid)
+        except (TypeError, ValueError):
+            tid = None
+        if tid and st in ('testcase', 'test_case'):
+            tc = TestCase.query.filter(TestCase.project_id == pid, TestCase.id == tid).first()
+            if tc:
+                by_id[int(tc.id)] = tc
+    return list(by_id.values())
+
+
 def _canonical_modifications(modifications):
     if not isinstance(modifications, dict):
         return {}
@@ -3721,6 +4018,71 @@ def upload_file():
             return jsonify({'error': result['error']}), 500
     else:
         return jsonify({'error': '文件类型不被允许'}), 400
+
+
+@app.route('/api/upload', methods=['POST'])
+@login_required
+def api_upload_file():
+    """富文本附件上传：走 /api 前缀以便 Vite 代理与 axios 同源带 Cookie。"""
+    return upload_file()
+
+
+@app.route('/api/uploads/image/<path:file_path>', methods=['GET'])
+@login_required
+def api_get_upload_image(file_path):
+    """富文本/附件图片：经后端从 MinIO 拉取，避免浏览器直连私有桶失败。"""
+    try:
+        decoded_path = unquote(file_path).strip().lstrip('/')
+        if not decoded_path or '..' in decoded_path.split('/'):
+            return jsonify({'error': '无效路径'}), 400
+
+        saas_prefix = (MINIO_CONFIG['saas_file_path'] or '').strip().lstrip('/')
+        if saas_prefix and not decoded_path.startswith(saas_prefix):
+            full_path = f"{MINIO_CONFIG['saas_file_path']}{decoded_path}"
+        else:
+            full_path = decoded_path
+
+        cache_key = get_upload_image_cache_key(full_path)
+        cached_image_data = get_image_from_cache(cache_key)
+        if cached_image_data:
+            image_data = cached_image_data
+        else:
+            client = get_minio_client()
+            try:
+                client.head_object(Bucket=MINIO_CONFIG['bucket_name'], Key=full_path)
+            except ClientError as e:
+                if e.response.get('Error', {}).get('Code') in ('404', 'NoSuchKey', 'NotFound'):
+                    return jsonify({'error': '文件不存在'}), 404
+                raise
+
+            raw = client.get_object(Bucket=MINIO_CONFIG['bucket_name'], Key=full_path)
+            image_data = read_minio_object_bytes(raw)
+
+        lower = decoded_path.lower()
+        mime_type = mimetypes.guess_type(decoded_path)[0] or 'application/octet-stream'
+        if lower.endswith('.png'):
+            mime_type = 'image/png'
+        elif lower.endswith('.gif'):
+            mime_type = 'image/gif'
+        elif lower.endswith('.webp'):
+            mime_type = 'image/webp'
+        elif lower.endswith(('.jpg', '.jpeg')):
+            mime_type = 'image/jpeg'
+
+        if not cached_image_data and mime_type.startswith('image/'):
+            set_image_to_cache(cache_key, image_data, 3600)
+
+        resp = app.response_class(image_data, status=200, mimetype=mime_type)
+        resp.headers['Cache-Control'] = 'private, max-age=3600'
+        resp.headers['Content-Type'] = mime_type
+        return resp
+    except ClientError as e:
+        print(f"获取上传图片失败: {e}")
+        return jsonify({'error': '获取图片失败'}), 500
+    except Exception as e:
+        print(f"获取上传图片异常: {e}")
+        return jsonify({'error': '服务器内部错误'}), 500
+
 
 # 项目头像上传
 @app.route('/api/upload/avatar', methods=['POST'])
@@ -5043,6 +5405,7 @@ def api_get_project_badcases(project_id):
         
         # 获取计划ID参数
         plan_id = _parse_query_int_optional('plan_id')
+        card_id = _parse_query_optional_int64('card_id')
         
         # 获取状态类型和内容类型参数
         status_type = request.args.get('status_type')
@@ -5051,8 +5414,12 @@ def api_get_project_badcases(project_id):
         # 构建查询条件
         query = BadCase.query.filter_by(project_id=project_id)
         
+        # 卡片分类型：优先按 card_id 过滤（与 Bug 列表一致）
+        if card_id is not None:
+            query = query.filter(BadCase.card_id == card_id)
+            print(f"按卡片ID过滤BadCase: card_id={card_id}", flush=True)
         # 处理status_type和content_type参数
-        if status_type == 'unplanned':
+        elif status_type == 'unplanned':
             # 未计划的BadCase：没有关联计划的BadCase
             query = query.filter(BadCase.plan_id.is_(None))
             print(f"过滤未计划的BadCase (status_type=unplanned)")
@@ -5408,6 +5775,7 @@ def api_create_badcase():
         badcase = BadCase(
             project_id=project_id,
             plan_id=_pid,
+            card_id=card_id_val,
             creator_id=current_user.id,
             title=title,
             case_category=case_category,
@@ -5429,9 +5797,18 @@ def api_create_badcase():
         
         db.session.add(badcase)
         db.session.commit()
+        db.session.refresh(badcase)
         _cache_invalidate_plans(project_id)
+
+        linked_cid = ensure_badcase_card_link(badcase, auto_create=(card_id_val is None))
+        if linked_cid is None and card_id_val is not None:
+            print(
+                f"[api_create_badcase] 警告: 已传 card_id={card_id_val} 但未能建立双向关联，"
+                f"badcase id={badcase.id}",
+                flush=True,
+            )
         
-        print(f"BadCase创建成功，ID: {badcase.id}")
+        print(f"BadCase创建成功，ID: {badcase.id}, card_id: {getattr(badcase, 'card_id', None)}")
         try:
             _rec = _workflow_merge_creator_if_empty(
                 _workflow_recipients_badcase(badcase), badcase.creator_id
@@ -5458,6 +5835,8 @@ def api_create_badcase():
                 'id': _json_snowflake_id(badcase.id),
                 'title': badcase.title,
                 'project_id': badcase.project_id,
+                'plan_id': _json_snowflake_id(badcase.plan_id),
+                'card_id': _json_snowflake_id(getattr(badcase, 'card_id', None)),
                 'creator_id': badcase.creator_id,
                 'case_category': badcase.case_category,
                 'base_problem': badcase.base_problem,
@@ -6061,6 +6440,41 @@ def api_get_project_cards(project_id):
         print(f"❌ 获取卡片列表失败: {e}")
         return jsonify({'success': False, 'error': f'获取卡片列表失败: {str(e)}'}), 500
 
+
+@app.route('/api/projects/<int:project_id>/cards/resolve-source', methods=['GET'])
+@login_required
+def api_resolve_project_card_by_source(project_id):
+    """
+    按 Card.source_id（及类型）精确定位卡片，不受「按 plan 分页拉卡」限制。
+    用于 Bug/BadCase/TestCase 行缺 card_id 或 Card.plan_id 不在当前迭代子树时的列表 / 沙箱 Tab 导航。
+    """
+    if not has_project_permission(current_user.id, project_id):
+        return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+    try:
+        source_type = (request.args.get('source_type') or '').strip().lower().replace('-', '_')
+        source_id = _parse_query_optional_int64('source_id')
+        prefer_plan_id = _parse_query_optional_int64('prefer_plan_id')
+        if source_id is None or source_id <= 0:
+            return jsonify({'success': True, 'data': {'card': None}})
+        if source_type in ('test_case',):
+            kind = 'testcase'
+        elif source_type in ('bad_case',):
+            kind = 'badcase'
+        elif source_type in ('bug', 'badcase', 'testcase'):
+            kind = source_type
+        else:
+            return jsonify({'success': False, 'error': '无效的 source_type'}), 400
+        card = _find_card_linking_source_record(
+            project_id, source_id, kind, prefer_plan_id=prefer_plan_id
+        )
+        if card is None:
+            return jsonify({'success': True, 'data': {'card': None}})
+        return jsonify({'success': True, 'data': {'card': card.to_dict()}})
+    except Exception as e:
+        print(f"❌ resolve-source 卡片失败: {e}")
+        return jsonify({'success': False, 'error': f'解析卡片失败: {str(e)}'}), 500
+
+
 @app.route('/api/cards/<int:card_id>', methods=['GET'])
 @login_required
 def api_get_card_detail(card_id):
@@ -6206,30 +6620,351 @@ def api_update_card(card_id):
 @app.route('/api/cards/<int:card_id>', methods=['DELETE'])
 @login_required
 def api_delete_card(card_id):
-    """删除卡片"""
+    """删除卡片。Bug / BadCase / TestCase 类型卡片若仍关联源表记录，需二次确认后级联删除。"""
     print(f"=== 删除卡片 {card_id} ===")
-    
+
     try:
         card = Card.query.get_or_404(card_id)
-        
-        # 检查权限
+
         if not has_project_permission(current_user.id, card.project_id):
             return jsonify({'success': False, 'error': '无权删除此卡片'}), 403
-        
+
         _pid = card.project_id
+        payload = request.get_json(silent=True) or {}
+        confirm_cascade = any(
+            [
+                payload.get('confirm_cascade_sources') is True,
+                payload.get('confirm_cascade_badcases') is True,
+                payload.get('confirm_cascade_bugs') is True,
+                payload.get('confirm_cascade_testcases') is True,
+            ]
+        )
+
+        ctype = getattr(card, 'type', None)
+        linked_badcases = []
+        linked_bugs = []
+        linked_testcases = []
+        source_kind = None
+
+        if ctype == CardType.BADCASE:
+            linked_badcases = _collect_badcases_for_badcase_card(card)
+            if linked_badcases:
+                source_kind = 'badcase'
+        elif ctype == CardType.BUG:
+            linked_bugs = _collect_bugs_for_bug_card(card)
+            if linked_bugs:
+                source_kind = 'bug'
+        elif ctype == CardType.TESTCASE:
+            linked_testcases = _collect_testcases_for_testcase_card(card)
+            if linked_testcases:
+                source_kind = 'testcase'
+
+        def _linked_items_payload(rows, title_attr='title'):
+            out = []
+            for r in rows:
+                tid = getattr(r, 'id', None)
+                if tid is None:
+                    continue
+                try:
+                    tid_s = _json_snowflake_id(int(tid))
+                except (TypeError, ValueError):
+                    continue
+                tv = getattr(r, title_attr, None) or ''
+                out.append({'id': tid_s, 'title': (str(tv) or '')[:200]})
+            return out
+
+        need_confirm = (
+            (linked_badcases or linked_bugs or linked_testcases) and not confirm_cascade
+        )
+        if need_confirm:
+            rows = linked_badcases or linked_bugs or linked_testcases
+            n = len(rows)
+            sk = source_kind or 'badcase'
+            err_cn = {
+                'badcase': f'该 BadCase 卡片仍关联 {n} 条 BadCase，删除将永久删除源记录（含评论）及待审核修改。',
+                'bug': f'该 Bug 卡片仍关联 {n} 条缺陷，删除将永久删除这些 Bug（含评论）及待审核修改。',
+                'testcase': f'该测试用例卡片仍关联 {n} 条用例，删除将永久删除这些 TestCase 及待审核修改。',
+            }.get(sk, f'该卡片仍关联 {n} 条源表记录。')
+            return (
+                jsonify(
+                    {
+                        'success': False,
+                        'code': 'CASCADE_CARD_SOURCES_REQUIRED',
+                        'source_kind': sk,
+                        'error': err_cn + ' 请确认后请求体带上 confirm_cascade_sources=true 重试。',
+                        'count': n,
+                        'linked_items': _linked_items_payload(rows),
+                        'linked_badcases': _linked_items_payload(linked_badcases)
+                        if linked_badcases
+                        else [],
+                        'linked_bugs': _linked_items_payload(linked_bugs) if linked_bugs else [],
+                        'linked_testcases': _linked_items_payload(linked_testcases)
+                        if linked_testcases
+                        else [],
+                    }
+                ),
+                409,
+            )
+
+        deleted_bc = deleted_bug = deleted_tc = 0
+
+        if linked_badcases and confirm_cascade:
+            ids = [int(bc.id) for bc in linked_badcases]
+            try:
+                Comment.query.filter(Comment.badcase_id.in_(ids)).delete(synchronize_session=False)
+            except Exception as _ce:
+                print(f"[DELETE-CARD] 清理 Comment 失败（继续）: {_ce}", flush=True)
+            try:
+                _delete_diff_review_state_rows(_pid, 'badcase', ids, None)
+            except Exception as _de:
+                print(f"[DELETE-CARD] 清理 diff_review_state(badcase) 失败（继续）: {_de}", flush=True)
+            try:
+                BadCase.query.filter(BadCase.id.in_(ids)).delete(synchronize_session=False)
+                deleted_bc = len(ids)
+            except Exception as _be:
+                db.session.rollback()
+                print(f"❌ 级联删除 BadCase 失败: {_be}", flush=True)
+                return jsonify({'success': False, 'error': f'级联删除 BadCase 失败: {str(_be)}'}), 500
+            print(f"[DELETE-CARD] 卡片 {card_id} 级联删除 {deleted_bc} 条 bad_case", flush=True)
+
+        if linked_bugs and confirm_cascade:
+            ids = [int(b.id) for b in linked_bugs]
+            try:
+                BugComment.query.filter(BugComment.bug_id.in_(ids)).delete(synchronize_session=False)
+            except Exception as _ce:
+                print(f"[DELETE-CARD] 清理 bug_comment 失败（继续）: {_ce}", flush=True)
+            try:
+                _delete_diff_review_state_rows(_pid, 'bug', ids, None)
+            except Exception as _de:
+                print(f"[DELETE-CARD] 清理 diff_review_state(bug) 失败（继续）: {_de}", flush=True)
+            try:
+                Bug.query.filter(Bug.id.in_(ids)).delete(synchronize_session=False)
+                deleted_bug = len(ids)
+            except Exception as _be:
+                db.session.rollback()
+                print(f"❌ 级联删除 Bug 失败: {_be}", flush=True)
+                return jsonify({'success': False, 'error': f'级联删除 Bug 失败: {str(_be)}'}), 500
+            print(f"[DELETE-CARD] 卡片 {card_id} 级联删除 {deleted_bug} 条 bug", flush=True)
+
+        if linked_testcases and confirm_cascade:
+            ids = [int(tc.id) for tc in linked_testcases]
+            try:
+                _delete_diff_review_state_rows(_pid, 'testcase', ids, None)
+            except Exception as _de:
+                print(f"[DELETE-CARD] 清理 diff_review_state(testcase) 失败（继续）: {_de}", flush=True)
+            try:
+                TestCase.query.filter(TestCase.id.in_(ids)).delete(synchronize_session=False)
+                deleted_tc = len(ids)
+            except Exception as _be:
+                db.session.rollback()
+                print(f"❌ 级联删除 TestCase 失败: {_be}", flush=True)
+                return jsonify({'success': False, 'error': f'级联删除 TestCase 失败: {str(_be)}'}), 500
+            print(f"[DELETE-CARD] 卡片 {card_id} 级联删除 {deleted_tc} 条 test_case", flush=True)
+
+        try:
+            CardPlanRelation.query.filter(CardPlanRelation.card_id == int(card_id)).delete(
+                synchronize_session=False
+            )
+        except Exception as _re:
+            print(f"[DELETE-CARD] 清理 card_plan_relation 失败（继续）: {_re}", flush=True)
+
         db.session.delete(card)
         db.session.commit()
         _cache_invalidate_cards(_pid)
-        
+        _cache_invalidate_plans(_pid)
+
         print(f"✅ 卡片删除成功: {card.id}")
-        return jsonify({'success': True, 'message': '卡片删除成功'})
-    
+        return jsonify(
+            {
+                'success': True,
+                'message': '卡片删除成功',
+                'deleted_linked_badcases': deleted_bc,
+                'deleted_linked_bugs': deleted_bug,
+                'deleted_linked_testcases': deleted_tc,
+            }
+        )
+
     except HTTPException:
         raise
     except Exception as e:
         db.session.rollback()
         print(f"❌ 删除卡片失败: {e}")
         return jsonify({'success': False, 'error': f'删除卡片失败: {str(e)}'}), 500
+
+
+def _user_name_map(user_ids):
+    ids = [int(x) for x in user_ids if x is not None]
+    if not ids:
+        return {}
+    rows = db.session.query(User.id, User.name).filter(User.id.in_(ids)).all()
+    return {uid: name for uid, name in rows}
+
+
+@app.route('/api/projects/<int:project_id>/global-search', methods=['GET'])
+@login_required
+def api_project_global_search(project_id):
+    """项目内全局搜索：计划、卡片、BadCase、Bug、测试用例（单次请求、库内 ilike 过滤）"""
+    try:
+        query_text = (request.args.get('query') or '').strip()
+        per_type = min(max(request.args.get('per_type', 30, type=int), 1), 50)
+
+        if not query_text:
+            return jsonify({'success': True, 'results': []})
+
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+
+        pattern = f'%{query_text}%'
+        results = []
+
+        # 迭代计划
+        plan_rows = (
+            Plan.query.filter(Plan.project_id == project_id)
+            .filter(db.or_(Plan.name.ilike(pattern), Plan.description.ilike(pattern)))
+            .order_by(Plan.updated_at.desc())
+            .limit(per_type)
+            .all()
+        )
+        for p in plan_rows:
+            results.append(
+                {
+                    'type': 'plan',
+                    'id': _json_snowflake_id(p.id),
+                    'title': p.name or f'Plan#{p.id}',
+                    'status': p.status or '',
+                    'status_text': p.status or '',
+                    'details': [],
+                }
+            )
+
+        # 迭代卡片
+        card_rows = (
+            Card.query.filter(Card.project_id == project_id)
+            .filter(Card.type.in_([CardType.BUG, CardType.BADCASE, CardType.TESTCASE]))
+            .filter(db.or_(Card.title.ilike(pattern), Card.description.ilike(pattern)))
+            .order_by(Card.updated_at.desc())
+            .limit(per_type)
+            .all()
+        )
+        card_assignee_map = _user_name_map([c.assignee_id for c in card_rows])
+        for c in card_rows:
+            ctype = c.type.value if isinstance(c.type, CardType) else str(c.type or '')
+            results.append(
+                {
+                    'type': 'card',
+                    'groupKey': ctype if ctype in ('bug', 'badcase', 'testcase') else 'card',
+                    'id': _json_snowflake_id(c.id),
+                    'title': c.title,
+                    'plan_id': _json_snowflake_id(c.plan_id),
+                    'cardType': ctype,
+                    'status': '',
+                    'status_text': '',
+                    'assignee': card_assignee_map.get(c.assignee_id) if c.assignee_id else None,
+                    'details': [],
+                }
+            )
+
+        # BadCase 实体
+        bc_rows = (
+            BadCase.query.filter(BadCase.project_id == project_id)
+            .filter(
+                db.or_(
+                    BadCase.title.ilike(pattern),
+                    BadCase.case_category.ilike(pattern),
+                    BadCase.base_problem.ilike(pattern),
+                    BadCase.reproduction_steps.ilike(pattern),
+                    BadCase.answer.ilike(pattern),
+                    BadCase.correct_answer.ilike(pattern),
+                )
+            )
+            .order_by(BadCase.updated_at.desc())
+            .limit(per_type)
+            .all()
+        )
+        for bc in bc_rows:
+            st = _badcase_status_str(bc)
+            results.append(
+                {
+                    'type': 'badcase',
+                    'groupKey': 'badcase',
+                    'id': _json_snowflake_id(bc.id),
+                    'title': bc.title or bc.case_category or f'BadCase#{bc.id}',
+                    'status': st or 'open',
+                    'status_text': st,
+                    'plan_id': _json_snowflake_id(bc.plan_id),
+                    'card_id': _json_snowflake_id(getattr(bc, 'card_id', None)),
+                    'details': [],
+                }
+            )
+
+        # Bug 实体
+        bug_rows = (
+            Bug.query.filter(Bug.project_id == project_id)
+            .filter(
+                db.or_(
+                    Bug.title.ilike(pattern),
+                    Bug.description.ilike(pattern),
+                    Bug.bug_type.ilike(pattern),
+                )
+            )
+            .order_by(Bug.updated_at.desc())
+            .limit(per_type)
+            .all()
+        )
+        bug_assignee_map = _user_name_map([b.assignee_id for b in bug_rows])
+        for b in bug_rows:
+            results.append(
+                {
+                    'type': 'bug',
+                    'groupKey': 'bug',
+                    'id': _json_snowflake_id(b.id),
+                    'title': b.title,
+                    'status': b.status or 'open',
+                    'status_text': b.status or '',
+                    'plan_id': _json_snowflake_id(b.plan_id),
+                    'card_id': _json_snowflake_id(b.card_id),
+                    'assignee': bug_assignee_map.get(b.assignee_id) if b.assignee_id else None,
+                    'details': [],
+                }
+            )
+
+        # 测试用例实体
+        tc_rows = (
+            TestCase.query.filter(TestCase.project_id == project_id)
+            .filter(
+                db.or_(
+                    TestCase.title.ilike(pattern),
+                    TestCase.case_type.ilike(pattern),
+                    TestCase.remark.ilike(pattern),
+                )
+            )
+            .order_by(TestCase.updated_at.desc())
+            .limit(per_type)
+            .all()
+        )
+        tc_assignee_map = _user_name_map([t.assignee_id for t in tc_rows])
+        for t in tc_rows:
+            st = _testcase_status_str(t)
+            results.append(
+                {
+                    'type': 'testcase',
+                    'groupKey': 'testcase',
+                    'id': _json_snowflake_id(t.id),
+                    'title': t.title,
+                    'status': st or 'active',
+                    'status_text': st,
+                    'plan_id': _json_snowflake_id(t.plan_id),
+                    'card_id': _json_snowflake_id(getattr(t, 'card_id', None)),
+                    'assignee': tc_assignee_map.get(t.assignee_id) if t.assignee_id else None,
+                    'details': [],
+                }
+            )
+
+        return jsonify({'success': True, 'results': results})
+    except Exception as e:
+        print(f'❌ 全局搜索失败: {e}')
+        return jsonify({'success': False, 'error': f'搜索失败: {str(e)}'}), 500
+
 
 @app.route('/api/cards/search', methods=['GET'])
 @login_required
@@ -6273,21 +7008,6 @@ def api_search_cards():
             )
         )
         
-        # 获取各类型计数
-        counts_query = Card.query
-        if project_id:
-            counts_query = counts_query.filter(Card.project_id == project_id)
-        
-        counts = {}
-        for t in types:
-            count = counts_query.filter(Card.type == t).filter(
-                db.or_(
-                    Card.title.ilike(search_pattern),
-                    Card.description.ilike(search_pattern)
-                )
-            ).count()
-            counts[t] = count
-        
         # 分页查询
         pagination = base_query.order_by(Card.updated_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
@@ -6295,12 +7015,24 @@ def api_search_cards():
         
         results = [card.to_dict() for card in pagination.items]
         
-        # 添加assignee名称
+        assignee_map = _user_name_map([r.get('assignee_id') for r in results])
         for result in results:
-            if result.get('assignee_id'):
-                assignee = User.query.get(result['assignee_id'])
-                if assignee:
-                    result['assignee'] = assignee.name
+            aid = result.get('assignee_id')
+            if aid and assignee_map.get(aid):
+                result['assignee'] = assignee_map[aid]
+
+        counts = {}
+        if (request.args.get('include_counts') or '').strip().lower() in ('1', 'true', 'yes'):
+            counts_query = Card.query
+            if project_id:
+                counts_query = counts_query.filter(Card.project_id == project_id)
+            for t in types:
+                counts[t] = counts_query.filter(Card.type == t).filter(
+                    db.or_(
+                        Card.title.ilike(search_pattern),
+                        Card.description.ilike(search_pattern),
+                    )
+                ).count()
         
         print(f"✅ 搜索完成，找到 {len(results)} 条结果")
         return jsonify({
@@ -9142,15 +9874,7 @@ def api_create_testcase():
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
         # 如果提供了 card_id，按卡片类型校验（卡片分类型，计划不分类型）
-        raw_card = data.get('card_id')
-        card_id_val = None
-        if raw_card is not None and str(raw_card).strip() != '':
-            try:
-                ci = int(raw_card)
-                if ci != 0:
-                    card_id_val = ci
-            except (TypeError, ValueError):
-                card_id_val = None
+        card_id_val = _coerce_optional_bigint_json(data.get('card_id'))
         
         if card_id_val is not None:
             # 按卡片类型校验
@@ -9163,11 +9887,16 @@ def api_create_testcase():
                 return jsonify({'success': False, 'error': '只能在testcase类型卡片中创建测试用例'}), 400
         
         # plan_id：若存在则使用（不再校验计划类型）
-        plan_id = data.get('plan_id')
+        plan_id = _coerce_optional_bigint_json(data.get('plan_id'))
         if plan_id:
             plan = Plan.query.get(plan_id)
             if not plan:
                 plan_id = None
+        # 未显式传 plan_id 时，继承卡片所属迭代
+        if plan_id is None and card_id_val is not None:
+            card_for_plan = Card.query.get(card_id_val)
+            if card_for_plan and card_for_plan.plan_id:
+                plan_id = int(card_for_plan.plan_id)
         
         # 创建TestCase
         testcase = TestCase(
@@ -9187,7 +9916,8 @@ def api_create_testcase():
             plan_id=plan_id,
             project_id=data['project_id'],
             creator_id=current_user.id,
-            assignee_id=data.get('assignee_id')
+            assignee_id=data.get('assignee_id'),
+            card_id=card_id_val,
         )
         
         db.session.add(testcase)
@@ -10009,6 +10739,7 @@ def api_get_project_testcases(project_id):
         
         # 获取计划ID参数
         plan_id = _parse_query_int_optional('plan_id')
+        card_id = _parse_query_optional_int64('card_id')
         
         # 获取状态类型参数
         status_type = request.args.get('status_type')
@@ -10016,8 +10747,11 @@ def api_get_project_testcases(project_id):
         # 构建查询条件
         query = TestCase.query.filter_by(project_id=project_id)
         
+        if card_id is not None:
+            query = query.filter(TestCase.card_id == card_id)
+            print(f"按卡片ID过滤TestCase: card_id={card_id}", flush=True)
         # 处理status_type参数
-        if status_type == 'unplanned':
+        elif status_type == 'unplanned':
             # 未计划的测试用例：没有关联计划的测试用例
             query = query.filter(TestCase.plan_id.is_(None))
             print(f"过滤未计划的TestCase (status_type=unplanned)")

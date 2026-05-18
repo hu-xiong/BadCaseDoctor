@@ -66,9 +66,12 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { getProjectCards, deleteCard } from '../api'
+import { getProjectCards, deleteCardWithCascadeConfirm, cascadeCardDeleteConfirmText } from '../api.js'
 
 const { t } = useI18n()
+
+const cascadeCardDeleteConfirm = (payload) =>
+  confirm(cascadeCardDeleteConfirmText(t, { ...payload, source_kind: payload.source_kind || 'badcase' }))
 
 const props = defineProps({
   title: {
@@ -128,7 +131,8 @@ const handleEditCard = (card) => {
 const handleDeleteCard = async (card) => {
   if (confirm(t('cardList.deleteConfirm'))) {
     try {
-      const response = await deleteCard(card.id)
+      const response = await deleteCardWithCascadeConfirm(card.id, { confirmFn: cascadeCardDeleteConfirm })
+      if (response?.data?.cancelled) return
       if (response.data.success) {
         cards.value = cards.value.filter(c => c.id !== card.id)
         emit('delete', card)

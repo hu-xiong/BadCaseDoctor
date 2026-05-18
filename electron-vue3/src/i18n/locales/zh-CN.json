@@ -408,7 +408,7 @@
     "createPreviewExpandRest": "展开其余 {n} 项",
     "createPreviewCollapseFields": "收起属性",
     "detailFieldsHint": "当前仅有详情/长文本字段，列表中仍会展示标题等；点击卡片可在左侧查看待创建行。",
-    "sandboxFooter": "在沙箱中查看变更后，点击卡片跳转到左侧列表，使用行内 ✓ 采纳或 ✗ 拒绝后才会正式落库。",
+    "sandboxFooter": "在沙箱中查看变更后，点击卡片跳转到左侧列表或详情（如优先级等仅详情字段会打开编辑页），使用行内 ✓ 采纳或 ✗ 拒绝后才会正式落库。",
     "alreadyAdoptedLocate": "本条与浏览器内已记录的采纳一致（同一标题/计划等），已尝试定位；若左侧未见，可能在其它计划、记录已删除，或需在列表中重新采纳创建。",
     "navRecords": "{n} 条",
     "navExpandAll": "展开全部",
@@ -644,7 +644,11 @@
       "close": "已关闭",
       "resolved": "已解决",
       "hold": "暂停",
-      "not_badcase": "非 BadCase"
+      "not_badcase": "非 BadCase",
+      "draft": "草稿",
+      "review": "评审",
+      "active": "生效",
+      "archived": "归档"
     }
   },
   "project": {
@@ -795,7 +799,7 @@
   "cardCreate": {
     "title": "创建卡片",
     "titleLabel": "标题",
-    "titlePlaceholder": "请输入卡片标题",
+    "titlePlaceholder": "请输入卡片标题，Enter 保存，Esc 取消",
     "typeLabel": "类型",
     "cancel": "取消",
     "confirm": "确定",
@@ -833,12 +837,19 @@
     "bugInfo": "Bug信息",
     "severity": "严重程度",
     "priority": "优先级",
+    "caseCategory": "问题分类",
     "reproducer": "复现步骤",
     "badcaseInfo": "BadCase信息",
     "scenario": "场景",
     "expected": "预期结果",
     "actual": "实际结果",
     "testcaseInfo": "测试用例信息",
+    "preconditions": "前置条件",
+    "remark": "备注",
+    "baseline": "基线",
+    "testType": "测试类型",
+    "caseType": "用例类型",
+    "title": "标题",
     "steps": "测试步骤",
     "expectedResult": "预期结果",
     "testResult": "测试结果",
@@ -1019,6 +1030,9 @@
     "createFirstCard": "创建第一张卡片",
     "confirmDelete": "确定要删除卡片「{title}」吗？",
     "confirmBatchDelete": "确定要删除选中的 {count} 张卡片吗？",
+    "cascadeBadcaseSecondConfirm": "该 BadCase 卡片仍关联 {count} 条 BadCase 记录。删除卡片将永久删除这些 BadCase（含评论）及待审核修改。是否继续删除？",
+    "cascadeBugSecondConfirm": "该 Bug 卡片仍关联 {count} 条缺陷记录。删除卡片将永久删除这些 Bug（含评论）及待审核修改。是否继续删除？",
+    "cascadeTestcaseSecondConfirm": "该测试用例卡片仍关联 {count} 条用例记录。删除卡片将永久删除这些 TestCase 及待审核修改。是否继续删除？",
     "deleteFailed": "删除失败，请重试"
   }
 }

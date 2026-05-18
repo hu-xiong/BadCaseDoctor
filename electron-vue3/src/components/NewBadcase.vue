@@ -11,7 +11,7 @@
       <!-- 第一栏：仅在非嵌入模式显示 -->
       <div v-if="!embedded" class="top-bar-row top-bar-row--primary">
         <div class="top-left">
-          <div class="logo" @click="goToDashboard" style="cursor: pointer;">
+          <div class="logo">
             <span class="logo-text">BadCase Doctor</span>
             <span class="star-icon">⭐</span>
           </div>
@@ -25,7 +25,7 @@
               {{ projectInfo?.name || '项目' }}
             </span>
             <span class="breadcrumb-separator">/</span>
-            <span class="breadcrumb-item">编辑BadCase</span>
+            <span class="breadcrumb-item">{{ editContextCrumb }}</span>
             <span class="dropdown-arrow">▼</span>
           </div>
 
@@ -84,7 +84,7 @@
       <div class="top-bar-row top-bar-row--secondary">
         <div class="secondary-left">
           <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
-          <span class="page-title">{{ isEdit ? '编辑BadCase' : '新建BadCase' }}</span>
+          <span class="page-title">{{ pageHeadline }}</span>
         </div>
       </div>
     </div>
@@ -247,7 +247,7 @@
               <div class="plan-selected-display">
                 <span class="refresh-icon" @click.stop="refreshProjectPlans">🔄</span>
                 <span class="plan-selected-text">
-                  所属计划 {{ getSelectedPlanDisplayText() }}
+                  所属计划 {{ getSelectedPlanDisplayText }}
                 </span>
                 <span class="arrow-icon" :class="{ 'rotated': showPlanDropdown }">▼</span>
               </div>
@@ -280,10 +280,9 @@
                       v-if="plan"
                       class="plan-option"
                       :class="{ 
-                        'selected': badcase.plan === plan.value, 
+                        'selected': isPlanSelected(plan.value), 
                         'expandable': plan.children && plan.children.length > 0,
-                        'pinned': plan.is_pinned,
-                        'unplanned': plan.value === 'unplanned'
+                        'pinned': plan.is_pinned
                       }"
                       :data-level="plan.level || 0"
                       @click.stop="selectPlan(plan.value)"
@@ -320,7 +319,7 @@
                         :key="childPlan.value"
                         class="plan-option sub-plan"
                         :class="{ 
-                          'selected': badcase.plan === childPlan.value,
+                          'selected': isPlanSelected(childPlan.value),
                           'expandable': childPlan.children && childPlan.children.length > 0
                         }"
                         :data-level="(plan.level || 0) + 1"
@@ -357,7 +356,7 @@
                             v-for="grandChildPlan in childPlan.children" 
                             :key="grandChildPlan.value"
                             class="plan-option sub-plan level-2"
-                            :class="{ 'selected': badcase.plan === grandChildPlan.value }"
+                            :class="{ 'selected': isPlanSelected(grandChildPlan.value) }"
                             :data-level="(plan.level || 0) + 2"
                             @click.stop="selectPlan(grandChildPlan.value)"
                           >
@@ -390,8 +389,6 @@
         
         <!-- 相似问题（选填） -->
         <div class="problem-section" :class="{ 'has-diff': pendingDiff?.modifications?.base_problem }">
-          <h3 class="problem-title">相似问题（选填）:</h3>
-          <!-- diff 显示区域 -->
           <div v-if="pendingDiff?.modifications?.base_problem" class="field-diff-panel">
             <div class="diff-header">
               <span class="diff-label">修改预览:</span>
@@ -412,6 +409,7 @@
               </div>
             </div>
           </div>
+          <h3 class="problem-title">相似问题（选填）:</h3>
           <textarea 
             v-model="badcase.base_problem" 
             class="problem-textarea" 
@@ -424,12 +422,6 @@
                 
         <!-- 复现步骤编辑器（Tiptap） -->
         <div class="editor-section" :class="{ 'has-diff': pendingDiff?.modifications?.reproduction_steps }">
-          <div class="editor-content">
-            <div class="editor-title-row">
-              <h3 class="editor-title">BadCase复现步骤:</h3>
-              <button type="button" class="toolbar-btn" title="添加附件到侧栏" @click="addAttachment">📎</button>
-            </div>
-            <!-- diff 显示区域 -->
             <div v-if="pendingDiff?.modifications?.reproduction_steps" class="field-diff-panel">
               <div class="diff-header">
                 <span class="diff-label">修改预览:</span>
@@ -450,6 +442,11 @@
                 </div>
               </div>
             </div>
+          <div class="editor-content">
+            <div class="editor-title-row">
+              <h3 class="editor-title">BadCase复现步骤:</h3>
+              <button type="button" class="toolbar-btn" title="添加附件到侧栏" @click="addAttachment">📎</button>
+            </div>
             <RichTextHtmlEditor
               v-model="badcase.reproduction_steps"
               class="editor-textarea"
@@ -462,8 +459,6 @@
         
         <!-- 答案输入框 -->
         <div class="answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.answer }">
-          <h3 class="answer-title">答案:</h3>
-          <!-- diff 显示区域（放在文本域内部上方，带 ✓/✗） -->
           <div v-if="pendingDiff?.modifications?.answer" class="field-diff-panel">
             <div class="diff-header">
               <span class="diff-label">修改预览:</span>
@@ -484,6 +479,7 @@
               </div>
             </div>
           </div>
+          <h3 class="answer-title">答案:</h3>
           <textarea 
             v-model="badcase.answer" 
             class="answer-textarea" 
@@ -496,11 +492,9 @@
         
         <!-- 正确答案输入框 -->
         <div class="correct-answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.correct_answer }">
-          <h3 class="correct-answer-title">正确答案:</h3>
-          <!-- diff 显示区域（放在文本域内部上方，带 ✓/✗） -->
           <div v-if="pendingDiff?.modifications?.correct_answer" class="field-diff-panel">
             <div class="diff-header">
-              <span class="diff-label">修改预览:</span>
+              <span class="diff-label">正确答案修改预览:</span>
               <div class="diff-actions">
                 <button @click="applyFieldChange('correct_answer')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                 <button @click="cancelFieldChange('correct_answer')" class="btn-cancel" title="取消">✗</button>
@@ -518,6 +512,7 @@
               </div>
             </div>
           </div>
+          <h3 class="correct-answer-title">正确答案:</h3>
           <textarea 
             v-model="badcase.correct_answer" 
             class="correct-answer-textarea" 
@@ -532,19 +527,22 @@
         <div class="category-section">
           <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.case_category }">
             <label class="form-label required">问题分类:</label>
-            <!-- diff 显示区域 -->
             <div v-if="pendingDiff?.modifications?.case_category" class="field-diff-panel-inline">
               <div class="diff-content">
                 <span class="diff-old">{{ pendingDiff.modifications.case_category.old || '未设置' }}</span>
                 <span class="diff-arrow">→</span>
                 <span class="diff-new">{{ pendingDiff.modifications.case_category.new }}</span>
                 <div class="diff-actions">
-                  <button @click="applyFieldChange('case_category')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
-                  <button @click="cancelFieldChange('case_category')" class="btn-cancel-sm" title="取消">✗</button>
+                  <button type="button" @click="applyFieldChange('case_category')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
+                  <button type="button" @click="cancelFieldChange('case_category')" class="btn-cancel-sm" title="取消">✗</button>
                 </div>
               </div>
             </div>
-            <select v-model="badcase.case_category" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.case_category }">
+            <select
+              v-model="badcase.case_category"
+              class="form-select"
+              :class="{ 'field-with-diff': pendingDiff?.modifications?.case_category }"
+            >
               <option value="">请选择问题分类</option>
               <option value="功能缺陷">功能缺陷</option>
               <option value="性能问题">性能问题</option>
@@ -556,19 +554,22 @@
           </div>
           <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
             <label class="form-label required">优先级:</label>
-            <!-- diff 显示区域 -->
             <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel-inline">
               <div class="diff-content">
                 <span class="diff-old">{{ formatBadcasePriorityLabel(pendingDiff.modifications.priority.old) }}</span>
                 <span class="diff-arrow">→</span>
                 <span class="diff-new">{{ formatBadcasePriorityLabel(pendingDiff.modifications.priority.new) }}</span>
                 <div class="diff-actions">
-                  <button @click="applyFieldChange('priority')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
-                  <button @click="cancelFieldChange('priority')" class="btn-cancel-sm" title="取消">✗</button>
+                  <button type="button" @click="applyFieldChange('priority')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
+                  <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel-sm" title="取消">✗</button>
                 </div>
               </div>
             </div>
-            <select v-model="badcase.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
+            <select
+              v-model="badcase.priority"
+              class="form-select"
+              :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }"
+            >
               <option value="p1">P1 - 紧急</option>
               <option value="p2">P2 - 高</option>
               <option value="p3">P3 - 中</option>
@@ -727,12 +728,13 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick, watch, inject } from 'vue'
+import { ref, reactive, onMounted, onActivated, computed, nextTick, watch, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser } from '../api.js'
-import { snowflakeIdStr } from '../utils/snowflakeId.js'
-import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
+import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getPlanDetail } from '../api.js'
+import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
+import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/richTextContent.js'
+import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
@@ -825,15 +827,10 @@ export default {
     
     // 已展开的计划ID列表
     const expandedPlans = ref([])
+    const selectedPlanDisplayName = ref('')
     
     // 可用计划列表 - 将从当前项目动态获取
-    const availablePlans = ref([
-      // 默认显示"未计划"选项，确保下拉框至少有一个选项
-      { value: 'unplanned', label: '未计划', icon: '📋' },
-      // 临时添加一些测试数据，确保下拉框能正常显示
-      { value: 'test1', label: '测试计划1', icon: '📁' },
-      { value: 'test2', label: '测试计划2', icon: '📁' }
-    ])
+    const availablePlans = ref([])
     
     // 过滤后的计划列表（用于搜索）
     const filteredPlans = computed(() => {
@@ -841,9 +838,9 @@ export default {
       console.log('filteredPlans计算属性被调用，searchText:', searchText)
       console.log('availablePlans.value:', availablePlans.value)
       
+      const list = availablePlans.value.filter((p) => p?.value !== 'unplanned')
       if (!searchText) {
-        console.log('没有搜索文本，返回所有计划:', availablePlans.value)
-        return availablePlans.value
+        return list
       }
       
       // 递归搜索计划
@@ -866,7 +863,7 @@ export default {
         return filtered
       }
       
-      const result = searchPlansRecursively(availablePlans.value)
+      const result = searchPlansRecursively(list)
       console.log('搜索结果:', result)
       return result
     })
@@ -899,15 +896,98 @@ export default {
       attachments: []
     })
 
-    /** 编辑加载后：空或非法优先级与下拉对齐，默认 p3（与后端一致） */
+    /** 编辑态：面包屑与副标题用 BadCase 标题，避免长期显示泛化的「编辑BadCase」 */
+    const editContextCrumb = computed(() => {
+      if (!isEdit.value) return '编辑BadCase'
+      const raw = String(badcase.title || '').trim()
+      if (!raw) return '编辑BadCase'
+      return raw.length > 22 ? `${raw.slice(0, 21)}…` : raw
+    })
+    const pageHeadline = computed(() => {
+      if (!isEdit.value) return '新建BadCase'
+      const raw = String(badcase.title || '').trim()
+      if (!raw) return '编辑BadCase'
+      return raw.length > 40 ? `${raw.slice(0, 39)}…` : raw
+    })
+
+    /** 编辑加载 / 预填 / 采纳后：统一为 p1–p4，避免 P1、文案与 option value 不一致导致下拉空白 */
     const normalizeBadcasePriorityForForm = () => {
       const raw = String(badcase.priority ?? '').trim()
+      if (!raw) {
+        badcase.priority = 'p3'
+        return
+      }
       const low = raw.toLowerCase()
       if (['p1', 'p2', 'p3', 'p4'].includes(low)) {
         badcase.priority = low
         return
       }
-      if (!raw) badcase.priority = 'p3'
+      const m = raw.match(/p\s*([1-4])/i)
+      if (m) {
+        badcase.priority = `p${m[1]}`
+        return
+      }
+      if (low.includes('紧急') || low.includes('urgent')) {
+        badcase.priority = 'p1'
+        return
+      }
+      if (low.includes('高')) {
+        badcase.priority = 'p2'
+        return
+      }
+      if (low.includes('中')) {
+        badcase.priority = 'p3'
+        return
+      }
+      if (low.includes('低')) {
+        badcase.priority = 'p4'
+        return
+      }
+      badcase.priority = 'p3'
+    }
+
+    const BADCASE_CASE_CATEGORY_OPTIONS = Object.freeze([
+      '功能缺陷',
+      '性能问题',
+      '界面问题',
+      '兼容性问题',
+      '安全问题',
+      '其他'
+    ])
+
+    /** 与问题分类下拉 option 对齐，避免沙箱/接口返回值与 option 不一致导致空白 */
+    const normalizeBadcaseCaseCategoryForForm = () => {
+      const raw = String(badcase.case_category ?? '').trim()
+      if (!raw) {
+        badcase.case_category = ''
+        return
+      }
+      if (BADCASE_CASE_CATEGORY_OPTIONS.includes(raw)) return
+      const collapsed = raw.replace(/\s+/g, '').replace(/\u3000/g, '')
+      for (const o of BADCASE_CASE_CATEGORY_OPTIONS) {
+        if (collapsed === o.replace(/\s+/g, '')) {
+          badcase.case_category = o
+          return
+        }
+      }
+      for (const o of BADCASE_CASE_CATEGORY_OPTIONS) {
+        if (raw.length >= 2 && (o.startsWith(raw) || (o.length >= 2 && raw.startsWith(o.slice(0, 2))))) {
+          badcase.case_category = o
+          return
+        }
+      }
+      const lower = raw.toLowerCase()
+      const en = {
+        functional: '功能缺陷',
+        function: '功能缺陷',
+        performance: '性能问题',
+        compatibility: '兼容性问题',
+        security: '安全问题',
+        other: '其他'
+      }
+      if (en[lower]) {
+        badcase.case_category = en[lower]
+      }
     }
 
     // 获取状态文本
@@ -930,6 +1010,96 @@ export default {
       }
       return map[s] || String(v).trim()
     }
+
+    const aliasPendingModKey = (mods, fromKey, toKey) => {
+      if (mods[fromKey] && !mods[toKey]) {
+        mods[toKey] = mods[fromKey]
+        delete mods[fromKey]
+      }
+    }
+
+    const normalizePendingDiffModifications = (pd) => {
+      if (!pd?.modifications || typeof pd.modifications !== 'object') return pd
+      const mods = { ...pd.modifications }
+      aliasPendingModKey(mods, 'correct_answer_final', 'correct_answer')
+      aliasPendingModKey(mods, 'correct_answer_text', 'answer')
+      aliasPendingModKey(mods, 'severity', 'priority')
+      aliasPendingModKey(mods, 'classification', 'case_category')
+      aliasPendingModKey(mods, 'category', 'case_category')
+      aliasPendingModKey(mods, 'similar_questions', 'base_problem')
+      aliasPendingModKey(mods, 'similar_question', 'base_problem')
+      aliasPendingModKey(mods, 'related_questions', 'base_problem')
+      aliasPendingModKey(mods, 'related_problem', 'base_problem')
+      aliasPendingModKey(mods, 'specific_problem', 'base_problem')
+      aliasPendingModKey(mods, 'reproduce_steps', 'reproduction_steps')
+      aliasPendingModKey(mods, 'steps_to_reproduce', 'reproduction_steps')
+      aliasPendingModKey(mods, 'reproduction_step', 'reproduction_steps')
+      aliasPendingModKey(mods, 'badcase_reproduction_steps', 'reproduction_steps')
+      return { ...pd, modifications: mods }
+    }
+
+    const applyPendingModificationsToForm = () => {
+      if (!pendingDiff.value?.modifications) return
+      for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+        if (
+          badcase.hasOwnProperty(field) &&
+          data &&
+          typeof data === 'object' &&
+          'new' in data &&
+          data.new !== undefined &&
+          String(data.new).trim() !== ''
+        ) {
+          badcase[field] = data.new
+        }
+      }
+      normalizeBadcasePriorityForForm()
+      normalizeBadcaseCaseCategoryForForm()
+    }
+
+    /** 沙箱跳入已打开的嵌入 Tab：keep-alive 复用时重新灌入 session 中的 pending diff */
+    const reloadPendingDiffFromSession = () => {
+      if (!props.embedded) return
+      const showDiffMode = props.show_diff
+      if (!showDiffMode) {
+        pendingDiff.value = null
+        return
+      }
+      const raw = sessionStorage.getItem('pendingModifyDiff')
+      if (!raw) {
+        pendingDiff.value = null
+        return
+      }
+      try {
+        let pd = JSON.parse(raw)
+        const tid = pd?.targetId != null ? String(pd.targetId).trim() : ''
+        const cur =
+          props.id != null
+            ? String(props.id).trim()
+            : badcaseId.value
+              ? String(badcaseId.value).trim()
+              : ''
+        const tgt = String(pd?.target || '').toLowerCase().replace(/-/g, '_')
+        const isBc = tgt === 'badcase' || tgt === 'bad_case' || tgt === ''
+        if (!isBc || (cur && tid && tid !== cur)) return
+        pd = normalizePendingDiffModifications(pd)
+        pendingDiff.value = pd
+        applyPendingModificationsToForm()
+      } catch (e) {
+        console.error('[DIFF] reloadPendingDiffFromSession 失败:', e)
+      }
+    }
+
+    watch(
+      () => [props.show_diff, props.id],
+      () => {
+        reloadPendingDiffFromSession()
+      },
+      { flush: 'post' }
+    )
+
+    onActivated(() => {
+      reloadPendingDiffFromSession()
+    })
 
     // 获取项目成员列表
     const fetchProjectMembers = async (projectId) => {
@@ -969,14 +1139,9 @@ export default {
         if (isEdit.value && oldProjectId && oldProjectId.toString() === projectId.toString()) {
           console.log('编辑模式下项目ID未真正改变，保持现有数据')
         } else {
-          // 清空计划选择
           badcase.plan = ''
-          // 清空负责人选择
           badcase.assignee = []
-          // 重置计划列表
-          availablePlans.value = [
-            { value: 'unplanned', label: '未计划', icon: '📋' }
-          ]
+          availablePlans.value = []
           // 清空项目成员
           projectMembers.value = []
         }
@@ -1031,9 +1196,7 @@ export default {
     
     // 使用后端 plans 树直接生成下拉选项（避免额外请求 /plans）
     const setAvailablePlansFromTree = async (plansTree) => {
-      const formattedPlans = [
-        { value: 'unplanned', label: '未计划', icon: '📋' }
-      ]
+      const formattedPlans = []
 
       const processPlans = (planList, level = 0) => {
         const processedPlans = []
@@ -1043,8 +1206,9 @@ export default {
             const children = plan.children && plan.children.length > 0 ? processPlans(plan.children, level + 1) : []
 
             if (children.length > 0 || plan.status === 'active') {
+              const planIdStr = snowflakeIdStr(plan.id) || String(plan.id)
               const planOption = {
-                value: plan.id.toString(),
+                value: planIdStr,
                 label: plan.name,
                 level,
                 is_pinned: plan.is_pinned || false,
@@ -1077,31 +1241,84 @@ export default {
     }
     
     // 获取选中计划的显示文本
-    const getSelectedPlanDisplayText = () => {
-      console.log('getSelectedPlanDisplayText: badcase.plan =', badcase.plan)
-      console.log('getSelectedPlanDisplayText: availablePlans =', availablePlans.value)
-      
-      if (!badcase.plan || badcase.plan === 'unplanned') {
-        return '未选择计划'
+    const planIdsMatch = (a, b) => {
+      const sa = snowflakeIdStr(a) || String(a ?? '')
+      const sb = snowflakeIdStr(b) || String(b ?? '')
+      return sa !== '' && sb !== '' && sa === sb
+    }
+
+    const findPlanLabelInTree = (plans, planId) => {
+      for (const plan of plans) {
+        if (planIdsMatch(plan.value, planId)) return plan.label
+        if (plan.children?.length) {
+          const found = findPlanLabelInTree(plan.children, planId)
+          if (found) return found
+        }
       }
-      
-      // 查找选中的计划
-      const findPlan = (plans, planId) => {
-        for (const plan of plans) {
-          if (plan.value === planId) {
-            return plan.label
+      return null
+    }
+
+    const planExistsInTree = (plans, planId) => {
+      for (const plan of plans) {
+        if (planIdsMatch(plan.value, planId)) return true
+        if (plan.children?.length && planExistsInTree(plan.children, planId)) return true
+      }
+      return false
+    }
+
+    const ensurePlanOptionVisible = async (planKey) => {
+      const key = normalizePlanId(planKey)
+      if (!key) {
+        selectedPlanDisplayName.value = ''
+        return
+      }
+      const label = findPlanLabelInTree(availablePlans.value, key)
+      if (label) {
+        selectedPlanDisplayName.value = label
+        return
+      }
+      if (planExistsInTree(availablePlans.value, key)) return
+      try {
+        const resp = await getPlanDetail(key)
+        if (resp.data?.success && resp.data.plan) {
+          const pl = resp.data.plan
+          const idStr = snowflakeIdStr(pl.id) || String(pl.id)
+          selectedPlanDisplayName.value = pl.name || ''
+          const opt = {
+            value: idStr,
+            label: pl.name,
+            level: 0,
+            is_pinned: pl.is_pinned || false,
+            icon: pl.icon || '📁',
+            badcase_count: pl.badcase_count || 0
           }
-          if (plan.children && plan.children.length > 0) {
-            const found = findPlan(plan.children, planId)
-            if (found) return found
+          if (!planExistsInTree(availablePlans.value, idStr)) {
+            availablePlans.value = [
+              ...availablePlans.value.filter((p) => !planIdsMatch(p.value, idStr)),
+              opt
+            ]
           }
         }
-        return null
+      } catch (e) {
+        console.warn('补全计划名称失败:', e)
       }
-      
-      const planName = findPlan(availablePlans.value, badcase.plan)
-      console.log('getSelectedPlanDisplayText: 找到的计划名称 =', planName)
-      return planName || '未选择计划'
+    }
+
+    const getSelectedPlanDisplayText = computed(() => {
+      if (isEmptyPlanKey(badcase.plan)) {
+        return '请选择计划'
+      }
+      return (
+        findPlanLabelInTree(availablePlans.value, badcase.plan) ||
+        selectedPlanDisplayName.value ||
+        '…'
+      )
+    })
+
+    const applyInitialPlanForCreate = (query, planIdProp) => {
+      const raw = query.plan_id ?? planIdProp
+      const id = normalizePlanId(raw)
+      badcase.plan = id || ''
     }
     
     // 刷新项目计划
@@ -1145,17 +1362,11 @@ export default {
           await setAvailablePlansFromTree(response.data.plans || [])
         } else {
           console.error('API返回失败:', response.data)
-          // 如果API失败，至少显示"未计划"选项
-          availablePlans.value = [
-            { value: 'unplanned', label: '未计划', icon: '📋' }
-          ]
+          availablePlans.value = []
         }
       } catch (error) {
         console.error('获取项目计划失败:', error)
-        // 如果获取失败，至少显示"未计划"选项
-        availablePlans.value = [
-          { value: 'unplanned', label: '未计划', icon: '📋' }
-        ]
+        availablePlans.value = []
       }
     }
     
@@ -1227,6 +1438,7 @@ export default {
             
             Object.assign(badcase, response.data.badcase)
             normalizeBadcasePriorityForForm()
+            normalizeBadcaseCaseCategoryForForm()
             console.log('BadCase信息加载成功:', badcase)
             console.log('加载后的复现步骤:', badcase.reproduction_steps)
             console.log('原始数据中的项目ID:', response.data.badcase.project_id, '类型:', typeof response.data.badcase.project_id)
@@ -1238,14 +1450,7 @@ export default {
               console.log('编辑模式：项目ID类型转换后:', badcase.project_id, '类型:', typeof badcase.project_id)
             }
             
-            if (badcase.plan) {
-              badcase.plan = badcase.plan.toString()
-              console.log('编辑模式：计划ID类型转换后:', badcase.plan, '类型:', typeof badcase.plan)
-            }
-            // 列表/统计以 plan_id 为准；详情里若仅有 plan_id，下拉框需用同一字符串 id
-            if (badcase.plan_id != null && badcase.plan_id !== '') {
-              badcase.plan = String(badcase.plan_id)
-            }
+            badcase.plan = normalizePlanId(badcase.plan_id ?? badcase.plan) || ''
             
             // 确保编辑模式下正确设置关联项目状态
             if (badcase.project_id) {
@@ -1333,9 +1538,9 @@ export default {
           goBack()
         } finally {
           loading.value = false
-          // 编辑模式下通知父组件更新Tab标题
-          if (isEdit.value && badcase.title) {
-            emit('titleLoaded', badcase.title)
+          if (isEdit.value) {
+            const t0 = String(badcase.title || '').trim()
+            emit('titleLoaded', t0 || `BadCase ${badcaseId.value || ''}`)
           }
         }
         } else if (pendingDiff.value?.targetId) {
@@ -1351,6 +1556,7 @@ export default {
               if (response.data.success && response.data.badcase) {
                 Object.assign(badcase, response.data.badcase)
                 normalizeBadcasePriorityForForm()
+                normalizeBadcaseCaseCategoryForForm()
                 console.log('兜底编辑模式：BadCase信息加载成功:', badcase)
               } else {
                 alert('获取BadCase信息失败')
@@ -1362,9 +1568,9 @@ export default {
               goBack()
             } finally {
               loading.value = false
-              // 编辑模式下通知父组件更新Tab标题
-              if (isEdit.value && badcase.title) {
-                emit('titleLoaded', badcase.title)
+              if (isEdit.value) {
+                const t0 = String(badcase.title || '').trim()
+                emit('titleLoaded', t0 || `BadCase ${badcaseId.value || ''}`)
               }
             }
           }
@@ -1378,11 +1584,6 @@ export default {
           badcase.project_id = String(pidRaw)
           console.log('设置badcase.project_id:', badcase.project_id)
           console.log('设置后badcase.project_id类型:', typeof badcase.project_id)
-
-          // 新建模式可预设计划：优先 route.query，其次 props.plan_id（嵌入 Tab 新建）
-          if (query.plan_id || props.plan_id) {
-            badcase.plan = String(query.plan_id || props.plan_id)
-          }
 
           // 获取项目信息
           const project = availableProjects.value.find(p => p.id == badcase.project_id)
@@ -1449,8 +1650,7 @@ export default {
         return
       }
       
-      // 检查复现步骤是否为空（按纯文本判断）
-      if (!reproductionStepsPlain.value) {
+      if (!richTextHtmlHasContent(badcase.reproduction_steps)) {
         alert('请输入复现步骤')
         return
       }
@@ -1460,7 +1660,7 @@ export default {
         const rawPlanKey =
           badcase.plan_id != null && badcase.plan_id !== '' ? badcase.plan_id : badcase.plan
         let plan_id = null
-        if (rawPlanKey != null && rawPlanKey !== '' && String(rawPlanKey) !== 'unplanned') {
+        if (!isEmptyPlanKey(rawPlanKey)) {
           const ps = snowflakeIdStr(rawPlanKey)
           if (ps) plan_id = ps
         }
@@ -1584,14 +1784,6 @@ export default {
 
     const badcaseDraftPreset = inject('badcaseDraftPreset', null)
 
-    const htmlToPlain = (html) => {
-      if (!html) return ''
-      const d = document.createElement('div')
-      d.innerHTML = html
-      return (d.textContent || d.innerText || '').trim()
-    }
-
-    const reproductionStepsPlain = computed(() => htmlToPlain(badcase.reproduction_steps))
     const _escHtml = (s) =>
       String(s)
         .replace(/&/g, '&amp;')
@@ -1611,7 +1803,7 @@ export default {
       }
     )
     
-    const stepsLength = computed(() => reproductionStepsPlain.value.length)
+    const stepsLength = computed(() => richTextHtmlDisplayLength(badcase.reproduction_steps))
     
     // 计算评论文本（去除HTML标签）
     const commentText = computed(() => {
@@ -1711,9 +1903,12 @@ export default {
 
     // 选择计划
     const selectPlan = (planValue) => {
-      badcase.plan = planValue
+      badcase.plan = normalizePlanId(planValue) || String(planValue)
+      selectedPlanDisplayName.value = findPlanLabelInTree(availablePlans.value, badcase.plan) || ''
       showPlanDropdown.value = false
     }
+
+    const isPlanSelected = (planValue) => planIdsMatch(badcase.plan, planValue)
     
     // 确认字段修改
     const confirmFieldChange = (field) => {
@@ -1754,7 +1949,13 @@ export default {
         if (badcase.hasOwnProperty(field)) {
           badcase[field] = oldValue || ''
         }
-        
+        if (field === 'priority') {
+          normalizeBadcasePriorityForForm()
+        }
+        if (field === 'case_category') {
+          normalizeBadcaseCaseCategoryForForm()
+        }
+
         // 清除该字段的 diff
         delete pendingDiff.value.modifications[field]
         
@@ -1806,6 +2007,16 @@ export default {
           return
         }
 
+        if (badcase.hasOwnProperty(field)) {
+          badcase[field] = newValue
+        }
+        if (field === 'priority') {
+          normalizeBadcasePriorityForForm()
+        }
+        if (field === 'case_category') {
+          normalizeBadcaseCaseCategoryForForm()
+        }
+
         confirmFieldChange(field)
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
@@ -1831,7 +2042,7 @@ export default {
       if (badcase.project_id) {
         const targetUrl = `/project-detail/${badcase.project_id}`
         // 如果有计划ID，添加到URL参数中，让ProjectDetail自动展开
-        if (badcase.plan && badcase.plan !== 'unplanned') {
+        if (!isEmptyPlanKey(badcase.plan)) {
           router.push(`${targetUrl}?expand_plan=${badcase.plan}`)
         } else {
           router.push(targetUrl)
@@ -1840,12 +2051,6 @@ export default {
         // 如果没有项目ID，使用浏览器后退
         router.go(-1)
       }
-    }
-
-    // 顶部栏：跳转到 Dashboard
-    const goToDashboard = () => {
-      showUserDropdown.value = false
-      router.push('/dashboard')
     }
 
     // 顶部栏：回到项目详情（与面包屑交互一致）
@@ -1926,18 +2131,8 @@ export default {
               console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
               console.log('[DIFF] pendingDiff.modifications:', pendingDiff.value?.modifications)
               console.log('[DIFF] modifications keys:', pendingDiff.value?.modifications ? Object.keys(pendingDiff.value.modifications) : [])
-              // 兼容旧字段名/旧版本 diff：统一到 answer / correct_answer
-              if (pendingDiff.value && pendingDiff.value.modifications && typeof pendingDiff.value.modifications === 'object') {
-                const mods = { ...pendingDiff.value.modifications }
-                if (mods.correct_answer_final && !mods.correct_answer) {
-                  mods.correct_answer = mods.correct_answer_final
-                  delete mods.correct_answer_final
-                }
-                if (mods.correct_answer_text && !mods.answer) {
-                  mods.answer = mods.correct_answer_text
-                  delete mods.correct_answer_text
-                }
-                pendingDiff.value.modifications = mods
+              if (pendingDiff.value?.modifications) {
+                pendingDiff.value = normalizePendingDiffModifications(pendingDiff.value)
               }
             } catch (e) {
               console.error('[DIFF] 预读取 diff 失败:', e)
@@ -1950,10 +2145,8 @@ export default {
         }
 
         // embedded 模式下尽量少请求（ProjectDetail 已有大量上下文），提升进入编辑页速度
-        if (!props.embedded) {
-          console.log('开始获取当前用户信息...')
+        if (!user.value) {
           await fetchCurrentUser()
-          console.log('当前用户信息获取完成')
         }
         
         // 然后初始化BadCase
@@ -1980,7 +2173,14 @@ export default {
             console.error('获取编辑页上下文失败:', e)
           }
         }
-        
+        if (!isEdit.value) {
+          applyInitialPlanForCreate(route.query, props.plan_id)
+          await ensurePlanOptionVisible(badcase.plan)
+          applyDefaultAssigneeOnCreate(badcase, user.value, { isEdit: false })
+        } else {
+          await ensurePlanOptionVisible(badcase.plan)
+        }
+
         // 如果是 show_diff 场景：过滤掉已采纳的字段（当前 DB 值已等于 diff 的 new 值）
         const queryForPrefill = route.query
         const showDiffModeForPrefill = props.show_diff || queryForPrefill.show_diff === 'true'
@@ -2002,8 +2202,9 @@ export default {
           for (const [field, data] of Object.entries(mods)) {
             if (String(field).startsWith('_')) continue
             const newVal = data?.new != null ? String(data.new).trim() : ''
+            const oldVal = data?.old != null ? String(data.old).trim() : ''
             const curVal = badcase[field] != null ? String(badcase[field]).trim() : ''
-            if (newVal && curVal === newVal) {
+            if (newVal && curVal === newVal && oldVal === newVal) {
               delete mods[field]
             }
           }
@@ -2018,7 +2219,7 @@ export default {
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (String(field).startsWith('_')) continue
             if (!badcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
-            if (field !== 'status' && field !== 'title') continue
+            if (field !== 'status' && field !== 'title' && field !== 'case_category') continue
             const bv = badcase[field]
             const bs = bv != null ? String(bv).trim() : ''
             if (!bs) continue
@@ -2044,6 +2245,12 @@ export default {
               badcase[field] = data.new
             }
           }
+        }
+        normalizeBadcasePriorityForForm()
+        normalizeBadcaseCaseCategoryForForm()
+        if (isEdit.value && props.embedded) {
+          const t0 = String(badcase.title || '').trim()
+          if (t0) emit('titleLoaded', t0)
         }
 
         await nextTick()
@@ -2077,6 +2284,8 @@ export default {
       loading,
       saveLoading,
       isEdit,
+      editContextCrumb,
+      pageHeadline,
       badcase,
       projectInfo,
       availableProjects,
@@ -2092,7 +2301,6 @@ export default {
       leftSidebarHidden,
       showTerminal,
       showAIAssistant,
-      goToDashboard,
       goBackToProjectDetail,
       toggleUserDropdown,
       showNotifications,
@@ -2119,6 +2327,7 @@ export default {
       toggleAssignee,
       togglePlanDropdown,
       selectPlan,
+      isPlanSelected,
       searchPlans,
       clearPlanSearch,
       getSelectedPlanDisplayText,
@@ -3246,7 +3455,7 @@ export default {
   margin-bottom: 32px;
   border: 1px solid #e9ecef;
   border-radius: 8px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .editor-toolbar {
@@ -3475,6 +3684,39 @@ export default {
   align-items: center;
   margin-bottom: 16px;
   gap: 12px;
+}
+
+.form-row--stack-field {
+  align-items: flex-start;
+}
+
+.form-row-field-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.form-row-field-col .form-select {
+  max-width: 100%;
+}
+
+.field-diff-panel--stacked {
+  width: 100%;
+  max-width: 520px;
+}
+
+.diff-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.diff-content--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
 }
 
 .form-label {

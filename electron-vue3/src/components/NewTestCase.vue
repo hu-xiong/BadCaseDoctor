@@ -37,7 +37,7 @@
           >
             <div class="pending-diff-item-head">
               <div class="pending-diff-field">
-                <span class="pending-diff-field-label">{{ field }}</span>
+                <span class="pending-diff-field-label">{{ testcaseFieldLabel(field) }}</span>
               </div>
               <div class="pending-diff-actions">
                 <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
@@ -181,13 +181,13 @@
               <div class="plan-selected-display">
                 <span class="refresh-icon" @click.stop="refreshProjectPlans">🔄</span>
                 <span class="plan-selected-text">
-                  所属计划 {{ getSelectedPlanDisplayText() }}
+                  所属计划 {{ getSelectedPlanDisplayText }}
                 </span>
                 <span class="arrow-icon" :class="{ 'rotated': showPlanDropdown }">▼</span>
               </div>
               <div v-if="showPlanDropdown" class="plan-dropdown-menu">
                 <div 
-                  v-for="plan in testcasePlans" 
+                  v-for="plan in selectableTestcasePlans" 
                   :key="plan.value"
                   class="plan-option"
                   :class="{ 'selected': String(testcase.plan) === String(plan.value) }"
@@ -233,10 +233,9 @@
           <!-- 基本信息 Tab -->
           <div v-if="activeTab === 'basic'" class="tab-pane">
             <!-- 前置条件 - 富文本编辑器 -->
-            <div class="form-group" :class="{ 'has-diff': pendingDiff?.modifications?.preconditions }">
-              <label class="field-label">前置条件</label>
-              <!-- diff 显示区域 -->
-              <div v-if="pendingDiff?.modifications?.preconditions" class="field-diff-panel">
+            <div class="form-group" :class="{ 'has-diff': hasDetailFieldDiff('preconditions') }">
+              <label class="field-label">{{ testcaseFieldLabel('preconditions') }}</label>
+              <div v-if="hasDetailFieldDiff('preconditions')" class="field-diff-panel">
                 <div class="diff-header">
                   <span class="diff-label">修改预览:</span>
                   <div class="diff-actions">
@@ -247,17 +246,18 @@
                 <div class="diff-content">
                   <div class="diff-old">
                     <span class="diff-tag old">原值</span>
-                    <span class="diff-value">{{ pendingDiff.modifications.preconditions.old || '未设置' }}</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('preconditions', detailFieldDiff('preconditions')?.old) }}</span>
                   </div>
                   <div class="diff-arrow">→</div>
                   <div class="diff-new">
                     <span class="diff-tag new">新值</span>
-                    <span class="diff-value">{{ pendingDiff.modifications.preconditions.new }}</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('preconditions', detailFieldDiff('preconditions')?.new) }}</span>
                   </div>
                 </div>
               </div>
               <div class="editor-section">
                 <RichTextHtmlEditor
+                  ref="preconditionsEditorRef"
                   v-model="testcase.preconditions"
                   class="editor-textarea"
                   placeholder="请输入前置条件..."
@@ -266,8 +266,27 @@
             </div>
 
             <!-- 用例步骤 -->
-            <div class="form-group">
-              <label class="field-label">用例步骤</label>
+            <div class="form-group" :class="{ 'has-diff': hasDetailFieldDiff('steps') }" id="diff-field-steps">
+              <label class="field-label">{{ testcaseFieldLabel('steps') }}</label>
+              <div v-if="hasDetailFieldDiff('steps')" class="field-diff-panel">
+                <div class="diff-header">
+                  <span class="diff-label">{{ testcaseFieldLabel('steps') }} · 修改预览</span>
+                  <div class="diff-actions">
+                    <button type="button" @click="applyFieldChange('steps')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                    <button type="button" @click="cancelFieldChange('steps')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('steps', detailFieldDiff('steps')?.old) }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('steps', detailFieldDiff('steps')?.new) }}</span>
+                  </div>
+                </div>
+              </div>
               <div class="steps-table">
                 <div class="steps-header">
                   <div class="step-col-number">#</div>
@@ -314,9 +333,28 @@
               <h3 class="properties-title">属性</h3>
               <div class="properties-grid">
                 <!-- 用例类型 -->
-                <div class="property-field">
-                  <label class="field-label">用例类型</label>
-                  <select v-model="testcase.case_type" class="field-select">
+                <div class="property-field" :class="{ 'has-diff': hasDetailFieldDiff('case_type') }" id="diff-field-case_type">
+                  <label class="field-label">{{ testcaseFieldLabel('case_type') }}</label>
+                  <div v-if="hasDetailFieldDiff('case_type')" class="field-diff-panel">
+                    <div class="diff-header">
+                      <span class="diff-label">{{ testcaseFieldLabel('case_type') }} · 修改预览</span>
+                      <div class="diff-actions">
+                        <button type="button" @click="applyFieldChange('case_type')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                        <button type="button" @click="cancelFieldChange('case_type')" class="btn-cancel" title="取消">✗</button>
+                      </div>
+                    </div>
+                    <div class="diff-content">
+                      <div class="diff-row">
+                        <span class="diff-tag old">原值</span>
+                        <span class="diff-value">{{ formatDiffFieldValue('case_type', detailFieldDiff('case_type')?.old) }}</span>
+                      </div>
+                      <div class="diff-row">
+                        <span class="diff-tag new">新值</span>
+                        <span class="diff-value">{{ formatDiffFieldValue('case_type', detailFieldDiff('case_type')?.new) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <select v-model="testcase.case_type" class="field-select" :class="{ 'field-with-diff': hasDetailFieldDiff('case_type') }">
                     <option value="功能测试">功能测试</option>
                     <option value="接口测试">接口测试</option>
                     <option value="性能测试">性能测试</option>
@@ -325,11 +363,11 @@
                 </div>
 
                 <!-- 重要程度 -->
-                <div class="property-field" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
-                  <label class="field-label">重要程度</label>
-                  <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel">
+                <div class="property-field" :class="{ 'has-diff': hasDetailFieldDiff('priority') }" id="diff-field-priority">
+                  <label class="field-label">{{ testcaseFieldLabel('priority') }}</label>
+                  <div v-if="hasDetailFieldDiff('priority')" class="field-diff-panel">
                     <div class="diff-header">
-                      <span class="diff-label">重要程度修改预览:</span>
+                      <span class="diff-label">{{ testcaseFieldLabel('priority') }} · 修改预览</span>
                       <div class="diff-actions">
                         <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                         <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
@@ -338,15 +376,15 @@
                     <div class="diff-content">
                       <div class="diff-row">
                         <span class="diff-tag old">原值</span>
-                        <span class="diff-value">{{ formatTestcasePriorityLabel(pendingDiff.modifications.priority?.old) }}</span>
+                        <span class="diff-value">{{ formatDiffFieldValue('priority', detailFieldDiff('priority')?.old) }}</span>
                       </div>
                       <div class="diff-row">
                         <span class="diff-tag new">新值</span>
-                        <span class="diff-value">{{ formatTestcasePriorityLabel(pendingDiff.modifications.priority?.new) }}</span>
+                        <span class="diff-value">{{ formatDiffFieldValue('priority', detailFieldDiff('priority')?.new) }}</span>
                       </div>
                     </div>
                   </div>
-                  <select v-model="testcase.priority" class="field-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
+                  <select v-model="testcase.priority" class="field-select" :class="{ 'field-with-diff': hasDetailFieldDiff('priority') }">
                     <option value="P0">P0</option>
                     <option value="P1">P1</option>
                     <option value="P2">P2</option>
@@ -355,9 +393,28 @@
                 </div>
 
                 <!-- 测试类型 -->
-                <div class="property-field">
-                  <label class="field-label">测试类型</label>
-                  <select v-model="testcase.test_type" class="field-select">
+                <div class="property-field" :class="{ 'has-diff': hasDetailFieldDiff('test_type') }" id="diff-field-test_type">
+                  <label class="field-label">{{ testcaseFieldLabel('test_type') }}</label>
+                  <div v-if="hasDetailFieldDiff('test_type')" class="field-diff-panel">
+                    <div class="diff-header">
+                      <span class="diff-label">{{ testcaseFieldLabel('test_type') }} · 修改预览</span>
+                      <div class="diff-actions">
+                        <button type="button" @click="applyFieldChange('test_type')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                        <button type="button" @click="cancelFieldChange('test_type')" class="btn-cancel" title="取消">✗</button>
+                      </div>
+                    </div>
+                    <div class="diff-content">
+                      <div class="diff-row">
+                        <span class="diff-tag old">原值</span>
+                        <span class="diff-value">{{ formatDiffFieldValue('test_type', detailFieldDiff('test_type')?.old) }}</span>
+                      </div>
+                      <div class="diff-row">
+                        <span class="diff-tag new">新值</span>
+                        <span class="diff-value">{{ formatDiffFieldValue('test_type', detailFieldDiff('test_type')?.new) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <select v-model="testcase.test_type" class="field-select" :class="{ 'field-with-diff': hasDetailFieldDiff('test_type') }">
                     <option value="手动">手动</option>
                     <option value="自动">自动</option>
                     <option value="探索">探索</option>
@@ -367,12 +424,11 @@
             </div>
 
             <!-- 备注 -->
-            <div class="form-group" :class="{ 'has-diff': pendingDiff?.modifications?.remark }">
-              <label class="field-label">备注</label>
-              <!-- diff 显示区域 -->
-              <div v-if="pendingDiff?.modifications?.remark" class="field-diff-panel">
+            <div class="form-group" :class="{ 'has-diff': hasDetailFieldDiff('remark') }" id="diff-field-remark">
+              <label class="field-label">{{ testcaseFieldLabel('remark') }}</label>
+              <div v-if="hasDetailFieldDiff('remark')" class="field-diff-panel">
                 <div class="diff-header">
-                  <span class="diff-label">备注修改预览:</span>
+                  <span class="diff-label">{{ testcaseFieldLabel('remark') }} · 修改预览</span>
                   <div class="diff-actions">
                     <button @click="applyFieldChange('remark')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button @click="cancelFieldChange('remark')" class="btn-cancel" title="取消">✗</button>
@@ -381,11 +437,11 @@
                 <div class="diff-content">
                   <div class="diff-row">
                     <span class="diff-tag old">原值</span>
-                    <span class="diff-value">{{ pendingDiff.modifications.remark?.old || '未设置' }}</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('remark', detailFieldDiff('remark')?.old) }}</span>
                   </div>
                   <div class="diff-row">
                     <span class="diff-tag new">新值</span>
-                    <span class="diff-value">{{ pendingDiff.modifications.remark?.new }}</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('remark', detailFieldDiff('remark')?.new) }}</span>
                   </div>
                 </div>
               </div>
@@ -394,6 +450,36 @@
                 class="form-textarea"
                 placeholder="输入备注信息"
                 rows="4"
+              ></textarea>
+            </div>
+
+            <!-- 基线 -->
+            <div class="form-group" :class="{ 'has-diff': hasDetailFieldDiff('baseline') }" id="diff-field-baseline">
+              <label class="field-label">{{ testcaseFieldLabel('baseline') }}</label>
+              <div v-if="hasDetailFieldDiff('baseline')" class="field-diff-panel">
+                <div class="diff-header">
+                  <span class="diff-label">{{ testcaseFieldLabel('baseline') }} · 修改预览</span>
+                  <div class="diff-actions">
+                    <button type="button" @click="applyFieldChange('baseline')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                    <button type="button" @click="cancelFieldChange('baseline')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('baseline', detailFieldDiff('baseline')?.old) }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('baseline', detailFieldDiff('baseline')?.new) }}</span>
+                  </div>
+                </div>
+              </div>
+              <textarea
+                v-model="testcase.baseline"
+                class="form-textarea"
+                placeholder="输入基线信息"
+                rows="3"
               ></textarea>
             </div>
           </div>
@@ -570,7 +656,7 @@
                 placeholder="点击输入评论…"
                 @click="activateCommentEditor"
               />
-              <div class="comment-count">{{ (commentText || '').length }} / 500</div>
+              <div class="comment-count">{{ commentDisplayLength }} / 500</div>
             </template>
             <template v-else>
               <RichTextHtmlEditor
@@ -582,7 +668,7 @@
               <div class="comment-editor-actions">
                 <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
               </div>
-              <div class="editor-count">{{ (commentText || '').length }} / 500</div>
+              <div class="editor-count">{{ commentDisplayLength }} / 500</div>
             </template>
           </div>
         </div>
@@ -705,11 +791,21 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, computed, nextTick, watch, inject } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, onActivated, computed, nextTick, watch, inject } from 'vue'
+import { useI18n } from 'vue-i18n'
+import {
+  TESTCASE_DETAIL_NO_PREFILL,
+  getTestcaseFieldLabel,
+  formatTestcaseModifyFieldValue,
+  normalizeTestcaseModifyFieldKey,
+  getTestcaseModifyModKeys
+} from '../utils/testcaseModifyFields.js'
 import { useRoute, useRouter } from 'vue-router'
 import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectEditContext, getProjectDetail, getProjectPlans, getPlanDetail, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
-import { snowflakeIdStr } from '../utils/snowflakeId.js'
-import { personPrimaryLabel, personSecondaryLabel } from '../utils/personLabel'
+import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
+import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
+import { richTextHtmlDisplayLength } from '../utils/richTextContent.js'
+import { ensureEditorHtmlContent } from '../utils/uploadImageUrl.js'
 import { defineAsyncComponent } from 'vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 
@@ -759,6 +855,48 @@ export default {
   setup(props, { emit }) {
     const route = useRoute()
     const router = useRouter()
+    const { t } = useI18n()
+
+    const testcaseFieldLabel = (field) => getTestcaseFieldLabel(t, field)
+    const formatDiffFieldValue = (field, val) => {
+      const s = formatTestcaseModifyFieldValue(field, val, { maxLen: 8000 })
+      return s || t('chat.notSet')
+    }
+    const detailFieldDiff = (field) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return null
+      for (const k of getTestcaseModifyModKeys(field, field)) {
+        const m = mods[k]
+        if (m && typeof m === 'object' && ('old' in m || 'new' in m)) return m
+      }
+      return null
+    }
+    const hasDetailFieldDiff = (field) => !!detailFieldDiff(field)
+    const clearDetailFieldDiff = (field) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return
+      for (const k of getTestcaseModifyModKeys(field, field)) delete mods[k]
+    }
+    const restoreDetailFieldOld = (field) => {
+      const nk = normalizeTestcaseModifyFieldKey(field)
+      const mod = detailFieldDiff(field)
+      if (!mod || mod.old === undefined) return
+      let val = mod.old
+      if (nk === 'steps') {
+        if (typeof val === 'string') {
+          try {
+            val = JSON.parse(val)
+          } catch (_e) {
+            /* keep string */
+          }
+        }
+        if (Array.isArray(val)) testcase.steps = val
+        return
+      }
+      if (Object.prototype.hasOwnProperty.call(testcase, nk)) {
+        testcase[nk] = val
+      }
+    }
 
     const idStrOrNull = (v) => {
       const raw = Array.isArray(v) ? v[0] : v
@@ -819,6 +957,8 @@ export default {
 
     // 待确认的 diff 数据
     const pendingDiff = ref(null)
+    /** 采纳后递增，迫使富文本编辑器用库内最新 HTML 重挂载 */
+    const preconditionsEditorRef = ref(null)
 
     const testcase = reactive({
       title: '',
@@ -840,7 +980,7 @@ export default {
       execution_result: '',
       associate_project: true,
       project_id: readProjectIdFromRoute(),
-      plan: 'unplanned',
+      plan: '',
       document_type: '',
       attachments: [],
       comment: ''
@@ -875,7 +1015,10 @@ export default {
     })
 
     const currentUser = ref(null)
-    const testcasePlans = ref([{ value: 'unplanned', label: '未计划', icon: '📋' }])
+    const testcasePlans = ref([])
+    const selectableTestcasePlans = computed(() =>
+      testcasePlans.value.filter((p) => p?.value !== 'unplanned')
+    )
     const availableProjects = ref([])
     const projectMembers = ref([])
     const assigneeSearchText = ref('')
@@ -949,38 +1092,78 @@ export default {
       showPlanDropdown.value = !showPlanDropdown.value
     }
 
-    const selectPlan = (planValue) => {
-      if (planValue === 'unplanned') {
-        testcase.plan = 'unplanned'
-        testcase.plan_id = null
-      } else {
-        testcase.plan = String(planValue)
-        testcase.plan_id = idStrOrNull(planValue)
+    const selectedPlanDisplayName = ref('')
+
+    const planIdsMatch = (a, b) => {
+      const sa = snowflakeIdStr(a) || String(a ?? '')
+      const sb = snowflakeIdStr(b) || String(b ?? '')
+      return sa !== '' && sb !== '' && sa === sb
+    }
+
+    const applyPlanFromProps = async (planIdProp) => {
+      if (isEdit) return
+      const pid = normalizePlanId(planIdProp)
+      if (!pid) return
+      if (!planIdsMatch(testcase.plan, pid)) {
+        testcase.plan = pid
+        testcase.plan_id = pid
       }
+      await ensurePlanOptionVisible(pid)
+    }
+
+    const applyInitialPlanForCreate = async () => {
+      if (isEdit) return
+      const pid =
+        normalizePlanId(props.plan_id) ?? normalizePlanId(route.query.plan_id)
+      if (pid) {
+        await applyPlanFromProps(pid)
+      } else if (isEmptyPlanKey(testcase.plan)) {
+        testcase.plan = ''
+        testcase.plan_id = null
+      }
+    }
+
+    const selectPlan = (planValue) => {
+      const id = normalizePlanId(planValue) || snowflakeIdStr(planValue) || String(planValue)
+      testcase.plan = id
+      testcase.plan_id = idStrOrNull(id)
+      selectedPlanDisplayName.value =
+        testcasePlans.value.find((p) => planIdsMatch(p.value, id))?.label || ''
       showPlanDropdown.value = false
     }
 
-    const getSelectedPlanDisplayText = () => {
-      if (!testcase.plan || testcase.plan === 'unplanned') {
-        return '未计划'
+    const getSelectedPlanDisplayText = computed(() => {
+      if (isEmptyPlanKey(testcase.plan)) {
+        return '请选择计划'
       }
-      const plan = testcasePlans.value.find(p => String(p.value) === String(testcase.plan))
-      return plan ? plan.label : testcase.plan
-    }
+      const key = snowflakeIdStr(testcase.plan) || String(testcase.plan)
+      const plan = testcasePlans.value.find(
+        (p) => p.value !== 'unplanned' && (snowflakeIdStr(p.value) || String(p.value)) === key
+      )
+      return plan?.label || selectedPlanDisplayName.value || '…'
+    })
 
     const ensurePlanOptionVisible = async (planKey) => {
-      if (planKey == null || planKey === '' || String(planKey) === 'unplanned') return
-      const key = String(planKey)
-      if (testcasePlans.value.some(p => String(p.value) === key)) return
+      if (isEmptyPlanKey(planKey)) return
+      const key = snowflakeIdStr(planKey) || String(planKey)
+      const existing = testcasePlans.value.find((p) => planIdsMatch(p.value, key))
+      if (existing) {
+        selectedPlanDisplayName.value = existing.label || ''
+        return
+      }
       try {
         const planKeyForApi = idStrOrNull(key) || String(key)
         const resp = await getPlanDetail(planKeyForApi)
         if (resp.data?.success && resp.data.plan) {
           const pl = resp.data.plan
-          testcasePlans.value = [
-            ...testcasePlans.value,
-            { value: String(pl.id), label: pl.name, icon: '🧪' }
-          ]
+          const idStr = snowflakeIdStr(pl.id) || String(pl.id)
+          selectedPlanDisplayName.value = pl.name || ''
+          if (!testcasePlans.value.some((p) => (snowflakeIdStr(p.value) || String(p.value)) === idStr)) {
+            testcasePlans.value = [
+              ...testcasePlans.value.filter((p) => p.value !== 'unplanned'),
+              { value: idStr, label: pl.name, icon: '🧪' }
+            ]
+          }
         }
       } catch (e) {
         console.warn('补全计划名称失败:', e)
@@ -1003,14 +1186,11 @@ export default {
           console.log('fetchProjectPlans: 所有计划:', allPlans)
           const plans = allPlans
           console.log('fetchProjectPlans: 计划列表:', plans)
-          testcasePlans.value = [
-            { value: 'unplanned', label: '未计划', icon: '📋' },
-            ...plans.map(p => ({
-              value: p.id.toString(),
-              label: p.name,
-              icon: '🧪'
-            }))
-          ]
+          testcasePlans.value = plans.map((p) => ({
+            value: snowflakeIdStr(p.id) || String(p.id),
+            label: p.name,
+            icon: '🧪'
+          }))
           console.log('fetchProjectPlans: 最终testcasePlans:', testcasePlans.value)
         }
       } catch (error) {
@@ -1027,14 +1207,11 @@ export default {
         })
       }
       walk(plansTree || [])
-      testcasePlans.value = [
-        { value: 'unplanned', label: '未计划', icon: '📋' },
-        ...result.map(p => ({
-          value: p.id.toString(),
-          label: p.name,
-          icon: '🧪'
-        }))
-      ]
+      testcasePlans.value = result.map((p) => ({
+        value: snowflakeIdStr(p.id) || String(p.id),
+        label: p.name,
+        icon: '🧪'
+      }))
       await nextTick()
     }
 
@@ -1180,8 +1357,8 @@ export default {
       
       console.log('navigateToDefect: 准备导航到 Bug', { planId, bugId, defect })
       
-      // 如果 planId 无效（如 'unplanned'），不传递 navigate_plan 参数
-      if (!planId || planId === 'unplanned' || !idStrOrNull(planId)) {
+      // 无有效 planId 时不传递 navigate_plan 参数
+      if (isEmptyPlanKey(planId) || !idStrOrNull(planId)) {
         console.log('navigateToDefect: 无有效计划ID，跳转到项目详情页')
         router.push(`/project-detail/${testcase.project_id}`)
         return
@@ -1294,13 +1471,15 @@ export default {
       return tempDiv.textContent || tempDiv.innerText || ''
     })
 
+    const commentDisplayLength = computed(() => richTextHtmlDisplayLength(testcase.comment))
+
     const handleProjectChange = () => {
       const sid = idStrOrNull(testcase.project_id)
       if (sid) {
         fetchProjectPlans(sid)
         fetchProjectMembers(sid)
       } else {
-        testcasePlans.value = [{ value: 'unplanned', label: '未计划', icon: '📋' }]
+        testcasePlans.value = []
         projectMembers.value = []
         testcase.assignee = []
       }
@@ -1370,10 +1549,10 @@ export default {
         const planInOptions = (pidStr) =>
           !!pidStr &&
           testcasePlans.value.some(
-            p => p.value !== 'unplanned' && idStrOrNull(p.value) === pidStr
+            (p) => p.value !== 'unplanned' && idStrOrNull(p.value) === pidStr
           )
         if (isEdit) {
-          if (testcase.plan && testcase.plan !== 'unplanned') {
+          if (!isEmptyPlanKey(testcase.plan)) {
             const pid = idStrOrNull(testcase.plan)
             if (pid && planInOptions(pid)) planId = pid
           } else {
@@ -1381,7 +1560,7 @@ export default {
           }
         } else if (routePlanSid) {
           planId = routePlanSid
-        } else if (testcase.plan && testcase.plan !== 'unplanned') {
+        } else if (!isEmptyPlanKey(testcase.plan)) {
           const pid = idStrOrNull(testcase.plan)
           if (pid && planInOptions(pid)) planId = pid
         }
@@ -1467,16 +1646,18 @@ export default {
     // 确认字段修改
     const confirmFieldChange = (field) => {
       console.log('[DIFF] 确认字段修改:', field)
-      if (pendingDiff.value?.modifications?.[field]) {
-        // 已经预填充了新值，直接清除 diff 显示
-        delete pendingDiff.value.modifications[field]
+      if (detailFieldDiff(field)) {
+        clearDetailFieldDiff(field)
         
         // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
-        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+        if (Object.keys(pendingDiff.value?.modifications || {}).filter(k => !k.startsWith('_')).length === 0) {
           sessionStorage.removeItem('pendingModifyDiff')
           // 通知对话区修改已确认
           const event = new CustomEvent('modify-confirmed', {
-            detail: { targetId: pendingDiff.value.targetId },
+            detail: {
+              targetId: pendingDiff.value.targetId,
+              targetType: 'testcase'
+            },
             bubbles: true
           })
           window.dispatchEvent(event)
@@ -1488,17 +1669,12 @@ export default {
     // 取消字段修改
     const cancelFieldChange = (field) => {
       console.log('[DIFF] 取消字段修改:', field)
-      if (pendingDiff.value?.modifications?.[field]) {
-        // 恢复原值
-        const oldVal = pendingDiff.value.modifications[field].old
-        if (testcase.hasOwnProperty(field) && oldVal !== undefined) {
-          testcase[field] = oldVal
-        }
-        // 清除 diff 显示
-        delete pendingDiff.value.modifications[field]
+      if (detailFieldDiff(field)) {
+        restoreDetailFieldOld(field)
+        clearDetailFieldDiff(field)
         
         // 如果所有字段都已处理，清除 sessionStorage
-        if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
+        if (Object.keys(pendingDiff.value?.modifications || {}).filter(k => !k.startsWith('_')).length === 0) {
           sessionStorage.removeItem('pendingModifyDiff')
           pendingDiff.value = null
         }
@@ -1511,12 +1687,102 @@ export default {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
 
+    const applyDetailFieldToTestcase = (nk, newValue) => {
+      if (newValue === undefined) return
+      if (nk === 'steps') {
+        let val = newValue
+        if (typeof val === 'string') {
+          try {
+            val = JSON.parse(val)
+          } catch (_e) {
+            /* keep */
+          }
+        }
+        if (Array.isArray(val)) {
+          testcase.steps = val
+        }
+        return
+      }
+      if (nk === 'preconditions' || nk === 'remark') {
+        testcase[nk] = ensureEditorHtmlContent(newValue)
+        return
+      }
+      if (Object.prototype.hasOwnProperty.call(testcase, nk)) {
+        testcase[nk] = newValue
+      }
+    }
+
+    const stripPreconditionText = (html) =>
+      String(html || '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .trim()
+
+    /** @param {unknown} raw @param {{ force?: boolean }} [opts] force：采纳后拉详情，始终以接口为准 */
+    const assignPreconditionsFromApi = (raw, opts = {}) => {
+      const force = opts.force === true
+      const apiTrim = raw != null ? String(raw).trim() : ''
+      if (force) {
+        testcase.preconditions = apiTrim ? ensureEditorHtmlContent(raw) : ''
+        return
+      }
+      const localTrim = stripPreconditionText(testcase.preconditions)
+      if (apiTrim) {
+        testcase.preconditions = ensureEditorHtmlContent(raw)
+      } else if (!localTrim) {
+        testcase.preconditions = ''
+      }
+    }
+
+    const resolveEditorTestcaseId = () => {
+      const raw =
+        props.id != null && props.id !== ''
+          ? props.id
+          : route.query.id != null && route.query.id !== ''
+            ? route.query.id
+            : null
+      return raw != null ? (idStrOrNull(raw) || String(raw).trim()) : ''
+    }
+
+    const waitModifyPersistSettled = async (result) => {
+      const ms = result && result.async === true ? 450 : 150
+      await new Promise((resolve) => setTimeout(resolve, ms))
+    }
+
+    const applyTestcaseDetailPayload = (data) => {
+      if (!data) return
+      assignPreconditionsFromApi(data.preconditions, { force: true })
+      testcase.steps = Array.isArray(data.steps) ? data.steps : [{ step: '', expected: '' }]
+      testcase.remark = ensureEditorHtmlContent(data.remark || '')
+      testcase.baseline = data.baseline || ''
+      testcase.case_type = data.case_type || testcase.case_type
+      testcase.test_type = data.test_type || testcase.test_type
+      testcase.priority = data.priority || testcase.priority
+    }
+
+    const reloadTestcaseDetailFromServer = async () => {
+      const id = resolveEditorTestcaseId() || testcaseId
+      if (!id) return
+      try {
+        const response = await getTestCaseDetail(id)
+        const res = response?.data || response
+        if (!res?.success || !res.testcase) return
+        applyTestcaseDetailPayload(res.testcase)
+        await nextTick()
+        preconditionsEditorRef.value?.syncFromModel?.()
+      } catch (e) {
+        console.warn('[DIFF] 采纳后刷新详情失败:', e)
+      }
+    }
+
     const applyFieldChange = async (field) => {
-      if (!pendingDiff.value?.modifications?.[field]) return
+      const mod = detailFieldDiff(field)
+      if (!mod) return
+      const nk = normalizeTestcaseModifyFieldKey(field)
 
       const targetId = pendingDiff.value?.targetId || testcaseId
       const target = pendingDiff.value?.target || 'testcase'
-      const newValue = pendingDiff.value.modifications[field]?.new
+      const newValue = mod.new
 
       const pid = currentProjectId.value || testcase.project_id
       if (!pid || !targetId) {
@@ -1532,7 +1798,7 @@ export default {
           body: JSON.stringify({
             target,
             target_id: targetId,
-            modifications: { [field]: newValue },
+            modifications: { [nk]: newValue },
             confirm: true,
             message_id: pendingDiff.value?.messageId
           })
@@ -1540,10 +1806,16 @@ export default {
         const result = await resp.json()
         if (!result.success) {
           console.error('[DIFF] 采纳失败:', result.error)
+          alert(result.error || '采纳失败')
           return
         }
 
+        applyDetailFieldToTestcase(nk, newValue)
+        await nextTick()
+        preconditionsEditorRef.value?.syncFromModel?.()
         confirmFieldChange(field)
+        await waitModifyPersistSettled(result)
+        await reloadTestcaseDetailFromServer()
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
       }
@@ -1564,7 +1836,122 @@ export default {
       }
     }
 
+    const reconcilePendingOldFromLoadedTestcase = () => {
+      if (!pendingDiff.value?.modifications) return
+      for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+        if (String(field).startsWith('_')) continue
+        const nk = normalizeTestcaseModifyFieldKey(field)
+        if (!data || typeof data !== 'object' || !('new' in data)) continue
+        if (!Object.prototype.hasOwnProperty.call(testcase, nk) && !Object.prototype.hasOwnProperty.call(testcase, field)) continue
+        const bv = testcase[nk] ?? testcase[field]
+        const bs =
+          bv != null && typeof bv !== 'object'
+            ? String(bv).trim()
+            : Array.isArray(bv)
+              ? JSON.stringify(bv)
+              : ''
+        const oldS = data.old != null ? String(data.old).trim() : ''
+        const newS = data.new != null ? String(data.new).trim() : ''
+        if (!newS || newS === bs) continue
+        if (oldS !== bs && bs !== '') {
+          data.old = bv
+        }
+      }
+    }
+
+    const applyPendingPrefillFromDiff = () => {
+      if (!pendingDiff.value?.modifications) return
+      for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+        if (!testcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
+        if (TESTCASE_DETAIL_NO_PREFILL.has(normalizeTestcaseModifyFieldKey(field))) continue
+        if (data.new !== undefined) {
+          testcase[field] = data.new
+        }
+      }
+    }
+
+    const reloadPendingDiffFromSession = () => {
+      const showDiffMode = props.show_diff || route.query.show_diff === 'true'
+      if (!showDiffMode) {
+        try {
+          sessionStorage.removeItem('pendingModifyDiff')
+        } catch (_e) {
+          /* ignore */
+        }
+        pendingDiff.value = null
+        return
+      }
+      const raw = sessionStorage.getItem('pendingModifyDiff')
+      if (!raw) {
+        pendingDiff.value = null
+        return
+      }
+      try {
+        const pd = JSON.parse(raw)
+        const tid = pd?.targetId != null ? String(pd.targetId).trim() : ''
+        const cur = testcaseId ? String(testcaseId).trim() : ''
+        const tgt = String(pd?.target || '').toLowerCase().replace(/-/g, '_')
+        const isTc = tgt === 'testcase' || tgt === 'test_case' || tgt === ''
+        if (!isTc || (isEdit && cur && tid && tid !== cur)) {
+          pendingDiff.value = null
+          return
+        }
+        pendingDiff.value = pd
+        const mods = pendingDiff.value?.modifications
+        if (mods) {
+          for (const [field, data] of Object.entries(mods)) {
+            if (String(field).startsWith('_')) continue
+            const newVal = data?.new != null ? String(data.new).trim() : ''
+            const curVal = testcase[field] != null ? String(testcase[field]).trim() : ''
+            if (newVal && curVal === newVal) delete mods[field]
+          }
+          if (Object.keys(mods).filter((k) => !String(k).startsWith('_')).length === 0) {
+            sessionStorage.removeItem('pendingModifyDiff')
+            pendingDiff.value = null
+            return
+          }
+        }
+        reconcilePendingOldFromLoadedTestcase()
+        applyPendingPrefillFromDiff()
+      } catch (e) {
+        console.error('[DIFF] reloadPendingDiffFromSession 失败:', e)
+        pendingDiff.value = null
+      }
+    }
+
+    const onDetailModifyAdopted = async (event) => {
+      const tid = event?.detail?.targetId != null ? String(event.detail.targetId).trim() : ''
+      const cur = resolveEditorTestcaseId()
+      if (!tid || !cur || tid !== cur) return
+
+      const fieldUpdates = event?.detail?.fieldUpdates
+      let wantPrecText = ''
+      if (fieldUpdates && typeof fieldUpdates === 'object') {
+        for (const [field, val] of Object.entries(fieldUpdates)) {
+          const nk = normalizeTestcaseModifyFieldKey(field)
+          applyDetailFieldToTestcase(nk, val)
+          if (nk === 'preconditions') {
+            wantPrecText = stripPreconditionText(ensureEditorHtmlContent(val))
+          }
+        }
+        await nextTick()
+        preconditionsEditorRef.value?.syncFromModel?.()
+      }
+
+      const waitMs = event?.detail?.asyncPersist ? 520 : 280
+      await new Promise((resolve) => setTimeout(resolve, waitMs))
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await reloadTestcaseDetailFromServer()
+        if (!wantPrecText) break
+        const got = stripPreconditionText(testcase.preconditions)
+        if (got === wantPrecText) break
+        await new Promise((resolve) => setTimeout(resolve, 320))
+      }
+    }
+
     onMounted(async () => {
+      window.addEventListener('testcase-detail-refresh', onDetailModifyAdopted)
       console.log('=== NewTestCase onMounted 开始 ===')
       console.log('route.query:', route.query)
       console.log('props.project_id:', props.project_id, 'props.plan_id:', props.plan_id)
@@ -1589,8 +1976,7 @@ export default {
           pendingDiff.value = null
         }
 
-        const bgTasks = []
-        bgTasks.push(fetchCurrentUser())
+        await fetchCurrentUser()
 
         const rid = readProjectIdFromRoute()
         if (rid != null) testcase.project_id = rid
@@ -1612,9 +1998,9 @@ export default {
             testcase.case_type = data.case_type || '功能测试'
             testcase.priority = data.priority || 'P3'
             testcase.test_type = data.test_type || '手动'
-            testcase.preconditions = data.preconditions || ''
+            assignPreconditionsFromApi(data.preconditions)
             testcase.steps = Array.isArray(data.steps) ? data.steps : [{ step: '', expected: '' }]
-            testcase.remark = data.remark || ''
+            testcase.remark = ensureEditorHtmlContent(data.remark || '')
             testcase.requirement_id = data.requirement_id
             testcase.baseline = data.baseline || ''
             testcase.estimated_time = data.estimated_time || 0
@@ -1645,80 +2031,16 @@ export default {
 
         await loadProjectWorkspace(testcase.project_id)
 
-        // 新建且带 plan_id：优先 route.query，其次 props.plan_id（嵌入在 ProjectDetail 的 Tab 新建）
         if (!isEdit) {
-          const pid = toPositiveIntOrNull(route.query.plan_id) ?? toPositiveIntOrNull(props.plan_id)
-          if (pid != null) {
-            testcase.plan = String(pid)
-            testcase.plan_id = pid
-            await ensurePlanOptionVisible(String(pid))
-          }
-        }
-
-        if (isEdit && testcase.plan && testcase.plan !== 'unplanned') {
+          await applyInitialPlanForCreate()
+          applyDefaultAssigneeOnCreate(testcase, currentUser.value, { isEdit: false })
+        } else if (!isEmptyPlanKey(testcase.plan)) {
           await ensurePlanOptionVisible(testcase.plan)
         }
 
-        const clearPendingModifyIfNotThisTestcase = () => {
-          if (!showDiffMode || !pendingDiff.value?.modifications) return
-          const pd = pendingDiff.value
-          const tid = pd.targetId != null ? String(pd.targetId).trim() : ''
-          const cur = testcaseId ? String(testcaseId).trim() : ''
-          const tgt = String(pd.target || '').toLowerCase().replace(/-/g, '_')
-          const isTc = tgt === 'testcase' || tgt === 'test_case' || tgt === ''
-          if (!isTc || (isEdit && cur && tid && tid !== cur)) {
-            sessionStorage.removeItem('pendingModifyDiff')
-            pendingDiff.value = null
-          }
-        }
-        clearPendingModifyIfNotThisTestcase()
-
-        // 过滤已采纳的字段（DB 值已等于 diff 的 new 值），避免重复显示
-        if (pendingDiff.value?.modifications) {
-          const mods = pendingDiff.value.modifications
-          for (const [field, data] of Object.entries(mods)) {
-            if (String(field).startsWith('_')) continue
-            const newVal = data?.new != null ? String(data.new).trim() : ''
-            const curVal = testcase[field] != null ? String(testcase[field]).trim() : ''
-            if (newVal && curVal === newVal) delete mods[field]
-          }
-          if (Object.keys(mods).filter(k => !String(k).startsWith('_')).length === 0) {
-            sessionStorage.removeItem('pendingModifyDiff')
-            pendingDiff.value = null
-          }
-        }
-        const reconcilePendingOldFromLoadedTestcase = () => {
-          if (!pendingDiff.value?.modifications) return
-          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-            if (String(field).startsWith('_')) continue
-            if (!testcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
-            if (field !== 'status' && field !== 'title') continue
-            const bv = testcase[field]
-            const bs = bv != null ? String(bv).trim() : ''
-            if (!bs) continue
-            const oldS = data.old != null ? String(data.old).trim() : ''
-            const newS = data.new != null ? String(data.new).trim() : ''
-            if (!newS || newS === bs) continue
-            if (oldS !== bs) {
-              data.old = bv
-            }
-          }
-        }
-        reconcilePendingOldFromLoadedTestcase()
-        if (pendingDiff.value?.modifications) {
-          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-            if (testcase.hasOwnProperty(field) && data && typeof data === 'object' && 'new' in data && data.new !== undefined) {
-              testcase[field] = data.new
-            }
-          }
-        }
+        reloadPendingDiffFromSession()
 
         await nextTick()
-
-        // 后台等待全量请求完成（不阻塞首屏）；忽略失败
-        Promise.allSettled(bgTasks).then(() => {
-          console.log('后台用户/项目/成员/计划加载完成')
-        })
       } catch (error) {
         console.error('加载失败:', error)
       } finally {
@@ -1730,6 +2052,32 @@ export default {
         console.log('=== NewTestCase onMounted 完成 ===')
       }
     })
+
+    watch(
+      () => [props.show_diff, props.id],
+      () => {
+        reloadPendingDiffFromSession()
+      },
+      { flush: 'post' }
+    )
+
+    onUnmounted(() => {
+      window.removeEventListener('testcase-detail-refresh', onDetailModifyAdopted)
+    })
+
+    onActivated(async () => {
+      reloadPendingDiffFromSession()
+      await nextTick()
+      preconditionsEditorRef.value?.syncFromModel?.()
+    })
+
+    watch(
+      () => props.plan_id,
+      (planId) => {
+        void applyPlanFromProps(planId)
+      },
+      { immediate: true }
+    )
 
     watch(
       () => readProjectIdFromRoute(),
@@ -1758,9 +2106,9 @@ export default {
           testcase.case_type = data.case_type || '功能测试'
           testcase.priority = data.priority || 'P3'
           testcase.test_type = data.test_type || '手动'
-          testcase.preconditions = data.preconditions || ''
+          assignPreconditionsFromApi(data.preconditions)
           testcase.steps = Array.isArray(data.steps) ? data.steps : [{ step: '', expected: '' }]
-          testcase.remark = data.remark || ''
+          testcase.remark = ensureEditorHtmlContent(data.remark || '')
           testcase.plan_id = data.plan_id
           testcase.project_id = data.project_id
           testcase.execution_result = data.execution_result || ''
@@ -1802,6 +2150,7 @@ export default {
       testcase,
       currentUser,
       testcasePlans,
+      selectableTestcasePlans,
       availableProjects,
       projectMembers,
       assigneeSearchText,
@@ -1837,6 +2186,7 @@ export default {
       removeDefect,
       fileInput,
       commentText,
+      commentDisplayLength,
       commentEditorActive,
       activateCommentEditor,
       finishCommentEditor,
@@ -1849,9 +2199,15 @@ export default {
       saveTestCase,
       goBack,
       pendingDiff,
+      t,
+      testcaseFieldLabel,
+      formatDiffFieldValue,
+      hasDetailFieldDiff,
+      detailFieldDiff,
       confirmFieldChange,
       cancelFieldChange,
       applyFieldChange,
+      preconditionsEditorRef,
       openDiagnosticTerminal,
       onOpenDiagnosticTerminal,
       isRightSidebarOpen,
@@ -2767,7 +3123,7 @@ export default {
 .editor-section {
   border: 1px solid #e4e7ed;
   border-radius: 4px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .editor-toolbar {
@@ -3645,5 +4001,10 @@ export default {
   font-size: 14px;
   color: #374151;
   word-break: break-all;
+}
+
+.diff-value-multiline {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

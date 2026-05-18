@@ -109,7 +109,13 @@ export const DETAIL_FIELDS = [
   'steps',
   'remark',
   'baseline',
-  'reproduce_steps'
+  'reproduce_steps',
+  /** 列表列不展示或仅详情表单项确认的字段（沙箱点击应可直达详情） */
+  'priority',
+  'severity',
+  'case_category',
+  'case_type',
+  'test_type'
 ]
 
 /** 与后端 modify 沙箱 before 形状一致：模型常传 target=badcase 实为 Bug 行 */
@@ -905,16 +911,16 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         flat.confirmation_required !== 'true'
 
       if (doneDelete) {
-        const delId = parseInt(flat.deleted_id, 10)
+        const delId = snowflakeIdStr(flat.deleted_id) || String(flat.deleted_id ?? '').trim()
         const prevNav = aiMessage.deleteNavigation
-        if (prevNav && typeof prevNav === 'object' && !Number.isNaN(delId)) {
+        if (prevNav && typeof prevNav === 'object' && delId && /^\d+$/.test(delId)) {
           aiMessage.deleteNavigation = {
             ...prevNav,
             confirmation_required: false,
             success: true,
             deleted_id: flat.deleted_id
           }
-        } else if (recRaw && !Number.isNaN(delId)) {
+        } else if (recRaw && delId && /^\d+$/.test(delId)) {
           let pv =
             pvRaw && pvRaw.record && typeof pvRaw.record === 'object'
               ? pvRaw
@@ -936,7 +942,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         } else {
           aiMessage.deleteNavigation = null
         }
-        if (!Number.isNaN(delId)) {
+        if (delId && /^\d+$/.test(delId)) {
           const dt = String(flat.target || '').toLowerCase()
           tick(() => {
             window.dispatchEvent(
@@ -956,10 +962,12 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
               : { target: flat.target || toolData.target || 'bug', record: recRaw }
         const rec = recRaw
         const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
-        const rid = parseInt(rec.id ?? flat.target_id ?? toolData.target_id, 10)
+        const rid =
+          snowflakeIdStr(rec.id ?? flat.target_id ?? toolData.target_id) ||
+          String(rec.id ?? flat.target_id ?? toolData.target_id ?? '').trim()
         let planId = rec.plan_id ?? flat.plan_id ?? toolData.plan_id
         if (planId != null && planId !== '') planId = parseInt(planId, 10)
-        if (!isNaN(rid)) {
+        if (rid && /^\d+$/.test(rid)) {
           aiMessage.deleteNavigation = {
             target: tgt || 'bug',
             target_id: rid,

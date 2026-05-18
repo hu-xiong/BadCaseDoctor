@@ -449,7 +449,7 @@
                     </template>
                     <template v-else-if="git.diff && git.diff.length">
                       <div v-for="(fieldDiff, idx) in git.diff" :key="`${gix}-${idx}`" class="modify-field-preview">
-                        <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                        <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, git, group.target) }}:</span>
                         <span :class="['old-value', { 'empty-value': !(formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) }]">
                           {{ (formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) || t('chat.notSet') }}
                         </span>
@@ -549,7 +549,7 @@
                         :key="`${bix}-${idx}`"
                         class="modify-field-preview"
                       >
-                        <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                        <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, br) }}:</span>
                         <span
                           :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(br, fieldDiff, 'old') }]"
                         >
@@ -584,7 +584,7 @@
                     {{ t('chat.detailFieldsHint') }}
                   </div>
                   <div v-for="(fieldDiff, idx) in getSandboxDiffRows(message)" :key="idx" class="modify-field-preview">
-                    <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                    <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, message.modifyNavigation) }}:</span>
                     <template v-if="message.modifyNavigation.is_create">
                       <span class="new-value create-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
                     </template>
@@ -842,6 +842,15 @@ import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
 import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
 import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import {
+  normalizeTestcaseModifyFieldKey,
+  isTestcaseDetailModifyField,
+  getTestcaseModifyModKeys,
+  getTestcaseFieldLabel,
+  formatTestcaseModifyFieldValue,
+  readTestcaseModifySideValue,
+  TESTCASE_FIELD_LABEL_I18N
+} from '../utils/testcaseModifyFields.js'
+import {
   localGoProxyOk as sharedLocalGoProxyRef,
   pingLocalGoProxy as sharedPingLocalGoProxy
 } from '../composables/useLocalGoProxyStatus'
@@ -1045,7 +1054,11 @@ function isPlaceholderSessionTitle(title) {
       hold: 'list.statusHold',
       reopened: 'list.statusReopen',
       reopen: 'list.statusReopen',
-      not_badcase: 'list.statusNotType'
+      not_badcase: 'list.statusNotType',
+      draft: 'list.badcaseStatus.draft',
+      review: 'list.badcaseStatus.review',
+      active: 'list.badcaseStatus.active',
+      archived: 'list.badcaseStatus.archived'
     }
     const i18nKey = keyMap[s]
     if (i18nKey) {
@@ -1057,12 +1070,43 @@ function isPlaceholderSessionTitle(title) {
     return String(raw).trim()
   }
 
+  /** BadCase 行快照：兼容 snake/camel 与误用的 classification 键 */
+  const readBadcaseCaseCategoryFromRow = (row) => {
+    if (!row || typeof row !== 'object') return ''
+    const v = row.case_category ?? row.caseCategory ?? row.classification
+    return v != null ? String(v).trim() : ''
+  }
+
+  /** 模型/ diff 行字段名归一（与详情、modify 工具一致） */
+  const normalizeSandboxFieldKey = (fk, label = '', tgt = '') => {
+    const t = String(tgt || '')
+      .trim()
+      .toLowerCase()
+    if (t === 'testcase' || t === 'test_case') {
+      return normalizeTestcaseModifyFieldKey(fk, label)
+    }
+    const f = String(fk || '')
+      .trim()
+      .toLowerCase()
+      .replace(/-/g, '_')
+    const lab = String(label || '').trim()
+    if (f === 'precondition' || lab === 'precondition' || lab === '前置条件') return 'preconditions'
+    if (f === 'reproduce_steps' || f === 'steps_to_reproduce') return 'reproduction_steps'
+    if (lab === '复现步骤' || lab.includes('复现步骤')) return 'reproduction_steps'
+    return f || lab
+  }
+
   const readSandboxModifySideRaw = (ctx, fieldDiff, which) => {
-    const fk = String(fieldDiff?.field || '').trim().toLowerCase()
-    const label = String(fieldDiff?.field_label || '')
-    const isPriority = fk === 'priority' || label.includes('优先级')
-    const isStatus = fk === 'status' || /状态/i.test(label)
     const tgt = String(ctx?.target || '').toLowerCase()
+    const fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
+    const label = String(fieldDiff?.field_label || '')
+    const isPriority =
+      fk === 'priority' ||
+      fk === 'severity' ||
+      label.includes('优先级') ||
+      label.includes('严重程度') ||
+      label.includes('严重级别')
+    const isStatus = fk === 'status' || /状态/i.test(label)
     const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
     if (isPriority && mods.priority && typeof mods.priority === 'object') {
       const v = which === 'old' ? mods.priority.old : mods.priority.new
@@ -1072,7 +1116,7 @@ function isPlaceholderSessionTitle(title) {
       const v = which === 'old' ? mods.status.old : mods.status.new
       if (v != null && String(v).trim() !== '') return String(v).trim()
     }
-    if ((tgt === 'bug' || tgt === 'card') && isPriority) {
+    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isPriority) {
       const b = ctx?.before
       const a = ctx?.after
       if (which === 'old' && b?.priority != null && String(b.priority).trim() !== '') return String(b.priority).trim()
@@ -1084,6 +1128,89 @@ function isPlaceholderSessionTitle(title) {
       if (which === 'old' && b?.status != null && String(b.status).trim() !== '') return String(b.status).trim()
       if (which === 'new' && a?.status != null && String(a.status).trim() !== '') return String(a.status).trim()
     }
+
+    /** 详情字段：diff delete 常为空，须读 modifications / before / 会话合并快照 */
+    const isTcDetail =
+      (tgt === 'testcase' || tgt === 'test_case') && isTestcaseDetailModifyField(fk, label)
+    const isOtherDetail = (tgt !== 'testcase' && tgt !== 'test_case') && DETAIL_FIELDS.includes(fk)
+    if (isTcDetail || isOtherDetail) {
+      if (isTcDetail) {
+        const fromTc = readTestcaseModifySideValue(
+          ctx,
+          fk,
+          fieldDiff?.field,
+          label,
+          which,
+          mods
+        )
+        if (fromTc) return fromTc
+      } else {
+        const modKeys = getTestcaseModifyModKeys(fk, fieldDiff?.field)
+        for (const mk of modKeys) {
+          const m = mods[mk]
+          if (m && typeof m === 'object') {
+            const v = which === 'old' ? m.old : m.new
+            const formatted = formatTestcaseModifyFieldValue(fk, v)
+            if (formatted) return formatted
+          }
+        }
+        const row = which === 'old' ? ctx?.before : ctx?.after
+        const fromRow = readTestcaseModifySideValue(ctx, fk, fieldDiff?.field, label, which, {})
+        if (fromRow) return fromRow
+      }
+      const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+      const nt = tgt === 'test_case' ? 'testcase' : tgt
+      if (tid && which === 'old' && Array.isArray(messages.value)) {
+        try {
+          const merged = getMergedPendingForTarget(messages.value, nt, tid)
+          const snap = merged?.before && typeof merged.before === 'object' ? merged.before : null
+          if (isTcDetail) {
+            const fromMerged = readTestcaseModifySideValue(
+              { before: snap, after: null },
+              fk,
+              fieldDiff?.field,
+              label,
+              'old',
+              mods
+            )
+            if (fromMerged) return fromMerged
+          }
+        } catch (_e) {
+          /* noop */
+        }
+      }
+    }
+
+    /** BadCase：沙箱 diff 行可能用 classification，库字段为 case_category；补全旧值避免误显示「未设置」 */
+    const isBadcaseCaseCategory =
+      (tgt === 'badcase' || tgt === 'bad_case') &&
+      (fk === 'case_category' ||
+        fk === 'classification' ||
+        fk === 'category' ||
+        fk.includes('问题分类') ||
+        label.includes('问题分类'))
+    const ccMod =
+      isBadcaseCaseCategory &&
+      ((mods.case_category && typeof mods.case_category === 'object' && mods.case_category) ||
+        (mods.classification && typeof mods.classification === 'object' && mods.classification) ||
+        (mods.category && typeof mods.category === 'object' && mods.category) ||
+        null)
+    if (ccMod) {
+      const v = which === 'old' ? ccMod.old : ccMod.new
+      if (v != null && String(v).trim() !== '') return String(v).trim()
+    }
+    if (isBadcaseCaseCategory) {
+      const b = ctx?.before
+      const a = ctx?.after
+      if (which === 'old') {
+        const cv = readBadcaseCaseCategoryFromRow(b)
+        if (cv) return cv
+      } else {
+        const cv = readBadcaseCaseCategoryFromRow(a)
+        if (cv) return cv
+      }
+    }
+
     // 分组/批量项上常缺 before：从本会话合并后的待采纳 payload 补 status（与列表、详情 reconcile 一致）
     if (isStatus && (which === 'old' || which === 'new')) {
       const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
@@ -1153,18 +1280,116 @@ function isPlaceholderSessionTitle(title) {
   }
 
   const formatSandboxModifySideDisplay = (ctx, fieldDiff, which) => {
-    const fk = String(fieldDiff?.field || '').trim().toLowerCase()
-    const label = String(fieldDiff?.field_label || '')
-    const isPriority = fk === 'priority' || label.includes('优先级')
-    const isStatus = fk === 'status' || /状态/i.test(label)
     const tgt = String(ctx?.target || '').toLowerCase()
+    const fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
+    const label = String(fieldDiff?.field_label || '')
+    const isPriority =
+      fk === 'priority' ||
+      fk === 'severity' ||
+      label.includes('优先级') ||
+      label.includes('严重程度') ||
+      label.includes('严重级别')
+    const isStatus = fk === 'status' || /状态/i.test(label)
     const raw = readSandboxModifySideRaw(ctx, fieldDiff, which)
     if (raw === '') return ''
-    if ((tgt === 'bug' || tgt === 'card') && isPriority) return formatSandboxBugPriorityText(raw)
+    if ((tgt === 'testcase' || tgt === 'test_case') && isPriority) {
+      return formatTestcaseModifyFieldValue('priority', raw)
+    }
+    if ((tgt === 'testcase' || tgt === 'test_case') && isTestcaseDetailModifyField(fk, label)) {
+      return formatTestcaseModifyFieldValue(fk, raw)
+    }
+    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isPriority) {
+      return formatSandboxBugPriorityText(raw)
+    }
     if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isStatus) {
       return formatSandboxBugStatusText(raw)
     }
     return raw
+  }
+
+  /** 沙箱 diff 行标题：BadCase 常被标成「严重程度」，与详情里「优先级」表单一致 */
+  const sandboxFieldHeaderLabel = (fd, ctx, groupTargetFallback = null) => {
+    const fk = String(fd?.field || '').trim().toLowerCase()
+    const lab = String(fd?.field_label || '').trim()
+    const tgt = String((ctx && ctx.target) || groupTargetFallback || '')
+      .trim()
+      .toLowerCase()
+    if (tgt === 'badcase' || tgt === 'bad_case') {
+      if (
+        fk === 'base_problem' ||
+        fk === 'similar_questions' ||
+        fk === 'similar_question' ||
+        /相似问题/.test(lab)
+      ) {
+        return '相似问题'
+      }
+      if (
+        fk === 'reproduction_steps' ||
+        fk === 'reproduce_steps' ||
+        fk === 'steps_to_reproduce' ||
+        /复现步骤/.test(lab)
+      ) {
+        return 'BadCase复现步骤'
+      }
+      if (fk === 'case_category' || fk === 'classification' || fk === 'category' || lab.includes('问题分类')) {
+        return t('cardDetail.caseCategory')
+      }
+      if (fk === 'priority' || fk === 'severity' || /优先级|严重程度|严重级别/.test(lab)) {
+        return t('cardDetail.priority')
+      }
+    }
+    if (tgt === 'bug') {
+      if (fk === 'severity' || (/严重/.test(lab) && !lab.includes('优先级'))) return t('cardDetail.severity')
+      if (fk === 'priority' || lab.includes('优先级')) return t('cardDetail.priority')
+    }
+    if (tgt === 'testcase' || tgt === 'test_case') {
+      return getTestcaseFieldLabel(t, fd?.field, lab)
+    }
+    const nk = normalizeSandboxFieldKey(fd?.field, lab, tgt)
+    const labelKeyByTarget = {
+      bug: {
+        title: 'cardDetail.title',
+        status: 'cardDetail.status',
+        assignee: 'cardDetail.assignee',
+        priority: 'cardDetail.priority',
+        severity: 'cardDetail.severity',
+        steps_to_reproduce: 'cardDetail.reproducer',
+        reproduction_steps: 'cardDetail.reproducer',
+        expected_result: 'cardDetail.expected',
+        actual_result: 'cardDetail.actual',
+        description: 'cardDetail.description'
+      },
+      badcase: {
+        title: 'cardDetail.title',
+        status: 'cardDetail.status',
+        assignee: 'cardDetail.assignee',
+        priority: 'cardDetail.priority',
+        case_category: 'cardDetail.caseCategory',
+        base_problem: 'cardDetail.scenario',
+        reproduction_steps: 'cardDetail.reproducer',
+        answer: 'cardDetail.expected',
+        correct_answer: 'cardDetail.expected',
+        badcase_result: 'cardDetail.actual',
+        solution: 'cardDetail.description',
+        problem_reason: 'cardDetail.description'
+      },
+      bad_case: {
+        title: 'cardDetail.title',
+        status: 'cardDetail.status',
+        assignee: 'cardDetail.assignee',
+        priority: 'cardDetail.priority',
+        case_category: 'cardDetail.caseCategory',
+        reproduction_steps: 'cardDetail.reproducer'
+      }
+    }
+    const bucket = labelKeyByTarget[tgt]
+    if (bucket && bucket[nk]) {
+      const tr = t(bucket[nk])
+      if (tr && tr !== bucket[nk]) return tr
+    }
+    if (/^[\u4e00-\u9fff]/.test(lab)) return lab
+    if (lab && !/^[a-z][a-z0-9_]*$/i.test(lab)) return lab
+    return lab || nk || String(fd?.field || '') || ''
   }
 
   /** 从批量预览项中取记录标题，用于「同一ID / 同标题」合并沙箱分组 */
@@ -2470,16 +2695,23 @@ const handleNavigation = (navigation) => {
   
   console.log('[NAV] 执行导航:', navigation)
 
-  const recordId = navigation.record_id ?? navigation.bug_id
+  const recordIdRaw = navigation.record_id ?? navigation.bug_id ?? navigation.id
+  const recordId =
+    snowflakeIdStr(recordIdRaw) ||
+    (recordIdRaw != null && String(recordIdRaw).trim() !== '' ? String(recordIdRaw).trim() : '')
   const navTarget = (navigation.target || 'bug').toString().toLowerCase().replace(/-/g, '_')
   let normalizedTarget = navTarget === 'test_case' || navTarget === 'testcase' ? 'testcase' : navTarget
   if (normalizedTarget === 'bad_case' || normalizedTarget === 'badcase') normalizedTarget = 'badcase'
-  const cardIdNav =
+  const cardIdRaw =
     navigation.card_id != null && navigation.card_id !== ''
       ? navigation.card_id
       : normalizedTarget === 'card'
-        ? recordId
+        ? recordIdRaw
         : undefined
+  const cardIdNav =
+    cardIdRaw != null && cardIdRaw !== ''
+      ? snowflakeIdStr(cardIdRaw) || String(cardIdRaw).trim()
+      : undefined
 
   const mergedLegacyRaw =
     navigation.merged_from_legacy != null && String(navigation.merged_from_legacy).trim() !== ''
@@ -2491,12 +2723,16 @@ const handleNavigation = (navigation) => {
       : mergedLegacyRaw === 'test_case'
         ? 'testcase'
         : mergedLegacyRaw
-  const legacyRowId =
+  const legacyRowIdRaw =
     navigation.legacy_row_id != null && navigation.legacy_row_id !== ''
       ? navigation.legacy_row_id
       : navigation.source_id != null && navigation.source_id !== ''
         ? navigation.source_id
         : null
+  const legacyRowId =
+    legacyRowIdRaw != null && legacyRowIdRaw !== ''
+      ? snowflakeIdStr(legacyRowIdRaw) || String(legacyRowIdRaw).trim()
+      : null
 
   // 发送自定义事件给父组件 ProjectDetail
   const event = new CustomEvent('grep-navigate', {
@@ -2793,13 +3029,19 @@ const refreshPersistedPendingDiffKeys = async (force = false, opts = {}) => {
 }
 
 const hasDetailFieldInPreview = (diffRows, mods) => {
-  const diffHasDetail = Array.isArray(diffRows) && diffRows.some((fd) => {
-    const f = (fd?.field || fd?.field_label || '').toString()
-    return DETAIL_FIELDS.includes(f)
-  })
+  const diffRowImpliesDetail = (fd) => {
+    const fk = String(fd?.field || '').trim().toLowerCase()
+    if (fk && DETAIL_FIELDS.includes(fk)) return true
+    const lab = String(fd?.field_label || '')
+    return /优先级|严重程度|严重级别|问题分类|相似问题|复现|正确答案|答案|原因|描述|步骤|备注|基线/i.test(lab)
+  }
+  const diffHasDetail = Array.isArray(diffRows) && diffRows.some(diffRowImpliesDetail)
   if (diffHasDetail) return true
   if (mods && typeof mods === 'object') {
-    return Object.keys(mods).some((k) => DETAIL_FIELDS.includes(k))
+    return Object.keys(mods).some((k) => {
+      const nk = String(k).trim().toLowerCase()
+      return DETAIL_FIELDS.includes(nk) || /优先级|严重程度|问题分类/.test(String(k))
+    })
   }
   return false
 }
@@ -3838,6 +4080,7 @@ const handleRequestPendingModifyForPlan = async (event) => {
             batchIndex: 0,
             peerTargetIds,
             suppressAutoOpenDetail,
+            restoreHydrateOnly: suppressAutoOpenDetail === true,
             before: merged.before ?? null,
             after: merged.after ?? null
           })
@@ -3876,6 +4119,7 @@ const handleRequestPendingModifyForPlan = async (event) => {
           batchIndex: 0,
           peerTargetIds,
           suppressAutoOpenDetail,
+          restoreHydrateOnly: suppressAutoOpenDetail === true,
           before: merged.before ?? null,
           after: merged.after ?? null
         })
@@ -3906,6 +4150,7 @@ const handleRequestPendingModifyForPlan = async (event) => {
         messageId: merged.messageId,
         peerTargetIds: [idStr],
         suppressAutoOpenDetail,
+        restoreHydrateOnly: suppressAutoOpenDetail === true,
         before: merged.before ?? null,
         after: merged.after ?? null
       })
@@ -4863,7 +5108,7 @@ const handleModifyCancelled = (event) => {
       console.log('[MODIFY] 已标记消息为已更新', msg.id, 'targetId:', want)
     }
   })
-  void refreshPersistedPendingDiffKeys(true)
+  void refreshPersistedPendingDiffKeys(true, { emitListSync: false })
 }
 
 // 处理修改确认事件
@@ -4971,7 +5216,8 @@ const handleModifyConfirmed = (event) => {
     }
   }
 
-  void refreshPersistedPendingDiffKeys(true)
+  // 列表侧 confirmModify 已 refreshActiveWorkbenchList；勿再 diff-review-sync 触发二次 restore/拉表
+  void refreshPersistedPendingDiffKeys(true, { emitListSync: false })
 }
 
 // 大图预览：Escape 关闭（与下方 watch 成对注册/移除）

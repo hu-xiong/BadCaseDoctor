@@ -41,7 +41,6 @@
     :showTerminal="showTerminal"
     :showAIAssistant="showAIAssistant"
     :showUserDropdown="showUserDropdown"
-    @goToDashboard="goToDashboard"
     @setLayout="setLayout"
     @toggleUserDropdown="toggleUserDropdown"
     @showNotifications="showNotifications"
@@ -762,8 +761,9 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, provide, shallowRef, markRaw } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, createCard, updateCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getCardDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline, deleteBadcase, deleteBug, deleteTestCase, deleteCard, clearChatMessageDeleteNavigation } from '../api.js'
-import { getBadCaseStatusText } from '../constants/status.js'
+import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, resolveProjectCardBySource, createCard, updateCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getCardDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline, deleteBadcase, deleteBug, deleteTestCase, deleteCardWithCascadeConfirm, cascadeCardDeleteConfirmText, clearChatMessageDeleteNavigation } from '../api.js'
+import { getBadCaseStatusText, getTestCaseStatusText } from '../constants/status.js'
+import { normalizePlanId } from '../utils/snowflakeId.js'
 import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
 import TerminalSettingsWorkbenchPanel from './TerminalSettingsWorkbenchPanel.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
@@ -783,6 +783,7 @@ import NewTestCase from './NewTestCase.vue'
 import ProjectManage from './ProjectManage.vue'
 import userStore from '../store/user.js'
 import { persistStableCreatedId, getStableCreatedId } from '../utils/createPreviewKeys.js'
+import { readTestcaseRowField, TESTCASE_DETAIL_FIELDS } from '../utils/testcaseModifyFields.js'
 import { useLocalGoProxyStatus } from '../composables/useLocalGoProxyStatus'
 import SelectableTitleTip from './SelectableTitleTip.vue'
 
@@ -1139,17 +1140,30 @@ export default {
     const mainEditorCardId = ref(null)
     /** 嵌入详情：badcase | bug | test_case，与 mainEditorItemId 组成稳定 keep-alive 键 */
     const embeddedEditorKind = ref('badcase')
+    /** 沙箱再次跳入已打开的详情 Tab 时递增，迫使 keep-alive 实例刷新 pending diff */
+    const mainEditorPendingDiffSeq = ref(0)
+
+    const setPendingModifyDiffSession = (diffData) => {
+      try {
+        sessionStorage.removeItem('pendingModifyDiff')
+        sessionStorage.setItem('pendingModifyDiff', JSON.stringify(diffData))
+        mainEditorPendingDiffSeq.value += 1
+      } catch (e) {
+        console.warn('[MODIFY] setPendingModifyDiffSession 失败:', e)
+      }
+    }
 
     /** 详情区 keep-alive：同一实体 Tab 切换时复用实例，避免反复挂载与 mainEditorKey 强刷 */
     const mainEditorCacheKey = computed(() => {
       const id = mainEditorItemId.value
       const editFlag = mainEditorEdit.value ? '1' : '0'
       const diffFlag = mainEditorShowDiff.value ? '1' : '0'
+      const diffSeq = mainEditorShowDiff.value ? mainEditorPendingDiffSeq.value : 0
       const pid = mainEditorPlanId.value == null ? 'na' : String(mainEditorPlanId.value)
       if (id == null || id === '') {
-        return `editor-${embeddedEditorKind.value}-create-${pid}-${editFlag}-${diffFlag}`
+        return `editor-${embeddedEditorKind.value}-create-${pid}-${editFlag}-${diffFlag}-d${diffSeq}`
       }
-      return `editor-${embeddedEditorKind.value}-detail-${id}-${pid}-${editFlag}-${diffFlag}`
+      return `editor-${embeddedEditorKind.value}-detail-${id}-${pid}-${editFlag}-${diffFlag}-d${diffSeq}`
     })
 
     /** Cursor 式工作区：计划列表 / 详情 各为一个 Tab，标题为短名 */
@@ -1424,18 +1438,17 @@ const totalCards = ref(0)
           return false
         }
         const pp = pc.preview?.plan_id ?? pc.preview?.planId
-        const ppNum = pp != null && pp !== '' ? Number(pp) : null
-        const isUnplannedPreview =
-          ppNum == null || !Number.isFinite(ppNum) || ppNum === 0
+        const ppStr = parsePositivePlanId(pp)
+        const isUnplannedPreview = !ppStr
         const isUnplannedTab =
           sp === null || sp === undefined || sp === 'unplanned'
         if (isUnplannedTab) {
           return isUnplannedPreview
         }
-        const sid = Number(sp)
-        if (!Number.isFinite(sid)) return false
+        const sid = parsePositivePlanId(sp)
+        if (!sid) return false
         if (isUnplannedPreview) return false
-        return Number(ppNum) === sid
+        return ppStr === sid
       })
     })
 
@@ -1522,7 +1535,11 @@ const totalCards = ref(0)
       'baseline',
       // 兼容：后端 diff 里可能使用复现步骤字段名
       'reproduce_steps',
-      'priority'
+      'priority',
+      'case_category',
+      'severity',
+      'case_type',
+      'test_type'
     ]
     
     // 字段标签映射
@@ -1530,6 +1547,8 @@ const totalCards = ref(0)
       'title': '标题',
       'status': '状态',
       'priority': '优先级',
+      'case_category': '问题分类',
+      'severity': '严重级别',
       'assignee': '负责人',
       'base_problem': '相似问题',
       'reproduction_steps': '复现步骤',
@@ -1545,7 +1564,9 @@ const totalCards = ref(0)
       'preconditions': '前置条件',
       'steps': '测试步骤',
       'remark': '备注',
-      'baseline': '基线'
+      'baseline': '基线',
+      'case_type': '用例类型',
+      'test_type': '测试类型'
     }
     // 标签/中文 -> 英文 key（用于 diff 里传中文字段名时识别为详情字段）
     const LABEL_TO_FIELD = {}
@@ -1553,13 +1574,94 @@ const totalCards = ref(0)
       LABEL_TO_FIELD[label] = key
     })
     LABEL_TO_FIELD['期望结果'] = 'expected_result' // 常见说法
+    LABEL_TO_FIELD['similar_questions'] = 'base_problem'
+    LABEL_TO_FIELD['similar_question'] = 'base_problem'
     ;['Owner', 'owner', 'Assignee', 'assignee'].forEach((k) => {
       LABEL_TO_FIELD[k] = 'assignee'
     })
+    ;['工作流状态', '处理状态', 'Case状态', '用例状态', '缺陷状态'].forEach((k) => {
+      LABEL_TO_FIELD[k] = 'status'
+    })
 
     /** diff 行字段名归一化：与 modify 工具、列表 LIST_FIELDS 对齐，避免仅英文标签时误判为「详情字段」而只打开详情、不展示列表行内 diff */
-    const normalizeDiffFieldKey = (rawField) => {
+    const normalizeDiffFieldKey = (rawField, optTarget = null) => {
+      const tgt = String(optTarget || '')
+        .trim()
+        .toLowerCase()
+        .replace(/-/g, '_')
       const raw = rawField ?? ''
+      if (typeof raw === 'string') {
+        const t = raw.trim()
+        if (['badcase', 'bad_case'].includes(tgt)) {
+          const tlcf = t.toLowerCase().replace(/-/g, '_')
+          if (
+            tlcf === 'classification' ||
+            tlcf === 'category' ||
+            t === '问题分类' ||
+            (t.includes('问题分类') && !t.includes('优先级'))
+          ) {
+            return 'case_category'
+          }
+          if (
+            t === '严重程度' ||
+            t === '严重级别' ||
+            t.includes('严重程度') ||
+            (t.includes('严重') && !t.includes('优先级'))
+          ) {
+            return 'priority'
+          }
+          if (t === '复现步骤' || t.includes('复现步骤')) {
+            return 'reproduction_steps'
+          }
+          const badcaseFieldAliases = {
+            similar_questions: 'base_problem',
+            similar_question: 'base_problem',
+            related_questions: 'base_problem',
+            related_problem: 'base_problem',
+            specific_problem: 'base_problem',
+            concrete_problem: 'base_problem',
+            problem_description: 'base_problem',
+            reproduce_steps: 'reproduction_steps',
+            reproduction_step: 'reproduction_steps',
+            badcase_reproduction_steps: 'reproduction_steps',
+            steps_to_reproduce: 'reproduction_steps'
+          }
+          if (Object.prototype.hasOwnProperty.call(badcaseFieldAliases, tlcf)) {
+            return badcaseFieldAliases[tlcf]
+          }
+        }
+        if (tgt === 'bug') {
+          if (t === '严重级别' || t === '严重程度' || t.includes('严重级别') || t.includes('严重程度')) {
+            return 'severity'
+          }
+        }
+        if (['testcase', 'test_case'].includes(tgt)) {
+          if (t === '严重程度' || t.includes('严重程度')) return 'priority'
+          if (t === '用例类型' || t.includes('用例类型')) return 'case_type'
+          if (t === '测试类型' || t.includes('测试类型')) return 'test_type'
+          if (t === '测试步骤' || t === '用例步骤' || t.includes('测试步骤')) return 'steps'
+          if (t === '备注') return 'remark'
+          if (t === '基线') return 'baseline'
+          if (t === '前置条件') return 'preconditions'
+        }
+        if (Object.prototype.hasOwnProperty.call(LABEL_TO_FIELD, t)) {
+          const m = LABEL_TO_FIELD[t]
+          return m === 'assignee_id' ? 'assignee' : m
+        }
+        const tl = t.toLowerCase().replace(/-/g, '_')
+        const snakeAliases = {
+          case_status: 'status',
+          workflow_status: 'status',
+          badcase_status: 'status',
+          bug_status: 'status',
+          testcase_status: 'status',
+          test_status: 'status',
+          record_status: 'status'
+        }
+        if (Object.prototype.hasOwnProperty.call(snakeAliases, tl)) {
+          return snakeAliases[tl]
+        }
+      }
       const mapped = LABEL_TO_FIELD[raw] || raw
       return mapped === 'assignee_id' ? 'assignee' : mapped
     }
@@ -1570,6 +1672,77 @@ const totalCards = ref(0)
       'status',
       'assignee'
     ]
+
+    /** 列表 pending 黄条 / 行内 √：仅含 LIST_FIELDS；详情字段走 sessionStorage + 详情页 field-diff */
+    const filterModifyDataToListOverlay = (modifyData, optTarget = null) => {
+      const md = modifyData && typeof modifyData === 'object' ? modifyData : {}
+      const out = {}
+      for (const [fk, v] of Object.entries(md)) {
+        if (String(fk).startsWith('_')) continue
+        const nk = normalizeDiffFieldKey(fk, optTarget)
+        if (!LIST_FIELDS.includes(nk)) continue
+        if (!v || typeof v !== 'object' || !('new' in v) || v.unchanged === true) continue
+        out[nk] = v
+      }
+      return out
+    }
+
+    const filterModifyDataToDetailSession = (modifyData, optTarget = null) => {
+      const md = modifyData && typeof modifyData === 'object' ? modifyData : {}
+      const out = {}
+      for (const [fk, v] of Object.entries(md)) {
+        if (String(fk).startsWith('_')) continue
+        const nk = normalizeDiffFieldKey(fk, optTarget)
+        if (!DETAIL_FIELDS.includes(nk)) continue
+        if (!v || typeof v !== 'object' || !('new' in v) || v.unchanged === true) continue
+        out[nk] = v
+      }
+      return out
+    }
+
+    /** 详情字段 diff 写入 session，供 NewTestCase/NewBadcase 等 show_diff 模式展示 */
+    const persistDetailModifyDiffToSession = (modifyData, recordKey, meta = {}) => {
+      if (meta.executed === true) return false
+      const detailOnly = filterModifyDataToDetailSession(modifyData, meta.target)
+      if (Object.keys(detailOnly).length === 0) return false
+      const key = entityIdStr(recordKey)
+      if (!key || !/^\d+$/.test(key)) return false
+      setPendingModifyDiffSession({
+        targetId: key,
+        target: meta.target,
+        diff: Array.isArray(meta.diff) ? meta.diff : [],
+        modifications: detailOnly,
+        messageId: meta.messageId ?? null,
+        batchIndex: meta.batchIndex
+      })
+      return true
+    }
+
+    /**
+     * Bug / BadCase / TestCase 共用：只统计「真变更」字段（忽略 unchanged），用于沙箱到达时列表 vs 详情分支。
+     * 只要有 title/status/assignee 任一有效变更，即视为列表语义，禁止自动 openMainEditor(show_diff)。
+     */
+    const getModifyFieldImpact = (modifyData, optTarget = null) => {
+      const md = modifyData && typeof modifyData === 'object' ? modifyData : {}
+      const keys = Object.keys(md).filter((k) => !String(k).startsWith('_'))
+      let hasEffectiveList = false
+      let hasEffectiveDetail = false
+      let hasEffectiveUnknown = false
+      for (const field of keys) {
+        const v = md[field]
+        if (!v || typeof v !== 'object' || !('new' in v)) continue
+        if (v.unchanged === true) continue
+        const nk = normalizeDiffFieldKey(field, optTarget)
+        if (LIST_FIELDS.includes(nk)) {
+          hasEffectiveList = true
+        } else if (DETAIL_FIELDS.includes(nk)) {
+          hasEffectiveDetail = true
+        } else {
+          hasEffectiveUnknown = true
+        }
+      }
+      return { hasEffectiveList, hasEffectiveDetail, hasEffectiveUnknown, keys }
+    }
 
     /** 列表上同时有待确认的「列表字段 + 详情字段」时提示用户分流处理（与 handleShowModifyInList 语义对齐） */
     const mixedListDetailModifyHint = computed(() => {
@@ -1585,7 +1758,7 @@ const totalCards = ref(0)
         let hasList = false
         let hasDetail = false
         for (const k of keys) {
-          const nk = normalizeDiffFieldKey(k)
+          const nk = normalizeDiffFieldKey(k, tab?.meta?.type)
           if (LIST_FIELDS.includes(nk)) hasList = true
           if (DETAIL_FIELDS.includes(nk)) hasDetail = true
         }
@@ -1747,35 +1920,35 @@ const totalCards = ref(0)
         console.log('调用API: 获取列表')
         const additionalParams = {}
         
-        // 获取当前 Tab 的 cardId（如果有的话）
+        // 获取当前 Tab 的 cardId / planId（type-list 下采纳刷新须与 Tab 一致）
         const currentTab = activeWorkbenchTab.value
         const cardId = currentTab?.meta?.cardId
-        
-        // 如果有 cardId，优先使用 cardId 过滤（卡片分类型，计划不分类型）
+        const tabPlanId = parsePositivePlanId(currentTab?.meta?.planId)
+        const selectedPlanId = parsePositivePlanId(selectedPlan.value)
+
+        if (tabPlanId) {
+          additionalParams.plan_id = tabPlanId
+        } else if (selectedPlanId) {
+          additionalParams.plan_id = selectedPlanId
+        }
         if (cardId) {
           additionalParams.card_id = cardId
-          console.log(`🔍 按卡片ID过滤: cardId=${cardId}`)
-        } else if (selectedPlan.value) {
-          // 确保是数字类型传递给后端
-          const planId = parseInt(selectedPlan.value)
-          if (!isNaN(planId)) {
-            additionalParams.plan_id = planId
-          }
+          console.log(`🔍 按卡片ID过滤: cardId=${cardId}, planId=${additionalParams.plan_id || '(none)'}`)
         }
         
-        // 优先使用 currentTypeFilter（当前视图类型）决定 API，兜底用 currentPlanType
-        const viewType = currentTypeFilter.value === 'bug' ? 'bug'
-                       : currentTypeFilter.value === 'testcase' ? 'test_case'
-                       : currentPlanType.value
-        if (viewType) {
-          additionalParams.content_type = viewType
+        const listKind = resolveWorkbenchListApiKind(
+          additionalParams.plan_id ?? null,
+          cardId ?? null
+        )
+        if (listKind) {
+          additionalParams.content_type = listKind === 'test_case' ? 'test_case' : listKind
         }
         
         let response
-        if (viewType === 'bug') {
+        if (listKind === 'bug') {
           console.log('🔍 检测到当前视图类型为 bug，调用 getProjectBugs')
           response = await getProjectBugs(projectId.value, page, badcasePerPage.value, additionalParams)
-        } else if (viewType === 'test_case') {
+        } else if (listKind === 'test_case') {
           console.log('🔍 检测到当前视图类型为 test_case，调用 getProjectTestCases')
           response = await getProjectTestCases(projectId.value, page, badcasePerPage.value, additionalParams)
         } else {
@@ -1786,7 +1959,7 @@ const totalCards = ref(0)
         console.log('API响应:', response)
         
         if (response && response.data && response.data.success) {
-          badcases.value = response.data.badcases || []
+          badcases.value = parseListRowsFromApiResponse(response, listKind)
           filteredBadcases.value = [...badcases.value] // 初始化过滤后的BadCase
           // 兼容 pagination.total 和直接的 total
           totalBadcases.value = (response.data.pagination && response.data.pagination.total) || response.data.total || 0
@@ -2110,7 +2283,7 @@ const totalCards = ref(0)
         _modifyListFetchCoalesceTimer = setTimeout(async () => {
           _modifyListFetchCoalesceTimer = null
           try {
-            await fetchBadcases(1)
+            await refreshActiveWorkbenchList(1)
           } finally {
             resolvePromise()
             _modifyListFetchCoalescePromise = null
@@ -2205,6 +2378,10 @@ const totalCards = ref(0)
     /** 与 show-modify 连发时避免 restore 重复整页跳转/高亮（约「闪三次」） */
     let _restorePendingNavFingerprint = ''
     let _restorePendingNavAtMs = 0
+    /** 避免 plan-list：fetchCards → request-pending-modify → show-modify → 再激活 Tab → 再 fetchCards 死循环 */
+    let _pendingModifyPlanSyncKey = ''
+    let _pendingModifyPlanSyncAt = 0
+    const PENDING_MODIFY_PLAN_SYNC_MS = 2500
     const handleDiffReviewSync = () => {
       if (diffReviewSyncDebounceTimer) clearTimeout(diffReviewSyncDebounceTimer)
       diffReviewSyncDebounceTimer = setTimeout(async () => {
@@ -2217,7 +2394,8 @@ const totalCards = ref(0)
       }, 320)
     }
 
-    const restorePendingDiffReviews = async () => {
+    const restorePendingDiffReviews = async (opts = {}) => {
+      const afterAdopt = opts.afterAdopt === true
       try {
         if (!projectId.value) return
         const resp = await fetch(
@@ -2287,7 +2465,9 @@ const totalCards = ref(0)
         _restorePendingNavFingerprint = navFp
         _restorePendingNavAtMs = nowNav
 
-        if (!skipHeavyListNav) {
+        if (afterAdopt) {
+          syncApplyShowModifyListBatchFromDetails(batchItems)
+        } else if (!skipHeavyListNav) {
           await handleShowModifyInList({ detail: { __modifyListBatch: true, items: batchItems } })
         }
 
@@ -2370,6 +2550,12 @@ const totalCards = ref(0)
         return t('chat.notSet')
       }
       const s = String(status).trim()
+      const tf = (currentTypeFilter.value || '').toString().toLowerCase()
+      if (tf === 'testcase' || tf === 'test_case') {
+        const tc = getTestCaseStatusText(s.toLowerCase())
+        if (tc && tc !== s.toLowerCase()) return tc
+        if (tc) return tc
+      }
       const norm = s.toLowerCase() === 'reopen' ? 'reopened' : s
       const k = `list.badcaseStatus.${norm}`
       const tr = t(k)
@@ -2621,6 +2807,23 @@ const totalCards = ref(0)
 
     // 处理类型列表打开：与 grep/modify 一致使用稳定 Tab id，便于复用「同一计划·同一卡片·同一类型」Tab
     const handleOpenTypeList = async (type, cardTitle, cardId) => {
+      const cidStr = cardId != null && String(cardId).trim() !== '' ? String(cardId).trim() : ''
+      if (!cidStr) {
+        console.warn('[handleOpenTypeList] 缺少 cardId，无法打开类型列表 Tab')
+        return
+      }
+      const pid = resolvePlanIdForOpenTypeList(cidStr)
+      if (!pid) {
+        console.warn('[handleOpenTypeList] 无法解析 planId', {
+          selectedPlan: selectedPlan.value,
+          cardId: cidStr,
+          activeTab: activeWorkbenchTabId.value
+        })
+        return
+      }
+      if (!sameEntityId(selectedPlan.value, pid)) {
+        selectedPlan.value = pid
+      }
       const currentTabId = activeWorkbenchTabId.value
       const currentTab = workbenchTabs.value.find((t) => t.id === currentTabId)
       if (currentTab?.kind === 'plan-list') {
@@ -2628,22 +2831,6 @@ const totalCards = ref(0)
           id: currentTabId,
           meta: { ...currentTab.meta, type: currentTypeFilter.value }
         })
-      }
-      const pidRaw = selectedPlan.value
-      const pid =
-        pidRaw != null && pidRaw !== '' && String(pidRaw) !== 'unplanned'
-          ? typeof pidRaw === 'number'
-            ? pidRaw
-            : parseInt(String(pidRaw), 10)
-          : NaN
-      if (Number.isNaN(pid) || pid <= 0) {
-        console.warn('[handleOpenTypeList] 无效 planId，无法打开类型列表 Tab', pidRaw)
-        return
-      }
-      const cidStr = cardId != null && String(cardId).trim() !== '' ? String(cardId).trim() : ''
-      if (!cidStr) {
-        console.warn('[handleOpenTypeList] 缺少 cardId，无法打开类型列表 Tab')
-        return
       }
       const tl =
         type === 'badcase'
@@ -2660,6 +2847,68 @@ const totalCards = ref(0)
       })
     }
 
+    /** 从工作台卡片表解析 plan_id（type-list 场景以卡片为准） */
+    const resolvePlanIdForCard = (cardId) => {
+      const cid = entityIdStr(cardId)
+      if (!cid) return null
+      const lists = [filteredCards.value, cards.value]
+      for (const list of lists) {
+        const row = (list || []).find((c) => sameEntityId(c?.id, cid))
+        if (row?.plan_id != null && row.plan_id !== '') {
+          return normalizePlanId(row.plan_id)
+        }
+      }
+      return null
+    }
+
+    /** 点卡片进类型列表：卡片 plan_id > 当前 Tab meta > plan-list Tab id > 侧栏 selectedPlan */
+    const resolvePlanIdForOpenTypeList = (cardId) => {
+      const fromCard = resolvePlanIdForCard(cardId)
+      if (fromCard) return fromCard
+      const tab = activeWorkbenchTab.value
+      const fromMeta = parsePositivePlanId(tab?.meta?.planId)
+      if (fromMeta) return fromMeta
+      if (tab?.kind === 'plan-list' && String(tab.id || '').startsWith('plan-')) {
+        const fromTab = parsePositivePlanId(String(tab.id).slice('plan-'.length))
+        if (fromTab) return fromTab
+      }
+      return parsePositivePlanId(selectedPlan.value)
+    }
+
+    /** 新建实体时继承当前迭代：卡片 plan_id > 侧栏 selectedPlan > Tab.meta > plan-list Tab id */
+    const resolveCreateContextPlanId = () => {
+      const tab = activeWorkbenchTab.value
+      if (tab?.meta?.cardId) {
+        const fromCard = resolvePlanIdForCard(tab.meta.cardId)
+        if (fromCard) return fromCard
+      }
+
+      const fromSelected = normalizePlanId(selectedPlan.value)
+      if (fromSelected) return fromSelected
+
+      if (!tab) return null
+
+      const fromMeta = normalizePlanId(tab.meta?.planId)
+      if (fromMeta) return fromMeta
+
+      if (tab.kind === 'plan-list' && String(tab.id || '').startsWith('plan-')) {
+        const fromTabId = normalizePlanId(String(tab.id).slice('plan-'.length))
+        if (fromTabId) return fromTabId
+      }
+
+      const returnTo = tab.meta?.returnTo
+      if (returnTo) {
+        const src = workbenchTabs.value.find((t) => t.id === returnTo)
+        const fromReturn = normalizePlanId(src?.meta?.planId)
+        if (fromReturn) return fromReturn
+        if (src?.kind === 'plan-list' && String(src.id || '').startsWith('plan-')) {
+          return normalizePlanId(String(src.id).slice('plan-'.length))
+        }
+      }
+
+      return null
+    }
+
     // 处理新建按钮点击 - 在新Tab中打开对应的创建界面
     const handleOpenCreate = (planType) => {
       const editorType = planType === 'test_case' ? 'test_case' : planType
@@ -2667,11 +2916,13 @@ const totalCards = ref(0)
       const currentTab = activeWorkbenchTab.value
       const cardId = currentTab?.meta?.cardId
       const cardTitle = currentTab?.meta?.cardTitle
-      console.log('[handleOpenCreate] planType:', planType, 'cardId:', cardId, 'currentTab:', currentTab?.kind, currentTab?.meta)
+      const contextPlanId =
+        resolvePlanIdForCard(cardId) ?? resolveCreateContextPlanId()
+      console.log('[handleOpenCreate] planType:', planType, 'cardId:', cardId, 'contextPlanId:', contextPlanId, 'currentTab:', currentTab?.kind, currentTab?.meta)
       
       // 保存当前Tab ID用于返回
       const returnTo = activeWorkbenchTabId.value
-      const pidKey = selectedPlan.value == null ? 'unplanned' : String(selectedPlan.value)
+      const pidKey = contextPlanId == null ? 'unplanned' : String(contextPlanId)
       const tid = `create-${editorType}-${pidKey}-${Date.now()}`
       const titleMap = {
         badcase: t('project.newBadcase') || '新建 BadCase',
@@ -2682,11 +2933,11 @@ const totalCards = ref(0)
         id: tid,
         kind: 'create',
         title: truncateForTab(titleMap[editorType] || '新建', '新建'),
-        meta: { editorPlanType: editorType, planId: selectedPlan.value, returnTo, cardId, cardTitle }
+        meta: { editorPlanType: editorType, planId: contextPlanId, returnTo, cardId, cardTitle }
       })
       activeWorkbenchTabId.value = tid
       // 传递cardId给编辑器，用于校验卡片类型
-      mountEditorComponents(null, editorType, false, false, selectedPlan.value, cardId)
+      mountEditorComponents(null, editorType, false, false, contextPlanId, cardId)
     }
 
     // 获取当前应该显示的面板组件
@@ -2898,7 +3149,9 @@ const totalCards = ref(0)
     })
     
     // 获取项目计划
-    const fetchProjectPlans = async () => {
+    /** @param {{ autoSelectFirst?: boolean }} [options] autoSelectFirst 仅首屏/手动刷新时启用，避免关 Tab 刷新计划树时与 keep-alive 卸载抢 patch */
+    const fetchProjectPlans = async (options = {}) => {
+      const { autoSelectFirst = false } = options
       if (!projectId.value) {
         console.log('项目ID为空，无法获取计划')
         return
@@ -2915,6 +3168,7 @@ const totalCards = ref(0)
         console.log('响应状态:', response.status)
         console.log('响应数据:', response.data)
         if (response && response.data && response.data.success) {
+          await nextTick()
           projectPlans.value = processPlanData(response.data.plans)
           // 后端 plans 接口已用 GROUP BY 聚合返回每个计划的 test_case_count，无需单独请求
           const agg = {}
@@ -2922,20 +3176,19 @@ const totalCards = ref(0)
             if (!plans?.length) return
             plans.forEach(p => {
               // 确保 key 和 value 都是正确的类型
-              agg[Number(p.id)] = Number(p.test_case_count ?? 0)
+              agg[entityIdStr(p.id)] = Number(p.test_case_count ?? 0)
               if (p.children?.length) setAgg(p.children)
             })
           }
           setAgg(projectPlans.value)
           planTestCaseCounts.value = agg
           filterPlans()
-          projectPlans.value = [...projectPlans.value]
-          filteredPlans.value = [...filteredPlans.value]
           
-          // 如果没有选中任何计划，自动选中第一个活跃计划并挂载Tab
-          if (!selectedPlan.value && filteredPlans.value.length > 0) {
+          // 仅显式要求时自动选计划（关 Tab / 刷新计数时不要触发，否则与嵌入详情 keep-alive 卸载并发 patch）
+          if (autoSelectFirst && !selectedPlan.value && filteredPlans.value.length > 0) {
             const firstPlan = filteredPlans.value[0]
             console.log('自动选中第一个计划:', firstPlan.id, firstPlan.name)
+            await nextTick()
             await selectPlan(firstPlan.id)
           }
         } else {
@@ -3010,7 +3263,7 @@ const totalCards = ref(0)
     const findPlanRecursive = (plans, id) => {
       if (!plans || id == null) return null
       for (const p of plans) {
-        if (p.id == id) return p
+        if (sameEntityId(p.id, id)) return p
         if (p.children?.length) {
           const f = findPlanRecursive(p.children, id)
           if (f) return f
@@ -3097,7 +3350,7 @@ const totalCards = ref(0)
       embeddedEditorKind.value = editorPlanType
       mainEditorItemId.value = itemId
       mainEditorEdit.value = !!edit
-      mainEditorPlanId.value = planId
+      mainEditorPlanId.value = normalizePlanId(planId)
       mainEditorShowDiff.value = showDiff
       mainEditorCardId.value = cardId
       showMainEditor.value = true
@@ -3105,8 +3358,8 @@ const totalCards = ref(0)
 
     const selectPlan = async (planId) => {
       clearEmbeddedEditor()
-      const pid = typeof planId === 'number' ? planId : parseInt(String(planId), 10)
-      if (Number.isNaN(pid)) {
+      const pid = parsePositivePlanId(planId)
+      if (!pid) {
         console.error('无效 planId:', planId)
         return
       }
@@ -3121,7 +3374,10 @@ const totalCards = ref(0)
       activeWorkbenchTabId.value = `plan-${pid}`
       console.log('选择计划:', planId)
       currentTypeFilter.value = null
-      await applyPlanListTabState({ planId: pid, urlContentType: null })
+      await applyPlanListTabState(
+        { planId: pid, urlContentType: null },
+        { forceFetchCards: true }
+      )
     }
     
     // 根据BadCase选择对应的计划
@@ -3270,6 +3526,10 @@ const totalCards = ref(0)
         console.log(`[getPlanListApiKindByPlanId] 使用 currentTypeFilter: test_case`)
         return 'test_case'
       }
+      if (typeFilter === 'badcase') {
+        console.log(`[getPlanListApiKindByPlanId] 使用 currentTypeFilter: badcase`)
+        return 'badcase'
+      }
       
       // 如果有 cardId，尝试使用 card 的类型
       if (cardId) {
@@ -3285,18 +3545,121 @@ const totalCards = ref(0)
       }
       
       // 兜底使用计划的 content_type
-      const numericPlanId = typeof planId === 'number' ? planId : parseInt(String(planId), 10)
-      if (Number.isNaN(numericPlanId)) {
+      const planIdStr = parsePositivePlanId(planId)
+      if (!planIdStr) {
         console.log(`[getPlanListApiKindByPlanId] 无效planId，使用 currentPlanType: ${currentPlanType.value}`)
         return currentPlanType.value
       }
-      const planObj = findPlanRecursive(projectPlans.value, numericPlanId)
+      const planObj = findPlanRecursive(projectPlans.value, planIdStr)
       if (!planObj) {
         console.log(`[getPlanListApiKindByPlanId] 未找到计划，使用 currentPlanType: ${currentPlanType.value}`)
         return currentPlanType.value
       }
       // 以后不再从计划推导类型，统一回退当前视图类型
       return currentPlanType.value
+    }
+
+    const parseListRowsFromApiResponse = (response, listKind) => {
+      const data = response?.data
+      if (!data) return []
+      if (listKind === 'bug') return data.bugs || data.badcases || []
+      if (listKind === 'test_case') return data.testcases || data.badcases || []
+      return data.badcases || data.bugs || data.testcases || []
+    }
+
+    const resolveWorkbenchListApiKind = (planId = null, cardId = null) => {
+      const tf = (currentTypeFilter.value || '').toString().toLowerCase()
+      if (tf === 'bug') return 'bug'
+      if (tf === 'testcase' || tf === 'test_case') return 'test_case'
+      if (tf === 'badcase') return 'badcase'
+      return getPlanListApiKindByPlanId(planId, cardId)
+    }
+
+    /** POST /modify 采纳为 async 后台落库时，略等再拉列表，避免仍显示旧状态 */
+    const awaitModifyAsyncPersist = async (result) => {
+      if (result && result.async === true) {
+        await new Promise((resolve) => setTimeout(resolve, 420))
+      }
+    }
+
+    /** 采纳/拒绝后按当前工作台 Tab 刷新列表，避免 type-list 用错 card_id 或 API */
+    const refreshActiveWorkbenchList = async (page = 1) => {
+      const tab = activeWorkbenchTab.value
+      if (tab?.kind === 'type-list') {
+        const { planId, cardId } = tab.meta || {}
+        const pid = parsePositivePlanId(planId)
+        if (pid) {
+          await fetchBadcasesByPlan(pid, page, cardId ?? null)
+          return
+        }
+      }
+      if (tab?.kind === 'plan-list') {
+        await applyPlanListTabState(tab.meta || {})
+        return
+      }
+      await fetchBadcases(page)
+    }
+
+    /** 采纳后 badcase.card_id 变更时，同步 type-list Tab 的 meta.cardId，避免刷新按旧卡过滤成空表 */
+    const syncTypeListTabCardId = (cardIdRaw, cardTitle = '') => {
+      const cid = entityIdStr(cardIdRaw)
+      if (!cid || !/^\d+$/.test(cid)) return
+      const tab = activeWorkbenchTab.value
+      if (!tab || tab.kind !== 'type-list') return
+      const meta = tab.meta || {}
+      if (sameEntityId(meta.cardId ?? meta.card_id, cid)) return
+      meta.cardId = cid
+      if (cardTitle && String(cardTitle).trim()) {
+        meta.cardTitle = String(cardTitle).trim()
+      }
+      const idx = workbenchTabs.value.findIndex((t) => t.id === tab.id)
+      if (idx < 0) return
+      const tl = meta.type || 'badcase'
+      const pid = parsePositivePlanId(meta.planId)
+      const newTabId = pid ? `type-list-${tl}-${pid}-${cid}` : tab.id
+      const nextTitle =
+        meta.cardTitle && String(meta.cardTitle).trim()
+          ? truncateForTab(meta.cardTitle, t('tab.planFallback', { id: pid || '' }))
+          : workbenchTabs.value[idx].title
+      workbenchTabs.value[idx] = {
+        ...workbenchTabs.value[idx],
+        id: newTabId,
+        title: nextTitle,
+        meta: { ...meta, cardId: cid }
+      }
+      if (activeWorkbenchTabId.value === tab.id) {
+        activeWorkbenchTabId.value = newTabId
+      }
+      console.log('[MODIFY] 已同步 type-list Tab cardId →', cid)
+    }
+
+    const syncTabCardIdFromRecordDetail = async (targetType, recordId) => {
+      const idKey = entityIdStr(recordId)
+      if (!idKey || !/^\d+$/.test(idKey)) return
+      const nt = (targetType || '').toString().toLowerCase()
+      try {
+        if (nt === 'badcase') {
+          const res = await getBadcaseDetail(idKey)
+          const row = res?.data?.badcase
+          if (res?.data?.success && row) {
+            syncTypeListTabCardId(row.card_id ?? row.cardId, row.title || '')
+          }
+        } else if (nt === 'bug') {
+          const res = await getBugDetail(idKey)
+          const row = res?.data?.bug
+          if (res?.data?.success && row) {
+            syncTypeListTabCardId(row.card_id ?? row.cardId, row.title || '')
+          }
+        } else if (nt === 'testcase' || nt === 'test_case') {
+          const res = await getTestCaseDetail(idKey)
+          const row = res?.data?.testcase
+          if (res?.data?.success && row) {
+            syncTypeListTabCardId(row.card_id ?? row.cardId, row.title || row.name || '')
+          }
+        }
+      } catch (e) {
+        console.warn('[MODIFY] syncTabCardIdFromRecordDetail failed', nt, idKey, e)
+      }
     }
     
     // 根据计划ID调用API获取BadCase
@@ -3316,20 +3679,20 @@ const totalCards = ref(0)
       try {
         // 构建API参数 - 处理数字或字符串类型的planId
         const params = {}
-        
-        // 转换为数字，如果有效则设置参数
-        const numericPlanId = typeof planId === 'number' ? planId : parseInt(planId)
-        
-        // 如果有 cardId，优先使用 cardId 过滤（卡片分类型，计划不分类型）
-        if (cardId) {
-          params.card_id = cardId
-          console.log(`🔍 按卡片ID过滤: cardId=${cardId}`)
-        } else if (planId && !isNaN(numericPlanId)) {
-          params.plan_id = numericPlanId
-          console.log(`🔍 检索计划ID: ${numericPlanId} 的数据`)
-        } else if (!cardId) {
+        const planIdStr = parsePositivePlanId(planId)
+        const cardIdStr = entityIdStr(cardId)
+
+        if (planIdStr) {
+          params.plan_id = planIdStr
+        }
+        if (cardIdStr && /^\d+$/.test(cardIdStr)) {
+          params.card_id = cardIdStr
+          console.log(`🔍 按卡片ID过滤: cardId=${cardIdStr}, planId=${planIdStr || '(none)'}`)
+        } else if (!planIdStr) {
           console.error('❌ 无效的计划ID:', planId, '类型:', typeof planId)
           return
+        } else {
+          console.log(`🔍 检索计划ID: ${planIdStr} 的数据`)
         }
         
         console.log('📋 API参数:', params)
@@ -3349,9 +3712,12 @@ const totalCards = ref(0)
         console.log('API响应:', response)
         
         if (response && response.data && response.data.success) {
-          badcases.value = response.data.badcases || []
+          badcases.value = parseListRowsFromApiResponse(response, listKind)
           filteredBadcases.value = [...badcases.value] // 初始化过滤后的BadCase
-          totalBadcases.value = response.data.total || 0
+          totalBadcases.value =
+            (response.data.pagination && response.data.pagination.total) ||
+            response.data.total ||
+            0
           badcasePage.value = page
           
           console.log(`✅ 计划 ${planId} 的BadCase检索成功，共${badcases.value.length}个`)
@@ -3413,28 +3779,47 @@ const totalCards = ref(0)
 
 
     /** 按 Tab 元数据恢复列表状态 */
-    const applyPlanListTabState = async (meta) => {
+    const applyPlanListTabState = async (meta, opts = {}) => {
       const m = meta || {}
       const { planId, urlContentType: uct } = m
-      const numericPlanIdForState =
-        planId != null && planId !== 'unplanned'
-          ? typeof planId === 'number'
-            ? planId
-            : parseInt(String(planId), 10)
-          : NaN
-      if (!Number.isNaN(numericPlanIdForState) && numericPlanIdForState > 0) {
-        // 与侧栏点计划一致时 meta.urlContentType 为 null；grep/modify 可按记录类型覆盖
-        urlContentType.value = uct !== undefined ? uct : null
-        selectedPlan.value = numericPlanIdForState
-        // 获取卡片数据（统一卡片列表）
+      const planIdStr =
+        planId != null && planId !== 'unplanned' ? parsePositivePlanId(planId) : null
+      if (!planIdStr) return
+
+      const forceFetch = opts.forceFetchCards === true
+      const activeTab = activeWorkbenchTab.value
+      const alreadyOnPlanCardList =
+        !forceFetch &&
+        activeTab?.kind === 'plan-list' &&
+        parsePositivePlanId(activeTab?.meta?.planId) === planIdStr &&
+        !currentTypeFilter.value
+
+      urlContentType.value = uct !== undefined ? uct : null
+      selectedPlan.value = planIdStr
+
+      if (!alreadyOnPlanCardList) {
         await fetchCards()
-        await nextTick()
-        window.dispatchEvent(
-          new CustomEvent('request-pending-modify-for-plan', {
-            detail: { planId: numericPlanIdForState, suppressAutoOpenDetail: true }
-          })
-        )
       }
+
+      if (opts.skipPendingModifySync === true) return
+
+      const now = Date.now()
+      const syncKey = String(planIdStr)
+      if (
+        syncKey === _pendingModifyPlanSyncKey &&
+        now - _pendingModifyPlanSyncAt < PENDING_MODIFY_PLAN_SYNC_MS
+      ) {
+        return
+      }
+      _pendingModifyPlanSyncKey = syncKey
+      _pendingModifyPlanSyncAt = now
+
+      await nextTick()
+      window.dispatchEvent(
+        new CustomEvent('request-pending-modify-for-plan', {
+          detail: { planId: planIdStr, suppressAutoOpenDetail: true }
+        })
+      )
     }
 
 
@@ -3446,28 +3831,32 @@ const totalCards = ref(0)
       const st = selectedPlan.value
       const uct = urlContentType.value
 
-      const numericPlanId =
-        st != null && st !== 'unplanned'
-          ? typeof st === 'number'
-            ? st
-            : parseInt(String(st), 10)
-          : NaN
+      let planIdStr =
+        st != null && st !== 'unplanned' ? parsePositivePlanId(st) : null
 
-      if (!Number.isNaN(numericPlanId)) {
-        const planObj = findPlanRecursive(projectPlans.value, numericPlanId)
-        const title = truncateForTab(planObj?.name, t('tab.planFallback', { id: numericPlanId }))
+      if (!planIdStr && filteredPlans.value.length > 0) {
+        planIdStr = parsePositivePlanId(filteredPlans.value[0]?.id)
+        if (planIdStr) {
+          void selectPlan(planIdStr)
+          return
+        }
+      }
+
+      if (planIdStr) {
+        const planObj = findPlanRecursive(projectPlans.value, planIdStr)
+        const title = truncateForTab(planObj?.name, t('tab.planFallback', { id: planIdStr }))
         upsertWorkbenchTab({
-          id: `plan-${numericPlanId}`,
+          id: `plan-${planIdStr}`,
           kind: 'plan-list',
           title,
-          meta: { planId: numericPlanId, urlContentType: null }
+          meta: { planId: planIdStr, urlContentType: uct ?? null }
         })
-        activeWorkbenchTabId.value = `plan-${numericPlanId}`
+        activeWorkbenchTabId.value = `plan-${planIdStr}`
         return
       }
     }
 
-    const activateWorkbenchTab = async (tabId) => {
+    const activateWorkbenchTab = async (tabId, opts = {}) => {
       const tab = workbenchTabs.value.find((t) => t.id === tabId)
       if (!tab) return
       activeWorkbenchTabId.value = tabId
@@ -3512,21 +3901,27 @@ const totalCards = ref(0)
       }
       if (tab.kind === 'create') {
         const { editorPlanType, planId, cardId } = tab.meta || {}
-        mountEditorComponents(null, editorPlanType, false, false, planId ?? null, cardId ?? null)
+        const pid =
+          resolvePlanIdForCard(cardId) ??
+          normalizePlanId(planId) ??
+          resolveCreateContextPlanId()
+        mountEditorComponents(null, editorPlanType, false, false, pid, cardId ?? null)
         return
       }
       if (tab.kind === 'type-list') {
         clearEmbeddedEditor()
         const { type, planId, cardId } = tab.meta || {}
+        const pid =
+          resolvePlanIdForCard(cardId) ?? parsePositivePlanId(planId)
         currentTypeFilter.value = type
         if (type === 'bug') urlContentType.value = 'bug'
         else if (type === 'testcase') urlContentType.value = 'test_case'
         else if (type === 'badcase') urlContentType.value = 'badcase'
-        selectedPlan.value = planId
-        // 切换到类型列表时，获取该卡片下的数据
-        if (planId) {
+        if (pid) selectedPlan.value = pid
+        // 切换到类型列表时，获取该卡片下的数据（grep 等路径可在外部已 await 拉取后传 skipTypeListFetch 避免连打两次列表接口）
+        if (pid && !opts.skipTypeListFetch) {
           await nextTick()
-          fetchBadcasesByPlan(planId, 1, cardId)
+          await fetchBadcasesByPlan(pid, 1, cardId)
         }
         return
       }
@@ -3558,7 +3953,7 @@ const totalCards = ref(0)
       workbenchTabs.value.splice(idx, 1)
       if (!wasActive) {
         refreshBadcases()
-        fetchProjectPlans()
+        void fetchProjectPlans()
         return
       }
       const next = workbenchTabs.value[idx] || workbenchTabs.value[idx - 1]
@@ -3566,14 +3961,16 @@ const totalCards = ref(0)
         await activateWorkbenchTab(next.id)
       } else {
         activeWorkbenchTabId.value = null
+        await nextTick()
         clearEmbeddedEditor()
         selectedPlan.value = null
         urlContentType.value = null
       }
       refreshBadcases()
-      fetchProjectPlans()
       await nextTick()
       ensureWorkbenchTabForCurrentView()
+      await nextTick()
+      void fetchProjectPlans()
     }
 
     const toggleWorkbenchTabMenu = () => {
@@ -3590,12 +3987,11 @@ const totalCards = ref(0)
 
     /** 展开左侧计划树至某一计划（grep / modify / URL 展开共用） */
     const expandPlanTreeToPlanId = (targetId) => {
-      if (targetId == null) return
-      const tid = typeof targetId === 'number' ? targetId : parseInt(String(targetId), 10)
-      if (Number.isNaN(tid)) return
+      const tid = parsePositivePlanId(targetId)
+      if (!tid) return
       const findAndExpand = (plans, id, parents = []) => {
         for (const plan of plans) {
-          if (plan.id === id) {
+          if (sameEntityId(plan.id, id)) {
             parents.forEach((parentId) => {
               if (!expandedPlans.value.includes(parentId)) {
                 expandedPlans.value.push(parentId)
@@ -3651,16 +4047,12 @@ const totalCards = ref(0)
     /**
      * grep / 沙箱：打开「某卡片下」的类型列表 Tab（Bug / BadCase / 测试用例），与 CardPanel 点进列表一致。
      */
-    const upsertAndActivateTypeListTab = async ({ planId, cardId, type, cardTitle }) => {
-      const pid =
-        planId != null && planId !== 'unplanned'
-          ? typeof planId === 'number'
-            ? planId
-            : parseInt(String(planId), 10)
-          : NaN
+    const upsertAndActivateTypeListTab = async ({ planId, cardId, type, cardTitle, activateOpts } = {}) => {
       const cidStr =
         cardId != null && String(cardId).trim() !== '' ? String(cardId).trim() : ''
-      if (Number.isNaN(pid) || pid <= 0 || !cidStr) return
+      const pid =
+        resolvePlanIdForCard(cidStr) ?? parsePositivePlanId(planId)
+      if (!pid || !cidStr) return
       const tl =
         type === 'badcase'
           ? 'badcase'
@@ -3685,7 +4077,7 @@ const totalCards = ref(0)
         title,
         meta: { type: tl, planId: pid, cardTitle, cardId: cidStr }
       })
-      await activateWorkbenchTab(tabId)
+      await activateWorkbenchTab(tabId, activateOpts || {})
       await nextTick()
       scrollActiveWorkbenchTabIntoView()
     }
@@ -3747,13 +4139,15 @@ const totalCards = ref(0)
       showWorkbenchTabMenu.value = false
       workbenchTabs.value = []
       activeWorkbenchTabId.value = null
+      await nextTick()
       clearEmbeddedEditor()
       selectedPlan.value = null
       urlContentType.value = null
       refreshBadcases()
-      fetchProjectPlans()
       await nextTick()
       ensureWorkbenchTabForCurrentView()
+      await nextTick()
+      void fetchProjectPlans()
     }
 
     watch(showWorkbenchTabMenu, (open) => {
@@ -3976,11 +4370,11 @@ const totalCards = ref(0)
           '[MAIN-EDITOR] 已自动纠正参数顺序：应为 openMainEditor(实体id, 类型)。曾误传 (类型字符串, id)。',
           { 误传第一参: mid, 误传第二参: mty }
         )
-        const rid = typeof mty === 'number' ? mty : parseInt(String(mty).trim(), 10)
+        const rid = entityIdStr(mty)
         let ty = String(mid).toLowerCase()
         if (ty === 'bad_case') ty = 'badcase'
         mty = ty === 'test_case' ? 'testcase' : ty
-        mid = rid
+        mid = rid && /^\d+$/.test(rid) ? rid : entityIdStr(mty)
       }
       itemId = mid
       itemType = mty
@@ -4063,44 +4457,45 @@ const totalCards = ref(0)
       if (itemType === 'card') {
         row = cardRowForId
       } else {
-        row = badcases.value.find((b) => b.id == itemId)
+        row = badcases.value.find((b) => sameEntityId(b.id, itemId))
       }
-      /** 勿用列表行或卡片行的 title 作为 Bug/BadCase/TestCase 详情 Tab：列表常为卡片展示名，且 cards.id 与实体 id 不可混查 */
+      /** 详情 Tab：优先用实体标题（与列表行一致）；无行时再退回「编辑 xxx」占位，避免从沙箱跳转时长期显示泛化标题 */
       const detailEditTitleByEt = {
         bug: t('project.editBug'),
         badcase: t('project.editBadcase'),
         test_case: t('project.editTestCase')
       }
+      const defaultEntityEditorTitle =
+        detailEditTitleByEt[et] || t('project.editBadcase')
+      const entityRowTitle = String(row?.title || '').trim()
       const title =
         et === 'bug' || et === 'badcase' || et === 'test_case'
-          ? truncateForTab(detailEditTitleByEt[et] || t('project.editBadcase'), '编辑')
+          ? truncateForTab(
+              entityRowTitle || defaultEntityEditorTitle,
+              defaultEntityEditorTitle
+            )
           : truncateForTab(String(row?.title || '').trim(), t('project.editCard'))
 
       let planIdForEditor = null
       const metaPlan = curTab?.meta?.planId
       if (metaPlan != null && metaPlan !== '' && metaPlan !== 'unplanned') {
-        const mp = typeof metaPlan === 'number' ? metaPlan : parseInt(String(metaPlan), 10)
-        if (Number.isFinite(mp) && mp > 0) planIdForEditor = mp
+        planIdForEditor = parsePositivePlanId(metaPlan)
       }
       if (planIdForEditor == null && selectedPlan.value != null && selectedPlan.value !== '' && selectedPlan.value !== 'unplanned') {
-        const sp = typeof selectedPlan.value === 'number' ? selectedPlan.value : parseInt(String(selectedPlan.value), 10)
-        if (Number.isFinite(sp) && sp > 0) planIdForEditor = sp
+        planIdForEditor = parsePositivePlanId(selectedPlan.value)
       }
       if (planIdForEditor == null && row?.plan_id != null && row.plan_id !== '') {
-        const pp = parseInt(String(row.plan_id), 10)
-        if (Number.isFinite(pp) && pp > 0) planIdForEditor = pp
+        planIdForEditor = parsePositivePlanId(row.plan_id)
       }
 
       let cardIdForEditor = curTab?.meta?.cardId ?? null
       if (itemType === 'card') {
-        const cn = typeof itemId === 'number' ? itemId : parseInt(String(itemId), 10)
-        if (Number.isFinite(cn) && cn > 0) cardIdForEditor = cn
+        const cidStr = entityIdStr(itemId)
+        if (cidStr && /^\d+$/.test(cidStr)) cardIdForEditor = cidStr
       } else if (cardIdForEditor == null && row) {
         const rc = row.card_id ?? row.cardId
-        if (rc != null && rc !== '') {
-          const cn = typeof rc === 'number' ? rc : parseInt(String(rc), 10)
-          cardIdForEditor = Number.isFinite(cn) && cn > 0 ? cn : null
-        }
+        const cidStr = entityIdStr(rc)
+        if (cidStr && /^\d+$/.test(cidStr)) cardIdForEditor = cidStr
       }
 
       upsertWorkbenchTab({
@@ -4120,10 +4515,16 @@ const totalCards = ref(0)
       mountEditorComponents(entityIdForEditor, et, showDiff, true, planIdForEditor, cardIdForEditor)
     }
     
-    const openMainCreateEditor = (itemType, planId = null) => {
+    const openMainCreateEditor = (itemType, planId = null, cardId = null) => {
       const et = mapToEditorPlanType(itemType)
       const returnTo = activeWorkbenchTabId.value
-      const pidKey = planId == null || planId === '' ? 'unplanned' : String(planId)
+      const tab = activeWorkbenchTab.value
+      const cid = cardId ?? tab?.meta?.cardId ?? null
+      const pid =
+        resolvePlanIdForCard(cid) ??
+        normalizePlanId(planId) ??
+        resolveCreateContextPlanId()
+      const pidKey = pid == null ? 'unplanned' : String(pid)
       const tid = `create-${et}-${pidKey}`
       const titleMap = {
         badcase: t('project.newBadcase'),
@@ -4134,23 +4535,17 @@ const totalCards = ref(0)
         id: tid,
         kind: 'create',
         title: truncateForTab(titleMap[et] || t('project.newBadcase'), t('project.newBadcase')),
-        meta: { editorPlanType: et, planId: planId ?? null, returnTo }
+        meta: { editorPlanType: et, planId: pid, returnTo, cardId: cid }
       })
       activeWorkbenchTabId.value = tid
-      mountEditorComponents(null, et, false, false, planId ?? null)
+      mountEditorComponents(null, et, false, false, pid, cid)
     }
 
     function openNewBadcaseFromTerminal(text) {
       const snippet = String(text || '').trim()
       if (!snippet) return
       badcaseDraftPreset.value = { token: Date.now(), description: snippet.slice(0, 12000) }
-      const pid =
-        selectedPlan.value && selectedPlan.value !== 'unplanned'
-          ? typeof selectedPlan.value === 'number'
-            ? selectedPlan.value
-            : parseInt(String(selectedPlan.value), 10)
-          : null
-      openMainCreateEditor('badcase', Number.isFinite(pid) ? pid : null)
+      openMainCreateEditor('badcase', resolveCreateContextPlanId())
     }
     provide('openNewBadcaseFromTerminal', openNewBadcaseFromTerminal)
 
@@ -4158,13 +4553,7 @@ const totalCards = ref(0)
       const snippet = String(text || '').trim()
       if (!snippet) return
       bugDraftPreset.value = { token: Date.now(), description: snippet.slice(0, 12000) }
-      const pid =
-        selectedPlan.value && selectedPlan.value !== 'unplanned'
-          ? typeof selectedPlan.value === 'number'
-            ? selectedPlan.value
-            : parseInt(String(selectedPlan.value), 10)
-          : null
-      openMainCreateEditor('bug', Number.isFinite(pid) ? pid : null)
+      openMainCreateEditor('bug', resolveCreateContextPlanId())
     }
     provide('openNewBugFromTerminal', openNewBugFromTerminal)
 
@@ -4172,13 +4561,7 @@ const totalCards = ref(0)
       const snippet = String(text || '').trim()
       if (!snippet) return
       testcaseDraftPreset.value = { token: Date.now(), description: snippet.slice(0, 12000) }
-      const pid =
-        selectedPlan.value && selectedPlan.value !== 'unplanned'
-          ? typeof selectedPlan.value === 'number'
-            ? selectedPlan.value
-            : parseInt(String(selectedPlan.value), 10)
-          : null
-      openMainCreateEditor('test_case', Number.isFinite(pid) ? pid : null)
+      openMainCreateEditor('test_case', resolveCreateContextPlanId())
     }
     provide('openNewTestcaseFromTerminal', openNewTestcaseFromTerminal)
 
@@ -4209,10 +4592,6 @@ const totalCards = ref(0)
       }
     }
     
-    const goToDashboard = () => {
-      router.push('/dashboard')
-    }
-
     /** 与 agents/tools/modify_tool._sanitize_title_modifications 对齐，用于前端采纳 URL */
     const titleChangeIntentInNaturalQuery = (nq) => {
       const s = String(nq || '').trim()
@@ -4307,14 +4686,105 @@ const totalCards = ref(0)
       }
     }
     
+    const pickDetailFieldUpdatesForAdopt = (modifications) => {
+      if (!modifications || typeof modifications !== 'object') return null
+      const out = {}
+      for (const field of DETAIL_FIELDS) {
+        if (modifications[field] !== undefined) {
+          out[field] = modifications[field]
+        }
+      }
+      return Object.keys(out).length ? out : null
+    }
+
+    /** 采纳后：退出 show_diff、清 session，并通知已打开的详情 Tab 拉最新数据 */
+    const refreshOpenDetailEditorAfterAdopt = (targetType, targetId, opts = {}) => {
+      const tid = entityIdStr(targetId)
+      if (!tid) return
+      const tt = String(targetType || '')
+        .toLowerCase()
+        .replace(/-/g, '_')
+      const asyncPersist = opts.asyncPersist === true
+      const fieldUpdates = opts.fieldUpdates || null
+      try {
+        sessionStorage.removeItem('pendingModifyDiff')
+      } catch (_e) {
+        /* ignore */
+      }
+      if (showMainEditor.value && sameEntityId(mainEditorItemId.value, tid)) {
+        mainEditorShowDiff.value = false
+      }
+      if (tt === 'testcase' || tt === 'test_case') {
+        window.dispatchEvent(
+          new CustomEvent('testcase-detail-refresh', {
+            detail: { targetId: tid, asyncPersist, fieldUpdates },
+            bubbles: true
+          })
+        )
+      }
+    }
+
+    /** 详情字段仅在 sessionStorage 时，列表 ✓ 也需能落库 */
+    const readSessionModifyDataForAdopt = (pendingKey) => {
+      try {
+        const raw = sessionStorage.getItem('pendingModifyDiff')
+        if (!raw) return null
+        const pd = JSON.parse(raw)
+        if (entityIdStr(pd?.targetId) !== pendingKey) return null
+        const mods = pd?.modifications
+        if (!mods || typeof mods !== 'object') return null
+        const out = {}
+        for (const [field, data] of Object.entries(mods)) {
+          if (String(field).startsWith('_')) continue
+          if (typeof data === 'object' && data !== null && 'new' in data) {
+            out[field] = data
+          }
+        }
+        if (Object.keys(out).length === 0) return null
+        const tgt = String(pd?.target || 'testcase').toLowerCase().replace(/-/g, '_')
+        return {
+          ...out,
+          _target: tgt === 'test_case' ? 'testcase' : tgt,
+          _messageId: pd.messageId ?? null
+        }
+      } catch (_e) {
+        return null
+      }
+    }
+
+    const mergeSessionDetailModsIntoAdoptPayload = (pendingKey, targetType, modifications) => {
+      try {
+        const raw = sessionStorage.getItem('pendingModifyDiff')
+        if (!raw) return
+        const pd = JSON.parse(raw)
+        if (entityIdStr(pd?.targetId) !== pendingKey) return
+        const mods = pd?.modifications
+        if (!mods || typeof mods !== 'object') return
+        for (const [field, data] of Object.entries(mods)) {
+          if (String(field).startsWith('_')) continue
+          const nk = normalizeDiffFieldKey(field, targetType)
+          if (!DETAIL_FIELDS.includes(nk)) continue
+          if (modifications[nk] !== undefined) continue
+          if (typeof data === 'object' && data !== null && 'new' in data) {
+            modifications[nk] = data.new
+          }
+        }
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+
     // 确认修改（单条）。opts.skipRestoreFetch=true 时不在末尾 restore/拉列表，供连续组合批末尾统一执行，减少闪烁。
     const confirmModify = async (bugId, opts = {}) => {
       const skipRestoreFetch = opts.skipRestoreFetch === true
       const pendingKey = entityIdStr(bugId)
       console.log('[MODIFY] 确认修改 Bug:', pendingKey, skipRestoreFetch ? '(batch中间步，defer restore/fetch)' : '')
-      const modifyData =
+      let modifyData =
         (pendingKey && pendingModifications.value[pendingKey]) ||
         pendingModifications.value[bugId]
+      if (!modifyData || Object.keys(modifyData).filter((k) => !String(k).startsWith('_')).length === 0) {
+        modifyData = readSessionModifyDataForAdopt(pendingKey) || modifyData
+      }
       if (!modifyData) {
         console.log('[MODIFY] 没有待修改数据')
         return
@@ -4338,6 +4808,7 @@ const totalCards = ref(0)
       }
 
       pruneSpuriousTitleForAdopt(modifyData, modifications)
+      mergeSessionDetailModsIntoAdoptPayload(pendingKey, targetType, modifications)
 
       console.log(
         '[MODIFY_ADOPT] bugId=%s keys=%s title_after_prune=%s',
@@ -4373,15 +4844,21 @@ const totalCards = ref(0)
           }
         }
       } else {
-        // 采纳路径不写 title：Bug.title 与迭代卡片标题解耦，避免列表「卡片标题」随误写跳动
         const optimisticMods = { ...modifications }
-        delete optimisticMods.title
+        // Bug 列表行标题与迭代卡片标题解耦；TestCase/BadCase 列表标题即实体 title，可乐观更新减闪烁
+        if (targetType === 'bug') {
+          delete optimisticMods.title
+        }
         badcaseRow = badcases.value.find((b) => sameEntityId(b.id, pendingKey))
         if (badcaseRow) {
           for (const [field, value] of Object.entries(optimisticMods)) {
             if (badcaseRow.hasOwnProperty(field)) {
               badcaseRow[field] = value
             }
+          }
+          const rowCid = badcaseRow.card_id ?? badcaseRow.cardId
+          if (rowCid != null && rowCid !== '') {
+            syncTypeListTabCardId(rowCid, badcaseRow.title || '')
           }
         }
       }
@@ -4438,11 +4915,19 @@ const totalCards = ref(0)
           // diff_review_state 在 POST /modify 内已同步删除，无需再 resolve confirm
           if (!skipRestoreFetch) {
             try {
-              await restorePendingDiffReviews()
+              await restorePendingDiffReviews({ afterAdopt: true })
             } catch (e) {
               console.warn('[DIFF] restorePendingDiffReviews 失败:', e)
             }
-            fetchBadcases()
+            if (targetType !== 'card') {
+              await syncTabCardIdFromRecordDetail(targetType, pendingKey)
+            }
+            await awaitModifyAsyncPersist(result)
+            refreshOpenDetailEditorAfterAdopt(targetType, pendingKey, {
+              asyncPersist: result?.async === true,
+              fieldUpdates: pickDetailFieldUpdatesForAdopt(modifications)
+            })
+            await refreshActiveWorkbenchList(1)
             // 计划下「卡片」总览：刷新 Card，避免仅刷新了 Bug 行而卡片标题与 Card 表不一致
             if (!currentTypeFilter.value) {
               fetchCards(1).catch((e) => console.warn('[MODIFY] fetchCards 失败:', e))
@@ -4539,7 +5024,9 @@ const totalCards = ref(0)
         const row = badcases.value.find((b) => sameEntityId(b.id, s.bugId))
         if (row) {
           const om = { ...s.modifications }
-          delete om.title
+          if (targetType === 'bug') {
+            delete om.title
+          }
           for (const [field, value] of Object.entries(om)) {
             if (row.hasOwnProperty(field)) row[field] = value
           }
@@ -4597,11 +5084,15 @@ const totalCards = ref(0)
         const result = await response.json()
         if (result.success) {
           try {
-            await restorePendingDiffReviews()
+            await restorePendingDiffReviews({ afterAdopt: true })
           } catch (e) {
             console.warn('[DIFF] restorePendingDiffReviews 失败:', e)
           }
-          fetchBadcases()
+          if (targetType !== 'card') {
+            await syncTabCardIdFromRecordDetail(targetType, snapshots[0]?.bugId)
+          }
+          await awaitModifyAsyncPersist(result)
+          await refreshActiveWorkbenchList(1)
           if (!currentTypeFilter.value) {
             fetchCards(1).catch((e) => console.warn('[MODIFY] fetchCards 失败:', e))
           }
@@ -4620,22 +5111,25 @@ const totalCards = ref(0)
     // 取消修改。opts.skipRestore=true 时不在末尾 restore，供连续组批量末尾统一 restore。
     const cancelModify = async (bugId, opts = {}) => {
       const skipRestore = opts.skipRestore === true
-      console.log('[MODIFY] 取消修改 Bug:', bugId, skipRestore ? '(batch中间步，defer restore)' : '')
-      const modifyData = pendingModifications.value[bugId]
+      const idKey = entityIdStr(bugId) || String(bugId)
+      console.log('[MODIFY] 取消修改 Bug:', idKey, skipRestore ? '(batch中间步，defer restore)' : '')
+      const modifyData =
+        (idKey && pendingModifications.value[idKey]) || pendingModifications.value[bugId]
       // 创建新对象触发响应式更新
       const newPending = { ...pendingModifications.value }
+      delete newPending[idKey]
       delete newPending[bugId]
       pendingModifications.value = newPending
       
       // 通知对话区更新状态（标记为已取消）
       const event = new CustomEvent('modify-cancelled', {
-        detail: { targetId: bugId },
+        detail: { targetId: idKey },
         bubbles: true
       })
       window.dispatchEvent(event)
       await resolveDiffReviewState({
         target: modifyData?._target || (currentPlanType.value === 'bug' ? 'bug' : (currentPlanType.value === 'test_case' ? 'testcase' : 'badcase')),
-        targetId: bugId,
+        targetId: idKey,
         action: 'reject',
         messageId: modifyData?._messageId
       })
@@ -4658,8 +5152,8 @@ const totalCards = ref(0)
       for (const k of Object.keys(pm)) {
         const v = pm[k]
         if (v?._pendingDelete && String(v._target || '').toLowerCase() === 'plan') {
-          const n = Number(k)
-          if (Number.isFinite(n) && n > 0) return n
+          const pid = parsePositivePlanId(k)
+          if (pid) return pid
         }
       }
       return null
@@ -4674,10 +5168,15 @@ const totalCards = ref(0)
       return targetType
     }
 
-    const deleteApiForNormalizedTarget = (normalizedTarget, tid) => {
+    const cascadeBadcaseDeleteConfirmFn = (payload) =>
+      window.confirm(
+        cascadeCardDeleteConfirmText(t, { ...payload, source_kind: payload.source_kind || 'badcase' })
+      )
+
+    const deleteApiForNormalizedTarget = async (normalizedTarget, tid) => {
       switch (normalizedTarget) {
         case 'card':
-          return deleteCard(tid)
+          return deleteCardWithCascadeConfirm(tid, { confirmFn: cascadeBadcaseDeleteConfirmFn })
         case 'badcase':
           return deleteBadcase(tid)
         case 'bug':
@@ -4693,20 +5192,24 @@ const totalCards = ref(0)
 
     const confirmDelete = async (targetId, opts = {}) => {
       const skipRestoreFetch = opts.skipRestoreFetch === true
-      const tid = Number(targetId)
-      const modifyData = pendingModifications.value[tid]
+      const tid = entityIdStr(targetId)
+      if (!tid || !/^\d+$/.test(tid)) return
+      const modifyData =
+        pendingModifications.value[tid] || pendingModifications.value[targetId]
       if (!modifyData?._pendingDelete) return
 
       const normalizedTarget = normalizePendingDeleteTarget(modifyData)
 
       try {
         const res = await deleteApiForNormalizedTarget(normalizedTarget, tid)
+        if (res?.data?.cancelled) return
         if (res?.data && res.data.success === false) {
           throw new Error(res?.data?.error || 'delete failed')
         }
 
         const newPending = { ...pendingModifications.value }
         delete newPending[tid]
+        delete newPending[targetId]
         pendingModifications.value = newPending
 
         window.dispatchEvent(
@@ -4738,20 +5241,20 @@ const totalCards = ref(0)
 
         if (!skipRestoreFetch) {
           try {
-            await restorePendingDiffReviews()
+            await restorePendingDiffReviews({ afterAdopt: true })
           } catch (e) {
             console.warn('[DIFF] restorePendingDiffReviews:', e)
           }
 
           if (normalizedTarget === 'plan') {
-            if (Number(selectedPlan.value) === tid) {
+            if (sameEntityId(selectedPlan.value, tid)) {
               selectedPlan.value = null
             }
             await fetchProjectPlans()
           } else if (normalizedTarget === 'card') {
             await fetchCards(1).catch((e) => console.warn('[DELETE] fetchCards:', e))
           } else {
-            fetchBadcases()
+            await refreshActiveWorkbenchList(1)
             if (!currentTypeFilter.value) {
               fetchCards(1).catch((e) => console.warn('[DELETE] fetchCards:', e))
             }
@@ -4773,12 +5276,14 @@ const totalCards = ref(0)
      */
     const confirmDeleteBatch = async (groupIds, opts = {}) => {
       const skipRestoreFetch = opts.skipRestoreFetch === true
-      const ids = groupIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+      const ids = uniqPreserveOrderNumeric(groupIds)
       if (!ids.length) return
 
       const snapshots = []
       for (const bugId of ids) {
-        const modifyData = pendingModifications.value[bugId]
+        const modifyData =
+          pendingModifications.value[bugId] ||
+          pendingModifications.value[entityIdStr(bugId)]
         if (!modifyData?._pendingDelete) continue
         const normalizedTarget = normalizePendingDeleteTarget(modifyData)
         snapshots.push({ bugId, modifyData, normalizedTarget })
@@ -4847,7 +5352,7 @@ const totalCards = ref(0)
 
         if (!skipRestoreFetch) {
           try {
-            await restorePendingDiffReviews()
+            await restorePendingDiffReviews({ afterAdopt: true })
           } catch (e) {
             console.warn('[DIFF] restorePendingDiffReviews:', e)
           }
@@ -4860,7 +5365,7 @@ const totalCards = ref(0)
           } else if (nt0 === 'card') {
             await fetchCards(1).catch((e) => console.warn('[DELETE] fetchCards:', e))
           } else {
-            fetchBadcases()
+            await refreshActiveWorkbenchList(1)
             if (!currentTypeFilter.value) {
               fetchCards(1).catch((e) => console.warn('[DELETE] fetchCards:', e))
             }
@@ -5259,9 +5764,9 @@ const totalCards = ref(0)
     
     // 批量确认所有修改
     const confirmAllModify = async () => {
-      const pendingIds = Object.keys(pendingModifications.value)
-        .map(Number)
-        .filter((id) => !pendingModifications.value[id]?._pendingDelete)
+      const pendingIds = Object.keys(pendingModifications.value).filter(
+        (id) => !pendingModifications.value[id]?._pendingDelete
+      )
       console.log('[MODIFY] 批量确认修改:', pendingIds)
       if (!pendingIds.length) return
       await confirmModifyBatch(pendingIds)
@@ -5273,7 +5778,7 @@ const totalCards = ref(0)
       console.log('[MODIFY] 批量取消修改:', pendingIds)
       
       for (const id of pendingIds) {
-        await cancelModify(parseInt(id))
+        await cancelModify(id)
       }
     }
     
@@ -5518,6 +6023,15 @@ const totalCards = ref(0)
       // 根据状态过滤
       if (selectedStatus.value) {
         filtered = filtered.filter(b => b.status === selectedStatus.value)
+      }
+
+      // type-list Tab：按卡片再收窄一层（后端已支持 card_id；客户端兜底防 Tab meta 滞后）
+      const listTab = activeWorkbenchTab.value
+      if (listTab?.kind === 'type-list') {
+        const cid = entityIdStr(listTab.meta?.cardId ?? listTab.meta?.card_id)
+        if (cid && /^\d+$/.test(cid)) {
+          filtered = filtered.filter((b) => sameEntityId(b.card_id ?? b.cardId, cid))
+        }
       }
       
       console.log('筛选后的BadCase数量:', filtered.length)
@@ -6076,7 +6590,7 @@ const totalCards = ref(0)
         const expandPlanId = route.query.expand_plan
         await Promise.all([
           fetchProjectInfo(),
-          fetchProjectPlans(),
+          fetchProjectPlans({ autoSelectFirst: true }),
           fetchProjectMembers()
         ])
         if (expandPlanId) {
@@ -6683,7 +7197,11 @@ const totalCards = ref(0)
         // 等待页面完全加载后触发事件
         setTimeout(() => {
           const event = new CustomEvent('grep-navigate', {
-            detail: { planId: parseInt(navigatePlan), bugId: parseInt(navigateBug), target: 'bug' }
+            detail: {
+              planId: parsePositivePlanId(navigatePlan),
+              bugId: entityIdStr(navigateBug),
+              target: 'bug'
+            }
           })
           window.dispatchEvent(event)
           console.log('已触发 grep-navigate 事件')
@@ -6882,10 +7400,11 @@ const totalCards = ref(0)
             : tgt === 'testcase' || tgt === 'test_case'
               ? 'testcase'
               : 'bug'
-        const planOk = Number.isFinite(pn) && pn > 0
+        const planOk = !!parsePositivePlanId(pn)
         if (planOk) {
-          expandPlanTreeToPlanId(pn)
-          selectedPlan.value = pn
+          const pnStr = parsePositivePlanId(pn)
+          expandPlanTreeToPlanId(pnStr)
+          selectedPlan.value = pnStr
           let openedTypeList = false
           if (['bug', 'badcase', 'testcase', 'test_case'].includes(tgt)) {
             await fetchCards()
@@ -6893,22 +7412,16 @@ const totalCards = ref(0)
             let cardRow = null
             const navCopyCardId = preview.nav_copy_source_card_id ?? preview.navCopySourceCardId
             if (navCopyCardId != null && navCopyCardId !== '') {
-              const ncid =
-                typeof navCopyCardId === 'number'
-                  ? navCopyCardId
-                  : parseInt(String(navCopyCardId), 10)
-              if (Number.isFinite(ncid) && ncid > 0) {
-                cardRow = cards.value.find((c) => Number(c.id) === ncid) || null
+              const ncid = entityIdStr(navCopyCardId)
+              if (ncid && /^\d+$/.test(ncid)) {
+                cardRow = cards.value.find((c) => sameEntityId(c.id, ncid)) || null
               }
             }
             const explicitCardId = preview.card_id ?? preview.cardId
             if (!cardRow && explicitCardId != null && explicitCardId !== '') {
-              const cid =
-                typeof explicitCardId === 'number'
-                  ? explicitCardId
-                  : parseInt(String(explicitCardId), 10)
-              if (Number.isFinite(cid) && cid > 0) {
-                cardRow = cards.value.find((c) => Number(c.id) === cid) || null
+              const cid = entityIdStr(explicitCardId)
+              if (cid && /^\d+$/.test(cid)) {
+                cardRow = cards.value.find((c) => sameEntityId(c.id, cid)) || null
                 if (!cardRow?.id) {
                   try {
                     const res = await getCardDetail(cid)
@@ -6932,19 +7445,16 @@ const totalCards = ref(0)
                 srcId = preview.copy_from_testcase_id ?? preview.source_testcase_id
               }
               if (srcId != null && srcId !== '') {
-                const n = typeof srcId === 'number' ? srcId : parseInt(String(srcId), 10)
-                if (Number.isFinite(n) && n > 0) {
-                  cardRow = resolveCardForListNav(n, typeForNav)
+                const sid = entityIdStr(srcId)
+                if (sid && /^\d+$/.test(sid)) {
+                  cardRow = resolveCardForListNav(sid, typeForNav)
                 }
               }
             }
             // 分页首屏未包含源卡片时，用详情接口补齐（面包屑「迭代/卡片名」与采纳后列表上下文）
             if (!cardRow?.id && navCopyCardId != null && navCopyCardId !== '') {
-              const ncid =
-                typeof navCopyCardId === 'number'
-                  ? navCopyCardId
-                  : parseInt(String(navCopyCardId), 10)
-              if (Number.isFinite(ncid) && ncid > 0) {
+              const ncid = entityIdStr(navCopyCardId)
+              if (ncid && /^\d+$/.test(ncid)) {
                 try {
                   const res = await getCardDetail(ncid)
                   const card = res?.data?.data
@@ -6964,9 +7474,9 @@ const totalCards = ref(0)
                     ? preview.copy_from_badcase_id ?? preview.source_badcase_id
                     : preview.copy_from_testcase_id ?? preview.source_testcase_id
               if (srcRid != null && srcRid !== '') {
-                const n = typeof srcRid === 'number' ? srcRid : parseInt(String(srcRid), 10)
-                if (Number.isFinite(n) && n > 0) {
-                  cardRow = await resolveCardRowByRecordDetailApi(n, typeForNav, parsePositivePlanId(pn))
+                const sid = entityIdStr(srcRid)
+                if (sid && /^\d+$/.test(sid)) {
+                  cardRow = await resolveCardRowByRecordDetailApi(sid, typeForNav, parsePositivePlanId(pn))
                 }
               }
             }
@@ -7054,15 +7564,12 @@ const totalCards = ref(0)
     /** 采纳新建后滚动到列表中对应行（与 grep / modify 定位一致） */
     const scrollToCreatedListRow = async (createdId, opts = {}) => {
       if (createdId == null || createdId === '') return
-      const id = Number(createdId)
-      if (!Number.isFinite(id)) return
+      const id = entityIdStr(createdId)
+      if (!id || !/^\d+$/.test(id)) return
       const cardIdRaw = opts.cardId ?? opts.card_id
-      const cid =
-        cardIdRaw != null && cardIdRaw !== ''
-          ? Number(cardIdRaw)
-          : NaN
-      const selectors = [`[data-bug-id="${id}"]`]
-      if (Number.isFinite(cid) && cid > 0) {
+      const cid = entityIdStr(cardIdRaw)
+      const selectors = [`[data-bug-id="${id}"]`, `[data-item-id="${id}"]`]
+      if (cid && /^\d+$/.test(cid)) {
         selectors.push(`[data-card-id="${cid}"]`, `[data-item-id="${cid}"]`)
       }
       for (let attempt = 0; attempt < 18; attempt++) {
@@ -7148,10 +7655,8 @@ const totalCards = ref(0)
             assignee_id: previewForApi.assignee_id
           }
           const pp = previewForApi.plan_id ?? previewForApi.planId
-          if (pp != null && pp !== '') {
-            const pNum = Number(pp)
-            if (Number.isFinite(pNum) && pNum > 0) body.plan_id = pNum
-          }
+          const planStr = parsePositivePlanId(pp)
+          if (planStr) body.plan_id = planStr
           const res = await fetch(`${BACKEND_BASE_URL}/api/cards`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -7194,11 +7699,11 @@ const totalCards = ref(0)
             targetPlanId = rp
           }
         }
-        if (targetPlanId && Number(selectedPlan.value) !== Number(targetPlanId)) {
+        if (targetPlanId && !sameEntityId(selectedPlan.value, targetPlanId)) {
           const expandPlanAndParents = (tid) => {
             const findAndExpand = (plans, targetId, parents = []) => {
               for (const plan of plans) {
-                if (plan.id === targetId) {
+                if (sameEntityId(plan.id, targetId)) {
                   parents.forEach((parentId) => {
                     if (!expandedPlans.value.includes(parentId)) {
                       expandedPlans.value.push(parentId)
@@ -7216,8 +7721,11 @@ const totalCards = ref(0)
             }
             findAndExpand(projectPlans.value, tid)
           }
-          expandPlanAndParents(Number(targetPlanId))
-          await selectPlan(Number(targetPlanId))
+          const tp = parsePositivePlanId(targetPlanId)
+          if (tp) {
+            expandPlanAndParents(tp)
+            await selectPlan(tp)
+          }
           await refreshBadcases()
         } else {
           await refreshBadcases()
@@ -7330,6 +7838,9 @@ const totalCards = ref(0)
       pendingModifications.value = newPending
       console.log('[MODIFY] 已清除 pendingModifications:', pendingModifications.value)
 
+      // 详情刷新由 confirmModify 落库后的 refreshOpenDetailEditorAfterAdopt 统一触发；
+      // 此处 modify-confirmed 早于 POST /modify 完成，过早拉详情会把旧值盖回编辑器。
+
       if (deletedTargetType === 'card') {
         await fetchCards(1).catch((e) => console.warn('[DELETE] fetchCards 失败:', e))
       } else if (['bug', 'badcase', 'testcase'].includes(deletedTargetType)) {
@@ -7403,23 +7914,37 @@ const totalCards = ref(0)
       if (diff && Array.isArray(diff) && diff.length > 0) {
         diff.forEach((fieldDiff) => {
           const rawField = fieldDiff.field ?? fieldDiff.field_label
-          const fieldKey = normalizeDiffFieldKey(rawField)
+          const fieldKey = normalizeDiffFieldKey(rawField, tgt)
           const oldLine = fieldDiff.lines?.find((l) => l.type === 'delete')
           const newLine = fieldDiff.lines?.find((l) => l.type === 'add')
           const unchangedLine = fieldDiff.lines?.find((l) => l.type === 'unchanged')
           if (oldLine && newLine) {
             let oldC = oldLine.content
             let newC = newLine.content
-            /** diff 行里「优先级」常被模型/渲染成重复中文，真实值以 before/after 为准 */
-            if (bugish && fieldKey === 'priority' && (before || after)) {
+            /** diff 行里「优先级」常被模型/渲染成重复中文；BadCase/Bug/TestCase 均以 before/after.priority 为准 */
+            const needsPrioritySnap =
+              fieldKey === 'priority' &&
+              (before || after) &&
+              (bugish || tgt === 'badcase' || tgt === 'testcase')
+            if (needsPrioritySnap) {
               const bo = before?.priority
               const ao = after?.priority
               if (bo != null && String(bo).trim() !== '') oldC = bo
               if (ao != null && String(ao).trim() !== '') newC = ao
             }
+            const needsTcDetailSnap =
+              (tgt === 'testcase' || tgt === 'test_case') &&
+              (before || after) &&
+              TESTCASE_DETAIL_FIELDS.includes(fieldKey)
+            if (needsTcDetailSnap) {
+              const bo = readTestcaseRowField(before, fieldKey)
+              const ao = readTestcaseRowField(after, fieldKey)
+              if (bo) oldC = bo
+              if (ao) newC = ao
+            }
             if (
               rowSnapshotTargets &&
-              ['status', 'title', 'assignee'].includes(fieldKey) &&
+              ['status', 'title', 'assignee', 'case_category'].includes(fieldKey) &&
               (before || after)
             ) {
               if (String(oldC ?? '').trim() === '') {
@@ -7444,22 +7969,40 @@ const totalCards = ref(0)
               modifyData[fieldKey] = { old: oldC, new: newC }
             }
           } else if (unchangedLine) {
-            modifyData[fieldKey] = {
-              old: unchangedLine.content,
-              new: unchangedLine.content,
-              unchanged: true
+            const needsTcDetailSnap =
+              (tgt === 'testcase' || tgt === 'test_case') &&
+              (before || after) &&
+              TESTCASE_DETAIL_FIELDS.includes(fieldKey)
+            if (needsTcDetailSnap) {
+              const bo = readTestcaseRowField(before, fieldKey)
+              const ao = readTestcaseRowField(after, fieldKey)
+              if (bo !== ao && (bo || ao)) {
+                modifyData[fieldKey] = { old: bo || '', new: ao || '' }
+              } else {
+                modifyData[fieldKey] = {
+                  old: bo || unchangedLine.content,
+                  new: ao || unchangedLine.content,
+                  unchanged: true
+                }
+              }
+            } else {
+              modifyData[fieldKey] = {
+                old: unchangedLine.content,
+                new: unchangedLine.content,
+                unchanged: true
+              }
             }
           }
         })
       } else if (modifications && typeof modifications === 'object') {
         for (const [field, value] of Object.entries(modifications)) {
-          const fk = normalizeDiffFieldKey(field)
+          const fk = normalizeDiffFieldKey(field, tgt)
           if (value && typeof value === 'object' && 'new' in value) {
             let entry = { ...value }
             if (
               rowSnapshotTargets &&
               (before || after) &&
-              ['status', 'title', 'assignee'].includes(fk) &&
+              ['status', 'title', 'assignee', 'case_category'].includes(fk) &&
               (!entry.old || String(entry.old).trim() === '')
             ) {
               const bo = snapListField(before, fk)
@@ -7489,15 +8032,15 @@ const totalCards = ref(0)
         modifyData.status &&
         (!modifyData.status.old || String(modifyData.status.old).trim() === '')
       ) {
-        const cid = parseInt(String(detail?.targetId ?? ''), 10)
-        if (!Number.isNaN(cid) && cid > 0) {
+        const cid = entityIdStr(detail?.targetId)
+        if (cid && /^\d+$/.test(cid)) {
           let fill = ''
           if (Array.isArray(badcases.value)) {
-            const br = badcases.value.find((b) => Number(b.card_id ?? b.cardId) === cid)
+            const br = badcases.value.find((b) => sameEntityId(b.card_id ?? b.cardId, cid))
             if (br?.status != null && String(br.status).trim() !== '') fill = String(br.status)
           }
           if (!fill && Array.isArray(cards.value)) {
-            const cr = cards.value.find((c) => Number(c.id) === cid)
+            const cr = cards.value.find((c) => sameEntityId(c.id, cid))
             if (cr?.status != null && String(cr.status).trim() !== '') fill = String(cr.status)
           }
           if (fill) {
@@ -7530,14 +8073,7 @@ const totalCards = ref(0)
       if (meta?.executed === true) return
       const key = entityIdStr(recordKey)
       if (!key || !/^\d+$/.test(key)) return
-      const md = modifyData && typeof modifyData === 'object' ? modifyData : {}
-      const overlay = {}
-      for (const [fk, v] of Object.entries(md)) {
-        const nk = normalizeDiffFieldKey(fk)
-        if (!v || typeof v !== 'object' || !('new' in v)) continue
-        if (v.unchanged === true) continue
-        overlay[nk] = v
-      }
+      const overlay = filterModifyDataToListOverlay(modifyData, meta?.target)
       if (Object.keys(overlay).length === 0) return
       const next = { ...pendingModifications.value }
       const prev = next[key] || {}
@@ -7562,19 +8098,16 @@ const totalCards = ref(0)
       if (!tidStr || !/^\d+$/.test(tidStr)) return
       const { target, diff, messageId, batchIndex } = detail
 
-      if (diff && Array.isArray(diff) && diff.length > 0 && writeSession) {
-        sessionStorage.removeItem('pendingModifyDiff')
-        sessionStorage.setItem(
-          'pendingModifyDiff',
-          JSON.stringify({
-            targetId: tidStr,
-            target: target,
-            diff: diff,
-            modifications: modifyData,
-            messageId: messageId,
-            batchIndex: batchIndex
-          })
-        )
+      const detailMods = filterModifyDataToDetailSession(modifyData, target)
+      if (Object.keys(detailMods).length > 0 && writeSession) {
+        setPendingModifyDiffSession({
+          targetId: tidStr,
+          target: target,
+          diff: diff,
+          modifications: detailMods,
+          messageId: messageId,
+          batchIndex: batchIndex
+        })
       }
 
       if (diff && Array.isArray(diff) && diff.length > 0) {
@@ -7604,20 +8137,17 @@ const totalCards = ref(0)
         if (!tidStr || !/^\d+$/.test(tidStr)) continue
         const { target, diff, messageId, batchIndex } = detail
 
-        if (diff && Array.isArray(diff) && diff.length > 0 && !sessionWritten) {
+        const detailModsBatch = filterModifyDataToDetailSession(modifyData, target)
+        if (Object.keys(detailModsBatch).length > 0 && !sessionWritten) {
           try {
-            sessionStorage.removeItem('pendingModifyDiff')
-            sessionStorage.setItem(
-              'pendingModifyDiff',
-              JSON.stringify({
-                targetId: tidStr,
-                target: target,
-                diff: diff,
-                modifications: modifyData,
-                messageId: messageId,
-                batchIndex: batchIndex
-              })
-            )
+            setPendingModifyDiffSession({
+              targetId: tidStr,
+              target: target,
+              diff: diff,
+              modifications: detailModsBatch,
+              messageId: messageId,
+              batchIndex: batchIndex
+            })
           } catch (_e) {
             /* ignore */
           }
@@ -7626,13 +8156,7 @@ const totalCards = ref(0)
 
         if (diff && Array.isArray(diff) && diff.length > 0) {
           const prev = base[tidStr] || {}
-          const overlay = {}
-          for (const [fk, v] of Object.entries(modifyData)) {
-            const nk = normalizeDiffFieldKey(fk)
-            if (!v || typeof v !== 'object' || !('new' in v)) continue
-            if (v.unchanged === true) continue
-            overlay[nk] = v
-          }
+          const overlay = filterModifyDataToListOverlay(modifyData, target)
           if (Object.keys(overlay).length > 0) {
             base[tidStr] = {
               ...prev,
@@ -7705,6 +8229,44 @@ const totalCards = ref(0)
       }
 
       return match || null
+    }
+
+    const typeListMetaMatchesNavTarget = (metaType, navTargetRaw) => {
+      const mt = String(metaType || '')
+        .toLowerCase()
+        .replace(/-/g, '_')
+      const ntRaw = String(navTargetRaw || '')
+        .toLowerCase()
+        .replace(/-/g, '_')
+      const nt = ntRaw === 'test_case' ? 'testcase' : ntRaw
+      if (nt === 'bug') return mt === 'bug'
+      if (nt === 'badcase') return mt === 'badcase' || mt === 'bad_case'
+      if (nt === 'testcase') return mt === 'testcase' || mt === 'test_case'
+      return false
+    }
+
+    /**
+     * 当前激活工作台 Tab 为「卡片下类型列表」时，用 meta.cardId 补导航（源表/API 常无 card_id）。
+     */
+    const getContextCardRowFromActiveTypeListTab = (navTargetRaw, planIdHint) => {
+      const tab = activeWorkbenchTab.value
+      if (!tab || tab.kind !== 'type-list' || !tab.meta) return null
+      const ntUse =
+        String(navTargetRaw || '')
+          .toLowerCase()
+          .replace(/-/g, '_') === 'test_case'
+          ? 'testcase'
+          : String(navTargetRaw || '').toLowerCase()
+      if (!typeListMetaMatchesNavTarget(tab.meta.type, ntUse)) return null
+      const hint = planIdHint != null && String(planIdHint).trim() !== '' ? parsePositivePlanId(planIdHint) : null
+      const metaPlanRaw = tab.meta.planId ?? tab.meta.plan_id
+      const metaPlan =
+        metaPlanRaw != null && String(metaPlanRaw).trim() !== '' ? parsePositivePlanId(metaPlanRaw) : null
+      if (hint && metaPlan && String(hint) !== String(metaPlan)) return null
+      const idStr = entityIdStr(tab.meta.cardId ?? tab.meta.card_id)
+      if (!idStr || !/^\d+$/.test(idStr)) return null
+      const titleRaw = tab.meta.cardTitle ?? tab.meta.card_title ?? ''
+      return { id: idStr, title: (titleRaw && String(titleRaw).trim()) || '' }
     }
 
     /** 当前迭代卡片首屏（与 fetchCards 的 per_page 一致，可能不含目标行） */
@@ -7818,6 +8380,51 @@ const totalCards = ref(0)
           }
         } catch (e) {
           console.warn('[NAV] plan-scoped card list scan failed', ntUse, idKey, e)
+        }
+      }
+
+      if (cidRaw == null || cidRaw === '') {
+        const ctxHit = getContextCardRowFromActiveTypeListTab(ntUse, pidForScan)
+        if (ctxHit?.id) {
+          logListNav('recordDetailResolvedActiveTypeListTab', {
+            navTarget: ntUse,
+            recordId: idKey,
+            cardId: ctxHit.id,
+            cardTitle: ctxHit.title,
+            planId: pidForScan
+          })
+          return ctxHit
+        }
+      }
+
+      if (
+        (cidRaw == null || cidRaw === '') &&
+        ['bug', 'badcase', 'testcase'].includes(ntUse) &&
+        projectId.value
+      ) {
+        try {
+          const q = { source_type: ntUse, source_id: idKey }
+          if (pidForScan) q.prefer_plan_id = pidForScan
+          const res = await resolveProjectCardBySource(projectId.value, q)
+          const c = res?.data?.data?.card
+          if (res?.data?.success && c && c.id != null && String(c.id).trim() !== '') {
+            const row = normalizeSnowflakeCardRow(c)
+            const hitId = entityIdStr(row.id)
+            if (hitId && /^\d+$/.test(hitId)) {
+              logListNav('recordDetailResolvedSourceApi', {
+                navTarget: ntUse,
+                recordId: idKey,
+                cardId: hitId,
+                preferPlan: pidForScan
+              })
+              return {
+                id: hitId,
+                title: (row.title && String(row.title).trim()) || fallbackTitle || ''
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[NAV] resolveProjectCardBySource failed', ntUse, idKey, e)
         }
       }
 
@@ -7975,18 +8582,16 @@ const totalCards = ref(0)
       const target = String(d.target || 'bug').toLowerCase()
       const rec = d.preview?.record && typeof d.preview.record === 'object' ? d.preview.record : {}
       const rawId = d.target_id ?? rec.id
-      const intTargetId = parseInt(rawId, 10)
-      if (!Number.isFinite(intTargetId) || intTargetId <= 0) return
+      const intTargetId = entityIdStr(rawId)
+      if (!intTargetId || !/^\d+$/.test(intTargetId)) return
 
-      let targetPlanId = d.plan_id != null ? parseInt(String(d.plan_id), 10) : NaN
-      if (!Number.isFinite(targetPlanId) || targetPlanId <= 0) {
-        targetPlanId = rec.plan_id != null ? parseInt(String(rec.plan_id), 10) : NaN
-      }
+      let targetPlanId =
+        parsePositivePlanId(d.plan_id) || parsePositivePlanId(rec.plan_id) || null
 
       const peerRaw = d.peerTargetIds
       const idSet = uniqPreserveOrderNumeric(
         Array.isArray(peerRaw) && peerRaw.length >= 2
-          ? [...peerRaw.map((x) => Number(x)), intTargetId]
+          ? [...peerRaw, intTargetId]
           : [intTargetId]
       )
       const nextPending = { ...pendingModifications.value }
@@ -8022,7 +8627,7 @@ const totalCards = ref(0)
 
         if (target === 'card') {
           urlContentType.value = null
-          if (Number.isFinite(targetPlanId) && targetPlanId > 0) {
+          if (targetPlanId) {
             selectedPlan.value = targetPlanId
             expandPlanTreeToPlanId(targetPlanId)
             await fetchCards()
@@ -8052,7 +8657,7 @@ const totalCards = ref(0)
           else if (nt === 'badcase') urlContentType.value = 'badcase'
           else if (nt === 'testcase') urlContentType.value = 'test_case'
 
-          if (Number.isFinite(targetPlanId) && targetPlanId > 0) {
+          if (targetPlanId) {
             selectedPlan.value = targetPlanId
             expandPlanTreeToPlanId(targetPlanId)
             await fetchCards()
@@ -8153,28 +8758,23 @@ const totalCards = ref(0)
 
           if (dtop.__pendingSyncedBatch === true) {
             const modifyDataPre = buildModifyDataFromShowModifyDetail(dtop)
-            const fieldKeysPre = Object.keys(modifyDataPre)
-            const hasDetailFieldsPre = fieldKeysPre.some((field) =>
-              DETAIL_FIELDS.includes(normalizeDiffFieldKey(field))
-            )
-            const hasListFieldChangesPre = fieldKeysPre.some((field) =>
-              LIST_FIELDS.includes(normalizeDiffFieldKey(field))
-            )
-            const allListFieldsPre =
-              fieldKeysPre.length > 0 &&
-              fieldKeysPre.every((field) =>
-                LIST_FIELDS.includes(normalizeDiffFieldKey(field))
-              )
-            /** 与主路径 allListFields 对齐：仅 title/status/assignee 时不得 fallback 开详情（文档 §6，避免沙箱 pending 污染标题） */
-            const onlyListNoDetailPre = allListFieldsPre && !hasDetailFieldsPre
-            if (
-              diff &&
-              Array.isArray(diff) &&
-              diff.length > 0 &&
-              hasDetailFieldsPre &&
+            const impactPre = getModifyFieldImpact(modifyDataPre, dtop.target)
+            /** 与主路径对齐：仅 title/status/assignee 真变更且无详情真变更时不得 fallback 开详情（文档 §6） */
+            const onlyListNoDetailPre = impactPre.hasEffectiveList && !impactPre.hasEffectiveDetail
+            const keysPre = Object.keys(modifyDataPre || {}).filter((k) => !String(k).startsWith('_'))
+            const hasLineDiffPre = Array.isArray(diff) && diff.length > 0
+            /** 后端可能只带 modifications、行级 diff 为空；仍须打开详情 diff（如 BadCase 问题分类） */
+            const hasModsOnlyDetailPre =
+              dtop.executed !== true &&
+              keysPre.length > 0 &&
+              impactPre.hasEffectiveDetail &&
+              !impactPre.hasEffectiveList
+            const shouldAutoOpenDetailPre =
+              impactPre.hasEffectiveDetail &&
+              !impactPre.hasEffectiveList &&
               suppressAutoOpenDetail !== true &&
-              !hasListFieldChangesPre
-            ) {
+              (hasLineDiffPre || hasModsOnlyDetailPre)
+            if (shouldAutoOpenDetailPre) {
               if (dtop.executed !== true) {
                 mergePendingModifyOverlayFromModifyData(modifyDataPre, navTargetIdStr, {
                   target: dtop.target,
@@ -8182,6 +8782,13 @@ const totalCards = ref(0)
                   natural_query:
                     typeof dtop.natural_query === 'string' ? dtop.natural_query : '',
                   peerTargetIds: dtop.peerTargetIds,
+                  executed: dtop.executed
+                })
+                persistDetailModifyDiffToSession(modifyDataPre, navTargetIdStr, {
+                  target: dtop.target,
+                  diff,
+                  messageId: dtop.messageId,
+                  batchIndex: dtop.batchIndex,
                   executed: dtop.executed
                 })
               }
@@ -8266,7 +8873,7 @@ const totalCards = ref(0)
             // 其它 suppressAutoOpenDetail（如切换计划 Tab 触发的 pending 同步）：无列表字段变更时也不抢 Tab。
             const hydrateOnlyNoWorkbenchTab =
               restoreHydrateOnly === true ||
-              (suppressAutoOpenDetail === true && !hasListFieldChangesPre)
+              (suppressAutoOpenDetail === true && !impactPre.hasEffectiveList)
             if (hydrateOnlyNoWorkbenchTab) {
               if (targetPlanId) selectedPlan.value = targetPlanId
               else selectedPlan.value = null
@@ -8445,40 +9052,33 @@ const totalCards = ref(0)
           
           console.log('[MODIFY] 构造后的 modifyData:', modifyData)
           const fieldKeys = Object.keys(modifyData)
-          console.log('[MODIFY] modifyData 的 keys:', fieldKeys)
+          const impact = getModifyFieldImpact(modifyData, target)
+          console.log('[MODIFY] modifyData 的 keys:', fieldKeys, 'impact:', impact)
 
-          // 是否包含详情字段（只能在详情页编辑）；assignee_id 按 assignee 视为列表字段
-          const hasDetailFields = fieldKeys.some(field => {
-            const normalized = normalizeDiffFieldKey(field)
-            return DETAIL_FIELDS.includes(normalized)
-          })
+          const hasLineDiffMain = Array.isArray(diff) && diff.length > 0
+          const keysMain = fieldKeys.filter((k) => !String(k).startsWith('_'))
+          const hasModsOnlyDetailMain =
+            executed !== true &&
+            keysMain.length > 0 &&
+            impact.hasEffectiveDetail &&
+            !impact.hasEffectiveList
+          const shouldProcessModifyPreview = hasLineDiffMain || hasModsOnlyDetailMain
 
-          // 是否全部都是列表字段（可只在列表展示 diff；优先级已归入详情字段）
-          const allListFields = fieldKeys.length > 0 && fieldKeys.every(field => {
-            const normalized = normalizeDiffFieldKey(field)
-            return LIST_FIELDS.includes(normalized)
-          })
-
-          // 是否包含「列表上可见、应用行内采纳」的列（标题/状态/负责人）
-          const hasListFieldChanges =
-            fieldKeys.length > 0 &&
-            fieldKeys.some((field) => LIST_FIELDS.includes(normalizeDiffFieldKey(field)))
-
-          // 只要有 diff 就先缓存到 sessionStorage，后续无论跳列表还是详情都可复用
-          if (diff && Array.isArray(diff) && diff.length > 0) {
-            const hasPendingModification = pendingModifications.value[navTargetIdStr]
-            if (!hasPendingModification || executed) {
-              sessionStorage.removeItem('pendingModifyDiff')
-              const diffData = {
-                targetId: navTargetIdStr,
-                target: target,
-                diff: diff,
-                modifications: modifyData,
-                messageId: messageId,
-                batchIndex: batchIndex
+          if (shouldProcessModifyPreview) {
+            if (!executed) {
+              const detailModsMain = filterModifyDataToDetailSession(modifyData, target)
+              if (Object.keys(detailModsMain).length > 0) {
+                const diffData = {
+                  targetId: navTargetIdStr,
+                  target: target,
+                  diff: hasLineDiffMain ? diff : [],
+                  modifications: detailModsMain,
+                  messageId: messageId,
+                  batchIndex: batchIndex
+                }
+                setPendingModifyDiffSession(diffData)
+                console.log('[MODIFY] 存储详情字段 diff:', diffData)
               }
-              sessionStorage.setItem('pendingModifyDiff', JSON.stringify(diffData))
-              console.log('[MODIFY] 存储 diff 数据:', diffData)
             }
 
             // 先合并 pending（含列表列与详情字段）：含详情时会提前 return，否则列表上看不到 title/status/assignee diff
@@ -8507,9 +9107,9 @@ const totalCards = ref(0)
               }
             }
 
-            // 如果都是列表字段（例如标题/状态/负责人），只跳到列表并高亮那一行，不打开编辑详情
-            if (allListFields && !hasDetailFields) {
-              console.log('[MODIFY] 仅列表字段修改，跳转列表并高亮行，不打开详情')
+            // 列表列在列表行内确认；详情字段（如前置条件）写入 session 并打开详情页 field-diff
+            if (impact.hasEffectiveList) {
+              console.log('[MODIFY] 含列表字段有效变更，留在列表行内确认')
               if (executed) {
                 if (pendingModifications.value[navTargetIdStr]) {
                   const clone = { ...pendingModifications.value }
@@ -8517,7 +9117,6 @@ const totalCards = ref(0)
                   pendingModifications.value = clone
                 }
               }
-              // 类型切换
               if (target === 'bug') {
                 urlContentType.value = 'bug'
               } else if (target === 'badcase') {
@@ -8528,20 +9127,42 @@ const totalCards = ref(0)
                 urlContentType.value = null
               }
               highlightRowId.value = navTargetIdStr
-              // 下面已有的 plan_id 推导和 fetchBadcases 逻辑会负责切计划和刷新列表
-            } else {
-              // 含详情字段：若同时改了列表列，优先留在列表用行内 ✓/✗；仅详情字段时才自动打开编辑页
-              if (suppressAutoOpenDetail === true) {
-                console.log('[MODIFY] 自动同步链路，抑制详情自动打开，仅同步列表状态')
-              } else if (!hasListFieldChanges) {
-                console.log('[MODIFY] 仅详情字段修改，打开编辑详情页')
+              if (
+                impact.hasEffectiveDetail &&
+                suppressAutoOpenDetail !== true &&
+                !executed
+              ) {
+                persistDetailModifyDiffToSession(modifyData, navTargetIdStr, {
+                  target,
+                  diff: hasLineDiffMain ? diff : [],
+                  messageId,
+                  batchIndex,
+                  executed
+                })
+                console.log('[MODIFY] 同时含详情字段，打开详情页确认（如前置条件）')
                 await openMainEditor(navTargetIdStr, target, true)
                 return
-              } else {
-                console.log(
-                  '[MODIFY] 列表列与详情同时修改：留在列表采纳标题/状态/负责人；详情字段请点 ▶ 或打开编辑页'
-                )
               }
+            } else if (suppressAutoOpenDetail === true) {
+              console.log('[MODIFY] 自动同步链路，抑制详情自动打开，仅同步列表状态')
+            } else if (impact.hasEffectiveDetail) {
+              console.log('[MODIFY] 仅详情字段有效变更，打开编辑详情页')
+              await openMainEditor(navTargetIdStr, target, true)
+              return
+            } else {
+              console.log(
+                '[MODIFY] 无列表/详情有效变更或仅未知字段，留在列表；不自动打开详情'
+              )
+              if (target === 'bug') {
+                urlContentType.value = 'bug'
+              } else if (target === 'badcase') {
+                urlContentType.value = 'badcase'
+              } else if (target === 'testcase') {
+                urlContentType.value = 'test_case'
+              } else if (target === 'card') {
+                urlContentType.value = null
+              }
+              highlightRowId.value = navTargetIdStr
             }
           }
           
@@ -8642,7 +9263,7 @@ const totalCards = ref(0)
             : { planId: null, urlContentType: uctForNav }
 
           let listLoadedByTabNavigation = false
-          if (suppressAutoOpenDetail === true && !hasListFieldChanges) {
+          if (suppressAutoOpenDetail === true && !impact.hasEffectiveList) {
             console.log('[MODIFY] 自动同步链路，跳过重复 Tab 激活，避免循环触发')
             // 当前链路通常已在目标 Tab；仅兜底维护 selectedPlan
             if (targetPlanId) selectedPlan.value = targetPlanId
@@ -8704,7 +9325,7 @@ const totalCards = ref(0)
               }
             }
             if (!openedTypeList) {
-              const onlyListFieldsNoDetail = allListFields && !hasDetailFields
+              const onlyListFieldsNoDetail = impact.hasEffectiveList && !impact.hasEffectiveDetail
               if (
                 targetPlanId &&
                 ['bug', 'badcase', 'testcase'].includes(target) &&
@@ -8737,15 +9358,32 @@ const totalCards = ref(0)
           }
 
           function setupPendingModifications () {
-            // 必须与 mergePendingModifyOverlayFromModifyData 同源，否则会覆盖掉 before/after 已补全的 old（例如 status 旧值为空）
             const built = buildModifyDataFromShowModifyDetail(event.detail)
-            const fieldCount = Object.keys(built).filter((k) => !k.startsWith('_')).length
-            if (fieldCount === 0) return
+            const listOverlay = filterModifyDataToListOverlay(built, target)
+            const detailMods = filterModifyDataToDetailSession(built, target)
+            if (
+              Object.keys(listOverlay).length === 0 &&
+              Object.keys(detailMods).length === 0
+            ) {
+              return
+            }
+
+            if (Object.keys(detailMods).length > 0 && executed !== true) {
+              persistDetailModifyDiffToSession(built, navTargetIdStr, {
+                target,
+                diff: Array.isArray(diff) ? diff : [],
+                messageId,
+                batchIndex,
+                executed
+              })
+            }
+
+            if (Object.keys(listOverlay).length === 0) return
 
             const prev = pendingModifications.value[navTargetIdStr] || {}
             const merged = {
               ...prev,
-              ...built,
+              ...listOverlay,
               _target: target
             }
             if (messageId != null) merged._messageId = messageId
@@ -8760,7 +9398,7 @@ const totalCards = ref(0)
               ...pendingModifications.value,
               [navTargetIdStr]: merged
             }
-            console.log('[MODIFY] setupPendingModifications（buildModifyData 合并）:', pendingModifications.value)
+            console.log('[MODIFY] setupPendingModifications（仅列表字段）:', pendingModifications.value)
           }
           
           // 只有未执行时才重新设置 pendingModifications
@@ -8842,11 +9480,10 @@ const totalCards = ref(0)
             : detail.bugId != null && detail.bugId !== ''
               ? detail.bugId
               : null
-        const cid =
-          typeof ridRaw === 'number' ? ridRaw : parseInt(String(ridRaw), 10)
-        if (!Number.isFinite(cid) || cid <= 0) return
+        const cidStr = entityIdStr(ridRaw)
+        if (!cidStr || !/^\d+$/.test(cidStr)) return
         try {
-          const cr = await getCardDetail(cid)
+          const cr = await getCardDetail(cidStr)
           const c = cr?.data?.data
           if (!cr?.data?.success || !c) return
           const st = String(c.source_type || '').toLowerCase()
@@ -8867,18 +9504,14 @@ const totalCards = ref(0)
             kind = 'testcase'
           if (!kind) return
           const sidRaw = c.source_id
-          const sid =
-            sidRaw != null && sidRaw !== ''
-              ? typeof sidRaw === 'number'
-                ? sidRaw
-                : parseInt(String(sidRaw), 10)
-              : NaN
-          const useRowId = Number.isFinite(sid) && sid > 0 ? sid : cid
+          const sidStr = entityIdStr(sidRaw)
+          const useRowId =
+            sidStr && /^\d+$/.test(sidStr) ? sidStr : cidStr
           detail.target = kind
           detail.recordId = useRowId
           detail.bugId = useRowId
-          detail.card_id = detail.card_id ?? detail.cardId ?? cid
-          detail.cardId = detail.cardId ?? detail.card_id ?? cid
+          detail.card_id = detail.card_id ?? detail.cardId ?? cidStr
+          detail.cardId = detail.cardId ?? detail.card_id ?? cidStr
           const pp = c.plan_id ?? c.planId
           if (
             (detail.planId == null || detail.planId === '') &&
@@ -8890,13 +9523,13 @@ const totalCards = ref(0)
           }
           if (detail.planId == null || detail.planId === '') {
             let rp = await resolvePlanIdByRecordApi(kind, useRowId)
-            if (!rp && cid !== useRowId)
-              rp = await resolvePlanIdByRecordApi(kind, cid)
-            if (!rp) rp = await resolvePlanIdByRecordApi('card', cid)
+            if (!rp && cidStr !== useRowId)
+              rp = await resolvePlanIdByRecordApi(kind, cidStr)
+            if (!rp) rp = await resolvePlanIdByRecordApi('card', cidStr)
             if (rp) detail.planId = rp
           }
           logListNav('grepNavigate.cardPromotedToTypeList', {
-            cardId: cid,
+            cardId: cidStr,
             kind,
             useRowId,
             planId: detail.planId
@@ -8911,7 +9544,13 @@ const totalCards = ref(0)
       const rawRecordIds = detail.recordIds
       const recordIdsBatch =
         Array.isArray(rawRecordIds) && rawRecordIds.length > 0
-          ? [...new Set(rawRecordIds.map((x) => Number(x)).filter((n) => !Number.isNaN(n) && n > 0))]
+          ? [
+              ...new Set(
+                rawRecordIds
+                  .map((x) => entityIdStr(x))
+                  .filter((id) => id && /^\d+$/.test(id))
+              )
+            ]
           : null
       const recordId = detail.recordId != null ? detail.recordId : detail.bugId
       const targetRaw = (detail.target || 'bug').toString().toLowerCase().replace(/-/g, '_')
@@ -8935,8 +9574,8 @@ const totalCards = ref(0)
       const legacyRowIdRaw = detail.legacy_row_id ?? detail.source_id ?? detail.bug_id
       let legacyRowId = null
       if (legacyRowIdRaw != null && legacyRowIdRaw !== '') {
-        const n = Number(legacyRowIdRaw)
-        if (!Number.isNaN(n) && n > 0) legacyRowId = n
+        const s = entityIdStr(legacyRowIdRaw)
+        if (s && /^\d+$/.test(s)) legacyRowId = s
       }
 
       let listKind = null
@@ -9041,9 +9680,8 @@ const totalCards = ref(0)
 
       /** 直达详情：不要先 upsert 计划 Tab，避免 Tab 标题与主区层级不一致 */
       if (openDetail && recordId != null && recordId !== '') {
-        const ridOpen =
-          typeof recordId === 'number' ? recordId : parseInt(String(recordId), 10)
-        if (!Number.isNaN(ridOpen) && ridOpen > 0) {
+        const ridOpenStr = entityIdStr(recordId)
+        if (ridOpenStr && /^\d+$/.test(ridOpenStr)) {
           if (!Number.isNaN(numericPlanId) && numericPlanId > 0) {
             expandPlanTreeToPlanId(numericPlanId)
             selectedPlan.value = numericPlanId
@@ -9061,7 +9699,7 @@ const totalCards = ref(0)
                     ? 'card'
                     : 'badcase'
           console.log('[GREP-NAV] openDetail 直达详情 Tab，跳过计划列表 Tab')
-          await openMainEditor(ridOpen, editorNavType, false)
+          await openMainEditor(ridOpenStr, editorNavType, false)
           return
         }
       }
@@ -9085,27 +9723,23 @@ const totalCards = ref(0)
           openDetail
         })
         if (target === 'card' && !mergedFromLegacy) {
-          const cid =
-            ridFirstEarly != null && ridFirstEarly !== ''
-              ? typeof ridFirstEarly === 'number'
-                ? ridFirstEarly
-                : parseInt(String(ridFirstEarly), 10)
-              : NaN
-          if (!Number.isFinite(cid) || cid <= 0) {
+          const cidStr =
+            ridFirstEarly != null && ridFirstEarly !== '' ? entityIdStr(ridFirstEarly) : ''
+          if (!cidStr || !/^\d+$/.test(cidStr)) {
             logListNav('grepOpenTypeList.abort', { reason: 'pure_card_bad_rid', ridFirstEarly })
             return false
           }
           let pid =
             !Number.isNaN(numericPlanId) && numericPlanId > 0 ? numericPlanId : null
           if (!pid) {
-            pid = await resolvePlanIdByRecordApi('card', cid)
+            pid = await resolvePlanIdByRecordApi('card', cidStr)
           }
           if (!pid || Number.isNaN(pid) || pid <= 0) {
             logListNav('grepOpenTypeList.fallback', {
               reason: 'pure_card_no_plan_open_editor',
-              cardId: cid
+              cardId: cidStr
             })
-            await openMainEditor(cid, 'card', false)
+            await openMainEditor(cidStr, 'card', false)
             return true
           }
           selectedPlan.value = pid
@@ -9116,15 +9750,15 @@ const totalCards = ref(0)
             planId: pid,
             urlContentType: null
           })
-          highlightRowId.value = cid
+          highlightRowId.value = cidStr
           await nextTick()
           let anyEl = null
           for (let i = 0; i < 14; i++) {
             await nextTick()
             if (i > 0) await new Promise((r) => setTimeout(r, 120))
             anyEl =
-              document.querySelector(`[data-item-id="${cid}"]`) ||
-              document.querySelector(`[data-card-id="${cid}"]`)
+              document.querySelector(`[data-item-id="${cidStr}"]`) ||
+              document.querySelector(`[data-card-id="${cidStr}"]`)
             if (anyEl) break
           }
           if (anyEl) {
@@ -9135,7 +9769,7 @@ const totalCards = ref(0)
           logListNav('grepOpenTypeList.ok', {
             reason: 'pure_card_plan_list',
             planId: pid,
-            cardId: cid
+            cardId: cidStr
           })
           return true
         }
@@ -9151,8 +9785,6 @@ const totalCards = ref(0)
 
         selectedPlan.value = numericPlanId
         expandPlanTreeToPlanId(numericPlanId)
-        await fetchCards()
-        await nextTick()
 
         let ek = listKind
         if (!ek && (target === 'bug' || target === 'badcase' || target === 'testcase')) {
@@ -9163,19 +9795,18 @@ const totalCards = ref(0)
           return false
         }
 
-        /** grep 项已带 bug.card_id 时优先按卡片 id 命中，避免仅依赖 source_id 映射失败而退化成「仅迭代计划 Tab」 */
+        /** grep 项已带 card_id 时先内存/详情解析卡片，避免无谓整表拉卡片 */
         const explicitCidRaw = detail.card_id ?? detail.cardId
         let cardRow = null
         let explicitEc = null
         if (explicitCidRaw != null && explicitCidRaw !== '') {
-          explicitEc =
-            typeof explicitCidRaw === 'number' ? explicitCidRaw : parseInt(String(explicitCidRaw), 10)
-          if (!Number.isNaN(explicitEc) && explicitEc > 0 && Array.isArray(cards.value)) {
-            cardRow = cards.value.find((c) => Number(c.id) === explicitEc) || null
+          explicitEc = entityIdStr(explicitCidRaw)
+          if (explicitEc && /^\d+$/.test(explicitEc) && Array.isArray(cards.value)) {
+            cardRow = cards.value.find((c) => sameEntityId(c.id, explicitEc)) || null
           }
         }
         /** 卡片列表分页时当前页可能不含目标卡片 id，需详情接口补标题 */
-        if (!cardRow?.id && explicitEc != null && !Number.isNaN(explicitEc) && explicitEc > 0) {
+        if (!cardRow?.id && explicitEc && /^\d+$/.test(String(explicitEc))) {
           try {
             const cr = await getCardDetail(explicitEc)
             const cdata = cr?.data?.data
@@ -9188,6 +9819,16 @@ const totalCards = ref(0)
         }
         if (!cardRow) {
           cardRow = resolveCardForListNav(ridFirst, ek)
+        }
+        if (!cardRow?.id) {
+          await fetchCards()
+          await nextTick()
+          if (explicitEc && /^\d+$/.test(String(explicitEc)) && Array.isArray(cards.value)) {
+            cardRow = cards.value.find((c) => sameEntityId(c.id, explicitEc)) || null
+          }
+          if (!cardRow) {
+            cardRow = resolveCardForListNav(ridFirst, ek)
+          }
         }
         /** 首屏 cards 不含 source 映射或记录不在当前页时，用实体详情里的 card_id 解析 */
         if (!cardRow?.id) {
@@ -9220,11 +9861,18 @@ const totalCards = ref(0)
           ek
         })
 
+        const listCardFilter =
+          entityIdStr(cardRow.id) && /^\d+$/.test(entityIdStr(cardRow.id))
+            ? entityIdStr(cardRow.id)
+            : null
+        await fetchBadcasesByPlan(numericPlanId, 1, listCardFilter)
+
         await upsertAndActivateTypeListTab({
           planId: numericPlanId,
           cardId: cardRow.id,
           type: ek,
-          cardTitle: cardTitleForTab
+          cardTitle: cardTitleForTab,
+          activateOpts: { skipTypeListFetch: true }
         })
         await nextTick()
 
@@ -9275,10 +9923,10 @@ const totalCards = ref(0)
           )
           const exRaw = detail.card_id ?? detail.cardId
           if (!lastCard?.id && exRaw != null && exRaw !== '') {
-            const exN = typeof exRaw === 'number' ? exRaw : parseInt(String(exRaw), 10)
-            if (Number.isFinite(exN) && exN > 0) {
+            const exStr = entityIdStr(exRaw)
+            if (exStr && /^\d+$/.test(exStr)) {
               try {
-                const cr = await getCardDetail(exN)
+                const cr = await getCardDetail(exStr)
                 const cdata = cr?.data?.data
                 if (cr?.data?.success && cdata?.id) {
                   lastCard = { id: cdata.id, title: cdata.title }
@@ -9297,17 +9945,21 @@ const totalCards = ref(0)
           if (lastCard?.id && !Number.isNaN(pnUse) && pnUse > 0) {
             selectedPlan.value = pnUse
             expandPlanTreeToPlanId(pnUse)
-            await fetchCards()
-            await nextTick()
             const cardTitleForTab =
               lastCard.title != null && String(lastCard.title).trim() !== ''
                 ? String(lastCard.title).trim()
                 : navTitle || `${ekTry}列表`
+            const lcStr2 =
+              entityIdStr(lastCard.id) && /^\d+$/.test(entityIdStr(lastCard.id))
+                ? entityIdStr(lastCard.id)
+                : null
+            await fetchBadcasesByPlan(pnUse, 1, lcStr2)
             await upsertAndActivateTypeListTab({
               planId: pnUse,
               cardId: lastCard.id,
               type: ekTry,
-              cardTitle: cardTitleForTab
+              cardTitle: cardTitleForTab,
+              activateOpts: { skipTypeListFetch: true }
             })
             await nextTick()
             const flashIds = recordIdsBatch?.length
@@ -9508,7 +10160,6 @@ const totalCards = ref(0)
       editBadcase,
       editCard,
       handleQuickUpdate,
-      goToDashboard,
       showPlanActions,
       hidePlanActions,
       showContextMenu,
@@ -12789,7 +13440,7 @@ const totalCards = ref(0)
   background: #252526;
   border-left: 1px solid #3e3e3e;
   box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
-  z-index: 2000; /* 低于 .top-bar 的 2100 */
+  z-index: 2000; /* 低于 ProjectWorkspaceShell .top-bar 的 10100 */
   display: flex;
   flex-direction: column;
   padding: 0;

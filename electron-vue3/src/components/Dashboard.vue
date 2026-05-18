@@ -171,7 +171,7 @@ export default {
     const createNewProject = () => {
       router.push('/new-project')
     }
-    
+
     // 用户下拉菜单相关方法
     const toggleUserDropdown = () => {
       showUserDropdown.value = !showUserDropdown.value

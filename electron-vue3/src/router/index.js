@@ -8,12 +8,9 @@ const routes = [
   { path: '/register', name: 'Register', component: () => import('../components/Register.vue') },
   { path: '/reset-password', name: 'ResetPassword', component: () => import('../components/ResetPassword.vue') },
   { path: '/forgot-password', name: 'ForgotPassword', component: () => import('../components/ForgotPassword.vue') },
-  { 
-    path: '/dashboard', 
-    name: 'Dashboard', 
-    component: () => import('../components/Dashboard.vue'),
-    meta: { requiresAuth: true }
-  },
+  /** Dashboard 暂隐藏：旧链接统一到项目管理 */
+  { path: '/dashboard', redirect: '/project-manage' },
+  { path: '/dashboard/', redirect: '/project-manage' },
   { 
     path: '/project-manage', 
     name: 'ProjectManage', 

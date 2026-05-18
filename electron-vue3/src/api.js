@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { normalizeUploadImageUrl, uploadResponseToImageUrl } from './utils/uploadImageUrl.js'
 
 // 开发环境走 Vite 代理（与页面同源），登录 Cookie 才能可靠带到 /api，避免直连 :5000 与 127.0.0.1/localhost 混用导致会话丢失。
 // 生产 / Electron 打包仍指向实际后端（可通过 VITE_BACKEND_URL 覆盖）。
@@ -258,6 +259,20 @@ export function addChatMessage(sessionId, data) {
  * 聊天附图异步落库：POST /upload（MinIO），返回可公网/内网访问的 url。
  * 勿手动设 Content-Type，以便浏览器带 multipart boundary。
  */
+/** 富文本插图：走 /api/upload + 代理 URL，供 RichTextHtmlEditor 使用 */
+export function uploadRichTextImageFile(file) {
+  const fd = new FormData()
+  fd.append('file', file)
+  return api.post('/api/upload', fd, { timeout: 120000 }).then((r) => {
+    const url = uploadResponseToImageUrl(r)
+    if (!url) {
+      const d = r?.data
+      throw new Error((d && d.error) || 'upload failed')
+    }
+    return url
+  })
+}
+
 export function uploadChatImageBlob(blob, filename = 'image.png') {
   const fd = new FormData()
   const name = String(filename || 'image.png').trim() || 'image.png'
@@ -274,7 +289,7 @@ export function uploadChatImageBlob(blob, filename = 'image.png') {
       if (!url || (d && d.success === false) || (d && d.error)) {
         throw new Error((d && d.error) || 'upload failed')
       }
-      return String(url).trim()
+      return normalizeUploadImageUrl(String(url).trim())
     })
 }
 
@@ -435,6 +450,13 @@ export function getProjectCards(projectId, page = 1, perPage = 10, additionalPar
   return api.get(`/api/projects/${projectId}/cards`, { params })
 }
 
+/** 按源表类型 + 源表主键解析 Card（不按 plan 分页过滤；用于行上缺 card_id 时挂 type-list Tab） */
+export function resolveProjectCardBySource(projectId, params = {}) {
+  return api.get(`/api/projects/${projectId}/cards/resolve-source`, {
+    params: stringifySnowflakeQueryParams(params)
+  })
+}
+
 // 获取卡片详情
 export function getCardDetail(cardId) {
   return api.get(`/api/cards/${apiPathId(cardId)}`)
@@ -445,9 +467,83 @@ export function updateCard(cardId, data) {
   return api.put(`/api/cards/${apiPathId(cardId)}`, data)
 }
 
-// 删除卡片
-export function deleteCard(cardId) {
-  return api.delete(`/api/cards/${apiPathId(cardId)}`)
+// 删除卡片（Bug/BadCase/TestCase 类型可能返回 409 要求二次确认级联删除源表）
+export function deleteCard(cardId, opts = {}) {
+  const axiosOpts = {
+    validateStatus: (status) => (status >= 200 && status < 300) || status === 409
+  }
+  const body = {}
+  if (opts && opts.confirm_cascade_sources === true) {
+    body.confirm_cascade_sources = true
+  }
+  if (opts && opts.confirm_cascade_badcases === true) {
+    body.confirm_cascade_badcases = true
+  }
+  if (opts && opts.confirm_cascade_bugs === true) {
+    body.confirm_cascade_bugs = true
+  }
+  if (opts && opts.confirm_cascade_testcases === true) {
+    body.confirm_cascade_testcases = true
+  }
+  if (Object.keys(body).length) {
+    axiosOpts.data = body
+  }
+  return api.delete(`/api/cards/${apiPathId(cardId)}`, axiosOpts)
+}
+
+const CASCADE_CARD_DELETE_CODES = new Set([
+  'CASCADE_CARD_SOURCES_REQUIRED',
+  'CASCADE_BADCASES_REQUIRED' // 兼容旧后端
+])
+
+/** 若服务端要求级联删除源表，先调 confirmFn(payload) 再重试；取消则返回 data.cancelled */
+export async function deleteCardWithCascadeConfirm(cardId, options = {}) {
+  const { confirmFn } = options
+  let res = await deleteCard(cardId)
+  if (res.status === 409 && res.data && CASCADE_CARD_DELETE_CODES.has(res.data.code)) {
+    if (typeof confirmFn !== 'function') {
+      return res
+    }
+    const ok = await Promise.resolve(confirmFn(res.data))
+    if (!ok) {
+      return {
+        status: 409,
+        data: { ...res.data, success: false, cancelled: true }
+      }
+    }
+    res = await deleteCard(cardId, { confirm_cascade_sources: true })
+  }
+  return res
+}
+
+/** 二次确认文案：与 CardPanel / ProjectDetail 等共用（需传入 vue-i18n 的 t） */
+export function cascadeCardDeleteConfirmText(t, payload) {
+  const sk = (payload && payload.source_kind) || 'badcase'
+  const n = (payload && payload.count) ?? 0
+  const key =
+    sk === 'bug'
+      ? 'unplannedCards.cascadeBugSecondConfirm'
+      : sk === 'testcase'
+        ? 'unplannedCards.cascadeTestcaseSecondConfirm'
+        : 'unplannedCards.cascadeBadcaseSecondConfirm'
+  const head = typeof t === 'function' ? t(key, { count: n }) : key
+  const raw =
+    (payload && payload.linked_items) ||
+    (payload && payload.linked_badcases) ||
+    (payload && payload.linked_bugs) ||
+    (payload && payload.linked_testcases) ||
+    []
+  const lines = raw.map((x) => x.title || x.id).slice(0, 12)
+  const titles = lines.join('\n')
+  const suffix = n > 12 ? '\n…' : ''
+  return `${head}\n\n${titles}${suffix}`
+}
+
+// 项目内全局搜索（计划 + 卡片 + BadCase + Bug + 测试用例）
+export function globalSearch(projectId, query, perType = 30) {
+  return api.get(`/api/projects/${projectId}/global-search`, {
+    params: { query, per_type: perType }
+  })
 }
 
 // 全局搜索卡片

@@ -22,6 +22,25 @@ from agents.locale_prompts import (
 )
 
 
+def _grep_nav_json_id(value: Any) -> Optional[str]:
+    """主键写入前端 JSON 时用十进制字符串，避免超过 JS MAX_SAFE_INTEGER 时被截断。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return s
+    try:
+        return str(int(s, 10))
+    except (TypeError, ValueError):
+        return None
+
+
 class GrepTool(BaseTool):
     """
     缺陷定位工具
@@ -697,19 +716,19 @@ class GrepTool(BaseTool):
 
     def _collapse_navigation_merge_keys(
         self,
-        best_by_rid: Dict[int, Tuple[int, Dict[str, Any]]],
+        best_by_rid: Dict[str, Tuple[int, Dict[str, Any]]],
         card_list: List[Dict[str, Any]],
         plan_tree: Optional[Dict[str, Any]],
-    ) -> Dict[int, Tuple[int, Dict[str, Any]]]:
+    ) -> Dict[str, Tuple[int, Dict[str, Any]]]:
         """
         源表 Bug/BadCase/TestCase 与 Card 指向同一业务对象时，grep 会同时命中两行；
         按 Card.source_type/source_id 合并为一条 target=card（与迭代卡片列表一致）。
         """
         card_list = card_list or []
-        bug_sid_to_cid: Dict[int, int] = {}
-        bc_sid_to_cid: Dict[int, int] = {}
-        tc_sid_to_cid: Dict[int, int] = {}
-        cid_meta: Dict[int, Dict[str, Any]] = {}
+        bug_sid_to_cid: Dict[str, str] = {}
+        bc_sid_to_cid: Dict[str, str] = {}
+        tc_sid_to_cid: Dict[str, str] = {}
+        cid_meta: Dict[str, Dict[str, Any]] = {}
 
         def _npid(raw: Any) -> Any:
             if raw is None or raw == "":
@@ -722,31 +741,25 @@ class GrepTool(BaseTool):
 
         for c in card_list:
             raw_cid = c.get("card_id") if c.get("card_id") is not None else c.get("id")
-            if raw_cid is None:
+            cid_s = _grep_nav_json_id(raw_cid)
+            if not cid_s:
                 continue
-            try:
-                cid = int(raw_cid)
-            except (TypeError, ValueError):
-                continue
-            cid_meta[cid] = c
+            cid_meta[cid_s] = c
             sid = c.get("source_id")
-            if sid is None:
-                continue
-            try:
-                sid_i = int(sid)
-            except (TypeError, ValueError):
+            sid_s = _grep_nav_json_id(sid)
+            if not sid_s:
                 continue
             st = str(c.get("source_type") or "").lower()
             if st == "bug":
-                bug_sid_to_cid[sid_i] = cid
+                bug_sid_to_cid[sid_s] = cid_s
             elif st in ("bad_case", "badcase"):
-                bc_sid_to_cid[sid_i] = cid
+                bc_sid_to_cid[sid_s] = cid_s
             elif st in ("test_case", "testcase"):
-                tc_sid_to_cid[sid_i] = cid
+                tc_sid_to_cid[sid_s] = cid_s
 
-        merged: Dict[int, Tuple[int, Dict[str, Any]]] = {}
+        merged: Dict[str, Tuple[int, Dict[str, Any]]] = {}
 
-        def merge_entry(canon_rid: int, pri: int, ent: Dict[str, Any]) -> None:
+        def merge_entry(canon_rid: str, pri: int, ent: Dict[str, Any]) -> None:
             if canon_rid not in merged:
                 merged[canon_rid] = (pri, ent)
                 return
@@ -765,72 +778,54 @@ class GrepTool(BaseTool):
                     if el and not ol:
                         merged[canon_rid] = (pri, ent)
 
-        for rid, (pri, ent) in best_by_rid.items():
-            try:
-                rid_int = int(rid)
-            except (TypeError, ValueError):
+        for rid_key, (pri, ent) in best_by_rid.items():
+            if not rid_key:
                 continue
             t = str(ent.get("target") or "").lower()
-            canon = rid_int
+            canon_key = rid_key
             upgraded = False
             if t == "bug":
-                bid = ent.get("bug_id")
-                try:
-                    bi = int(bid) if bid is not None else None
-                except (TypeError, ValueError):
-                    bi = None
-                if bi is not None and bi in bug_sid_to_cid:
-                    canon = bug_sid_to_cid[bi]
+                bid_s = _grep_nav_json_id(ent.get("bug_id"))
+                if bid_s and bid_s in bug_sid_to_cid:
+                    canon_key = bug_sid_to_cid[bid_s]
                     upgraded = True
             elif t == "badcase":
-                si = ent.get("source_id")
-                try:
-                    si_i = int(si) if si is not None else None
-                except (TypeError, ValueError):
-                    si_i = None
-                if si_i is not None and si_i in bc_sid_to_cid:
-                    canon = bc_sid_to_cid[si_i]
+                si_s = _grep_nav_json_id(ent.get("source_id"))
+                if si_s and si_s in bc_sid_to_cid:
+                    canon_key = bc_sid_to_cid[si_s]
                     upgraded = True
             elif t == "testcase":
-                si = ent.get("source_id")
-                try:
-                    si_i = int(si) if si is not None else None
-                except (TypeError, ValueError):
-                    si_i = None
-                if si_i is not None and si_i in tc_sid_to_cid:
-                    canon = tc_sid_to_cid[si_i]
+                si_s = _grep_nav_json_id(ent.get("source_id"))
+                if si_s and si_s in tc_sid_to_cid:
+                    canon_key = tc_sid_to_cid[si_s]
                     upgraded = True
 
             if upgraded:
-                cm = cid_meta.get(canon) or {}
+                cm = cid_meta.get(canon_key) or {}
                 # 导航文案必须与 grep 命中的源表行一致；Card.title 可能滞后或与另一条 Bug 共用卡片展示名，勿优先用 cm
                 title = (ent.get("title") or cm.get("title") or "").strip()
                 pid = _npid(cm.get("plan_id"))
                 if pid is None:
                     pid = _npid(ent.get("plan_id"))
-                legacy_row_id = None
-                try:
-                    if t == "bug" and ent.get("bug_id") is not None:
-                        legacy_row_id = int(ent.get("bug_id"))
-                    elif ent.get("source_id") is not None:
-                        legacy_row_id = int(ent.get("source_id"))
-                except (TypeError, ValueError):
-                    legacy_row_id = None
+                if t == "bug":
+                    legacy_row_s = _grep_nav_json_id(ent.get("bug_id"))
+                else:
+                    legacy_row_s = _grep_nav_json_id(ent.get("source_id"))
                 ent2 = {
                     "type": "expand_and_locate",
                     "target": "card",
-                    "record_id": canon,
+                    "record_id": canon_key,
                     "title": title or ent.get("title", ""),
                     "plan_id": pid,
                     "plan_name": self._plan_display_name(plan_tree, pid) if pid else "未计划",
-                    "card_id": canon,
+                    "card_id": canon_key,
                     "merged_from_legacy": t,
                     # 前端钻进类型列表后，列表行 data-bug-id 为源表 id；合并后 record_id 为卡片 id，须用此项高亮具体行
-                    "legacy_row_id": legacy_row_id,
+                    "legacy_row_id": legacy_row_s,
                 }
-                merge_entry(canon, self._grep_nav_target_priority("card"), ent2)
+                merge_entry(canon_key, self._grep_nav_target_priority("card"), ent2)
             else:
-                merge_entry(canon, pri, ent)
+                merge_entry(canon_key, pri, ent)
 
         return merged
 
@@ -930,36 +925,37 @@ class GrepTool(BaseTool):
                 if pid is None:
                     continue
                 try:
-                    rid = int(pid)
+                    rid_i = int(pid)
                 except (TypeError, ValueError):
                     continue
+                rid_s = _grep_nav_json_id(pid)
+                if not rid_s:
+                    continue
                 title = (pl.get("name") or pl.get("title") or "").strip()
-                pname = self._plan_display_name(plan_tree, rid) or title or f"Plan #{rid}"
+                pname = self._plan_display_name(plan_tree, rid_i) or title or f"Plan #{rid_i}"
                 out_plan.append(
                     {
                         "type": "expand_and_locate",
                         "target": "plan",
-                        "record_id": rid,
+                        "record_id": rid_s,
                         "title": title or pname,
-                        "plan_id": rid,
+                        "plan_id": rid_i,
                         "plan_name": pname,
                     }
                 )
             return self._finalize_grep_navigation_items(out_plan, plan_tree, scope_plan_id)
         raw_items: List[Dict[str, Any]] = []
         card_list = card_list or []
-        # record_id -> (priority, entry) 取最优一条
-        best_by_rid: Dict[int, Tuple[int, Dict[str, Any]]] = {}
+        # record_id（字符串键）-> (priority, entry) 取最优一条；键与 JSON 下发一致，避免 JS 大数精度丢失
+        best_by_rid: Dict[str, Tuple[int, Dict[str, Any]]] = {}
 
         def _nav_push(entry: Dict[str, Any]) -> None:
-            rid = entry.get("record_id")
-            try:
-                rid_int = int(rid)
-            except (TypeError, ValueError):
+            rid_key = _grep_nav_json_id(entry.get("record_id"))
+            if not rid_key:
                 return
             pri = self._grep_nav_target_priority(str(entry.get("target") or ""))
-            if rid_int not in best_by_rid or pri < best_by_rid[rid_int][0]:
-                best_by_rid[rid_int] = (pri, entry)
+            if rid_key not in best_by_rid or pri < best_by_rid[rid_key][0]:
+                best_by_rid[rid_key] = (pri, entry)
 
         def _normalize_nav_plan_id(raw: Any) -> Any:
             """None / 0 / '' 视为未计划，仍要进导航（否则未计划 Bug 点击查询不到、navigation 为空）。"""
@@ -977,18 +973,19 @@ class GrepTool(BaseTool):
             card_id = bug.get('card_id') or bug.get('cardId')
             bid = bug.get('id')
             # record_id 必须用源 Bug.id：同一卡片下多条 Bug 时若用 card_id，前端列表 data-bug-id 重复会导致高亮永远落在第一行
-            rid = bid
-            if rid is None:
+            bid_s = _grep_nav_json_id(bid)
+            if not bid_s:
                 return
+            cid_s = _grep_nav_json_id(card_id)
             _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'bug',
-                'record_id': rid,
+                'record_id': bid_s,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
-                'card_id': card_id,
-                'bug_id': bid,
+                **({'card_id': cid_s} if cid_s else {}),
+                'bug_id': bid_s,
                 'bug_title': title,
             })
 
@@ -997,18 +994,19 @@ class GrepTool(BaseTool):
             title = (bc.get('title') or '').strip()
             card_id = bc.get('card_id') or bc.get('cardId')
             src_id = bc.get('id')
-            rid = src_id
-            if rid is None:
+            src_s = _grep_nav_json_id(src_id)
+            if not src_s:
                 return
+            cid_s = _grep_nav_json_id(card_id)
             _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'badcase',
-                'record_id': rid,
+                'record_id': src_s,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
-                'card_id': card_id,
-                'source_id': src_id,
+                **({'card_id': cid_s} if cid_s else {}),
+                'source_id': src_s,
             })
 
         def append_tc(tc: Dict[str, Any]) -> None:
@@ -1016,38 +1014,36 @@ class GrepTool(BaseTool):
             title = (tc.get('title') or '').strip()
             card_id = tc.get('card_id') or tc.get('cardId')
             src_id = tc.get('id')
-            rid = src_id
-            if rid is None:
+            src_s = _grep_nav_json_id(src_id)
+            if not src_s:
                 return
+            cid_s = _grep_nav_json_id(card_id)
             _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'testcase',
-                'record_id': rid,
+                'record_id': src_s,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
-                'card_id': card_id,
-                'source_id': src_id,
+                **({'card_id': cid_s} if cid_s else {}),
+                'source_id': src_s,
             })
 
         def append_card(card: Dict[str, Any]) -> None:
             pid = _normalize_nav_plan_id(card.get('plan_id'))
             cid = card.get('card_id') if card.get('card_id') is not None else card.get('id')
             title = (card.get('title') or '').strip()
-            if cid is None:
-                return
-            try:
-                rid = int(cid)
-            except (TypeError, ValueError):
+            rid_s = _grep_nav_json_id(cid)
+            if not rid_s:
                 return
             _nav_push({
                 'type': 'expand_and_locate',
                 'target': 'card',
-                'record_id': rid,
+                'record_id': rid_s,
                 'title': title,
                 'plan_id': pid,
                 'plan_name': self._plan_display_name(plan_tree, pid) if pid else '未计划',
-                'card_id': rid,
+                'card_id': rid_s,
             })
 
         if gt in ('bug', 'all'):
@@ -1065,7 +1061,7 @@ class GrepTool(BaseTool):
 
         best_by_rid = self._collapse_navigation_merge_keys(best_by_rid, card_list, plan_tree)
 
-        for _rid in sorted(best_by_rid.keys()):
+        for _rid in sorted(best_by_rid.keys(), key=lambda k: int(k) if k.isdigit() else 0):
             raw_items.append(best_by_rid[_rid][1])
         return self._finalize_grep_navigation_items(raw_items, plan_tree, scope_plan_id)
     
