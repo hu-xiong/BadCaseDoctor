@@ -7,6 +7,10 @@ import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import { getStableCreatedId } from '../utils/createPreviewKeys.js'
 import { i18n } from '../i18n/index.js'
 import { freezeThoughtSnapshotForStep } from './thoughtSnapshot.js'
+import {
+  normalizeTestcaseModifyFieldKey,
+  isTestcaseDetailModifyField
+} from '../utils/testcaseModifyFields.js'
 
 /** modify 预览：从工具结果或 before 快照取关联 Card.id，供列表跳转（与 Bug 源表 id 区分） */
 function pickModifyNavCardId(rr, r, toolData) {
@@ -601,13 +605,22 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
             rawDiff.forEach((fieldDiff) => {
               const fname = fieldDiff && (fieldDiff.field || fieldDiff.field_label)
               if (!fieldDiff || !fname) return
+              const nk = normalizeTestcaseModifyFieldKey(
+                fieldDiff.field,
+                fieldDiff.field_label
+              )
+              const isDetail =
+                DETAIL_FIELDS.includes(nk) ||
+                isTestcaseDetailModifyField(nk, fieldDiff.field_label)
               console.log(
                 '[MODIFY-DEBUG] fieldDiff.field:',
                 fname,
+                'normalized:',
+                nk,
                 'isDetail:',
-                DETAIL_FIELDS.includes(fname)
+                isDetail
               )
-              if (DETAIL_FIELDS.includes(fname)) {
+              if (isDetail) {
                 detailFieldDiff.push(fieldDiff)
               } else {
                 listFieldDiff.push(fieldDiff)
@@ -781,6 +794,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           target_id: snowflakeIdStr(toolData.target_id) || toolData.target_id,
           ...(navCid2 ? { card_id: navCid2 } : {}),
           diff: toolData.diff,
+          modifications: toolData.modifications,
           before: toolData.before,
           after: toolData.after,
           plan_id: toolData.before?.plan_id,

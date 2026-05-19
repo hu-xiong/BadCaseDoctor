@@ -293,7 +293,16 @@ class ModifyTool(BaseTool):
             "base_problem",
             "case_category",
         }
-        tcish = {"preconditions", "steps", "remark", "baseline", "test_type", "case_type"}
+        tcish = {
+            "preconditions",
+            "steps",
+            "remark",
+            "baseline",
+            "test_type",
+            "case_type",
+            "testcase_type",
+            "test_case_type",
+        }
         b_hit = bool(keys & bugish)
         d_hit = bool(keys & badish)
         t_hit = bool(keys & tcish)
@@ -4172,6 +4181,10 @@ class ModifyTool(BaseTool):
             '前置条件': 'preconditions',
             'precondition': 'preconditions',
             '测试步骤': 'steps',
+            '用例类型': 'case_type',
+            '测试类型': 'test_type',
+            'testcase_type': 'case_type',
+            'test_case_type': 'case_type',
             '备注': 'remark',
             '基线': 'baseline',
         }
@@ -4238,6 +4251,10 @@ class ModifyTool(BaseTool):
                 return "preconditions"
             if fl in ("test_step", "test_steps"):
                 return "steps"
+            if fl in ("testcase_type", "test_case_type"):
+                return "case_type"
+            if fl in ("testcase_test_type",):
+                return "test_type"
         return field
 
     def _resolve_db_column_name(self, target: str, field: str) -> str:
@@ -4251,6 +4268,9 @@ class ModifyTool(BaseTool):
                 "pre_conditions": "preconditions",
                 "test_step": "steps",
                 "test_steps": "steps",
+                "testcase_type": "case_type",
+                "test_case_type": "case_type",
+                "testcase_test_type": "test_type",
             }
             return aliases.get(kl, mapped)
         return mapped

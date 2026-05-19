@@ -429,7 +429,7 @@
                 <div class="collapsible-header sandbox-header" @click="handleShowGroupInList(group, message.id)">
                   <span class="card-icon">📝</span>
                   <span class="card-title">{{ t('chat.sandboxPreview') }}</span>
-                  <span class="card-count">{{ t('chat.itemsCount', { n: group.items.length }) }}</span>
+                  <span class="card-count">{{ t('chat.itemsCount', { n: countGroupSandboxDisplayRows(group) }) }}</span>
                   <span v-if="group.plan_id" class="plan-badge">{{ t('chat.planBadge', { id: group.plan_id }) }}</span>
                   <img
                     class="sandbox-toggle"
@@ -447,8 +447,8 @@
                         {{ t('chat.adoptedNoPendingDetail') }}
                       </div>
                     </template>
-                    <template v-else-if="git.diff && git.diff.length">
-                      <div v-for="(fieldDiff, idx) in git.diff" :key="`${gix}-${idx}`" class="modify-field-preview">
+                    <template v-else-if="resolveSandboxDiffRowsForDisplay(git, group.target).length">
+                      <div v-for="(fieldDiff, idx) in resolveSandboxDiffRowsForDisplay(git, group.target)" :key="`${gix}-${idx}`" class="modify-field-preview">
                         <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, git, group.target) }}:</span>
                         <span :class="['old-value', { 'empty-value': !(formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) }]">
                           {{ (formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) || t('chat.notSet') }}
@@ -543,9 +543,9 @@
                         {{ t('chat.adoptedNoPendingDetail') }}
                       </div>
                     </template>
-                    <template v-else-if="getBatchItemSandboxDiffRows(br).length">
+                    <template v-else-if="getBatchItemSandboxDiffRows(br, message.modifyNavigation?.target).length">
                       <div
-                        v-for="(fieldDiff, idx) in getBatchItemSandboxDiffRows(br)"
+                        v-for="(fieldDiff, idx) in getBatchItemSandboxDiffRows(br, message.modifyNavigation?.target)"
                         :key="`${bix}-${idx}`"
                         class="modify-field-preview"
                       >
@@ -847,7 +847,15 @@ import {
   getTestcaseModifyModKeys,
   getTestcaseFieldLabel,
   formatTestcaseModifyFieldValue,
+  formatTestcaseSelectFieldLabel,
+  isTestcaseSelectDetailField,
   readTestcaseModifySideValue,
+  readTestcaseDetailRawField,
+  testcaseDetailFieldValuesEqual,
+  normalizeTestcaseSandboxDiffRow,
+  enrichTestcaseSandboxDiffRows,
+  TESTCASE_DETAIL_FIELDS,
+  TESTCASE_LIST_FIELDS,
   TESTCASE_FIELD_LABEL_I18N
 } from '../utils/testcaseModifyFields.js'
 import {
@@ -988,11 +996,63 @@ function isPlaceholderSessionTitle(title) {
     })
   }
 
+  /** 统一归一 diff 行字段名与 i18n 标签，并补全测例属性快照 */
+  const inferSandboxNavTarget = (ctx, groupTarget = null) => {
+    const explicit = String(groupTarget || ctx?.target || '')
+      .trim()
+      .toLowerCase()
+    if (explicit === 'testcase' || explicit === 'test_case') return 'testcase'
+    const mods = ctx?.modifications
+    if (mods && typeof mods === 'object') {
+      if (Object.keys(mods).some((k) => isTestcaseDetailModifyField(k))) return 'testcase'
+    }
+    const b = ctx?.before
+    if (
+      b &&
+      typeof b === 'object' &&
+      (b.case_type != null ||
+        b.testcase_type != null ||
+        b.steps != null ||
+        b.preconditions != null)
+    ) {
+      return 'testcase'
+    }
+    if (Array.isArray(ctx?.diff)) {
+      if (ctx.diff.some((fd) => isTestcaseDetailModifyField(fd?.field, fd?.field_label))) {
+        return 'testcase'
+      }
+    }
+    return explicit
+  }
+
+  const resolveSandboxDiffRowsForDisplay = (ctx, groupTarget = null) => {
+    const tgt = inferSandboxNavTarget(ctx, groupTarget)
+    const base = Array.isArray(ctx?.diff) ? ctx.diff : []
+    return enrichTestcaseSandboxDiffRows(
+      {
+        target: tgt || ctx?.target,
+        before: ctx?.before,
+        after: ctx?.after,
+        modifications: ctx?.modifications
+      },
+      base,
+      t
+    )
+  }
+
+  const countGroupSandboxDisplayRows = (group) => {
+    if (!group?.items?.length) return 0
+    let n = 0
+    for (const git of group.items) {
+      n += resolveSandboxDiffRowsForDisplay(git, group.target).length
+    }
+    return n
+  }
+
   /** 单条 batch_result 展平为沙箱 diff 行（供批量卡片按条判断是否仍待确认） */
-  const getBatchItemSandboxDiffRows = (br) => {
+  const getBatchItemSandboxDiffRows = (br, navTarget = null) => {
     if (!br || typeof br !== 'object') return []
     const tid = br.target_id ?? br.targetId
-    const dif = Array.isArray(br.diff) ? br.diff : []
     const title =
       (br.record_title && String(br.record_title).trim()) ||
       (br.before && (br.before.title || br.before.name) && String(br.before.title || br.before.name).trim()) ||
@@ -1001,14 +1061,12 @@ function isPlaceholderSessionTitle(title) {
       tid != null
         ? `#${tid}${title ? ` ${title.slice(0, 40)}${title.length > 40 ? '...' : ''}` : ''}`
         : ''
-    const rows = []
-    for (const fd of dif) {
-      if (!fd || typeof fd !== 'object') continue
-      const fl = fd.field_label || fd.field || ''
-      const field_label = head ? `${head} · ${fl}` : fl
-      rows.push({ ...fd, field_label })
-    }
-    return rows
+    const resolved = resolveSandboxDiffRowsForDisplay(br, navTarget || br.target)
+    if (!head) return resolved
+    return resolved.map((fd) => {
+      const fl = fd.field_label || getTestcaseFieldLabel(t, fd.field, fd.field_label)
+      return { ...fd, field_label: `${head} · ${fl}` }
+    })
   }
 
   /** 沙箱卡片内展示的 diff 行：新建仅列表字段；修改仍展示全部；批量预览取 batch_results（nav.diff 仅单条时有值） */
@@ -1023,11 +1081,11 @@ function isPlaceholderSessionTitle(title) {
     ) {
       const rows = []
       for (const br of nav.batch_results) {
-        rows.push(...getBatchItemSandboxDiffRows(br))
+        rows.push(...getBatchItemSandboxDiffRows(br, nav.target))
       }
       return rows
     }
-    return nav.diff || []
+    return resolveSandboxDiffRowsForDisplay(nav)
   }
 
   /** Bug/卡片：优先级在沙箱里与表单一致；优先读 modifications / before.after，避免 diff 行「紧急→紧急」 */
@@ -1084,6 +1142,10 @@ function isPlaceholderSessionTitle(title) {
       .toLowerCase()
     if (t === 'testcase' || t === 'test_case') {
       return normalizeTestcaseModifyFieldKey(fk, label)
+    }
+    const tcNk = normalizeTestcaseModifyFieldKey(fk, label)
+    if (TESTCASE_DETAIL_FIELDS.includes(tcNk) || TESTCASE_LIST_FIELDS.includes(tcNk)) {
+      return tcNk
     }
     const f = String(fk || '')
       .trim()
@@ -1292,11 +1354,15 @@ function isPlaceholderSessionTitle(title) {
     const isStatus = fk === 'status' || /状态/i.test(label)
     const raw = readSandboxModifySideRaw(ctx, fieldDiff, which)
     if (raw === '') return ''
+    const isTcField = isTestcaseDetailModifyField(fk, label)
+    if (isTcField && isTestcaseSelectDetailField(fk)) {
+      return formatTestcaseSelectFieldLabel(fk, raw, t)
+    }
+    if (isTcField) {
+      return formatTestcaseModifyFieldValue(fk, raw)
+    }
     if ((tgt === 'testcase' || tgt === 'test_case') && isPriority) {
       return formatTestcaseModifyFieldValue('priority', raw)
-    }
-    if ((tgt === 'testcase' || tgt === 'test_case') && isTestcaseDetailModifyField(fk, label)) {
-      return formatTestcaseModifyFieldValue(fk, raw)
     }
     if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isPriority) {
       return formatSandboxBugPriorityText(raw)
@@ -1314,6 +1380,15 @@ function isPlaceholderSessionTitle(title) {
     const tgt = String((ctx && ctx.target) || groupTargetFallback || '')
       .trim()
       .toLowerCase()
+    const tcNk = normalizeTestcaseModifyFieldKey(fd?.field, lab)
+    if (
+      tgt === 'testcase' ||
+      tgt === 'test_case' ||
+      TESTCASE_DETAIL_FIELDS.includes(tcNk) ||
+      TESTCASE_LIST_FIELDS.includes(tcNk)
+    ) {
+      return getTestcaseFieldLabel(t, tcNk, lab)
+    }
     if (tgt === 'badcase' || tgt === 'bad_case') {
       if (
         fk === 'base_problem' ||
@@ -1341,9 +1416,6 @@ function isPlaceholderSessionTitle(title) {
     if (tgt === 'bug') {
       if (fk === 'severity' || (/严重/.test(lab) && !lab.includes('优先级'))) return t('cardDetail.severity')
       if (fk === 'priority' || lab.includes('优先级')) return t('cardDetail.priority')
-    }
-    if (tgt === 'testcase' || tgt === 'test_case') {
-      return getTestcaseFieldLabel(t, fd?.field, lab)
     }
     const nk = normalizeSandboxFieldKey(fd?.field, lab, tgt)
     const labelKeyByTarget = {
@@ -3033,14 +3105,18 @@ const hasDetailFieldInPreview = (diffRows, mods) => {
     const fk = String(fd?.field || '').trim().toLowerCase()
     if (fk && DETAIL_FIELDS.includes(fk)) return true
     const lab = String(fd?.field_label || '')
-    return /优先级|严重程度|严重级别|问题分类|相似问题|复现|正确答案|答案|原因|描述|步骤|备注|基线/i.test(lab)
+    return /优先级|严重程度|严重级别|用例类型|测试类型|问题分类|相似问题|复现|正确答案|答案|原因|描述|步骤|备注|基线/i.test(lab)
   }
   const diffHasDetail = Array.isArray(diffRows) && diffRows.some(diffRowImpliesDetail)
   if (diffHasDetail) return true
   if (mods && typeof mods === 'object') {
     return Object.keys(mods).some((k) => {
       const nk = String(k).trim().toLowerCase()
-      return DETAIL_FIELDS.includes(nk) || /优先级|严重程度|问题分类/.test(String(k))
+      return (
+        DETAIL_FIELDS.includes(nk) ||
+        TESTCASE_DETAIL_FIELDS.includes(nk) ||
+        /优先级|严重程度|用例类型|测试类型|问题分类/.test(String(k))
+      )
     })
   }
   return false

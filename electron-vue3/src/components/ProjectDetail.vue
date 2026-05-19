@@ -783,7 +783,13 @@ import NewTestCase from './NewTestCase.vue'
 import ProjectManage from './ProjectManage.vue'
 import userStore from '../store/user.js'
 import { persistStableCreatedId, getStableCreatedId } from '../utils/createPreviewKeys.js'
-import { readTestcaseRowField, TESTCASE_DETAIL_FIELDS } from '../utils/testcaseModifyFields.js'
+import {
+  readTestcaseRowField,
+  readTestcaseDetailRawField,
+  normalizeTestcaseStepsForEditor,
+  testcaseDetailFieldValuesEqual,
+  TESTCASE_DETAIL_FIELDS
+} from '../utils/testcaseModifyFields.js'
 import { useLocalGoProxyStatus } from '../composables/useLocalGoProxyStatus'
 import SelectableTitleTip from './SelectableTitleTip.vue'
 
@@ -1639,6 +1645,8 @@ const totalCards = ref(0)
           if (t === '严重程度' || t.includes('严重程度')) return 'priority'
           if (t === '用例类型' || t.includes('用例类型')) return 'case_type'
           if (t === '测试类型' || t.includes('测试类型')) return 'test_type'
+          const tlTc = t.toLowerCase().replace(/-/g, '_')
+          if (tlTc === 'testcase_type' || tlTc === 'test_case_type') return 'case_type'
           if (t === '测试步骤' || t === '用例步骤' || t.includes('测试步骤')) return 'steps'
           if (t === '备注') return 'remark'
           if (t === '基线') return 'baseline'
@@ -4691,7 +4699,11 @@ const totalCards = ref(0)
       const out = {}
       for (const field of DETAIL_FIELDS) {
         if (modifications[field] !== undefined) {
-          out[field] = modifications[field]
+          let val = modifications[field]
+          if (field === 'steps') {
+            val = normalizeTestcaseStepsForEditor(val)
+          }
+          out[field] = val
         }
       }
       return Object.keys(out).length ? out : null
@@ -7937,10 +7949,10 @@ const totalCards = ref(0)
               (before || after) &&
               TESTCASE_DETAIL_FIELDS.includes(fieldKey)
             if (needsTcDetailSnap) {
-              const bo = readTestcaseRowField(before, fieldKey)
-              const ao = readTestcaseRowField(after, fieldKey)
-              if (bo) oldC = bo
-              if (ao) newC = ao
+              const bo = readTestcaseDetailRawField(before, fieldKey)
+              const ao = readTestcaseDetailRawField(after, fieldKey)
+              if (bo !== undefined && bo !== null && String(bo).trim() !== '') oldC = bo
+              if (ao !== undefined && ao !== null && String(ao).trim() !== '') newC = ao
             }
             if (
               rowSnapshotTargets &&
@@ -7956,15 +7968,32 @@ const totalCards = ref(0)
                 if (ao) newC = ao
               }
             }
-            modifyData[fieldKey] = { old: oldC, new: newC }
+            if (
+              needsTcDetailSnap &&
+              testcaseDetailFieldValuesEqual(fieldKey, oldC, newC)
+            ) {
+              /* 跳过无实质变更（如沙箱 功能测试→功能测试） */
+            } else {
+              modifyData[fieldKey] = { old: oldC, new: newC }
+            }
           } else if (
             (bugish || rowSnapshotTargets) &&
             (before || after) &&
             (oldLine || newLine) &&
             !unchangedLine
           ) {
-            const oldC = oldLine ? String(oldLine.content ?? '') : snapListField(before, fieldKey)
-            const newC = newLine ? String(newLine.content ?? '') : snapListField(after, fieldKey)
+            let oldC = oldLine ? String(oldLine.content ?? '') : snapListField(before, fieldKey)
+            let newC = newLine ? String(newLine.content ?? '') : snapListField(after, fieldKey)
+            const needsTcRawSnap =
+              (tgt === 'testcase' || tgt === 'test_case') &&
+              fieldKey === 'steps' &&
+              (before || after)
+            if (needsTcRawSnap) {
+              const bo = readTestcaseDetailRawField(before, fieldKey)
+              const ao = readTestcaseDetailRawField(after, fieldKey)
+              if (bo !== undefined && bo !== null && String(bo).trim() !== '') oldC = bo
+              if (ao !== undefined && ao !== null && String(ao).trim() !== '') newC = ao
+            }
             if (oldC !== newC) {
               modifyData[fieldKey] = { old: oldC, new: newC }
             }
@@ -7974,16 +8003,13 @@ const totalCards = ref(0)
               (before || after) &&
               TESTCASE_DETAIL_FIELDS.includes(fieldKey)
             if (needsTcDetailSnap) {
-              const bo = readTestcaseRowField(before, fieldKey)
-              const ao = readTestcaseRowField(after, fieldKey)
-              if (bo !== ao && (bo || ao)) {
-                modifyData[fieldKey] = { old: bo || '', new: ao || '' }
-              } else {
-                modifyData[fieldKey] = {
-                  old: bo || unchangedLine.content,
-                  new: ao || unchangedLine.content,
-                  unchanged: true
-                }
+              const bo = readTestcaseDetailRawField(before, fieldKey)
+              const ao = readTestcaseDetailRawField(after, fieldKey)
+              if (
+                !testcaseDetailFieldValuesEqual(fieldKey, bo, ao) &&
+                (bo != null || ao != null)
+              ) {
+                modifyData[fieldKey] = { old: bo ?? '', new: ao ?? '' }
               }
             } else {
               modifyData[fieldKey] = {
@@ -8010,10 +8036,50 @@ const totalCards = ref(0)
             }
             modifyData[fk] = entry
           } else {
-            const bo =
-              rowSnapshotTargets && before ? snapListField(before, fk) : ''
+            let bo = ''
+            if (
+              (tgt === 'testcase' || tgt === 'test_case') &&
+              TESTCASE_DETAIL_FIELDS.includes(fk) &&
+              before
+            ) {
+              const raw = readTestcaseDetailRawField(before, fk)
+              bo = raw != null ? String(raw) : ''
+            } else if (rowSnapshotTargets && before) {
+              bo = snapListField(before, fk)
+            }
+            if (
+              (tgt === 'testcase' || tgt === 'test_case') &&
+              TESTCASE_DETAIL_FIELDS.includes(fk) &&
+              testcaseDetailFieldValuesEqual(fk, bo, value)
+            ) {
+              continue
+            }
             modifyData[fk] = { old: bo || '', new: value }
           }
+        }
+      }
+      if ((tgt === 'testcase' || tgt === 'test_case') && (before || after)) {
+        for (const fk of ['case_type', 'priority', 'test_type']) {
+          const cur = modifyData[fk]
+          if (cur && typeof cur === 'object') {
+            if (cur.unchanged === true) {
+              delete modifyData[fk]
+              continue
+            }
+            if (
+              'new' in cur &&
+              testcaseDetailFieldValuesEqual(fk, cur.old, cur.new)
+            ) {
+              delete modifyData[fk]
+              continue
+            }
+            continue
+          }
+          const bo = readTestcaseDetailRawField(before, fk)
+          const ao = readTestcaseDetailRawField(after, fk)
+          if (bo === undefined && ao === undefined) continue
+          if (testcaseDetailFieldValuesEqual(fk, bo, ao)) continue
+          modifyData[fk] = { old: bo ?? '', new: ao ?? '' }
         }
       }
       if (rowSnapshotTargets && (before || after)) {
