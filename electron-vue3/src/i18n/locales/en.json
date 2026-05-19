@@ -846,6 +846,8 @@
     "remark": "Remark",
     "baseline": "Baseline",
     "testType": "Test type",
+    "executionResult": "Execution result",
+    "relatedDefects": "Related defects",
     "caseType": "Case type",
     "title": "Title",
     "steps": "Test steps",
@@ -856,6 +858,25 @@
     "testcase": "Test case",
     "lockedWarning": "Card detail is open. Please save or close the current detail before switching views.",
     "switchConfirm": "A card detail is currently open. Are you sure you want to switch to another card?"
+  },
+  "testcaseExecution": {
+    "notRun": "Not run",
+    "pass": "Passed",
+    "fail": "Failed",
+    "blocked": "Blocked",
+    "skip": "Skipped"
+  },
+  "testcaseRelatedDefects": {
+    "none": "(none)"
+  },
+  "testcaseComment": {
+    "appendTitle": "Append comment",
+    "historyTitle": "Comments",
+    "inputTitle": "Add comment",
+    "placeholder": "Click to add a comment…",
+    "submit": "Post comment",
+    "empty": "No comments yet",
+    "linkedOp": "From chat action"
   },
   "narrowNav": {
     "returnToPlans": "Return to plans",

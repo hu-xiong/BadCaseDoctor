@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="testcase-detail-wrapper" :class="{ 'is-embedded': embedded }">
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
@@ -486,17 +486,39 @@
           
           <!-- 缺陷 Tab -->
           <div v-if="activeTab === 'defects'" class="tab-pane">
-            <div class="form-group">
-              <label class="field-label">关联缺陷</label>
-              <div class="related-defects">
+            <div
+              class="form-group"
+              :class="{ 'has-diff': hasDetailFieldDiff('related_defects') }"
+              id="diff-field-related_defects"
+            >
+              <label class="field-label">{{ testcaseFieldLabel('related_defects') }}</label>
+              <div v-if="hasDetailFieldDiff('related_defects')" class="field-diff-panel field-diff-panel--stacked">
+                <div class="diff-header">
+                  <span class="diff-label">{{ testcaseFieldLabel('related_defects') }} · 修改预览</span>
+                  <div class="diff-actions">
+                    <button type="button" @click="applyFieldChange('related_defects')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                    <button type="button" @click="cancelFieldChange('related_defects')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('related_defects', detailFieldDiff('related_defects')?.old) }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('related_defects', detailFieldDiff('related_defects')?.new) }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="related-defects" :class="{ 'field-with-diff': hasDetailFieldDiff('related_defects') }">
                 <div 
                   v-for="(defect, index) in testcase.related_defects" 
                   :key="index"
                   class="defect-item"
                 >
                   <div class="defect-info" @click="navigateToDefect(defect)">
-                    <span class="defect-id">Bug-{{ defect.id }}</span>
-                    <span class="defect-title">{{ defect.title }}</span>
+                    <span class="defect-title">{{ defectDisplayTitle(defect) }}</span>
                   </div>
                   <button @click="removeDefect(index)" class="remove-defect-btn">×</button>
                 </div>
@@ -509,9 +531,36 @@
 
           <!-- 执行 Tab -->
           <div v-if="activeTab === 'execution'" class="tab-pane">
-            <div class="form-group">
-              <label class="field-label">执行结果</label>
-              <select v-model="testcase.execution_result" class="form-select">
+            <div
+              class="form-group property-field property-field--stacked"
+              :class="{ 'has-diff': hasDetailFieldDiff('execution_result') }"
+              id="diff-field-execution_result"
+            >
+              <label class="field-label">{{ testcaseFieldLabel('execution_result') }}</label>
+              <div v-if="hasDetailFieldDiff('execution_result')" class="field-diff-panel field-diff-panel--stacked">
+                <div class="diff-header">
+                  <span class="diff-label">{{ testcaseFieldLabel('execution_result') }} · 修改预览</span>
+                  <div class="diff-actions">
+                    <button type="button" @click="applyFieldChange('execution_result')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                    <button type="button" @click="cancelFieldChange('execution_result')" class="btn-cancel" title="取消">✗</button>
+                  </div>
+                </div>
+                <div class="diff-content">
+                  <div class="diff-row">
+                    <span class="diff-tag old">原值</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('execution_result', detailFieldDiff('execution_result')?.old) }}</span>
+                  </div>
+                  <div class="diff-row">
+                    <span class="diff-tag new">新值</span>
+                    <span class="diff-value">{{ formatDiffFieldValue('execution_result', detailFieldDiff('execution_result')?.new) }}</span>
+                  </div>
+                </div>
+              </div>
+              <select
+                v-model="testcase.execution_result"
+                class="form-select field-select"
+                :class="{ 'field-with-diff': hasDetailFieldDiff('execution_result') }"
+              >
                 <option value="">未执行</option>
                 <option value="pass">通过</option>
                 <option value="fail">失败</option>
@@ -643,35 +692,72 @@
           />
         </div>
 
-        <!-- 输入评论：先只读预览，点击后再展开富文本 -->
-        <div class="sidebar-section">
-          <h3 class="sidebar-title">输入评论</h3>
+        <!-- 评论：历史只读 + 仅追加；对话可带 append_comment diff -->
+        <div class="sidebar-section comment-section" :class="{ 'has-diff': hasDetailFieldDiff('append_comment') }">
+          <h3 class="sidebar-title">{{ t('testcaseComment.historyTitle') }}</h3>
+          <div v-if="hasDetailFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
+            <div class="diff-header">
+              <span class="diff-label">{{ testcaseFieldLabel('append_comment') }} · 修改预览</span>
+              <div class="diff-actions">
+                <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" title="采纳（立即落库）">✓</button>
+                <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" title="取消">✗</button>
+              </div>
+            </div>
+            <div class="diff-content">
+              <div class="diff-row">
+                <span class="diff-tag new">新评论</span>
+                <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('append_comment', detailFieldDiff('append_comment')?.new) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="testcaseComments.length" class="comment-timeline">
+            <div v-for="c in testcaseComments" :key="c.id" class="comment-item">
+              <div class="comment-item-meta">
+                <span class="comment-author">{{ c.user_name || '—' }}</span>
+                <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
+                <span v-if="c.source_message_id" class="comment-op-tag">{{ t('testcaseComment.linkedOp') }}</span>
+              </div>
+              <div class="comment-item-body" v-html="c.content"></div>
+            </div>
+          </div>
+          <div v-else class="comment-empty">{{ t('testcaseComment.empty') }}</div>
+          <h4 class="comment-input-subtitle">{{ t('testcaseComment.inputTitle') }}</h4>
           <div class="comment-input-container">
             <template v-if="!commentEditorActive">
               <textarea
                 class="comment-textarea-simple"
                 readonly
                 rows="3"
-                :value="commentText"
-                placeholder="点击输入评论…"
+                :value="commentDraftText"
+                :placeholder="t('testcaseComment.placeholder')"
                 @click="activateCommentEditor"
               />
-              <div class="comment-count">{{ commentDisplayLength }} / 500</div>
+              <div class="comment-count">{{ commentDraftLength }} / 500</div>
             </template>
             <template v-else>
               <RichTextHtmlEditor
-                v-model="testcase.comment"
+                v-model="commentDraft"
                 variant="compact"
-                placeholder="请输入评论"
+                :placeholder="t('testcaseComment.placeholder')"
                 class="rich-editor"
               />
               <div class="comment-editor-actions">
                 <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
+                <button
+                  v-if="isEdit && testcaseId"
+                  type="button"
+                  class="comment-submit-btn"
+                  :disabled="commentSubmitting || !commentDraftLength"
+                  @click="submitCommentDraft"
+                >
+                  {{ t('testcaseComment.submit') }}
+                </button>
               </div>
-              <div class="editor-count">{{ commentDisplayLength }} / 500</div>
+              <div class="editor-count">{{ commentDraftLength }} / 500</div>
             </template>
           </div>
         </div>
+
         </div>
       </div>
     </div>
@@ -693,91 +779,44 @@
               class="search-input"
               @keyup.enter="searchDefects"
             />
-            <button @click="searchDefects" class="search-btn">搜索</button>
+            <button @click="searchDefects" class="search-btn" :disabled="defectSearchLoading">搜索</button>
           </div>
 
-          <!-- Bug 树形列表 -->
-          <div class="bug-tree-container">
+          <div v-if="defectSearchText.trim()" class="defect-search-results">
+            <div v-if="defectSearchLoading" class="defect-search-hint">搜索中…</div>
+            <div v-else-if="defectSearchResults.length === 0" class="defect-search-hint">未找到匹配的缺陷（当前计划范围内）</div>
+            <div
+              v-else
+              v-for="bug in defectSearchResults"
+              :key="bug.id"
+              class="bug-item defect-search-item"
+              :class="{ selected: isDefectSelected(bug.id) }"
+              @click="toggleDefectSelection(bug, bug.plan_id || testcase.plan_id || testcase.plan)"
+            >
+              <div class="checkbox" :class="{ checked: isDefectSelected(bug.id) }">
+                <span v-if="isDefectSelected(bug.id)" class="checkmark">✓</span>
+              </div>
+              <div class="bug-info">
+                <span class="bug-id">Bug-{{ bug.id }}</span>
+                <span class="bug-title">{{ bug.title }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="bug-tree-container" v-show="!defectSearchText.trim()">
             <div class="tree-header">
               <span class="tree-title">缺陷列表</span>
-              <button @click="loadAllBugs" class="refresh-btn" title="刷新">
-                🔄
-              </button>
+              <button @click="loadAllBugs" class="refresh-btn" title="刷新">🔄</button>
             </div>
             <div class="bug-tree">
-              <!-- 使用递归组件展示计划树 -->
-              <template v-for="plan in bugPlans" :key="plan.value">
-                <div class="tree-node">
-                  <div class="tree-node-header" @click="togglePlanExpand(plan.value)">
-                    <span class="expand-icon" :class="{ expanded: plan.expanded }">▶</span>
-                    <span class="plan-icon">{{ plan.icon }}</span>
-                    <span class="plan-name">{{ plan.label }}</span>
-                    <span class="bug-count">({{ plan.bug_count ?? (plan.bugs?.length || 0) }})</span>
-                  </div>
-                  <div v-if="plan.expanded" class="tree-children">
-                    <!-- 子计划 -->
-                    <template v-if="plan.children && plan.children.length > 0">
-                      <div v-for="childPlan in plan.children" :key="childPlan.value" class="tree-node sub-plan">
-                        <div class="tree-node-header" @click="togglePlanExpand(childPlan.value)">
-                          <span class="expand-icon" :class="{ expanded: childPlan.expanded }">▶</span>
-                          <span class="plan-icon">{{ childPlan.icon }}</span>
-                          <span class="plan-name">{{ childPlan.label }}</span>
-                          <span class="bug-count">({{ childPlan.bug_count ?? (childPlan.bugs?.length || 0) }})</span>
-                        </div>
-                        <div v-if="childPlan.expanded && childPlan.bugs !== null" class="tree-children">
-                          <div v-if="childPlan.bugs && childPlan.bugs.length > 0">
-                            <div 
-                              v-for="bug in childPlan.bugs" 
-                              :key="bug.id"
-                              class="bug-item"
-                              :class="{ selected: isDefectSelected(bug.id.toString()) }"
-                              @click="toggleDefectSelection(bug, childPlan.value)"
-                            >
-                              <div class="checkbox" :class="{ checked: isDefectSelected(bug.id.toString()) }">
-                                <span v-if="isDefectSelected(bug.id.toString())" class="checkmark">✓</span>
-                              </div>
-                              <div class="bug-info">
-                                <span class="bug-id">Bug-{{ bug.id }}</span>
-                                <span class="bug-title">{{ bug.title }}</span>
-                              </div>
-                            </div>
-                          </div>
-                          <div v-else class="no-bugs-tip">
-                            暂无缺陷
-                          </div>
-                        </div>
-                        <div v-if="childPlan.expanded && childPlan.bugs === null" class="tree-children loading">
-                          <span class="loading-text">加载中...</span>
-                        </div>
-                      </div>
-                    </template>
-                    <!-- Bug 列表 -->
-                    <div v-if="plan.bugs !== null && plan.bugs && plan.bugs.length > 0">
-                      <div 
-                        v-for="bug in plan.bugs" 
-                        :key="bug.id"
-                        class="bug-item"
-                        :class="{ selected: isDefectSelected(bug.id.toString()) }"
-                        @click="toggleDefectSelection(bug, plan.value)"
-                      >
-                        <div class="checkbox" :class="{ checked: isDefectSelected(bug.id.toString()) }">
-                          <span v-if="isDefectSelected(bug.id.toString())" class="checkmark">✓</span>
-                        </div>
-                        <div class="bug-info">
-                          <span class="bug-id">Bug-{{ bug.id }}</span>
-                          <span class="bug-title">{{ bug.title }}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <div v-if="plan.bugs !== null && (!plan.bugs || plan.bugs.length === 0) && (!plan.children || plan.children.length === 0)" class="no-bugs-tip">
-                      暂无缺陷
-                    </div>
-                  </div>
-                  <div v-if="plan.expanded && plan.bugs === null" class="tree-children loading">
-                    <span class="loading-text">加载中...</span>
-                  </div>
-                </div>
-              </template>
+              <DefectPickerTreeNode
+                :plans="bugPlans"
+                :depth="0"
+                :is-defect-selected="isDefectSelected"
+                @toggle-plan="togglePlanExpand"
+                @toggle-card="toggleCardExpand"
+                @toggle-bug="toggleDefectSelection"
+              />
             </div>
           </div>
         </div>
@@ -801,15 +840,20 @@ import {
   getTestcaseModifyModKeys,
   normalizeTestcaseStepsForEditor,
   normalizeTestcaseSelectFieldForEditor,
+  normalizeTestcaseExecutionResultForSelect,
+  normalizeTestcaseRelatedDefectIds,
+  formatTestcaseRelatedDefectsForDisplay,
+  isPlaceholderTestcaseDefectTitle,
   isTestcaseSelectDetailField,
   TESTCASE_MONACO_DETAIL_FIELDS,
   TESTCASE_SELECT_DETAIL_FIELDS
 } from '../utils/testcaseModifyFields.js'
 import { useRoute, useRouter } from 'vue-router'
-import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, getProjects, getProjectEditContext, getProjectDetail, getProjectPlans, getPlanDetail, getPlanBugs, getProjectMembers, getCurrentUser } from '../api'
+import { BACKEND_BASE_URL, createTestCase, getTestCaseDetail, updateTestCase, deleteTestCase, addTestCaseComment, getProjects, getProjectEditContext, getProjectDetail, getProjectPlans, getPlanDetail, getProjectCards, getProjectBugs, getProjectMembers, getCurrentUser, getBugDetail } from '../api'
+import DefectPickerTreeNode from './DefectPickerTreeNode.vue'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
-import { richTextHtmlDisplayLength } from '../utils/richTextContent.js'
+import { richTextHtmlDisplayLength, richTextHtmlHasContent } from '../utils/richTextContent.js'
 import { ensureEditorHtmlContent } from '../utils/uploadImageUrl.js'
 import { defineAsyncComponent } from 'vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
@@ -824,7 +868,7 @@ function isTestCasePlanType(planType) {
 
 export default {
   name: 'NewTestCase',
-  components: { MonacoDiffEditor, RichTextHtmlEditor },
+  components: { MonacoDiffEditor, RichTextHtmlEditor, DefectPickerTreeNode },
   props: {
     id: {
       type: [String, Number],
@@ -851,6 +895,11 @@ export default {
       type: Boolean,
       default: false
     },
+    /** 嵌入详情：沙箱跳转时默认 Tab（basic | defects | execution） */
+    initial_tab: {
+      type: String,
+      default: null
+    },
     embedded: {
       type: Boolean,
       default: false
@@ -863,12 +912,72 @@ export default {
     const { t } = useI18n()
 
     const testcaseFieldLabel = (field) => getTestcaseFieldLabel(t, field)
+
+    const buildRelatedDefectTitleMap = () => {
+      const map = {}
+      for (const d of testcase.related_defects || []) {
+        if (d?.id == null) continue
+        const id = String(d.id).trim()
+        const title = String(d.title || '').trim()
+        if (id && title && !isPlaceholderTestcaseDefectTitle(id, title)) {
+          map[id] = title
+        }
+      }
+      return map
+    }
+
+    const defectDisplayTitle = (defect) => {
+      const id = String(defect?.id ?? '').trim()
+      const title = String(defect?.title ?? '').trim()
+      if (title && !isPlaceholderTestcaseDefectTitle(id, title)) return title
+      return id ? `Bug-${id}` : '—'
+    }
+
+    const hydrateRelatedDefectTitles = async () => {
+      const list = testcase.related_defects
+      if (!Array.isArray(list) || list.length === 0) return
+      await Promise.all(
+        list.map(async (d, idx) => {
+          if (d?.id == null) return
+          const id = String(d.id).trim()
+          if (!id || !isPlaceholderTestcaseDefectTitle(id, d.title)) return
+          try {
+            const res = await getBugDetail(id)
+            const payload = res?.data
+            const bug =
+              payload?.bug ??
+              payload?.data ??
+              (payload?.success && payload?.title != null ? payload : null)
+            const title = String(bug?.title ?? '').trim()
+            if (!title) return
+            const planId = bug?.plan_id ?? bug?.planId ?? d.plan_id
+            list[idx] = { ...d, id, title, plan_id: planId ?? d.plan_id }
+          } catch (_e) {
+            /* ignore */
+          }
+        })
+      )
+    }
+
     const formatDiffFieldValue = (field, val) => {
       const nk = normalizeTestcaseModifyFieldKey(field)
+      if (nk === 'append_comment') {
+        return formatTestcaseModifyFieldValue(field, val, { maxLen: 8000, t })
+      }
+      if (nk === 'related_defects') {
+        return formatTestcaseRelatedDefectsForDisplay(val, {
+          t,
+          titleMap: buildRelatedDefectTitleMap()
+        })
+      }
       if (isTestcaseSelectDetailField(nk)) {
         return formatTestcaseSelectFieldLabel(nk, val, t)
       }
-      const s = formatTestcaseModifyFieldValue(field, val, { maxLen: 8000 })
+      const s = formatTestcaseModifyFieldValue(field, val, {
+        maxLen: 8000,
+        t,
+        titleMap: buildRelatedDefectTitleMap()
+      })
       return s || t('chat.notSet')
     }
 
@@ -908,6 +1017,18 @@ export default {
         testcase.steps = normalizeTestcaseStepsForEditor(val)
         return
       }
+      if (nk === 'related_defects') {
+        const ids = normalizeTestcaseRelatedDefectIds(mod.old)
+        const byId = new Map(
+          (testcase.related_defects || []).map((d) => [String(d.id), d])
+        )
+        testcase.related_defects = ids.map((id) => {
+          const hit = byId.get(String(id))
+          return hit ? { ...hit, id } : { id, title: '' }
+        })
+        void hydrateRelatedDefectTitles()
+        return
+      }
       if (nk === 'preconditions' || nk === 'remark') {
         testcase[nk] = ensureEditorHtmlContent(val || '')
         return
@@ -935,6 +1056,9 @@ export default {
         if (!data || typeof data !== 'object' || !('new' in data)) continue
         const nv = data.new
         if (nv === undefined) continue
+        if (nk === 'related_defects' || nk === 'append_comment') {
+          continue
+        }
         if (typeof nv === 'string' && !String(nv).trim()) continue
         applyDetailFieldToTestcase(nk, nv)
       }
@@ -983,6 +1107,9 @@ export default {
     const showAddDefectDialog = ref(false)
     const activeTab = ref('basic')
     const fileInput = ref(null)
+    const testcaseComments = ref([])
+    const commentDraft = ref('')
+    const commentSubmitting = ref(false)
     const commentEditorActive = ref(false)
     const activateCommentEditor = () => {
       commentEditorActive.value = true
@@ -991,6 +1118,8 @@ export default {
       commentEditorActive.value = false
     }
     const defectSearchText = ref('')
+    const defectSearchResults = ref([])
+    const defectSearchLoading = ref(false)
     const bugPlans = ref([])
 
     const projectInfo = reactive({
@@ -1024,8 +1153,7 @@ export default {
       project_id: readProjectIdFromRoute(),
       plan: '',
       document_type: '',
-      attachments: [],
-      comment: ''
+      attachments: []
     })
 
     const _escHtml = (s) =>
@@ -1371,7 +1499,8 @@ export default {
     }
 
     const isDefectSelected = (defectId) => {
-      return testcase.related_defects.some(d => d.id.toString() === defectId)
+      const idStr = defectId != null ? String(defectId) : ''
+      return testcase.related_defects.some(d => d.id.toString() === idStr)
     }
 
     const toggleDefectSelection = (bug, planId) => {
@@ -1411,11 +1540,36 @@ export default {
     }
 
     const searchDefects = async () => {
+      const q = (defectSearchText.value || '').trim()
+      if (!q) {
+        defectSearchResults.value = []
+        return
+      }
+      const projectId = snowflakeIdStr(testcase.project_id) || testcase.project_id
+      if (!projectId) {
+        alert('请先选择所属项目')
+        return
+      }
+      defectSearchLoading.value = true
       try {
-        console.log('搜索缺陷:', defectSearchText.value)
-        // TODO: 调用搜索 API
+        const rawPlan = testcase.plan_id ?? testcase.plan
+        const params = {}
+        if (rawPlan != null && !isEmptyPlanKey(rawPlan)) {
+          params.plan_id = snowflakeIdStr(rawPlan) || String(rawPlan)
+        }
+        const response = await getProjectBugs(projectId, 1, 500, params)
+        const list = response.data?.bugs || response.data?.badcases || []
+        const ql = q.toLowerCase()
+        defectSearchResults.value = list.filter((b) => {
+          const id = String(b.id ?? '')
+          const title = String(b.title ?? '').toLowerCase()
+          return id.includes(q) || title.includes(ql)
+        })
       } catch (error) {
         console.error('搜索失败:', error)
+        defectSearchResults.value = []
+      } finally {
+        defectSearchLoading.value = false
       }
     }
 
@@ -1432,88 +1586,176 @@ export default {
       return null
     }
 
+    const isLeafPlanNode = (plan) => !plan?.children || plan.children.length === 0
+
     const togglePlanExpand = (planValue) => {
       const plan = findPlanById(bugPlans.value, planValue)
-      if (plan) {
-        plan.expanded = !plan.expanded
-        // 如果第一次展开，加载 Bug 列表
-        if (plan.expanded && plan.bugs === null) {
-          loadBugsForPlan(planValue)
-        }
+      if (!plan) return
+      plan.expanded = !plan.expanded
+      if (plan.expanded && isLeafPlanNode(plan) && plan.cards === null) {
+        loadCardsForPlan(planValue)
+      }
+    }
+
+    const toggleCardExpand = (planValue, cardValue) => {
+      const plan = findPlanById(bugPlans.value, planValue)
+      if (!plan?.cards) return
+      const card = plan.cards.find((c) => c.value === cardValue)
+      if (!card) return
+      card.expanded = !card.expanded
+      if (card.expanded && card.bugs === null) {
+        loadBugsForCard(planValue, cardValue)
       }
     }
 
     const fetchBugPlans = async (projectId) => {
       try {
-        console.log('fetchBugPlans: 开始加载 Bug 计划，projectId:', projectId)
         const response = await getProjectPlans(projectId)
-        console.log('fetchBugPlans: API 响应:', response.data)
         if (response.data.success) {
           const allPlans = response.data.plans || []
-          
-          // 递归处理计划树
-          const processPlanTree = (plans) => {
+          const processPlanTree = (plans, level = 0) => {
             return plans.map(p => ({
-              value: p.id.toString(),
+              value: snowflakeIdStr(p.id) || String(p.id),
               label: p.name,
               icon: '📋',
+              level,
               expanded: false,
-              bugs: null,
-              bug_count: p.bug_count || 0,  // 使用后端返回的 bug_count
-              children: p.children && p.children.length > 0 ? processPlanTree(p.children) : []
+              cards: null,
+              bug_count: p.bug_count || 0,
+              children: p.children && p.children.length > 0 ? processPlanTree(p.children, level + 1) : []
             }))
           }
-          
           bugPlans.value = processPlanTree(allPlans)
-          console.log('fetchBugPlans: bugPlans 初始化完成:', bugPlans.value)
         }
       } catch (error) {
         console.error('获取 Bug 计划失败:', error)
       }
     }
 
-    const loadBugsForPlan = async (planId) => {
+    const loadCardsForPlan = async (planId) => {
+      const projectId = snowflakeIdStr(testcase.project_id) || testcase.project_id
+      if (!projectId) return
+      const plan = findPlanById(bugPlans.value, planId)
+      if (!plan) return
       try {
-        console.log('loadBugsForPlan: 加载计划下的 Bug, planId:', planId)
-        const response = await getPlanBugs(planId)
-        console.log('loadBugsForPlan: API 响应:', response.data)
-        if (response.data.success) {
-          const plan = findPlanById(bugPlans.value, planId)
-          if (plan) {
-            plan.bugs = response.data.bugs || []
-          }
+        const response = await getProjectCards(projectId, 1, 500, {
+          plan_id: planId,
+          type: 'bug'
+        })
+        if (response.data?.success) {
+          const raw = response.data.data || []
+          plan.cards = raw
+            .filter((c) => String(c.type || '').toLowerCase() === 'bug')
+            .map((c) => ({
+              value: snowflakeIdStr(c.id) || String(c.id),
+              label: c.title || `卡片-${c.id}`,
+              type: 'bug',
+              expanded: false,
+              bugs: null,
+              bug_count: c.bug_count || 0
+            }))
+        } else {
+          plan.cards = []
         }
-        console.log('loadBugsForPlan: Bug 加载完成')
       } catch (error) {
-        console.error('加载 Bug 失败:', error)
+        console.error('加载缺陷卡片失败:', error)
+        plan.cards = []
+      }
+    }
+
+    const loadBugsForCard = async (planId, cardId) => {
+      const projectId = snowflakeIdStr(testcase.project_id) || testcase.project_id
+      if (!projectId) return
+      const plan = findPlanById(bugPlans.value, planId)
+      const card = plan?.cards?.find((c) => c.value === cardId)
+      if (!card) return
+      try {
+        const response = await getProjectBugs(projectId, 1, 500, { card_id: cardId })
+        if (response.data?.success) {
+          card.bugs = response.data.badcases || response.data.bugs || []
+          card.bug_count = card.bugs.length
+        } else {
+          card.bugs = []
+        }
+      } catch (error) {
+        console.error('加载卡片下 Bug 失败:', error)
+        card.bugs = []
       }
     }
 
     const loadAllBugs = async () => {
-      console.log('loadAllBugs: 刷新所有 Bug 列表')
-      
-      const loadBugsForExpandedPlans = async (plans) => {
+      const refreshExpanded = async (plans) => {
         for (const plan of plans) {
-          if (plan.expanded) {
-            await loadBugsForPlan(plan.value)
-          }
-          if (plan.children && plan.children.length > 0) {
-            await loadBugsForExpandedPlans(plan.children)
+          if (!plan.expanded) continue
+          if (isLeafPlanNode(plan)) {
+            if (plan.cards === null) {
+              await loadCardsForPlan(plan.value)
+            }
+            for (const card of plan.cards || []) {
+              if (card.expanded) {
+                await loadBugsForCard(plan.value, card.value)
+              }
+            }
+          } else if (plan.children?.length) {
+            await refreshExpanded(plan.children)
           }
         }
       }
-      
-      await loadBugsForExpandedPlans(bugPlans.value)
+      await refreshExpanded(bugPlans.value)
     }
 
-    const commentText = computed(() => {
-      if (!testcase.comment) return ''
+    const commentDraftText = computed(() => {
+      if (!commentDraft.value) return ''
       const tempDiv = document.createElement('div')
-      tempDiv.innerHTML = testcase.comment
+      tempDiv.innerHTML = commentDraft.value
       return tempDiv.textContent || tempDiv.innerText || ''
     })
 
-    const commentDisplayLength = computed(() => richTextHtmlDisplayLength(testcase.comment))
+    const commentDraftLength = computed(() => richTextHtmlDisplayLength(commentDraft.value))
+
+    const formatCommentTime = (iso) => {
+      if (!iso) return ''
+      try {
+        const d = new Date(iso)
+        if (Number.isNaN(d.getTime())) return String(iso)
+        return d.toLocaleString()
+      } catch (_e) {
+        return String(iso)
+      }
+    }
+
+    const loadTestcaseComments = async () => {
+      if (!testcaseId) return
+      try {
+        const response = await getTestCaseDetail(testcaseId)
+        const res = response?.data || response
+        const list = res?.testcase?.comments
+        testcaseComments.value = Array.isArray(list) ? [...list] : []
+      } catch (e) {
+        console.error('[TestCase] 加载评论失败:', e)
+      }
+    }
+
+    const submitCommentDraft = async () => {
+      if (!isEdit || !testcaseId || !richTextHtmlHasContent(commentDraft.value)) return
+      commentSubmitting.value = true
+      try {
+        const resp = await addTestCaseComment(testcaseId, commentDraft.value)
+        const res = resp?.data || resp
+        if (res?.success && res.comment) {
+          testcaseComments.value = [...testcaseComments.value, res.comment]
+          commentDraft.value = ''
+          commentEditorActive.value = false
+        } else {
+          alert(res?.error || '发表评论失败')
+        }
+      } catch (e) {
+        console.error('[TestCase] 发表评论失败:', e)
+        alert('发表评论失败')
+      } finally {
+        commentSubmitting.value = false
+      }
+    }
 
     const handleProjectChange = () => {
       const sid = idStrOrNull(testcase.project_id)
@@ -1731,8 +1973,24 @@ export default {
 
     const applyDetailFieldToTestcase = (nk, newValue) => {
       if (newValue === undefined) return
+      if (nk === 'append_comment') {
+        void loadTestcaseComments()
+        return
+      }
       if (nk === 'steps') {
         testcase.steps = normalizeTestcaseStepsForEditor(newValue)
+        return
+      }
+      if (nk === 'related_defects') {
+        const ids = normalizeTestcaseRelatedDefectIds(newValue)
+        const byId = new Map(
+          (testcase.related_defects || []).map((d) => [String(d.id), d])
+        )
+        testcase.related_defects = ids.map((id) => {
+          const hit = byId.get(String(id))
+          return hit ? { ...hit, id } : { id, title: '' }
+        })
+        void hydrateRelatedDefectTitles()
         return
       }
       if (isTestcaseSelectDetailField(nk)) {
@@ -1786,7 +2044,12 @@ export default {
           body: JSON.stringify({
             target,
             target_id: targetId,
-            modifications: { [apiField]: newValue },
+            modifications: {
+              [apiField]:
+                nk === 'related_defects'
+                  ? normalizeTestcaseRelatedDefectIds(newValue)
+                  : newValue
+            },
             confirm: true,
             message_id: pendingDiff.value?.messageId
           })
@@ -1798,9 +2061,14 @@ export default {
           return
         }
 
-        applyDetailFieldToTestcase(nk, newValue)
-        await nextTick()
-        preconditionsEditorRef.value?.syncFromModel?.()
+        if (nk === 'append_comment') {
+          await loadTestcaseComments()
+          commentDraft.value = ''
+        } else {
+          applyDetailFieldToTestcase(nk, newValue)
+          await nextTick()
+          preconditionsEditorRef.value?.syncFromModel?.()
+        }
         confirmFieldChange(field)
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
@@ -1839,7 +2107,17 @@ export default {
         const oldS = data.old != null ? String(data.old).trim() : ''
         const newS = data.new != null ? String(data.new).trim() : ''
         if (!newS || newS === bs) continue
-        if (oldS !== bs && bs !== '') {
+        /** 执行结果：空串=未执行，须用库内当前值补全 old（modify 常不带 before） */
+        if (nk === 'execution_result') {
+          data.old = bv ?? ''
+          continue
+        }
+        if (nk === 'related_defects') {
+          const curIds = normalizeTestcaseRelatedDefectIds(testcase.related_defects)
+          data.old = curIds
+          continue
+        }
+        if (oldS !== bs && (bs !== '' || isTestcaseSelectDetailField(nk))) {
           data.old = bv
         }
       }
@@ -1888,6 +2166,17 @@ export default {
               }
               continue
             }
+            if (nk === 'related_defects') {
+              const parsedNew = normalizeTestcaseRelatedDefectIds(data?.new)
+              const parsedCur = normalizeTestcaseRelatedDefectIds(testcase.related_defects)
+              if (
+                JSON.stringify([...parsedNew].sort()) ===
+                JSON.stringify([...parsedCur].sort())
+              ) {
+                delete mods[field]
+              }
+              continue
+            }
             const newVal = data?.new != null ? String(data.new).trim() : ''
             const curVal = testcase[nk] != null ? String(testcase[nk]).trim() : ''
             if (newVal && curVal === newVal) delete mods[field]
@@ -1900,6 +2189,20 @@ export default {
         }
         reconcilePendingOldFromLoadedTestcase()
         applyPendingModificationsToTestcaseForm()
+        if (detailFieldDiff('execution_result')) {
+          activeTab.value = 'execution'
+          await nextTick()
+          scrollToDiffField('execution_result')
+        } else if (detailFieldDiff('related_defects')) {
+          activeTab.value = 'defects'
+          await nextTick()
+          scrollToDiffField('related_defects')
+        } else {
+          const it = props.initial_tab
+          if (it === 'execution' || it === 'basic' || it === 'defects') {
+            activeTab.value = it
+          }
+        }
         await nextTick()
         preconditionsEditorRef.value?.syncFromModel?.()
       } catch (e) {
@@ -1991,7 +2294,7 @@ export default {
             testcase.version = data.version || 'v1'
             testcase.plan_id = data.plan_id
             testcase.project_id = data.project_id
-            testcase.execution_result = data.execution_result || ''
+            testcase.execution_result = normalizeTestcaseExecutionResultForSelect(data.execution_result)
 
             if (data.assignee_id) {
               testcase.assignee = [data.assignee_id.toString()]
@@ -2003,11 +2306,19 @@ export default {
             }
 
             if (data.related_defects && Array.isArray(data.related_defects)) {
-              testcase.related_defects = data.related_defects.map(id => ({
-                id: typeof id === 'object' ? id.id : id,
-                title: typeof id === 'object' ? id.title : `Bug-${id}`
-              }))
+              testcase.related_defects = data.related_defects.map((item) => {
+                if (item && typeof item === 'object') {
+                  return {
+                    id: item.id,
+                    title: String(item.title || '').trim(),
+                    plan_id: item.plan_id ?? item.planId ?? null
+                  }
+                }
+                return { id: item, title: '', plan_id: null }
+              })
+              await hydrateRelatedDefectTitles()
             }
+            testcaseComments.value = Array.isArray(data.comments) ? [...data.comments] : []
           }
         } else {
           await loadUserProjectsForSelect()
@@ -2044,6 +2355,18 @@ export default {
         void reloadPendingDiffFromSession()
       },
       { flush: 'post' }
+    )
+
+    watch(
+      () => props.initial_tab,
+      (tab) => {
+        if (!props.show_diff) return
+        if (detailFieldDiff('execution_result')) return
+        if (detailFieldDiff('related_defects')) return
+        if (tab === 'execution' || tab === 'basic' || tab === 'defects') {
+          activeTab.value = tab
+        }
+      }
     )
 
     onUnmounted(() => {
@@ -2096,7 +2419,7 @@ export default {
           testcase.remark = ensureEditorHtmlContent(data.remark || '')
           testcase.plan_id = data.plan_id
           testcase.project_id = data.project_id
-          testcase.execution_result = data.execution_result || ''
+          testcase.execution_result = normalizeTestcaseExecutionResultForSelect(data.execution_result)
           if (data.assignee_id) {
             testcase.assignee = [String(data.assignee_id)]
             testcase.assignee_id = data.assignee_id
@@ -2142,6 +2465,8 @@ export default {
       showPlanDropdown,
       bugPlans,
       defectSearchText,
+      defectSearchResults,
+      defectSearchLoading,
       availableStatuses,
       isEdit,
       getStatusText,
@@ -2160,8 +2485,10 @@ export default {
       isDefectSelected,
       toggleDefectSelection,
       navigateToDefect,
+      defectDisplayTitle,
       searchDefects,
       togglePlanExpand,
+      toggleCardExpand,
       loadAllBugs,
       toggleStatusDropdown,
       selectStatus,
@@ -2170,11 +2497,17 @@ export default {
       removeStep,
       removeDefect,
       fileInput,
-      commentText,
-      commentDisplayLength,
+      testcaseComments,
+      commentDraft,
+      commentDraftText,
+      commentDraftLength,
+      commentSubmitting,
       commentEditorActive,
       activateCommentEditor,
       finishCommentEditor,
+      formatCommentTime,
+      loadTestcaseComments,
+      submitCommentDraft,
       handleProjectChange,
       onProjectSelectChange,
       copyDocumentLink,
@@ -2589,6 +2922,85 @@ export default {
 .comment-collapse-btn:hover {
   border-color: #667eea;
   color: #667eea;
+}
+
+.comment-input-subtitle {
+  margin: 12px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #495057;
+}
+
+.comment-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.comment-item {
+  padding: 10px 12px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  border: 1px solid #e9ecef;
+}
+
+.comment-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #6c757d;
+}
+
+.comment-author {
+  font-weight: 600;
+  color: #343a40;
+}
+
+.comment-op-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e7f1ff;
+  color: #0d6efd;
+  font-size: 11px;
+}
+
+.comment-item-body {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #333;
+  word-break: break-word;
+}
+
+.comment-empty {
+  font-size: 13px;
+  color: #999;
+  padding: 8px 0 12px;
+}
+
+.comment-diff-panel {
+  margin-bottom: 10px;
+}
+
+.comment-submit-btn {
+  margin-left: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #667eea;
+  border-radius: 4px;
+  background: #667eea;
+  color: #fff;
+  cursor: pointer;
+}
+
+.comment-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .editor-count {
@@ -3520,6 +3932,28 @@ export default {
 }
 
 /* 添加缺陷对话框样式 */
+.defect-search-results {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fafbfc;
+}
+
+.defect-search-hint {
+  padding: 12px;
+  text-align: center;
+  color: #888;
+  font-size: 13px;
+}
+
+.defect-search-item {
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+
 .dialog-overlay {
   position: fixed;
   top: 0;
@@ -3801,33 +4235,38 @@ export default {
   border-top: 1px solid #e9ecef;
 }
 
-.btn-cancel,
-.btn-confirm {
-  padding: 8px 20px;
-  border: none;
-  border-radius: 4px;
+.dialog-footer .btn-cancel,
+.dialog-footer .btn-confirm {
+  min-width: 80px;
+  padding: 10px 24px;
+  border-radius: 6px;
   font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.2s;
+  white-space: nowrap;
+  transition: background-color 0.2s, border-color 0.2s;
 }
 
-.btn-cancel {
+.dialog-footer .btn-cancel {
   background: #fff;
   border: 1px solid #dcdfe6;
   color: #606266;
 }
 
-.btn-cancel:hover {
+.dialog-footer .btn-cancel:hover {
   background: #f5f7fa;
+  border-color: #c0c4cc;
 }
 
-.btn-confirm {
+.dialog-footer .btn-confirm {
   background: #409eff;
+  border: 1px solid #409eff;
   color: #fff;
 }
 
-.btn-confirm:hover {
+.dialog-footer .btn-confirm:hover {
   background: #66b1ff;
+  border-color: #66b1ff;
 }
 
 /* 关联缺陷样式 */
@@ -3926,8 +4365,8 @@ export default {
   gap: 8px;
 }
 
-.btn-confirm,
-.btn-cancel {
+.diff-actions .btn-confirm,
+.diff-actions .btn-cancel {
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -3940,22 +4379,22 @@ export default {
   transition: all 0.2s;
 }
 
-.btn-confirm {
+.diff-actions .btn-confirm {
   background: #10b981;
   color: white;
 }
 
-.btn-confirm:hover {
+.diff-actions .btn-confirm:hover {
   background: #059669;
   transform: scale(1.1);
 }
 
-.btn-cancel {
+.diff-actions .btn-cancel {
   background: #ef4444;
   color: white;
 }
 
-.btn-cancel:hover {
+.diff-actions .btn-cancel:hover {
   background: #dc2626;
   transform: scale(1.1);
 }

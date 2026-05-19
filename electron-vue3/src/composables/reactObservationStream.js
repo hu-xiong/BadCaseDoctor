@@ -119,7 +119,12 @@ export const DETAIL_FIELDS = [
   'severity',
   'case_category',
   'case_type',
-  'test_type'
+  'test_type',
+  'execution_result',
+  'related_defects',
+  'append_comment',
+  'plan_id',
+  'project_id'
 ]
 
 /** 与后端 modify 沙箱 before 形状一致：模型常传 target=badcase 实为 Bug 行 */
@@ -145,7 +150,9 @@ function inferModifyTargetFromSourceRowShape(before, after) {
   }
   if (
     Object.prototype.hasOwnProperty.call(row, 'preconditions') ||
-    Object.prototype.hasOwnProperty.call(row, 'test_type')
+    Object.prototype.hasOwnProperty.call(row, 'test_type') ||
+    Object.prototype.hasOwnProperty.call(row, 'execution_result') ||
+    Object.prototype.hasOwnProperty.call(row, 'related_defects')
   ) {
     return 'testcase'
   }

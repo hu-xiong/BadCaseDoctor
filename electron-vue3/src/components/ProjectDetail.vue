@@ -175,6 +175,7 @@
             :id="mainEditorItemId"
             :edit="mainEditorEdit"
             :show_diff="mainEditorShowDiff"
+            :initial_tab="mainEditorInitialTab"
             :embedded="true"
             @close="closeMainEditor"
             @titleLoaded="handleTitleLoaded"
@@ -490,6 +491,7 @@
             :sessionId="currentSession"
             :projectId="Number(projectId)"
             :project-display-name="projectName || ''"
+            :plan-id="selectedPlan"
             @title-updated="handleTitleUpdated"
           />
           <div v-else class="chat-empty-placeholder">
@@ -788,7 +790,8 @@ import {
   readTestcaseDetailRawField,
   normalizeTestcaseStepsForEditor,
   testcaseDetailFieldValuesEqual,
-  TESTCASE_DETAIL_FIELDS
+  TESTCASE_DETAIL_FIELDS,
+  pickTestcaseEditorTabForPendingModify
 } from '../utils/testcaseModifyFields.js'
 import { useLocalGoProxyStatus } from '../composables/useLocalGoProxyStatus'
 import SelectableTitleTip from './SelectableTitleTip.vue'
@@ -1142,6 +1145,8 @@ export default {
     const mainEditorEdit = ref(true)
     const mainEditorPlanId = ref(null)
     const mainEditorShowDiff = ref(false)
+    /** 测例详情：沙箱仅改执行结果时默认打开「执行」Tab */
+    const mainEditorInitialTab = ref(null)
     /** 创建时关联的卡片ID，用于类型校验 */
     const mainEditorCardId = ref(null)
     /** 嵌入详情：badcase | bug | test_case，与 mainEditorItemId 组成稳定 keep-alive 键 */
@@ -1545,7 +1550,12 @@ const totalCards = ref(0)
       'case_category',
       'severity',
       'case_type',
-      'test_type'
+      'test_type',
+      'execution_result',
+      'related_defects',
+      'append_comment',
+      'plan_id',
+      'project_id'
     ]
     
     // 字段标签映射
@@ -1572,7 +1582,12 @@ const totalCards = ref(0)
       'remark': '备注',
       'baseline': '基线',
       'case_type': '用例类型',
-      'test_type': '测试类型'
+      'test_type': '测试类型',
+      'execution_result': '执行结果',
+      'related_defects': '关联缺陷',
+      'append_comment': '追加评论',
+      'plan_id': '所属计划',
+      'project_id': '所属项目'
     }
     // 标签/中文 -> 英文 key（用于 diff 里传中文字段名时识别为详情字段）
     const LABEL_TO_FIELD = {}
@@ -1651,6 +1666,11 @@ const totalCards = ref(0)
           if (t === '备注') return 'remark'
           if (t === '基线') return 'baseline'
           if (t === '前置条件') return 'preconditions'
+          if (t === '执行结果' || t.includes('执行结果')) return 'execution_result'
+          if (t === '关联缺陷' || t.includes('关联缺陷')) return 'related_defects'
+          if (t === '评论' || t.includes('追加评论') || t.includes('添加评论')) return 'append_comment'
+          if (t === '所属计划' || t.includes('所属计划') || t === '所属迭代') return 'plan_id'
+          if (t === '所属项目' || t.includes('所属项目') || t === '项目名称') return 'project_id'
         }
         if (Object.prototype.hasOwnProperty.call(LABEL_TO_FIELD, t)) {
           const m = LABEL_TO_FIELD[t]
@@ -3260,6 +3280,7 @@ const totalCards = ref(0)
       mainEditorPlanId.value = null
       mainEditorShowDiff.value = false
       mainEditorCardId.value = null
+      mainEditorInitialTab.value = null
     }
 
     const MAX_TAB_TITLE = 28
@@ -4520,6 +4541,25 @@ const totalCards = ref(0)
         }
       })
       activeWorkbenchTabId.value = tid
+      if (showDiff && et === 'test_case') {
+        try {
+          const raw = sessionStorage.getItem('pendingModifyDiff')
+          if (raw) {
+            const pd = JSON.parse(raw)
+            if (sameEntityId(pd?.targetId, entityIdForEditor)) {
+              mainEditorInitialTab.value = pickTestcaseEditorTabForPendingModify(pd.modifications)
+            } else {
+              mainEditorInitialTab.value = null
+            }
+          } else {
+            mainEditorInitialTab.value = null
+          }
+        } catch (_e) {
+          mainEditorInitialTab.value = null
+        }
+      } else {
+        mainEditorInitialTab.value = null
+      }
       mountEditorComponents(entityIdForEditor, et, showDiff, true, planIdForEditor, cardIdForEditor)
     }
     
@@ -7951,8 +7991,13 @@ const totalCards = ref(0)
             if (needsTcDetailSnap) {
               const bo = readTestcaseDetailRawField(before, fieldKey)
               const ao = readTestcaseDetailRawField(after, fieldKey)
-              if (bo !== undefined && bo !== null && String(bo).trim() !== '') oldC = bo
-              if (ao !== undefined && ao !== null && String(ao).trim() !== '') newC = ao
+              if (fieldKey === 'related_defects') {
+                if (bo !== undefined) oldC = bo
+                if (ao !== undefined) newC = ao
+              } else {
+                if (bo !== undefined && bo !== null && String(bo).trim() !== '') oldC = bo
+                if (ao !== undefined && ao !== null && String(ao).trim() !== '') newC = ao
+              }
             }
             if (
               rowSnapshotTargets &&
@@ -8059,7 +8104,7 @@ const totalCards = ref(0)
         }
       }
       if ((tgt === 'testcase' || tgt === 'test_case') && (before || after)) {
-        for (const fk of ['case_type', 'priority', 'test_type']) {
+        for (const fk of ['case_type', 'priority', 'test_type', 'execution_result', 'related_defects']) {
           const cur = modifyData[fk]
           if (cur && typeof cur === 'object') {
             if (cur.unchanged === true) {
@@ -10188,6 +10233,7 @@ const totalCards = ref(0)
       mainEditorEdit,
       mainEditorPlanId,
       mainEditorShowDiff,
+      mainEditorInitialTab,
       mainEditorCardId,
       embeddedEditorKind,
       mainEditorCacheKey,

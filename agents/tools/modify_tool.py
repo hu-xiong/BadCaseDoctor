@@ -85,6 +85,27 @@ def _json_safe_row(snapshot: Any) -> Any:
     return out
 
 
+def _json_safe_ids_in_list(seq: Any) -> List[str]:
+    """related_defects 等 JSON 列：雪花 id 列表统一为字符串。"""
+    if not seq:
+        return []
+    if not isinstance(seq, (list, tuple)):
+        return []
+    out: List[str] = []
+    for x in seq:
+        if x is None:
+            continue
+        if isinstance(x, dict):
+            x = x.get("id") or x.get("bug_id")
+        sid = _json_safe_id(x)
+        if sid is None:
+            continue
+        s = str(sid).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
 def modify_tool_params_log_snapshot(
     params: Optional[Dict[str, Any]],
     *,
@@ -284,6 +305,8 @@ class ModifyTool(BaseTool):
             "description",
             "assignee",
             "assignee_id",
+            "append_comment",
+            "comment",
         }
         badish = {
             "reproduction_steps",
@@ -292,6 +315,8 @@ class ModifyTool(BaseTool):
             "badcase_result",
             "base_problem",
             "case_category",
+            "append_comment",
+            "comment",
         }
         tcish = {
             "preconditions",
@@ -302,6 +327,8 @@ class ModifyTool(BaseTool):
             "case_type",
             "testcase_type",
             "test_case_type",
+            "append_comment",
+            "comment",
         }
         b_hit = bool(keys & bugish)
         d_hit = bool(keys & badish)
@@ -1483,6 +1510,9 @@ class ModifyTool(BaseTool):
                     "execution_result": testcase.execution_result.value
                     if testcase.execution_result
                     else "",
+                    "related_defects": _json_safe_ids_in_list(
+                        getattr(testcase, "related_defects", None) or []
+                    ),
                     "assignee_id": testcase.assignee_id,
                     "assignee": assignee_name,
                     "executed_by": executed_by_name,
@@ -1977,6 +2007,23 @@ class ModifyTool(BaseTool):
                 )
             )
 
+        if "related_defects" in modifications and t_norm in ("testcase", "test_case"):
+            try:
+                with self._get_app_context():
+                    from app import db as flask_db
+
+                    raw_rd = modifications["related_defects"]
+                    if isinstance(raw_rd, dict) and "new" in raw_rd:
+                        raw_rd = raw_rd["new"]
+                    modifications["related_defects"] = self._coerce_testcase_related_defects(
+                        raw_rd, project_id, flask_db, validate=True
+                    )
+            except Exception as ex:
+                print(f"[MODIFY] related_defects 归一失败: {ex}", flush=True)
+
+        if t_norm in ("testcase", "test_case", "bug", "badcase", "bad_case"):
+            self._normalize_append_comment_mods(modifications)
+
         if (
             "case_category" in modifications
             and t_norm in ("badcase", "bad_case")
@@ -2074,16 +2121,35 @@ class ModifyTool(BaseTool):
                         target, modifications, original_data, natural_query, batch_mode=False
                     )
                     _progress(modify_tool_progress("sandbox_diff", loc))
+                    from app import db as flask_db
+
+                    preview_mods = {}
+                    for fk, fv in modifications.items():
+                        if fk in self._APPEND_ONLY_FIELDS:
+                            preview_mods[fk] = (
+                                fv["new"] if isinstance(fv, dict) and "new" in fv else fv
+                            )
+                            continue
+                        preview_mods[fk] = (
+                            fv["new"] if isinstance(fv, dict) and "new" in fv else fv
+                        )
                     modified_data = original_data.copy()
-                    modified_data.update(modifications)
+                    if "append_comment" in preview_mods:
+                        modified_data.setdefault("append_comment", "")
+                    modified_data.update(preview_mods)
                     _t_enrich = time.perf_counter()
                     self._enrich_modified_data_for_preview(
-                        target, modified_data, modifications, project_id
+                        target, modified_data, preview_mods, project_id
                     )
                     _enrich_ms = (time.perf_counter() - _t_enrich) * 1000.0
                     _t_ld = time.perf_counter()
                     diff_result = self._generate_line_diff(
-                        original_data, modified_data, modifications.keys(), ui_locale=loc
+                        original_data,
+                        modified_data,
+                        preview_mods.keys(),
+                        ui_locale=loc,
+                        project_id=project_id,
+                        flask_db=flask_db,
                     )
                     _line_diff_ms = (time.perf_counter() - _t_ld) * 1000.0
                     if _perf_single:
@@ -2147,7 +2213,12 @@ class ModifyTool(BaseTool):
                         flush=True,
                     )
                     success = await self._apply_modifications(
-                        target, target_id, modifications, project_id
+                        target,
+                        target_id,
+                        modifications,
+                        project_id,
+                        operator_user_id=kwargs.get("operator_user_id"),
+                        message_id=kwargs.get("message_id"),
                     )
                 print(f"[MODIFY] 应用修改完成: success={success}", flush=True)
                 _progress(modify_tool_progress("commit_ok" if success else "commit_fail", loc))
@@ -2533,6 +2604,9 @@ class ModifyTool(BaseTool):
                 'steps': json.dumps(testcase.steps, ensure_ascii=False) if testcase.steps else '',
                 'remark': testcase.remark or '',
                 'execution_result': testcase.execution_result.value if testcase.execution_result else '',
+                'related_defects': _json_safe_ids_in_list(
+                    getattr(testcase, "related_defects", None) or []
+                ),
                 'assignee_id': testcase.assignee_id,
                 'assignee': assignee_name,
                 'executed_by': executed_by_name,
@@ -2786,9 +2860,290 @@ class ModifyTool(BaseTool):
         s = s.replace('&nbsp;', ' ')
         return re.sub(r'\s+\n', '\n', s).strip()
 
-    def _diff_field_display_value(self, field: str, value: Any) -> str:
+    _APPEND_ONLY_FIELDS = frozenset({"append_comment"})
+
+    def _diff_immutable_fields(self, target: str) -> set:
+        """diff/沙箱 UPDATE 不可改字段；Bug/BadCase/TestCase 允许改 plan_id、project_id。"""
+        tgt = (target or "").strip().lower()
+        if tgt == "plan":
+            return {
+                "id",
+                "project_id",
+                "created_at",
+                "updated_at",
+                "creator_id",
+                "is_default",
+            }
+        base = {
+            "id",
+            "type",
+            "created_at",
+            "updated_at",
+            "creator_id",
+        }
+        if tgt in ("bug", "badcase", "bad_case", "testcase", "test_case"):
+            return base
+        return base | {"project_id", "plan_id"}
+
+    def _normalize_append_comment_mods(
+        self, modifications: Optional[Dict[str, Any]]
+    ) -> None:
+        """评论仅追加：comment -> append_comment；忽略 old。"""
+        if not modifications:
+            return
+        if "comment" in modifications and "append_comment" not in modifications:
+            modifications["append_comment"] = modifications.pop("comment")
+        ac = modifications.get("append_comment")
+        if ac is None:
+            return
+        if isinstance(ac, dict):
+            if "new" in ac:
+                modifications["append_comment"] = ac["new"]
+            elif "old" in ac and "new" not in ac:
+                modifications["append_comment"] = ac.get("old")
+
+    def _extract_append_comment_mods(
+        self, modifications: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], Optional[str]]:
+        """从 modifications 中拆出 append_comment，返回 (剩余字段, 评论正文)。"""
+        if not modifications:
+            return modifications, None
+        text = None
+        for key in ("append_comment", "comment"):
+            if key not in modifications:
+                continue
+            raw = modifications.pop(key)
+            if isinstance(raw, dict) and "new" in raw:
+                text = raw.get("new")
+            else:
+                text = raw
+            break
+        if text is None:
+            return modifications, None
+        s = str(text).strip() if text is not None else ""
+        return modifications, s if s else None
+
+    def _resolve_comment_author_id(
+        self, flask_db, project_id: int, kwargs: Dict[str, Any], source_row=None
+    ) -> Optional[int]:
+        op = kwargs.get("operator_user_id")
+        if op is not None:
+            try:
+                return int(op)
+            except (TypeError, ValueError):
+                pass
+        mid = kwargs.get("message_id")
+        if mid is not None:
+            try:
+                from app import ChatMessage
+
+                msg = flask_db.session.query(ChatMessage).get(int(mid))
+                if msg and msg.user_id:
+                    return int(msg.user_id)
+            except Exception:
+                pass
+        if source_row is not None and getattr(source_row, "creator_id", None):
+            return int(source_row.creator_id)
+        return None
+
+    def _append_entity_comment_orm(
+        self,
+        target: str,
+        flask_db,
+        row,
+        content: str,
+        user_id: int,
+        source_message_id=None,
+    ) -> bool:
+        tgt = (target or "").strip().lower()
+        try:
+            if tgt == "testcase" or tgt == "test_case":
+                from app import _append_testcase_comment_row
+
+                _append_testcase_comment_row(
+                    row, content, int(user_id), source_message_id=source_message_id
+                )
+            elif tgt == "bug":
+                from app import _append_bug_comment_row
+
+                _append_bug_comment_row(
+                    row, content, int(user_id), source_message_id=source_message_id
+                )
+            elif tgt in ("badcase", "bad_case"):
+                from app import _append_badcase_comment_row
+
+                _append_badcase_comment_row(
+                    row, content, int(user_id), source_message_id=source_message_id
+                )
+            else:
+                return False
+            return True
+        except Exception as ex:
+            print(f"[MODIFY] append_comment 失败: {ex}", flush=True)
+            return False
+
+    def _coerce_testcase_related_defects(
+        self, value: Any, project_id: int, flask_db=None, *, validate: bool = True
+    ) -> List[str]:
+        """测例 related_defects：归一为项目内 Bug 主键字符串列表。"""
+        ids = _json_safe_ids_in_list(value)
+        if not validate or not ids:
+            return ids
+        try:
+            from app import Bug
+
+            session = flask_db.session if flask_db is not None else None
+            if session is None:
+                return ids
+            pid = int(project_id)
+            found = (
+                session.query(Bug.id)
+                .filter(Bug.project_id == pid, Bug.id.in_([int(x) for x in ids]))
+                .all()
+            )
+            ok = {str(int(r[0])) for r in found}
+            return [x for x in ids if x in ok]
+        except Exception as ex:
+            print(f"[MODIFY] related_defects 校验失败: {ex}", flush=True)
+            return ids
+
+    def _format_plan_id_diff_display(
+        self, value: Any, project_id: int, flask_db=None
+    ) -> str:
+        if value is None or str(value).strip() == "":
+            return "（未关联计划）"
+        try:
+            from app import Plan
+
+            session = flask_db.session if flask_db is not None else None
+            if session is None:
+                return str(value)
+            pid = int(value)
+            plan = (
+                session.query(Plan)
+                .filter(Plan.id == pid, Plan.project_id == int(project_id))
+                .first()
+            )
+            if plan and (plan.name or "").strip():
+                return str(plan.name).strip()
+        except Exception as ex:
+            print(f"[MODIFY] plan_id diff 名称查询失败: {ex}", flush=True)
+        return str(value)
+
+    def _format_project_id_diff_display(self, value: Any, flask_db=None) -> str:
+        if value is None or str(value).strip() == "":
+            return "（未关联项目）"
+        try:
+            from app import Project
+
+            session = flask_db.session if flask_db is not None else None
+            if session is None:
+                return str(value)
+            proj = session.query(Project).get(int(value))
+            if proj and (proj.name or "").strip():
+                return str(proj.name).strip()
+        except Exception as ex:
+            print(f"[MODIFY] project_id diff 名称查询失败: {ex}", flush=True)
+        return str(value)
+
+    def _coerce_plan_id_value(
+        self, value: Any, project_id: int, flask_db=None, *, validate: bool = True
+    ):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            pid = int(str(value).strip())
+        except (TypeError, ValueError):
+            if not validate:
+                return value
+            raise ValueError(f"无效的计划 id: {value!r}")
+        if not validate:
+            return pid
+        from app import Plan
+
+        session = flask_db.session if flask_db is not None else None
+        if session is None:
+            return pid
+        ok = (
+            session.query(Plan.id)
+            .filter(Plan.id == pid, Plan.project_id == int(project_id))
+            .first()
+        )
+        if not ok:
+            raise ValueError(f"计划 {pid} 不属于项目 {project_id}")
+        return pid
+
+    def _coerce_project_id_value(
+        self, value: Any, current_project_id: int, flask_db=None, *, validate: bool = True
+    ):
+        if value is None or (isinstance(value, str) and not str(value).strip()):
+            return int(current_project_id)
+        try:
+            new_pid = int(str(value).strip())
+        except (TypeError, ValueError):
+            if not validate:
+                return value
+            raise ValueError(f"无效的项目 id: {value!r}")
+        if not validate:
+            return new_pid
+        from app import Project
+
+        session = flask_db.session if flask_db is not None else None
+        if session is None:
+            return new_pid
+        proj = session.query(Project).get(new_pid)
+        if not proj:
+            raise ValueError(f"项目 {new_pid} 不存在")
+        return new_pid
+
+    def _format_related_defects_diff_display(
+        self, value: Any, project_id: int, flask_db=None
+    ) -> str:
+        ids = _json_safe_ids_in_list(value)
+        if not ids:
+            return "（无）"
+        titles: Dict[str, str] = {}
+        try:
+            from app import Bug
+
+            session = flask_db.session if flask_db is not None else None
+            if session is not None:
+                pid = int(project_id)
+                rows = (
+                    session.query(Bug.id, Bug.title)
+                    .filter(Bug.project_id == pid, Bug.id.in_([int(x) for x in ids]))
+                    .all()
+                )
+                for bid, title in rows:
+                    titles[str(int(bid))] = str(title or "").strip()
+        except Exception as ex:
+            print(f"[MODIFY] related_defects diff 标题查询失败: {ex}", flush=True)
+        lines = []
+        for bid in ids:
+            t = titles.get(bid, "")
+            lines.append(t if t else f"Bug-{bid}")
+        return "\n".join(lines)
+
+    def _diff_field_display_value(
+        self, field: str, value: Any, project_id: int = None, flask_db=None
+    ) -> str:
+        if field == "related_defects":
+            return self._format_related_defects_diff_display(
+                value, project_id or 0, flask_db
+            )
+        if field in ("append_comment", "comment"):
+            return self._strip_html_for_diff_display(value)
+        if field == "plan_id":
+            return self._format_plan_id_diff_display(value, project_id, flask_db)
+        if field == "project_id":
+            return self._format_project_id_diff_display(value, flask_db)
         if field in ('preconditions', 'remark'):
             return self._strip_html_for_diff_display(value)
+        if isinstance(value, (list, tuple)):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
         return str(value) if value is not None else ''
 
     def _generate_line_diff(
@@ -2797,10 +3152,11 @@ class ModifyTool(BaseTool):
         after: Dict,
         changed_fields: List[str],
         ui_locale: Optional[str] = None,
+        project_id: int = None,
+        flask_db=None,
     ) -> List[Dict]:
         """生成行级别差异对比"""
-        # 不可修改的字段列表
-        immutable_fields = {'id', 'type', 'project_id', 'created_at', 'updated_at', 'creator_id', 'plan_id'}
+        immutable_fields = self._diff_immutable_fields(target)
         loc = normalize_locale(ui_locale)
         
         diff_result = []
@@ -2821,8 +3177,12 @@ class ModifyTool(BaseTool):
                 after_value = str(after.get('assignee_display') or after.get('assignee') or '')
                 out_field = 'assignee'
             else:
-                before_value = self._diff_field_display_value(field, before.get(field, ''))
-                after_value = self._diff_field_display_value(field, after.get(field, ''))
+                before_value = self._diff_field_display_value(
+                    field, before.get(field, ''), project_id, flask_db
+                )
+                after_value = self._diff_field_display_value(
+                    field, after.get(field, ''), project_id, flask_db
+                )
                 out_field = field
             
             # 构造 diff 行
@@ -3202,27 +3562,11 @@ class ModifyTool(BaseTool):
         self, target: str, modifications: Dict[str, Any], project_id: int
     ) -> tuple[Optional[List[str]], Optional[str]]:
         """直出 UPDATE 的 SET 子句列表；与单条沙箱预览语义一致。"""
-        if (target or "").strip().lower() == "plan":
-            immutable_fields = {
-                "id",
-                "project_id",
-                "created_at",
-                "updated_at",
-                "creator_id",
-                "is_default",
-            }
-        else:
-            immutable_fields = {
-                "id",
-                "type",
-                "project_id",
-                "created_at",
-                "updated_at",
-                "creator_id",
-                "plan_id",
-            }
+        immutable_fields = self._diff_immutable_fields(target)
         set_clauses: List[str] = []
         for field, value in (modifications or {}).items():
+            if field in self._APPEND_ONLY_FIELDS:
+                continue
             if field in immutable_fields:
                 print(f"[MODIFY-SANDBOX] 跳过不可修改字段: {field}")
                 continue
@@ -3233,14 +3577,45 @@ class ModifyTool(BaseTool):
                 if resolved_value != actual_value:
                     print(f"[MODIFY-SANDBOX] 用户解析: '{actual_value}' -> 用户ID={resolved_value}")
                     actual_value = resolved_value
-            if isinstance(actual_value, str):
+            if field_name == "related_defects":
+                coerced = self._coerce_testcase_related_defects(
+                    actual_value, project_id, validate=False
+                )
+                esc = json.dumps(coerced, ensure_ascii=False).replace("'", "''")
+                set_clauses.append(f"{field_name} = '{esc}'")
+            elif field_name == "plan_id":
+                from app import db as flask_db
+
+                coerced = self._coerce_plan_id_value(
+                    actual_value, project_id, flask_db, validate=False
+                )
+                if coerced is None:
+                    set_clauses.append(f"{field_name} = NULL")
+                else:
+                    set_clauses.append(f"{field_name} = {int(coerced)}")
+            elif field_name == "project_id":
+                from app import db as flask_db
+
+                coerced = self._coerce_project_id_value(
+                    actual_value, project_id, flask_db, validate=False
+                )
+                set_clauses.append(f"{field_name} = {int(coerced)}")
+            elif isinstance(actual_value, str):
                 esc = actual_value.replace("'", "''")
                 set_clauses.append(f"{field_name} = '{esc}'")
             elif actual_value is None:
                 set_clauses.append(f"{field_name} = NULL")
+            elif isinstance(actual_value, (list, tuple, dict)):
+                esc = json.dumps(actual_value, ensure_ascii=False).replace("'", "''")
+                set_clauses.append(f"{field_name} = '{esc}'")
             else:
                 set_clauses.append(f"{field_name} = {actual_value}")
         if not set_clauses:
+            has_append = any(
+                k in self._APPEND_ONLY_FIELDS for k in (modifications or {}).keys()
+            )
+            if has_append:
+                return [], None
             return None, "没有可更新字段"
         return set_clauses, None
 
@@ -3332,15 +3707,27 @@ class ModifyTool(BaseTool):
                     "batch_modify": True,
                 }
             _progress(modify_tool_progress("sandbox_diff", loc))
+            from app import db as flask_db
+
+            preview_mods = {}
+            for fk, fv in modifications.items():
+                preview_mods[fk] = (
+                    fv["new"] if isinstance(fv, dict) and "new" in fv else fv
+                )
             modified_data = original_data.copy()
-            modified_data.update(modifications)
+            modified_data.update(preview_mods)
             _te0 = time.perf_counter()
-            self._enrich_modified_data_for_preview(target, modified_data, modifications, project_id)
+            self._enrich_modified_data_for_preview(target, modified_data, preview_mods, project_id)
             _enrich_one = (time.perf_counter() - _te0) * 1000.0
             enrich_ms_acc += _enrich_one
             _td0 = time.perf_counter()
             diff_result = self._generate_line_diff(
-                original_data, modified_data, modifications.keys(), ui_locale=loc
+                original_data,
+                modified_data,
+                preview_mods.keys(),
+                ui_locale=loc,
+                project_id=project_id,
+                flask_db=flask_db,
             )
             _diff_one = (time.perf_counter() - _td0) * 1000.0
             line_diff_ms_acc += _diff_one
@@ -3847,6 +4234,13 @@ class ModifyTool(BaseTool):
             if err:
                 return {"success": False, "error": err}
             assert set_clauses is not None
+            if not set_clauses:
+                return {
+                    "success": True,
+                    "sql": "",
+                    "sandbox_mode": True,
+                    "message": "沙箱预览完成（仅追加评论，确认后写入评论表）",
+                }
             if use_direct_sql:
                 sql = (
                     f"UPDATE {table_name} SET {', '.join(set_clauses)} "
@@ -3968,29 +4362,18 @@ class ModifyTool(BaseTool):
                 out.append(iv)
         return out
     
-    async def _apply_modifications(self, target: str, target_id: int, modifications: Dict, project_id: int) -> bool:
+    async def _apply_modifications(
+        self,
+        target: str,
+        target_id: int,
+        modifications: Dict,
+        project_id: int,
+        operator_user_id=None,
+        message_id=None,
+    ) -> bool:
         """应用修改到数据库"""
         print(f"[MODIFY] _apply_modifications 开始: target={target}, target_id={target_id}, 共 {len(modifications or {})} 个字段")
-        # 不可修改的字段列表（Plan 表无 plan_id / type）
-        if (target or "").strip().lower() == "plan":
-            immutable_fields = {
-                "id",
-                "project_id",
-                "created_at",
-                "updated_at",
-                "creator_id",
-                "is_default",
-            }
-        else:
-            immutable_fields = {
-                "id",
-                "type",
-                "project_id",
-                "created_at",
-                "updated_at",
-                "creator_id",
-                "plan_id",
-            }
+        immutable_fields = self._diff_immutable_fields(target)
         
         try:
             # 构建自然语言修改描述
@@ -4010,6 +4393,10 @@ class ModifyTool(BaseTool):
                 # 跳过不可修改的字段
                 if field in immutable_fields:
                     print(f"[MODIFY] 跳过不可修改字段: {field}")
+                    continue
+                if field in self._APPEND_ONLY_FIELDS:
+                    actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+                    resolved_modifications[field] = actual_value
                     continue
                 
                 actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
@@ -4032,6 +4419,25 @@ class ModifyTool(BaseTool):
                     if target == 'badcase' and field in ['assignee', 'assignee_id', '负责人', 'owner']:
                         actual_value = str(actual_value)
                 
+                if field_name == "related_defects" and target in ("testcase", "test_case"):
+                    from app import db as flask_db
+
+                    actual_value = self._coerce_testcase_related_defects(
+                        actual_value, project_id, flask_db, validate=True
+                    )
+                if field_name == "plan_id":
+                    from app import db as flask_db
+
+                    actual_value = self._coerce_plan_id_value(
+                        actual_value, project_id, flask_db, validate=True
+                    )
+                if field_name == "project_id":
+                    from app import db as flask_db
+
+                    actual_value = self._coerce_project_id_value(
+                        actual_value, project_id, flask_db, validate=True
+                    )
+
                 # 保存解析后的值
                 resolved_modifications[field] = actual_value
                 
@@ -4042,7 +4448,14 @@ class ModifyTool(BaseTool):
             
             modify_desc = "、".join(set_clauses)
             print(f"[MODIFY] 正在写入 ORM（commit）…")
-            result = await self._apply_modifications_orm(target, target_id, resolved_modifications, project_id)
+            result = await self._apply_modifications_orm(
+                target,
+                target_id,
+                resolved_modifications,
+                project_id,
+                operator_user_id=operator_user_id,
+                message_id=message_id,
+            )
             print(f"[MODIFY] ORM 写入结果: success={result}")
             return result
             
@@ -4085,6 +4498,12 @@ class ModifyTool(BaseTool):
                         except (ValueError, TypeError) as ex:
                             print(f"[MODIFY] 批量 TestCase status 无效: {v!r} -> {ex}", flush=True)
                             return False
+                    if mk == "related_defects":
+                        from app import db as flask_db
+
+                        v = self._coerce_testcase_related_defects(
+                            v, project_id, flask_db, validate=True
+                        )
                     update_map[mk] = v
             elif target == "card":
                 from app import Card
@@ -4187,6 +4606,21 @@ class ModifyTool(BaseTool):
             'test_case_type': 'case_type',
             '备注': 'remark',
             '基线': 'baseline',
+            '关联缺陷': 'related_defects',
+            'related_defects': 'related_defects',
+            'related_defect': 'related_defects',
+            'defects': 'related_defects',
+            '评论': 'append_comment',
+            '追加评论': 'append_comment',
+            'comment': 'append_comment',
+            'append_comment': 'append_comment',
+            '所属计划': 'plan_id',
+            '所属迭代': 'plan_id',
+            '计划': 'plan_id',
+            'plan_id': 'plan_id',
+            '所属项目': 'project_id',
+            '项目名称': 'project_id',
+            'project_id': 'project_id',
         }
         
         if target == 'badcase':
@@ -4366,7 +4800,15 @@ class ModifyTool(BaseTool):
             print(f"[MODIFY] ❌ 查询用户失败: {e}")
             return None
     
-    async def _apply_modifications_orm(self, target: str, target_id: int, modifications: Dict, project_id: int) -> bool:
+    async def _apply_modifications_orm(
+        self,
+        target: str,
+        target_id: int,
+        modifications: Dict,
+        project_id: int,
+        operator_user_id=None,
+        message_id=None,
+    ) -> bool:
         """ORM 方式应用修改（回退方案）
         
         注意：传入的 modifications 已经是解析后的值（用户名已转换为用户ID）
@@ -4404,17 +4846,37 @@ class ModifyTool(BaseTool):
                 
                 if not bug:
                     return False
-                
-                for field, value in modifications.items():
-                    # 应用字段映射
+                mods_work = dict(modifications)
+                mods_work, append_text = self._extract_append_comment_mods(mods_work)
+                for field, value in mods_work.items():
                     actual_field = field_mapping.get(field, field)
-                    
-                    if hasattr(bug, actual_field):
-                        # 值已经在 _apply_modifications 中解析过了
-                        actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
-                        
-                        setattr(bug, actual_field, actual_value)
-                
+                    actual_field = self._resolve_db_column_name(target, field)
+                    if not hasattr(bug, actual_field):
+                        continue
+                    actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+                    if actual_field == "plan_id":
+                        actual_value = self._coerce_plan_id_value(
+                            actual_value, project_id, flask_db, validate=True
+                        )
+                    elif actual_field == "project_id":
+                        actual_value = self._coerce_project_id_value(
+                            actual_value, project_id, flask_db, validate=True
+                        )
+                    setattr(bug, actual_field, actual_value)
+                if append_text:
+                    ctx = {
+                        "operator_user_id": operator_user_id,
+                        "message_id": message_id,
+                    }
+                    uid = self._resolve_comment_author_id(
+                        flask_db, project_id, ctx, bug
+                    )
+                    if not uid:
+                        return False
+                    if not self._append_entity_comment_orm(
+                        target, flask_db, bug, append_text, uid, message_id
+                    ):
+                        return False
                 self._sync_card_from_source_row(
                     flask_db.session, "bug", bug, project_id
                 )
@@ -4430,11 +4892,37 @@ class ModifyTool(BaseTool):
                 
                 if not badcase:
                     return False
-                for field, value in modifications.items():
+                mods_work = dict(modifications)
+                mods_work, append_text = self._extract_append_comment_mods(mods_work)
+                for field, value in mods_work.items():
                     actual_field = field_mapping.get(field, field)
-                    if hasattr(badcase, actual_field):
-                        actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
-                        setattr(badcase, actual_field, actual_value)
+                    actual_field = self._resolve_db_column_name(target, field)
+                    if not hasattr(badcase, actual_field):
+                        continue
+                    actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
+                    if actual_field == "plan_id":
+                        actual_value = self._coerce_plan_id_value(
+                            actual_value, project_id, flask_db, validate=True
+                        )
+                    elif actual_field == "project_id":
+                        actual_value = self._coerce_project_id_value(
+                            actual_value, project_id, flask_db, validate=True
+                        )
+                    setattr(badcase, actual_field, actual_value)
+                if append_text:
+                    ctx = {
+                        "operator_user_id": operator_user_id,
+                        "message_id": message_id,
+                    }
+                    uid = self._resolve_comment_author_id(
+                        flask_db, project_id, ctx, badcase
+                    )
+                    if not uid:
+                        return False
+                    if not self._append_entity_comment_orm(
+                        target, flask_db, badcase, append_text, uid, message_id
+                    ):
+                        return False
                 self._sync_card_from_source_row(
                     flask_db.session, "badcase", badcase, project_id
                 )
@@ -4451,7 +4939,9 @@ class ModifyTool(BaseTool):
                 
                 if not testcase:
                     return False
-                for field, value in modifications.items():
+                mods_work = dict(modifications)
+                mods_work, append_text = self._extract_append_comment_mods(mods_work)
+                for field, value in mods_work.items():
                     actual_field = self._resolve_db_column_name(target, field)
                     if hasattr(testcase, actual_field):
                         actual_value = value['new'] if isinstance(value, dict) and 'new' in value else value
@@ -4464,7 +4954,39 @@ class ModifyTool(BaseTool):
                                     flush=True,
                                 )
                                 return False
+                        if actual_field == "related_defects":
+                            actual_value = self._coerce_testcase_related_defects(
+                                actual_value, project_id, flask_db, validate=True
+                            )
+                        if actual_field == "plan_id":
+                            actual_value = self._coerce_plan_id_value(
+                                actual_value, project_id, flask_db, validate=True
+                            )
+                        if actual_field == "project_id":
+                            actual_value = self._coerce_project_id_value(
+                                actual_value, project_id, flask_db, validate=True
+                            )
                         setattr(testcase, actual_field, actual_value)
+                if append_text:
+                    ctx = {
+                        "operator_user_id": operator_user_id,
+                        "message_id": message_id,
+                    }
+                    uid = self._resolve_comment_author_id(
+                        flask_db, project_id, ctx, testcase
+                    )
+                    if not uid:
+                        print("[MODIFY] append_comment 无法解析作者 user_id", flush=True)
+                        return False
+                    if not self._append_entity_comment_orm(
+                        target,
+                        flask_db,
+                        testcase,
+                        append_text,
+                        uid,
+                        message_id,
+                    ):
+                        return False
                 
                 self._sync_card_from_source_row(
                     flask_db.session, "testcase", testcase, project_id

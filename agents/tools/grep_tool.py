@@ -1168,6 +1168,55 @@ class GrepTool(BaseTool):
             )
         return query
 
+    def _resolve_plan_scope_ids(
+        self, project_id: str, plan_id: Optional[str]
+    ) -> Optional[List[int]]:
+        """
+        将 plan_id 解析为该项目下可检索的计划 id 列表（含子计划）。
+        若 plan_id 与 project_id 相同则视为模型误填并忽略（常见：把项目 id 当成「迭代 1」的 plan_id）。
+        """
+        if plan_id is None:
+            return None
+        pid_s = str(plan_id).strip()
+        if not pid_s or pid_s in ("0", "None", "null"):
+            return None
+        try:
+            pid_int = int(pid_s)
+        except (ValueError, TypeError):
+            return None
+        try:
+            proj_int = int(project_id)
+        except (ValueError, TypeError):
+            proj_int = None
+        if proj_int is not None and pid_int == proj_int:
+            print(
+                f"[GREP] plan_id={pid_int} 与 project_id 相同，忽略计划过滤"
+                "（避免将项目 id 误当作迭代计划 id）"
+            )
+            return None
+        try:
+            from app import _plan_subtree_ids_for_project
+
+            ids = _plan_subtree_ids_for_project(proj_int or 1, pid_int)
+            if ids:
+                print(
+                    f"[GREP] 限定计划子树 plan_id={pid_int} -> {len(ids)} 个计划节点"
+                )
+                return ids
+        except Exception as e:
+            print(f"[GREP] 计划子树解析失败 plan_id={pid_int}: {e}")
+        return [pid_int]
+
+    def _apply_entity_plan_scope_filter(self, query, model, project_id: str, plan_id: str = None):
+        scope_ids = self._resolve_plan_scope_ids(project_id, plan_id)
+        if scope_ids:
+            col = model.plan_id
+            if len(scope_ids) == 1:
+                query = query.filter(col == scope_ids[0])
+            else:
+                query = query.filter(col.in_(scope_ids))
+        return query, scope_ids
+
     def _text_matches_normalized_keywords(self, text: str, keywords: Optional[str]) -> bool:
         if not keywords or not str(keywords).strip():
             return False
@@ -1186,15 +1235,10 @@ class GrepTool(BaseTool):
         
         query = db.session.query(BadCase).filter_by(project_id=project_id)
         
-        # 按 plan_id 过滤：只查当前迭代计划下的记录（人类式先看本计划再判断）
-        if plan_id:
-            try:
-                pid = int(plan_id)
-                query = query.filter(BadCase.plan_id == pid)
-                print(f"[GREP] 限定计划 plan_id={pid}")
-            except (ValueError, TypeError):
-                pass
-        
+        query, _plan_scope = self._apply_entity_plan_scope_filter(
+            query, BadCase, project_id, plan_id
+        )
+
         # 按 status 过滤
         if status:
             # 标准化 status 值
@@ -1263,15 +1307,10 @@ class GrepTool(BaseTool):
         
         query = db.session.query(Bug).filter_by(project_id=project_id_int)
         
-        # 按 plan_id 过滤：只查当前迭代计划下的记录
-        if plan_id:
-            try:
-                pid = int(plan_id)
-                query = query.filter(Bug.plan_id == pid)
-                print(f"[GREP] 限定计划 plan_id={pid}")
-            except (ValueError, TypeError):
-                pass
-        
+        query, _plan_scope = self._apply_entity_plan_scope_filter(
+            query, Bug, project_id, plan_id
+        )
+
         # 按 status 过滤
         if status:
             # 标准化 status 值
@@ -1305,7 +1344,20 @@ class GrepTool(BaseTool):
             bugs = query.order_by(Bug.created_at.desc()).limit(100).all()
         else:
             bugs = query.order_by(Bug.created_at.desc()).limit(20).all()
-        
+
+        if (
+            not bugs
+            and _plan_scope
+            and keyword_list
+            and not status
+        ):
+            print(
+                "[GREP] 计划子树内无 Bug 命中，回退为全项目按关键词检索"
+            )
+            query = db.session.query(Bug).filter_by(project_id=project_id_int)
+            query = self._apply_title_ilike_keywords(query, Bug.title, keyword_list)
+            bugs = query.order_by(Bug.created_at.desc()).limit(20).all()
+
         print(f"[GREP] 找到 {len(bugs)} 个 Bug")
         
         result = []
@@ -1335,11 +1387,9 @@ class GrepTool(BaseTool):
         except (ValueError, TypeError):
             project_id_int = 1
         query = db.session.query(TestCase).filter_by(project_id=project_id_int)
-        if plan_id:
-            try:
-                query = query.filter(TestCase.plan_id == int(plan_id))
-            except (ValueError, TypeError):
-                pass
+        query, _plan_scope = self._apply_entity_plan_scope_filter(
+            query, TestCase, project_id, plan_id
+        )
         if status:
             status_map = {'草稿': 'draft', 'draft': 'draft', '评审': 'review', 'review': 'review', '生效': 'active', 'active': 'active', '归档': 'archived', 'archived': 'archived'}
             norm = status_map.get(status.strip().lower(), status.strip().lower())
@@ -1380,11 +1430,9 @@ class GrepTool(BaseTool):
             project_id_int = 1
 
         query = db.session.query(Card).filter(Card.project_id == project_id_int)
-        if plan_id:
-            try:
-                query = query.filter(Card.plan_id == int(plan_id))
-            except (ValueError, TypeError):
-                pass
+        query, _plan_scope = self._apply_entity_plan_scope_filter(
+            query, Card, project_id, plan_id
+        )
 
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
         is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')

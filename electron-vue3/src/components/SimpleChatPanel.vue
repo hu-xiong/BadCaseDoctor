@@ -854,6 +854,8 @@ import {
   testcaseDetailFieldValuesEqual,
   normalizeTestcaseSandboxDiffRow,
   enrichTestcaseSandboxDiffRows,
+  remapMislabeledTestcaseSandboxFieldKey,
+  isTestcaseExecutionResultEnumValue,
   TESTCASE_DETAIL_FIELDS,
   TESTCASE_LIST_FIELDS,
   TESTCASE_FIELD_LABEL_I18N
@@ -880,6 +882,12 @@ const props = defineProps({
     type: String,
     required: false,
     default: ''
+  },
+  /** 左侧计划树当前选中的迭代计划 id（字符串，避免大整数精度丢失） */
+  planId: {
+    type: [String, Number],
+    required: false,
+    default: null
   }
 })
 
@@ -1013,7 +1021,11 @@ function isPlaceholderSessionTitle(title) {
       (b.case_type != null ||
         b.testcase_type != null ||
         b.steps != null ||
-        b.preconditions != null)
+        b.preconditions != null ||
+        b.execution_result != null ||
+        b.executionResult != null ||
+        b.related_defects != null ||
+        b.append_comment != null)
     ) {
       return 'testcase'
     }
@@ -1160,16 +1172,42 @@ function isPlaceholderSessionTitle(title) {
 
   const readSandboxModifySideRaw = (ctx, fieldDiff, which) => {
     const tgt = String(ctx?.target || '').toLowerCase()
-    const fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
+    let fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
     const label = String(fieldDiff?.field_label || '')
+    const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
+    const lineNew = fieldDiff?.lines?.find((l) => l.type === 'add')?.content
+    const lineOld = fieldDiff?.lines?.find((l) => l.type === 'delete')?.content
+    const modExec = mods.execution_result
+    const modStatus = mods.status
+    const sampleNew =
+      (modExec && typeof modExec === 'object' ? modExec.new : null) ??
+      (modStatus && typeof modStatus === 'object' ? modStatus.new : null) ??
+      lineNew
+    const sampleOld =
+      (modExec && typeof modExec === 'object' ? modExec.old : null) ??
+      (modStatus && typeof modStatus === 'object' ? modStatus.old : null) ??
+      lineOld
+    if (tgt === 'testcase' || tgt === 'test_case') {
+      fk = remapMislabeledTestcaseSandboxFieldKey(
+        fk,
+        label,
+        which === 'old' ? sampleOld : sampleNew
+      )
+    }
     const isPriority =
       fk === 'priority' ||
       fk === 'severity' ||
       label.includes('优先级') ||
       label.includes('严重程度') ||
       label.includes('严重级别')
-    const isStatus = fk === 'status' || /状态/i.test(label)
-    const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
+    const isTcExecution =
+      (tgt === 'testcase' || tgt === 'test_case') &&
+      (fk === 'execution_result' ||
+        isTestcaseExecutionResultEnumValue(which === 'old' ? sampleOld : sampleNew))
+    const isStatus =
+      !isTcExecution &&
+      (fk === 'status' ||
+        (/状态/.test(label) && !/执行结果|test\s*result/i.test(label)))
     if (isPriority && mods.priority && typeof mods.priority === 'object') {
       const v = which === 'old' ? mods.priority.old : mods.priority.new
       if (v != null && String(v).trim() !== '') return String(v).trim()
@@ -1203,7 +1241,8 @@ function isPlaceholderSessionTitle(title) {
           fieldDiff?.field,
           label,
           which,
-          mods
+          mods,
+          t
         )
         if (fromTc) return fromTc
       } else {
@@ -1212,12 +1251,12 @@ function isPlaceholderSessionTitle(title) {
           const m = mods[mk]
           if (m && typeof m === 'object') {
             const v = which === 'old' ? m.old : m.new
-            const formatted = formatTestcaseModifyFieldValue(fk, v)
+            const formatted = formatTestcaseModifyFieldValue(fk, v, { t })
             if (formatted) return formatted
           }
         }
         const row = which === 'old' ? ctx?.before : ctx?.after
-        const fromRow = readTestcaseModifySideValue(ctx, fk, fieldDiff?.field, label, which, {})
+        const fromRow = readTestcaseModifySideValue(ctx, fk, fieldDiff?.field, label, which, {}, t)
         if (fromRow) return fromRow
       }
       const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
@@ -1233,7 +1272,8 @@ function isPlaceholderSessionTitle(title) {
               fieldDiff?.field,
               label,
               'old',
-              mods
+              mods,
+              t
             )
             if (fromMerged) return fromMerged
           }
@@ -1343,23 +1383,50 @@ function isPlaceholderSessionTitle(title) {
 
   const formatSandboxModifySideDisplay = (ctx, fieldDiff, which) => {
     const tgt = String(ctx?.target || '').toLowerCase()
-    const fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
+    let fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
     const label = String(fieldDiff?.field_label || '')
+    const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
+    const lineNew = fieldDiff?.lines?.find((l) => l.type === 'add')?.content
+    const lineOld = fieldDiff?.lines?.find((l) => l.type === 'delete')?.content
+    const modExec = mods.execution_result
+    const modStatus = mods.status
+    const sampleNew =
+      (modExec && typeof modExec === 'object' ? modExec.new : null) ??
+      (modStatus && typeof modStatus === 'object' ? modStatus.new : null) ??
+      lineNew
+    const sampleOld =
+      (modExec && typeof modExec === 'object' ? modExec.old : null) ??
+      (modStatus && typeof modStatus === 'object' ? modStatus.old : null) ??
+      lineOld
+    if (tgt === 'testcase' || tgt === 'test_case') {
+      fk = remapMislabeledTestcaseSandboxFieldKey(
+        fk,
+        label,
+        which === 'old' ? sampleOld : sampleNew
+      )
+    }
     const isPriority =
       fk === 'priority' ||
       fk === 'severity' ||
       label.includes('优先级') ||
       label.includes('严重程度') ||
       label.includes('严重级别')
-    const isStatus = fk === 'status' || /状态/i.test(label)
+    const isTcExecution =
+      (tgt === 'testcase' || tgt === 'test_case') &&
+      (fk === 'execution_result' ||
+        isTestcaseExecutionResultEnumValue(which === 'old' ? sampleOld : sampleNew))
+    const isStatus =
+      !isTcExecution &&
+      (fk === 'status' ||
+        (/状态/.test(label) && !/执行结果|test\s*result/i.test(label)))
     const raw = readSandboxModifySideRaw(ctx, fieldDiff, which)
     if (raw === '') return ''
-    const isTcField = isTestcaseDetailModifyField(fk, label)
-    if (isTcField && isTestcaseSelectDetailField(fk)) {
+    const isTcField = isTestcaseDetailModifyField(fk, label) || isTcExecution
+    if (isTcField && (isTestcaseSelectDetailField(fk) || isTcExecution)) {
       return formatTestcaseSelectFieldLabel(fk, raw, t)
     }
     if (isTcField) {
-      return formatTestcaseModifyFieldValue(fk, raw)
+      return formatTestcaseModifyFieldValue(fk, raw, { t })
     }
     if ((tgt === 'testcase' || tgt === 'test_case') && isPriority) {
       return formatTestcaseModifyFieldValue('priority', raw)
@@ -1380,7 +1447,13 @@ function isPlaceholderSessionTitle(title) {
     const tgt = String((ctx && ctx.target) || groupTargetFallback || '')
       .trim()
       .toLowerCase()
-    const tcNk = normalizeTestcaseModifyFieldKey(fd?.field, lab)
+    const lineNew = fd?.lines?.find((l) => l.type === 'add')?.content
+    const lineOld = fd?.lines?.find((l) => l.type === 'delete')?.content
+    const tcNk = remapMislabeledTestcaseSandboxFieldKey(
+      normalizeTestcaseModifyFieldKey(fd?.field, lab),
+      lab,
+      lineNew ?? lineOld
+    )
     if (
       tgt === 'testcase' ||
       tgt === 'test_case' ||
@@ -4520,6 +4593,9 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
         locale: localeForApi(),
         ...(String(props.projectDisplayName || '').trim()
           ? { project_display_name: String(props.projectDisplayName).trim() }
+          : {}),
+        ...(props.planId != null && String(props.planId).trim() !== ''
+          ? { plan_id: String(props.planId).trim() }
           : {}),
         ...longMemoryContextForReact()
       })

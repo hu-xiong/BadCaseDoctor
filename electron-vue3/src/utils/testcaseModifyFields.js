@@ -12,11 +12,14 @@ export const TESTCASE_DETAIL_FIELDS = [
   'baseline',
   'priority',
   'case_type',
-  'test_type'
+  'test_type',
+  'execution_result',
+  'related_defects',
+  'append_comment'
 ]
 
 /** 属性区下拉框：与 Bug 优先级一致，行内 diff + 灌入 new 到 select */
-export const TESTCASE_SELECT_DETAIL_FIELDS = ['case_type', 'priority', 'test_type']
+export const TESTCASE_SELECT_DETAIL_FIELDS = ['case_type', 'priority', 'test_type', 'execution_result']
 
 /** 长文本详情字段：仅 Monaco / 富文本 diff，不预填控件 */
 export const TESTCASE_MONACO_DETAIL_FIELDS = TESTCASE_DETAIL_FIELDS.filter(
@@ -29,6 +32,30 @@ export const TESTCASE_DETAIL_NO_PREFILL = new Set(TESTCASE_MONACO_DETAIL_FIELDS)
 export const TESTCASE_CASE_TYPE_OPTIONS = ['功能测试', '接口测试', '性能测试', '安全测试']
 export const TESTCASE_TEST_TYPE_OPTIONS = ['手动', '自动', '探索']
 export const TESTCASE_PRIORITY_OPTIONS = ['P0', 'P1', 'P2', 'P3']
+/** v-model 值；空字符串表示未执行（与后端 NULL 对齐） */
+export const TESTCASE_EXECUTION_RESULT_OPTIONS = ['', 'pass', 'fail', 'blocked', 'skip']
+
+const EXECUTION_RESULT_LABEL_ZH = {
+  '': '未执行',
+  pass: '通过',
+  fail: '失败',
+  blocked: '阻塞',
+  skip: '跳过'
+}
+
+const EXECUTION_RESULT_FROM_TEXT = {
+  未执行: '',
+  通过: 'pass',
+  失败: 'fail',
+  阻塞: 'blocked',
+  跳过: 'skip',
+  pass: 'pass',
+  fail: 'fail',
+  blocked: 'blocked',
+  skip: 'skip',
+  passed: 'pass',
+  failed: 'fail'
+}
 
 /** i18n key（cardDetail.*） */
 export const TESTCASE_FIELD_LABEL_I18N = {
@@ -41,7 +68,10 @@ export const TESTCASE_FIELD_LABEL_I18N = {
   remark: 'cardDetail.remark',
   baseline: 'cardDetail.baseline',
   case_type: 'cardDetail.caseType',
-  test_type: 'cardDetail.testType'
+  test_type: 'cardDetail.testType',
+  execution_result: 'cardDetail.executionResult',
+  related_defects: 'cardDetail.relatedDefects',
+  append_comment: 'testcaseComment.appendTitle'
 }
 
 const LABEL_TO_KEY_ZH = {
@@ -55,6 +85,14 @@ const LABEL_TO_KEY_ZH = {
   测试类型: 'test_type',
   重要程度: 'priority',
   优先级: 'priority',
+  执行结果: 'execution_result',
+  result: 'execution_result',
+  关联缺陷: 'related_defects',
+  关联bug: 'related_defects',
+  关联Bug: 'related_defects',
+  评论: 'append_comment',
+  追加评论: 'append_comment',
+  添加评论: 'append_comment',
   标题: 'title',
   状态: 'status',
   负责人: 'assignee'
@@ -73,7 +111,15 @@ const TESTCASE_FIELD_KEY_ALIASES = {
   precondition: 'preconditions',
   pre_conditions: 'preconditions',
   test_step: 'steps',
-  test_steps: 'steps'
+  test_steps: 'steps',
+  test_result: 'execution_result',
+  execution: 'execution_result',
+  result: 'execution_result',
+  related_defect: 'related_defects',
+  related_defects: 'related_defects',
+  defects: 'related_defects',
+  comment: 'append_comment',
+  append_comment: 'append_comment'
 }
 
 export const TESTCASE_ROW_ALIASES = {
@@ -84,7 +130,94 @@ export const TESTCASE_ROW_ALIASES = {
   case_type: ['case_type', 'caseType', 'testcase_type', 'test_case_type'],
   test_type: ['test_type', 'testType', 'testcase_test_type'],
   priority: ['priority'],
+  execution_result: ['execution_result', 'executionResult', 'test_result', 'testResult'],
+  related_defects: ['related_defects', 'relatedDefects', 'defects', 'related_bugs'],
   assignee: ['assignee_display', 'assignee', 'assignee_id']
+}
+
+/** 归一为 Bug 主键字符串数组（全量替换语义） */
+export function normalizeTestcaseRelatedDefectIds(raw) {
+  if (raw == null) return []
+  if (Array.isArray(raw)) {
+    const out = []
+    for (const item of raw) {
+      if (item == null) continue
+      let id = ''
+      if (typeof item === 'object') {
+        id = String(item.id ?? item.bug_id ?? item.bugId ?? '').trim()
+      } else {
+        id = String(item).trim()
+      }
+      if (!id) continue
+      const m = id.match(/(\d{10,})/)
+      if (m) id = m[1]
+      if (!out.includes(id)) out.push(id)
+    }
+    return out
+  }
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (!t) return []
+    if (t.startsWith('[')) {
+      try {
+        return normalizeTestcaseRelatedDefectIds(JSON.parse(t))
+      } catch (_e) {
+        /* fall through */
+      }
+    }
+    const lines = t.split('\n').map((l) => l.trim()).filter(Boolean)
+    const fromLines = []
+    for (const line of lines) {
+      const m = line.match(/Bug-?(\d{10,})/i) || line.match(/(\d{10,})/)
+      if (m) fromLines.push(m[1])
+    }
+    if (fromLines.length) return [...new Set(fromLines)]
+    return t
+      .split(/[,;，；\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+export function testcaseRelatedDefectsEqual(a, b) {
+  const aa = [...normalizeTestcaseRelatedDefectIds(a)].sort()
+  const bb = [...normalizeTestcaseRelatedDefectIds(b)].sort()
+  return JSON.stringify(aa) === JSON.stringify(bb)
+}
+
+/** 是否为占位标题（Bug-123 / 纯 id），需拉取真实 Bug 标题 */
+export function isPlaceholderTestcaseDefectTitle(id, title) {
+  const idStr = String(id ?? '').trim()
+  const t = String(title ?? '').trim()
+  if (!t) return true
+  if (!idStr) return false
+  if (t === idStr) return true
+  if (t === `Bug-${idStr}` || t === `Bug ${idStr}`) return true
+  const digits = t.replace(/\D/g, '')
+  if (digits === idStr && /^Bug[-\s]?\d+$/i.test(t)) return true
+  return false
+}
+
+export function formatTestcaseRelatedDefectsForDisplay(raw, opts = {}) {
+  const ids = normalizeTestcaseRelatedDefectIds(raw)
+  const t = opts.t
+  const titleMap = opts.titleMap || opts.bugTitleMap || {}
+  const none =
+    typeof t === 'function'
+      ? (() => {
+          const tr = t('testcaseRelatedDefects.none')
+          return tr && tr !== 'testcaseRelatedDefects.none' ? tr : '（无）'
+        })()
+      : '（无）'
+  if (ids.length === 0) return none
+  return ids
+    .map((id) => {
+      const title = titleMap[id] || titleMap[String(id)]
+      if (title && !isPlaceholderTestcaseDefectTitle(id, title)) return title
+      return `Bug-${id}`
+    })
+    .join('\n')
 }
 
 export function normalizeTestcaseModifyFieldKey(fk, label = '') {
@@ -215,10 +348,109 @@ export function normalizeTestcaseStepsForEditor(raw) {
 }
 
 /** 比较详情字段是否实质相同（优先级兼容 P3/p3） */
+/** 是否为测例「执行结果」枚举值（pass/fail 等），与工作流 status 区分 */
+export function isTestcaseExecutionResultEnumValue(raw) {
+  const n = normalizeTestcaseExecutionResultForSelect(raw)
+  return n === 'pass' || n === 'fail' || n === 'blocked' || n === 'skip'
+}
+
+/**
+ * 沙箱 diff：模型常把执行结果写到 status，或 field_label 写「执行结果」但 field 为 status
+ */
+export function remapMislabeledTestcaseSandboxFieldKey(fieldKey, fieldLabel = '', sampleValue = null) {
+  const nk = normalizeTestcaseModifyFieldKey(fieldKey, fieldLabel)
+  const lab = String(fieldLabel || '').trim()
+  if (nk === 'execution_result' || /执行结果|test\s*result/i.test(lab)) {
+    return 'execution_result'
+  }
+  if (nk === 'status' && isTestcaseExecutionResultEnumValue(sampleValue)) {
+    return 'execution_result'
+  }
+  return nk
+}
+
+/** 已有 execution_result 变更时，隐藏误标的 status 行（评审→pass） */
+export function shouldSuppressMislabeledTestcaseStatusSandboxRow(row, nav) {
+  const fk = normalizeTestcaseModifyFieldKey(row?.field, row?.field_label)
+  if (fk !== 'status') return false
+  const mods = nav?.modifications
+  if (mods && typeof mods === 'object') {
+    for (const k of Object.keys(mods)) {
+      if (String(k).startsWith('_')) continue
+      if (normalizeTestcaseModifyFieldKey(k) === 'execution_result') return true
+    }
+  }
+  const newL = row?.lines?.find((l) => l.type === 'add')
+  const oldL = row?.lines?.find((l) => l.type === 'delete')
+  const sample = newL?.content ?? oldL?.content
+  if (isTestcaseExecutionResultEnumValue(sample)) return true
+  if (/执行结果|test\s*result/i.test(String(row?.field_label || ''))) return true
+  return false
+}
+
+export function normalizeTestcaseExecutionResultForSelect(raw) {
+  if (raw == null) return ''
+  const s = String(raw).trim()
+  if (!s) return ''
+  if (Object.prototype.hasOwnProperty.call(EXECUTION_RESULT_FROM_TEXT, s)) {
+    return EXECUTION_RESULT_FROM_TEXT[s]
+  }
+  const lower = s.toLowerCase()
+  if (Object.prototype.hasOwnProperty.call(EXECUTION_RESULT_FROM_TEXT, lower)) {
+    return EXECUTION_RESULT_FROM_TEXT[lower]
+  }
+  if (TESTCASE_EXECUTION_RESULT_OPTIONS.includes(lower)) return lower
+  return ''
+}
+
+const EXECUTION_RESULT_I18N_KEYS = {
+  '': 'testcaseExecution.notRun',
+  pass: 'testcaseExecution.pass',
+  fail: 'testcaseExecution.fail',
+  blocked: 'testcaseExecution.blocked',
+  skip: 'testcaseExecution.skip'
+}
+
+export function formatTestcaseExecutionResultLabel(raw, t) {
+  const notSet =
+    typeof t === 'function'
+      ? (() => {
+          const tr = t('chat.notSet')
+          return tr && tr !== 'chat.notSet' ? tr : '未设置'
+        })()
+      : '未设置'
+  const v = normalizeTestcaseExecutionResultForSelect(raw)
+  if (v === '') {
+    if (typeof t === 'function') {
+      const tr = t(EXECUTION_RESULT_I18N_KEYS[''])
+      if (tr && tr !== EXECUTION_RESULT_I18N_KEYS['']) return tr
+    }
+    return EXECUTION_RESULT_LABEL_ZH[''] || '未执行'
+  }
+  if (typeof t === 'function') {
+    const key = EXECUTION_RESULT_I18N_KEYS[v]
+    if (key) {
+      const tr = t(key)
+      if (tr && tr !== key) return tr
+    }
+  }
+  const zh = EXECUTION_RESULT_LABEL_ZH[v]
+  return zh || v || notSet
+}
+
 export function testcaseDetailFieldValuesEqual(fieldKey, a, b) {
   const nk = normalizeTestcaseModifyFieldKey(fieldKey)
   if (nk === 'priority') {
     return formatTestcasePriorityForDisplay(a) === formatTestcasePriorityForDisplay(b)
+  }
+  if (nk === 'execution_result') {
+    return (
+      normalizeTestcaseExecutionResultForSelect(a) ===
+      normalizeTestcaseExecutionResultForSelect(b)
+    )
+  }
+  if (nk === 'related_defects') {
+    return testcaseRelatedDefectsEqual(a, b)
   }
   if (nk === 'steps') {
     const pa = normalizeTestcaseStepsForEditor(a)
@@ -265,10 +497,44 @@ export function readTestcaseDetailRawField(row, fieldKey) {
   for (const k of keys) {
     if (!Object.prototype.hasOwnProperty.call(row, k)) continue
     const v = row[k]
+    if (nk === 'execution_result') {
+      if (v == null) return ''
+      if (typeof v === 'string') return v
+      return String(v)
+    }
+    if (nk === 'related_defects') {
+      if (v == null) return []
+      return normalizeTestcaseRelatedDefectIds(v)
+    }
     if (v == null) continue
     if (Array.isArray(v) && v.length === 0) continue
     if (typeof v === 'string' && v.trim() === '') continue
     return v
+  }
+  return undefined
+}
+
+/** before 快照 + modifications.old（测例执行结果空串也视为有效旧值） */
+export function readTestcaseEffectiveBefore(nav, fieldKey) {
+  const fromBefore = readTestcaseDetailRawField(nav?.before, fieldKey)
+  if (fromBefore !== undefined) return fromBefore
+  const mods = nav?.modifications
+  if (!mods || typeof mods !== 'object') return undefined
+  for (const mk of getTestcaseModifyModKeys(fieldKey)) {
+    const m = mods[mk]
+    if (m != null && typeof m === 'object' && 'old' in m) {
+      const v = m.old
+      if (normalizeTestcaseModifyFieldKey(fieldKey) === 'execution_result') {
+        return v == null ? '' : v
+      }
+      if (normalizeTestcaseModifyFieldKey(fieldKey) === 'related_defects') {
+        return normalizeTestcaseRelatedDefectIds(v)
+      }
+      if (v != null && String(v).trim() !== '') return v
+      if (v === '' && normalizeTestcaseModifyFieldKey(fieldKey) === 'execution_result') {
+        return ''
+      }
+    }
   }
   return undefined
 }
@@ -364,6 +630,10 @@ export function formatTestcaseSelectFieldLabel(fieldKey, raw, t) {
           return tr && tr !== 'chat.notSet' ? tr : '未设置'
         })()
       : '未设置'
+  /** 空字符串表示「未执行」，与详情下拉一致，不能显示为「未设置」 */
+  if (nk === 'execution_result') {
+    return formatTestcaseExecutionResultLabel(raw, t)
+  }
   if (raw == null || String(raw).trim() === '') return notSet
   if (nk === 'priority') {
     const p = normalizeTestcasePriorityForSelect(raw)
@@ -385,6 +655,7 @@ export function normalizeTestcaseSelectFieldForEditor(fieldKey, raw) {
   if (nk === 'priority') return normalizeTestcasePriorityForSelect(raw)
   if (nk === 'case_type') return normalizeTestcaseCaseTypeForSelect(raw)
   if (nk === 'test_type') return normalizeTestcaseTestTypeForSelect(raw)
+  if (nk === 'execution_result') return normalizeTestcaseExecutionResultForSelect(raw)
   return raw
 }
 
@@ -392,20 +663,53 @@ export function isTestcaseSelectDetailField(fieldKey) {
   return TESTCASE_SELECT_DETAIL_FIELDS.includes(normalizeTestcaseModifyFieldKey(fieldKey))
 }
 
+/** 沙箱/详情打开时：有执行结果待采纳则进「执行」Tab，否则留在基本信息 */
+export function pickTestcaseEditorTabForPendingModify(modifications) {
+  if (!modifications || typeof modifications !== 'object') return null
+  for (const [field, data] of Object.entries(modifications)) {
+    if (String(field).startsWith('_')) continue
+    if (!data || typeof data !== 'object' || !('new' in data) || data.unchanged === true) continue
+    const nk = normalizeTestcaseModifyFieldKey(field)
+    if (nk === 'execution_result') return 'execution'
+  }
+  for (const [field, data] of Object.entries(modifications)) {
+    if (String(field).startsWith('_')) continue
+    if (!data || typeof data !== 'object' || !('new' in data) || data.unchanged === true) continue
+    const nk = normalizeTestcaseModifyFieldKey(field)
+    if (nk === 'related_defects') return 'defects'
+  }
+  for (const [field, data] of Object.entries(modifications)) {
+    if (String(field).startsWith('_')) continue
+    if (!data || typeof data !== 'object' || !('new' in data) || data.unchanged === true) continue
+    const nk = normalizeTestcaseModifyFieldKey(field)
+    if (
+      TESTCASE_DETAIL_FIELDS.includes(nk) &&
+      nk !== 'execution_result' &&
+      nk !== 'related_defects'
+    ) {
+      return 'basic'
+    }
+  }
+  return null
+}
+
 /**
  * @param {string} fieldKey
  * @param {*} raw
- * @param {{ maxLen?: number }} opts
+ * @param {{ maxLen?: number, t?: function }} opts
  */
 export function formatTestcaseModifyFieldValue(fieldKey, raw, opts = {}) {
   const nk = normalizeTestcaseModifyFieldKey(fieldKey)
   const maxLen = opts.maxLen ?? 480
+  const t = opts.t
   let s = ''
   if (nk === 'steps') {
     s = formatTestcaseStepsForDisplay(raw)
+  } else if (nk === 'related_defects') {
+    s = formatTestcaseRelatedDefectsForDisplay(raw, { t, titleMap: opts.titleMap })
   } else if (isTestcaseSelectDetailField(nk)) {
-    s = formatTestcaseSelectFieldLabel(nk, raw)
-  } else if (nk === 'preconditions' || nk === 'remark') {
+    s = formatTestcaseSelectFieldLabel(nk, raw, t)
+  } else if (nk === 'append_comment' || nk === 'preconditions' || nk === 'remark') {
     s = stripHtmlForModifyDisplay(raw)
   } else if (raw != null && typeof raw === 'object') {
     try {
@@ -441,6 +745,25 @@ export function readTestcaseRowField(row, fieldKey) {
  * @param {Array} baseRows - 后端 diff 行（可先 normalizeTestcaseSandboxDiffRow）
  * @param {function} t - vue-i18n t
  */
+function remapTestcaseSandboxDiffRowForDisplay(row, nav, t) {
+  if (!row || typeof row !== 'object') return row
+  const mods = nav?.modifications
+  const newL = row.lines?.find((l) => l.type === 'add')
+  const oldL = row.lines?.find((l) => l.type === 'delete')
+  let sample = newL?.content ?? oldL?.content
+  if (mods && typeof mods === 'object') {
+    const st = mods.status
+    const ex = mods.execution_result
+    if (ex && typeof ex === 'object') {
+      sample = ex.new ?? ex.old ?? sample
+    } else if (st && typeof st === 'object') {
+      sample = st.new ?? st.old ?? sample
+    }
+  }
+  const fk = remapMislabeledTestcaseSandboxFieldKey(row.field, row.field_label, sample)
+  return normalizeTestcaseSandboxDiffRow({ ...row, field: fk }, t)
+}
+
 export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
   const tgt = String(nav?.target || '')
     .trim()
@@ -448,7 +771,11 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
   if (tgt !== 'testcase' && tgt !== 'test_case') {
     return Array.isArray(baseRows) ? baseRows : []
   }
-  const rows = Array.isArray(baseRows) ? baseRows.map((r) => normalizeTestcaseSandboxDiffRow(r, t)) : []
+  const rows = Array.isArray(baseRows)
+    ? baseRows
+        .filter((r) => !shouldSuppressMislabeledTestcaseStatusSandboxRow(r, nav))
+        .map((r) => remapTestcaseSandboxDiffRowForDisplay(r, nav, t))
+    : []
   const before = nav?.before
   const after = nav?.after
   const mods = nav?.modifications
@@ -457,7 +784,7 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
   const formatSide = (fk, val) =>
     isTestcaseSelectDetailField(fk)
       ? formatTestcaseSelectFieldLabel(fk, val, t)
-      : formatTestcaseModifyFieldValue(fk, val)
+      : formatTestcaseModifyFieldValue(fk, val, { t })
 
   const upsertRow = (fk, bo, ao) => {
     if (testcaseDetailFieldValuesEqual(fk, bo, ao) && !formatSide(fk, ao)) {
@@ -484,7 +811,7 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
   for (let i = rows.length - 1; i >= 0; i--) {
     const fk = normalizeTestcaseModifyFieldKey(rows[i]?.field, rows[i]?.field_label)
     if (testcaseSandboxDiffLinesShowChange(rows[i])) continue
-    const bo = readTestcaseDetailRawField(before, fk)
+    const bo = readTestcaseEffectiveBefore(nav, fk)
     const ao = readTestcaseEffectiveAfter(nav, fk)
     if (testcaseDetailFieldValuesEqual(fk, bo, ao)) {
       rows.splice(i, 1)
@@ -499,10 +826,10 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
   const fieldsToScan = [...new Set([...allDetailFields, ...seen])]
 
   for (const fk of fieldsToScan) {
-    if (!TESTCASE_DETAIL_FIELDS.includes(fk) && !['case_type', 'priority', 'test_type'].includes(fk)) {
+    if (!TESTCASE_DETAIL_FIELDS.includes(fk)) {
       continue
     }
-    const bo = readTestcaseDetailRawField(before, fk)
+    const bo = readTestcaseEffectiveBefore(nav, fk)
     const ao = readTestcaseEffectiveAfter(nav, fk)
     if (ao === undefined && bo === undefined) continue
     if (seen.has(fk) && !testcaseSandboxDiffLinesShowChange(rows.find(
@@ -521,7 +848,7 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
       const fk = normalizeTestcaseModifyFieldKey(rawKey)
       if (!TESTCASE_DETAIL_FIELDS.includes(fk)) continue
       if (seen.has(fk)) continue
-      const bo = readTestcaseDetailRawField(before, fk)
+      const bo = readTestcaseEffectiveBefore(nav, fk)
       const ao = readTestcaseModifyNewValue(mods, fk)
       if (ao === undefined) continue
       if (testcaseDetailFieldValuesEqual(fk, bo, ao)) continue
@@ -529,16 +856,36 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
     }
   }
 
-  return rows
+  return rows.filter((r) => !shouldSuppressMislabeledTestcaseStatusSandboxRow(r, nav))
 }
 
-export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel, which, mods = {}) {
-  const nk = normalizeTestcaseModifyFieldKey(fieldKey, fieldLabel)
+export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel, which, mods = {}, t = null) {
+  const modSample =
+    mods?.execution_result && typeof mods.execution_result === 'object'
+      ? which === 'old'
+        ? mods.execution_result.old
+        : mods.execution_result.new
+      : mods?.status && typeof mods.status === 'object'
+        ? which === 'old'
+          ? mods.status.old
+          : mods.status.new
+        : null
+  const nk = remapMislabeledTestcaseSandboxFieldKey(fieldKey, fieldLabel, modSample)
   const fromBefore = readTestcaseRowField(ctx?.before, nk)
   const fromAfter = readTestcaseRowField(ctx?.after, nk)
 
   if (which === 'old' && fromBefore) return fromBefore
   if (which === 'new' && fromAfter) return fromAfter
+
+  if (which === 'old') {
+    const fromEff = readTestcaseEffectiveBefore(ctx, nk)
+    if (fromEff !== undefined) {
+      const formatted = isTestcaseSelectDetailField(nk)
+        ? formatTestcaseSelectFieldLabel(nk, fromEff, t)
+        : formatTestcaseModifyFieldValue(nk, fromEff, { t })
+      if (formatted || nk === 'execution_result' || nk === 'related_defects') return formatted
+    }
+  }
 
   const modKeys = getTestcaseModifyModKeys(nk, rawField)
   for (const mk of modKeys) {
@@ -546,10 +893,18 @@ export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel,
     if (m == null) continue
     if (typeof m === 'object' && ('old' in m || 'new' in m)) {
       const v = which === 'old' ? m.old : m.new
-      const formatted = formatTestcaseModifyFieldValue(nk, v)
-      if (formatted) return formatted
+      const formatted = isTestcaseSelectDetailField(nk)
+        ? formatTestcaseSelectFieldLabel(nk, v, t)
+        : formatTestcaseModifyFieldValue(nk, v, { t })
+      if (
+        formatted ||
+        (nk === 'execution_result' && which === 'old' && (v === '' || v == null)) ||
+        (nk === 'related_defects' && which === 'old' && (v == null || (Array.isArray(v) && v.length === 0)))
+      ) {
+        return formatted
+      }
     } else if (which === 'new') {
-      const formatted = formatTestcaseModifyFieldValue(nk, m)
+      const formatted = formatTestcaseModifyFieldValue(nk, m, { t })
       if (formatted) return formatted
     }
   }

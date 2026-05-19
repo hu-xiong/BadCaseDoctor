@@ -7476,6 +7476,53 @@ class SimplifiedReActEngine:
             print(f"[REACT-execution] grep.params.target 按用户计划意图纠正: {t!r} -> plan")
             params['target'] = 'plan'
 
+    def _normalize_grep_plan_scope(self, params: Dict[str, Any]) -> None:
+        """
+        grep 计划范围：优先使用当前侧栏迭代 self.plan_id；并剔除模型将 project_id 误填为 plan_id 的情况。
+        """
+        if not isinstance(params, dict):
+            return
+        t = str(params.get("target") or "all").strip().lower()
+        if t in ("all", "plan"):
+            params.pop("plan_id", None)
+            return
+
+        proj = params.get("project_id") or getattr(self, "project_id", None)
+        raw = params.get("plan_id")
+        if raw is not None and proj is not None:
+            try:
+                if int(raw) == int(proj):
+                    print(
+                        f"[REACT] grep 移除误填 plan_id={raw}（与 project_id 相同）"
+                    )
+                    params.pop("plan_id", None)
+                    raw = None
+            except (TypeError, ValueError):
+                pass
+
+        agent_pid = getattr(self, "plan_id", None)
+        if agent_pid in (None, "", 0, "0"):
+            return
+        try:
+            ap = int(agent_pid)
+        except (TypeError, ValueError):
+            return
+        if ap <= 0:
+            return
+        if raw is None:
+            params["plan_id"] = ap
+            print(f"[REACT] grep 注入当前迭代 plan_id={ap}")
+            return
+        try:
+            rp = int(raw)
+        except (TypeError, ValueError):
+            params["plan_id"] = ap
+            print(f"[REACT] grep 注入当前迭代 plan_id={ap}（原 plan_id 非法）")
+            return
+        if rp != ap:
+            print(f"[REACT] grep 用当前迭代 plan_id={ap} 覆盖模型 plan_id={rp}")
+            params["plan_id"] = ap
+
     def _force_grep_card_layer_only_if_requested(
         self, params: Dict[str, Any], user_input: str, todo: str
     ) -> None:
@@ -8020,6 +8067,10 @@ class SimplifiedReActEngine:
 - "用例类型" -> case_type
 - "测试类型" -> test_type
 - "执行结果" -> execution_result
+- "关联缺陷" / "关联 Bug" / "关联缺陷列表" -> related_defects（值为 Bug 源表主键 id 的 JSON 数组，全量替换）
+- "评论" / "追加评论" / "添加评论" -> append_comment（仅追加一条评论正文，不可修改历史评论；值为字符串或 {{"new":"评论内容"}}）
+- "所属计划" / "所属迭代" -> plan_id（计划主键 id 或计划名称，服务端会解析）
+- "所属项目" / "项目名称" -> project_id（项目主键 id 或项目名称，须为当前用户有权限的项目）
 - "预估工时" -> estimated_time
 - "实际工时" -> actual_time
 
@@ -8582,7 +8633,8 @@ class SimplifiedReActEngine:
                     params, _grep_ui, ""
                 )
                 self._force_grep_card_layer_only_if_requested(params, _grep_ui, "")
-            
+                self._normalize_grep_plan_scope(params)
+
             if tool_name != "modify":
                 print(f"[REACT] 工具参数: {params}")
             print(f"[REACT] 正在执行工具: {tool_name}")

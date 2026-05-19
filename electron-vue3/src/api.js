@@ -333,6 +333,13 @@ export function deleteBug(id) {
   return api.delete(`/api/bugs/${apiPathId(id)}`)
 }
 
+/** Bug 评论：仅追加 */
+export function addBugComment(bugId, content, messageId = null) {
+  const body = { content }
+  if (messageId != null) body.message_id = messageId
+  return api.post(`/api/bugs/${apiPathId(bugId)}/comment`, body)
+}
+
 // ==================== TestCase API ====================
 
 // 创建TestCase
@@ -348,6 +355,13 @@ export function updateTestCase(id, data) {
 // 获取TestCase详情
 export function getTestCaseDetail(id) {
   return api.get(`/api/testcases/${apiPathId(id)}`)
+}
+
+/** 测例评论：仅追加 */
+export function addTestCaseComment(testcaseId, content, messageId = null) {
+  const body = { content }
+  if (messageId != null) body.message_id = messageId
+  return api.post(`/api/testcases/${apiPathId(testcaseId)}/comment`, body)
 }
 
 // 删除TestCase

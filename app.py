@@ -846,6 +846,164 @@ def _json_snowflake_ids_in_list(seq):
     return seq
 
 
+def _testcase_related_defects_detail_payload(testcase) -> list:
+    """测例详情 API：关联缺陷返回 {id, title, plan_id}，供前端展示 Bug 标题而非纯 id。"""
+    raw = getattr(testcase, "related_defects", None) or []
+    ids = _json_snowflake_ids_in_list(raw)
+    if not ids:
+        return []
+    if not isinstance(ids, list):
+        return []
+    id_strs = []
+    for x in ids:
+        if isinstance(x, dict):
+            sid = _json_snowflake_id(x.get("id"))
+            if sid:
+                id_strs.append(str(sid))
+        else:
+            sid = _json_snowflake_id(x)
+            if sid:
+                id_strs.append(str(sid))
+    if not id_strs:
+        return []
+    try:
+        from app import Bug
+
+        id_ints = [int(x) for x in id_strs]
+        rows = (
+            Bug.query.filter(
+                Bug.project_id == testcase.project_id, Bug.id.in_(id_ints)
+            ).all()
+        )
+        by_id = {}
+        for b in rows:
+            bid = _json_snowflake_id(b.id)
+            if not bid:
+                continue
+            by_id[str(bid)] = {
+                "id": str(bid),
+                "title": (b.title or "").strip(),
+                "plan_id": _json_snowflake_id(b.plan_id),
+            }
+        return [by_id.get(bid, {"id": bid, "title": "", "plan_id": None}) for bid in id_strs]
+    except Exception as ex:
+        print(f"[API] related_defects 标题补全失败: {ex}", flush=True)
+        return [{"id": bid, "title": "", "plan_id": None} for bid in id_strs]
+
+
+def _testcase_comments_detail_payload(test_case_id: int) -> list:
+    """测例评论列表（只读展示，按时间升序）。"""
+    try:
+        rows = (
+            db.session.query(TestCaseComment, User.name)
+            .outerjoin(User, User.id == TestCaseComment.user_id)
+            .filter(TestCaseComment.test_case_id == int(test_case_id))
+            .order_by(TestCaseComment.created_at.asc())
+            .all()
+        )
+        out = []
+        for c, uname in rows:
+            out.append(
+                {
+                    "id": c.id,
+                    "content": c.content,
+                    "user_id": c.user_id,
+                    "user_name": uname or "",
+                    "source_message_id": c.source_message_id,
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+            )
+        return out
+    except Exception as ex:
+        print(f"[_testcase_comments_detail_payload] {ex}", flush=True)
+        return []
+
+
+def _comment_author_name(user_id: int) -> str:
+    try:
+        u = User.query.get(int(user_id))
+        if u:
+            return (u.name or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _append_testcase_comment_row(
+    testcase,
+    content: str,
+    user_id: int,
+    source_message_id=None,
+) -> dict:
+    """向测例追加一条评论（不可修改历史评论）。"""
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("评论内容不能为空")
+    row = TestCaseComment(
+        test_case_id=int(testcase.id),
+        user_id=int(user_id),
+        content=text,
+        source_message_id=_safe_mysql_int_fk_id(source_message_id),
+    )
+    db.session.add(row)
+    db.session.flush()
+    uname = _comment_author_name(user_id)
+    return {
+        "id": row.id,
+        "content": row.content,
+        "user_id": row.user_id,
+        "user_name": uname,
+        "source_message_id": row.source_message_id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def _append_bug_comment_row(bug, content: str, user_id: int, source_message_id=None) -> dict:
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("评论内容不能为空")
+    row = BugComment(
+        bug_id=int(bug.id),
+        user_id=int(user_id),
+        content=text,
+        source_message_id=_safe_mysql_int_fk_id(source_message_id),
+    )
+    db.session.add(row)
+    db.session.flush()
+    uname = _comment_author_name(user_id)
+    return {
+        "id": row.id,
+        "content": row.content,
+        "user_id": row.user_id,
+        "user_name": uname,
+        "source_message_id": row.source_message_id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def _append_badcase_comment_row(badcase, content: str, user_id: int, source_message_id=None) -> dict:
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("评论内容不能为空")
+    row = Comment(
+        badcase_id=int(badcase.id),
+        user_id=int(user_id),
+        content=text,
+        source_message_id=_safe_mysql_int_fk_id(source_message_id),
+    )
+    db.session.add(row)
+    db.session.flush()
+    uname = _comment_author_name(user_id)
+    return {
+        "id": row.id,
+        "content": row.content,
+        "user_id": row.user_id,
+        "user_name": uname,
+        "source_message_id": row.source_message_id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
 class BadCase(db.Model):
     __tablename__ = 'bad_case'
     id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
@@ -912,6 +1070,7 @@ class Comment(db.Model):
     badcase_id = db.Column(db.BigInteger, nullable=False)
     user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
+    source_message_id = db.Column(db.Integer, nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class Plan(db.Model):
@@ -1746,6 +1905,17 @@ class BugComment(db.Model):
     bug_id = db.Column(db.BigInteger, nullable=False)
     user_id = db.Column(db.Integer, nullable=False)
     content = db.Column(db.Text, nullable=False)  # 富文本内容
+    source_message_id = db.Column(db.Integer, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class TestCaseComment(db.Model):
+    __tablename__ = 'test_case_comment'
+    id = db.Column(db.Integer, primary_key=True)
+    test_case_id = db.Column(db.BigInteger, nullable=False, index=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    source_message_id = db.Column(db.Integer, nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class PromptTemplate(db.Model):
@@ -3707,7 +3877,14 @@ def _finalize_chat_message_after_modify_adopt(message_id, target=None, target_id
 
 
 def _run_modify_in_background(
-    project_id, target, target_id, modifications, message_id, db_uri, natural_query=None
+    project_id,
+    target,
+    target_id,
+    modifications,
+    message_id,
+    db_uri,
+    natural_query=None,
+    operator_user_id=None,
 ):
     """后台线程执行采纳落库，使用独立 app_context 和 db.session，避免阻塞主请求"""
     import asyncio
@@ -3723,6 +3900,8 @@ def _run_modify_in_background(
                 project_id=project_id,
                 confirm=True,
                 natural_query=natural_query,
+                message_id=message_id,
+                operator_user_id=operator_user_id,
             ))
             if result.get('success') and message_id:
                 _finalize_chat_message_after_modify_adopt(
@@ -3911,6 +4090,7 @@ def api_project_modify(project_id):
                     message_id,
                     db_uri,
                     natural_query_top,
+                    current_user.id,
                 ),
                 daemon=True
             )
@@ -5869,10 +6049,17 @@ def api_get_badcase_detail(badcase_id):
     
     # 评论 + 用户名一次 JOIN；负责人姓名仍按需补查（常与评论用户不重叠）
     comment_rows = (
-        db.session.query(Comment.id, Comment.content, Comment.user_id, Comment.created_at, User.name)
+        db.session.query(
+            Comment.id,
+            Comment.content,
+            Comment.user_id,
+            Comment.created_at,
+            Comment.source_message_id,
+            User.name,
+        )
         .outerjoin(User, User.id == Comment.user_id)
         .filter(Comment.badcase_id == badcase_id)
-        .order_by(Comment.created_at.desc())
+        .order_by(Comment.created_at.asc())
         .all()
     )
     
@@ -5961,9 +6148,11 @@ def api_get_badcase_detail(badcase_id):
             'comments': [{
                 'id': cid,
                 'content': content,
+                'user_id': uid,
                 'user_name': uname or '',
+                'source_message_id': smid,
                 'created_at': created_at.isoformat()
-            } for (cid, content, user_id, created_at, uname) in comment_rows]
+            } for (cid, content, uid, created_at, smid, uname) in comment_rows]
         }
     })
 
@@ -6029,23 +6218,19 @@ def api_add_badcase_comment(badcase_id):
     if not content:
         return jsonify({'success': False, 'error': '评论内容不能为空'}), 400
     
-    comment = Comment(
-        badcase_id=badcase_id,
-        user_id=current_user.id,
-        content=content
-    )
-    db.session.add(comment)
-    db.session.commit()
-    
-    return jsonify({
-        'success': True,
-        'comment': {
-            'id': comment.id,
-            'content': comment.content,
-            'user_name': current_user.name,
-            'created_at': comment.created_at.isoformat()
-        }
-    })
+    try:
+        comment = _append_badcase_comment_row(
+            badcase,
+            content,
+            current_user.id,
+            source_message_id=data.get('message_id'),
+        )
+        db.session.commit()
+        return jsonify({'success': True, 'comment': comment})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[API] 追加 BadCase 评论失败: {e}", flush=True)
+        return jsonify({'success': False, 'error': '追加评论失败'}), 500
 
 @app.route('/api/badcases/<int:badcase_id>', methods=['PUT', 'DELETE'])
 @login_required
@@ -7410,6 +7595,18 @@ def api_get_card_plan_history(card_id):
 
 # CORS已在上面配置，这里不需要重复配置
 
+def _adapt_create_table_columns_for_dialect(columns):
+    """CREATE TABLE 列定义：SQLite 用 AUTOINCREMENT，MySQL 用 AUTO_INCREMENT。"""
+    dialect = (db.engine.dialect.name or "").lower()
+    if dialect != "mysql":
+        return columns
+    return [
+        c.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "INTEGER PRIMARY KEY AUTO_INCREMENT")
+        .replace("AUTOINCREMENT", "AUTO_INCREMENT")
+        for c in columns
+    ]
+
+
 def sync_database_schema():
     """同步数据库表结构，确保与代码中的模型完全一致"""
     try:
@@ -7729,6 +7926,7 @@ def sync_database_schema():
                     'badcase_id BIGINT NOT NULL',
                     'user_id INT NOT NULL',
                     'content TEXT NOT NULL',
+                    'source_message_id INT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'FOREIGN KEY (badcase_id) REFERENCES bad_case(id)',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
@@ -7826,8 +8024,21 @@ def sync_database_schema():
                     'bug_id BIGINT NOT NULL',
                     'user_id INT NOT NULL',
                     'content TEXT NOT NULL',
+                    'source_message_id INT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'FOREIGN KEY (bug_id) REFERENCES bug(id)',
+                    'FOREIGN KEY (user_id) REFERENCES user(id)'
+                ]
+            },
+            'test_case_comment': {
+                'columns': [
+                    'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                    'test_case_id BIGINT NOT NULL',
+                    'user_id INT NOT NULL',
+                    'content TEXT NOT NULL',
+                    'source_message_id INT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'FOREIGN KEY (test_case_id) REFERENCES test_case(id)',
                     'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
@@ -7986,7 +8197,8 @@ def sync_database_schema():
             
             if not table_exists:
                 # 创建新表
-                create_sql = f"CREATE TABLE {table_name} (\n    " + ",\n    ".join(definition['columns']) + "\n)"
+                cols = _adapt_create_table_columns_for_dialect(definition["columns"])
+                create_sql = f"CREATE TABLE {table_name} (\n    " + ",\n    ".join(cols) + "\n)"
                 db.session.execute(text(create_sql))
                 print(f"已创建表: {table_name}")
             else:
@@ -8201,6 +8413,9 @@ def create_performance_indexes():
             # Bug评论表索引
             ("idx_bug_comment_bug_id", "CREATE INDEX idx_bug_comment_bug_id ON bug_comment(bug_id)"),
             ("idx_bug_comment_user_id", "CREATE INDEX idx_bug_comment_user_id ON bug_comment(user_id)"),
+            ("idx_test_case_comment_tc_id", "CREATE INDEX idx_test_case_comment_tc_id ON test_case_comment(test_case_id)"),
+            ("idx_test_case_comment_user_id", "CREATE INDEX idx_test_case_comment_user_id ON test_case_comment(user_id)"),
+            ("idx_test_case_comment_msg_id", "CREATE INDEX idx_test_case_comment_msg_id ON test_case_comment(source_message_id)"),
             
             # BadCase表新增索引
             ("idx_badcase_plan_id", "CREATE INDEX idx_badcase_plan_id ON bad_case(plan_id)"),
@@ -9585,6 +9800,7 @@ def api_bug_detail(bug_id):
                     'content': comment.content,
                     'user_id': comment.user_id,
                     'user_name': uname or '未知',
+                    'source_message_id': comment.source_message_id,
                     'created_at': comment.created_at.isoformat()
                 })
             
@@ -9825,25 +10041,17 @@ def api_add_bug_comment(bug_id):
         if not data.get('content'):
             return jsonify({'success': False, 'error': '评论内容不能为空'}), 400
         
-        comment = BugComment(
-            bug_id=bug_id,
-            user_id=current_user.id,
-            content=data['content']
+        comment = _append_bug_comment_row(
+            bug,
+            data['content'],
+            current_user.id,
+            source_message_id=data.get('message_id'),
         )
-        
-        db.session.add(comment)
         db.session.commit()
-        
         return jsonify({
             'success': True,
             'message': '评论添加成功',
-            'comment': {
-                'id': comment.id,
-                'content': comment.content,
-                'user_id': comment.user_id,
-                'user_name': comment.user.name,
-                'created_at': comment.created_at.isoformat()
-            }
+            'comment': comment,
         })
         
     except Exception as e:
@@ -9997,7 +10205,7 @@ def api_testcase_detail(testcase_id):
                     'steps': testcase.steps,
                     'remark': testcase.remark,
                     'requirement_id': testcase.requirement_id,
-                    'related_defects': _json_snowflake_ids_in_list(testcase.related_defects),
+                    'related_defects': _testcase_related_defects_detail_payload(testcase),
                     'baseline': testcase.baseline,
                     'estimated_time': testcase.estimated_time,
                     'actual_time': testcase.actual_time,
@@ -10012,7 +10220,8 @@ def api_testcase_detail(testcase_id):
                     'assignee_id': testcase.assignee_id,
                     'card_id': _json_snowflake_id(getattr(testcase, 'card_id', None)),
                     'created_at': testcase.created_at.isoformat(),
-                    'updated_at': testcase.updated_at.isoformat()
+                    'updated_at': testcase.updated_at.isoformat(),
+                    'comments': _testcase_comments_detail_payload(testcase.id),
                 }
             })
             
@@ -10155,6 +10364,12 @@ def api_testcase_detail(testcase_id):
             _rec = _workflow_merge_creator_if_empty(
                 _workflow_recipients_testcase(testcase), testcase.creator_id
             )
+            try:
+                TestCaseComment.query.filter_by(test_case_id=int(testcase_id)).delete(
+                    synchronize_session=False
+                )
+            except Exception as _ce:
+                print(f"[DELETE-TESTCASE] 清理 test_case_comment 失败（继续）: {_ce}")
             db.session.delete(testcase)
             db.session.commit()
             _cache_invalidate_plans(pid)
@@ -10184,6 +10399,39 @@ def api_testcase_detail(testcase_id):
             db.session.rollback()
             print(f"删除TestCase失败: {e}")
             return jsonify({'success': False, 'error': '删除TestCase失败'}), 500
+
+
+@app.route('/api/testcases/<int:testcase_id>/comment', methods=['POST'])
+@login_required
+def api_add_testcase_comment(testcase_id):
+    """测例评论：仅追加，不可修改历史评论。"""
+    testcase, access_err = _model_for_user_collaborator_access(
+        TestCase, testcase_id, current_user.id
+    )
+    if access_err == 'not_found':
+        return jsonify({'success': False, 'error': '测试用例不存在'}), 404
+    if access_err == 'forbidden':
+        return jsonify({'success': False, 'error': '没有项目权限'}), 403
+
+    data = request.get_json() or {}
+    content = data.get('content')
+    if not content or not str(content).strip():
+        return jsonify({'success': False, 'error': '评论内容不能为空'}), 400
+
+    try:
+        comment = _append_testcase_comment_row(
+            testcase,
+            content,
+            current_user.id,
+            source_message_id=data.get('message_id'),
+        )
+        db.session.commit()
+        return jsonify({'success': True, 'comment': comment})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[API] 追加测例评论失败: {e}", flush=True)
+        return jsonify({'success': False, 'error': '追加评论失败'}), 500
+
 
 @app.route('/api/plans/<int:plan_id>/testcases', methods=['GET'])
 @login_required

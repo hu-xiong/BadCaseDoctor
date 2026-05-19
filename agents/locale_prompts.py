@@ -373,6 +373,10 @@ _ZH_FIELD_LABELS: Dict[str, str] = {
     "steps": "测试步骤",
     "remark": "备注",
     "execution_result": "执行结果",
+    "related_defects": "关联缺陷",
+    "append_comment": "追加评论",
+    "plan_id": "所属计划",
+    "project_id": "所属项目",
     "executed_by": "执行人",
     "estimated_time": "预估工时",
     "actual_time": "实际工时",
@@ -407,6 +411,10 @@ _EN_FIELD_LABELS: Dict[str, str] = {
     "steps": "Test steps",
     "remark": "Remark",
     "execution_result": "Execution result",
+    "related_defects": "Related defects",
+    "append_comment": "Append comment",
+    "plan_id": "Plan",
+    "project_id": "Project",
     "executed_by": "Executed by",
     "estimated_time": "Estimated time",
     "actual_time": "Actual time",
@@ -436,6 +444,9 @@ def modify_modifiable_fields_rows(target: str, locale: Optional[str]) -> List[Di
         "steps_to_reproduce",
         "expected_result",
         "actual_result",
+        "append_comment",
+        "plan_id",
+        "project_id",
     ]
     badcase_keys = [
         "title",
@@ -449,6 +460,9 @@ def modify_modifiable_fields_rows(target: str, locale: Optional[str]) -> List[Di
         "badcase_result",
         "solution",
         "problem_reason",
+        "append_comment",
+        "plan_id",
+        "project_id",
     ]
     testcase_keys = [
         "title",
@@ -462,6 +476,10 @@ def modify_modifiable_fields_rows(target: str, locale: Optional[str]) -> List[Di
         "case_type",
         "test_type",
         "execution_result",
+        "related_defects",
+        "append_comment",
+        "plan_id",
+        "project_id",
         "estimated_time",
         "actual_time",
     ]

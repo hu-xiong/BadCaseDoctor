@@ -1,0 +1,1 @@
+         <motion class="sidebar-section comment-section" :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }">

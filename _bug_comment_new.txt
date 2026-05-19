@@ -1,0 +1,3 @@
+         <div class="sidebar-section comment-section" :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }">
+           <h3 class="sidebar-title">评论记录</h3>
+           <motion v-if="hasEntityFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">

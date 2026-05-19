@@ -648,35 +648,71 @@
            />
          </div>
 
-                  <!-- 输入评论：先只读预览，点击后再展开富文本 -->
-         <div class="sidebar-section">
-           <h3 class="sidebar-title">输入评论</h3>
+         <div class="sidebar-section comment-section" :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }">
+           <h3 class="sidebar-title">评论记录</h3>
+           <div v-if="hasEntityFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
+             <div class="diff-header">
+               <span class="diff-label">追加评论 · 修改预览</span>
+               <div class="diff-actions">
+                 <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" title="采纳">✓</button>
+                 <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" title="取消">✗</button>
+               </div>
+             </div>
+             <div class="diff-content">
+               <div class="diff-row">
+                 <span class="diff-tag new">新评论</span>
+                 <span class="diff-value diff-value-multiline">{{ formatEntityDiffValue('append_comment', entityFieldDiff('append_comment')?.new) }}</span>
+               </div>
+             </div>
+           </div>
+           <div v-if="entityComments.length" class="comment-timeline">
+             <div v-for="c in entityComments" :key="c.id" class="comment-item">
+               <div class="comment-item-meta">
+                 <span class="comment-author">{{ c.user_name || '—' }}</span>
+                 <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
+                 <span v-if="c.source_message_id" class="comment-op-tag">来自对话操作</span>
+               </div>
+               <div class="comment-item-body" v-html="c.content"></div>
+             </div>
+           </div>
+           <div v-else class="comment-empty">暂无评论</div>
+           <h4 class="comment-input-subtitle">输入评论</h4>
            <div class="comment-input-container">
              <template v-if="!commentEditorActive">
                <textarea
                  class="comment-textarea-simple"
                  readonly
                  rows="3"
-                 :value="commentText"
+                 :value="commentDraftText"
                  placeholder="点击输入评论…"
                  @click="activateCommentEditor"
                />
-               <div class="comment-count">{{ commentText.length }} / 500</div>
+               <div class="comment-count">{{ commentDraftLength }} / 500</div>
              </template>
              <template v-else>
                <RichTextHtmlEditor
-                 v-model="bug.comment"
+                 v-model="commentDraft"
                  variant="compact"
                  placeholder="请输入评论"
                  class="rich-editor"
                />
                <div class="comment-editor-actions">
                  <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
+                 <button
+                   v-if="isEdit && bugId"
+                   type="button"
+                   class="comment-submit-btn"
+                   :disabled="commentSubmitting || !commentDraftLength"
+                   @click="submitCommentDraft"
+                 >
+                   发表评论
+                 </button>
                </div>
-               <div class="editor-count">{{ commentText.length }} / 500</div>
+               <div class="editor-count">{{ commentDraftLength }} / 500</div>
              </template>
            </div>
          </div>
+
         </div>
       </div>
     </div>
@@ -688,7 +724,7 @@
 <script>
 import { ref, reactive, onMounted, onActivated, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
+import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, addBugComment, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
 import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/richTextContent.js'
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
@@ -1320,6 +1356,8 @@ export default {
             console.log('原始数据中的计划ID:', response.data.bug.plan_id)
             
             // 确保编辑模式下正确设置关联项目状态
+            entityComments.value = Array.isArray(response.data.bug.comments) ? [...response.data.bug.comments] : []
+
             if (bug.project_id) {
               bug.associate_project = true
               console.log('编辑模式：设置associate_project为true，项目ID:', bug.project_id)
@@ -1641,14 +1679,83 @@ export default {
       }
     )
     
-    // 计算评论文本（去除HTML标签）
-    const commentText = computed(() => {
-      if (!bug.comment) return ''
-      // 创建一个临时div来解析HTML并获取纯文本
+    const entityComments = ref([])
+    const commentDraft = ref('')
+    const commentSubmitting = ref(false)
+
+    const commentDraftText = computed(() => {
+      if (!commentDraft.value) return ''
       const tempDiv = document.createElement('div')
-      tempDiv.innerHTML = bug.comment
+      tempDiv.innerHTML = commentDraft.value
       return tempDiv.textContent || tempDiv.innerText || ''
     })
+    const commentDraftLength = computed(() => richTextHtmlDisplayLength(commentDraft.value))
+
+    const formatCommentTime = (iso) => {
+      if (!iso) return ''
+      try {
+        const d = new Date(iso)
+        if (Number.isNaN(d.getTime())) return String(iso)
+        return d.toLocaleString()
+      } catch (_e) {
+        return String(iso)
+      }
+    }
+
+    const entityFieldDiff = (field) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return null
+      const keys = [field, 'comment']
+      if (field === 'reproduction_steps') keys.push('steps_to_reproduce')
+      for (const k of keys) {
+        const m = mods[k]
+        if (m && typeof m === 'object' && ('old' in m || 'new' in m)) return m
+      }
+      return null
+    }
+    const hasEntityFieldDiff = (field) => !!entityFieldDiff(field)
+    const formatEntityDiffValue = (field, val) => {
+      if (field === 'append_comment') {
+        if (!val) return ''
+        const tempDiv = document.createElement('div')
+        tempDiv.innerHTML = String(val)
+        return (tempDiv.textContent || tempDiv.innerText || '').trim() || String(val)
+      }
+      return val != null ? String(val) : ''
+    }
+
+    const loadEntityComments = async () => {
+      const id = bugId.value
+      if (!id) return
+      try {
+        const response = await getBugDetail(id)
+        const list = response?.data?.bug?.comments
+        entityComments.value = Array.isArray(list) ? [...list] : []
+      } catch (e) {
+        console.error('[Bug] 加载评论失败:', e)
+      }
+    }
+
+    const submitCommentDraft = async () => {
+      if (!isEdit || !bugId.value || !richTextHtmlHasContent(commentDraft.value)) return
+      commentSubmitting.value = true
+      try {
+        const resp = await addBugComment(bugId.value, commentDraft.value)
+        const res = resp?.data || resp
+        if (res?.success && res.comment) {
+          entityComments.value = [...entityComments.value, res.comment]
+          commentDraft.value = ''
+          commentEditorActive.value = false
+        } else {
+          alert(res?.error || res?.message || '发表评论失败')
+        }
+      } catch (e) {
+        console.error('[Bug] 发表评论失败:', e)
+        alert('发表评论失败')
+      } finally {
+        commentSubmitting.value = false
+      }
+    }
 
     // 切换状态下拉框显示
     const toggleStatusDropdown = () => {
@@ -1756,6 +1863,8 @@ export default {
       if (!mods) return null
       const tryKeys = [
         requested,
+        requested === 'append_comment' ? 'comment' : null,
+        requested === 'comment' ? 'append_comment' : null,
         requested === 'reproduction_steps' ? 'steps_to_reproduce' : null,
         requested === 'reproduction_steps' ? 'reproduce_steps' : null,
         requested === 'steps_to_reproduce' ? 'reproduction_steps' : null
@@ -1789,9 +1898,15 @@ export default {
         if (String(field).startsWith('_')) continue
         const storeKey = resolvePendingModifyStoreKey(field)
         if (!storeKey || !data || typeof data !== 'object' || !('new' in data)) continue
+        if (storeKey === 'append_comment' || storeKey === 'comment') continue
         const nv = data.new
         if (nv === undefined || String(nv).trim() === '') continue
-        if (
+        if (storeKey === 'plan_id') {
+          bug.plan = normalizePlanId(nv) || ''
+        } else if (storeKey === 'project_id') {
+          bug.project_id = String(nv)
+          bug.associate_project = true
+        } else if (
           storeKey === 'steps_to_reproduce' ||
           storeKey === 'reproduction_steps' ||
           storeKey === 'reproduce_steps'
@@ -1847,7 +1962,14 @@ export default {
       if (!storeKey || !pendingDiff.value?.modifications?.[storeKey]) return
       const oldValue = pendingDiff.value.modifications[storeKey].old
       const target = pendingDiff.value?.target || 'bug'
-      if (target === 'bug' && (storeKey === 'steps_to_reproduce' || storeKey === 'reproduction_steps' || storeKey === 'reproduce_steps')) {
+      if (storeKey === 'append_comment' || storeKey === 'comment') {
+        // 评论只追加，取消 diff 即可
+      } else if (storeKey === 'plan_id') {
+        bug.plan = normalizePlanId(oldValue) || ''
+      } else if (storeKey === 'project_id') {
+        bug.project_id = oldValue ? String(oldValue) : ''
+        bug.associate_project = !!bug.project_id
+      } else if (target === 'bug' && (storeKey === 'steps_to_reproduce' || storeKey === 'reproduction_steps' || storeKey === 'reproduce_steps')) {
         bug.reproduction_steps = oldValue || ''
       } else if (bug.hasOwnProperty(storeKey)) {
         bug[storeKey] = oldValue || ''
@@ -1899,7 +2021,15 @@ export default {
           return
         }
 
-        if (target === 'bug' && apiField === 'steps_to_reproduce') {
+        if (storeKey === 'append_comment' || apiField === 'append_comment') {
+          await loadEntityComments()
+          commentDraft.value = ''
+        } else if (apiField === 'plan_id') {
+          bug.plan = normalizePlanId(newValue) || ''
+        } else if (apiField === 'project_id') {
+          bug.project_id = String(newValue)
+          bug.associate_project = true
+        } else if (target === 'bug' && apiField === 'steps_to_reproduce') {
           bug.reproduction_steps = newValue
         } else if (Object.prototype.hasOwnProperty.call(bug, apiField)) {
           bug[apiField] = newValue
@@ -2121,7 +2251,17 @@ export default {
       removeAttachment,
       fileInput,
       stepsLength,
-      commentText,
+      entityComments,
+      commentDraft,
+      commentDraftText,
+      commentDraftLength,
+      commentSubmitting,
+      entityFieldDiff,
+      hasEntityFieldDiff,
+      formatEntityDiffValue,
+      formatCommentTime,
+      loadEntityComments,
+      submitCommentDraft,
       commentEditorActive,
       activateCommentEditor,
       finishCommentEditor,
@@ -3617,6 +3757,85 @@ export default {
 
 .comment-section {
   margin-top: 16px;
+}
+
+.comment-input-subtitle {
+  margin: 12px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #495057;
+}
+
+.comment-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.comment-item {
+  padding: 10px 12px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  border: 1px solid #e9ecef;
+}
+
+.comment-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #6c757d;
+}
+
+.comment-author {
+  font-weight: 600;
+  color: #343a40;
+}
+
+.comment-op-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e7f1ff;
+  color: #0d6efd;
+  font-size: 11px;
+}
+
+.comment-item-body {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #333;
+  word-break: break-word;
+}
+
+.comment-empty {
+  font-size: 13px;
+  color: #999;
+  padding: 8px 0 12px;
+}
+
+.comment-diff-panel {
+  margin-bottom: 10px;
+}
+
+.comment-submit-btn {
+  margin-left: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #667eea;
+  border-radius: 4px;
+  background: #667eea;
+  color: #fff;
+  cursor: pointer;
+}
+
+.comment-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .comment-label {

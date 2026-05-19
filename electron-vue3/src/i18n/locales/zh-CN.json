@@ -848,6 +848,8 @@
     "remark": "备注",
     "baseline": "基线",
     "testType": "测试类型",
+    "executionResult": "执行结果",
+    "relatedDefects": "关联缺陷",
     "caseType": "用例类型",
     "title": "标题",
     "steps": "测试步骤",
@@ -858,6 +860,25 @@
     "testcase": "测试用例",
     "lockedWarning": "卡片详情已打开，请先保存或关闭当前详情后再切换界面",
     "switchConfirm": "当前有卡片详情未关闭，确定要切换到其他卡片吗？"
+  },
+  "testcaseExecution": {
+    "notRun": "未执行",
+    "pass": "通过",
+    "fail": "失败",
+    "blocked": "阻塞",
+    "skip": "跳过"
+  },
+  "testcaseRelatedDefects": {
+    "none": "（无）"
+  },
+  "testcaseComment": {
+    "appendTitle": "追加评论",
+    "historyTitle": "评论记录",
+    "inputTitle": "输入评论",
+    "placeholder": "点击输入评论…",
+    "submit": "发表评论",
+    "empty": "暂无评论",
+    "linkedOp": "来自对话操作"
   },
   "narrowNav": {
     "returnToPlans": "返回迭代计划",
