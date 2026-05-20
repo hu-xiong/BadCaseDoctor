@@ -42,6 +42,10 @@ export function register(data) {
 export function getCurrentUser() {
   return api.get('/api/user')
 }
+/** 预热后端 DB/Redis 连接，避免首条业务接口冷启动（进项目页时调用，勿阻塞 UI） */
+export function pingBackend() {
+  return api.get('/api/ping', { timeout: 20000 })
+}
 // 发送邮箱验证码
 export function sendVerificationCode(data) {
   return api.post('/api/send_verification_code', data)
@@ -58,9 +62,11 @@ export function createProject(data) {
 export function getProjectDetail(id) {
   return api.get(`/api/projects/${id}`)
 }
-// 编辑页最小上下文（project + plans + members）
-export function getProjectEditContext(projectId) {
-  return api.get(`/api/projects/${projectId}/edit-context`)
+// 编辑页最小上下文（project + plans + members）；lite=1 跳过计划下各类型计数聚合（编辑下拉不需要）
+export function getProjectEditContext(projectId, opts = {}) {
+  const params = {}
+  if (opts && opts.lite) params.lite = '1'
+  return api.get(`/api/projects/${projectId}/edit-context`, { params })
 }
 // 获取项目BadCase列表（分页）
 export function getProjectBadcases(projectId, page = 1, perPage = 10, additionalParams = {}) {

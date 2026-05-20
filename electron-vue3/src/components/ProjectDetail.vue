@@ -763,7 +763,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, provide, shallowRef, markRaw } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { BACKEND_BASE_URL, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, resolveProjectCardBySource, createCard, updateCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getCardDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline, deleteBadcase, deleteBug, deleteTestCase, deleteCardWithCascadeConfirm, cascadeCardDeleteConfirmText, clearChatMessageDeleteNavigation } from '../api.js'
+import { BACKEND_BASE_URL, pingBackend, getProjectPlans, getProjectDetail, createPlan as createPlanApi, updatePlan as updatePlanApi, deletePlan as deletePlanApi, pinPlan as pinPlanApi, getProjectBadcases, getProjectBugs, getProjectTestCases, getProjectCards, resolveProjectCardBySource, createCard, updateCard, updateBadcasePlan, getProjectMembers, getChatSessions, createChatSession, getChatSession, getBugDetail, getBadcaseDetail, getTestCaseDetail, getCardDetail, getPlanBaselines, createBaseline as apiCreateBaseline, getBaselineDetail, deleteBaseline as apiDeleteBaseline, deleteBadcase, deleteBug, deleteTestCase, deleteCardWithCascadeConfirm, cascadeCardDeleteConfirmText, clearChatMessageDeleteNavigation } from '../api.js'
 import { getBadCaseStatusText, getTestCaseStatusText } from '../constants/status.js'
 import { normalizePlanId } from '../utils/snowflakeId.js'
 import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
@@ -1096,6 +1096,19 @@ export default {
     /** 打开项目时拉取最近长期记忆，随每条 ReAct 请求传入（不在每条对话后端 embed） */
     const projectLongMemoryContext = ref(null)
     provide('projectLongMemoryContext', projectLongMemoryContext)
+
+    /** 嵌入详情编辑器复用侧栏已加载的 plans/members，避免重复 edit-context */
+    const embeddedProjectWorkspace = computed(() => ({
+      projectId: projectId.value,
+      project:
+        projectId.value != null
+          ? { id: projectId.value, name: projectName.value || '' }
+          : null,
+      plans: projectPlans.value,
+      members: projectMembers.value,
+      ready: Array.isArray(projectPlans.value) && projectPlans.value.length > 0
+    }))
+    provide('embeddedProjectWorkspace', embeddedProjectWorkspace)
 
     const loadProjectLongMemoryBootstrap = async () => {
       const pid = projectId.value
@@ -1527,7 +1540,7 @@ const totalCards = ref(0)
     }
     
     // 详情字段（列表行内不做 diff；含需在详情确认的优先级）
-    // 注意：bug 的复现字段为 reproduction_steps，badcase 为 reproduction_steps，testcase 为 preconditions/steps/remark/baseline 等
+    // 注意：bug 的复现字段为 reproduction_steps，badcase 为 reproduction_steps，testcase 为 preconditions/steps/append_comment 等
     const DETAIL_FIELDS = [
       'base_problem',
       'reproduction_steps',
@@ -1542,8 +1555,6 @@ const totalCards = ref(0)
       'actual_result',
       'preconditions',
       'steps',
-      'remark',
-      'baseline',
       // 兼容：后端 diff 里可能使用复现步骤字段名
       'reproduce_steps',
       'priority',
@@ -1579,8 +1590,6 @@ const totalCards = ref(0)
       'actual_result': '实际结果',
       'preconditions': '前置条件',
       'steps': '测试步骤',
-      'remark': '备注',
-      'baseline': '基线',
       'case_type': '用例类型',
       'test_type': '测试类型',
       'execution_result': '执行结果',
@@ -1613,6 +1622,8 @@ const totalCards = ref(0)
       const raw = rawField ?? ''
       if (typeof raw === 'string') {
         const t = raw.trim()
+        const tl = t.toLowerCase().replace(/-/g, '_')
+        if (tl === 'remark') return 'append_comment'
         if (['badcase', 'bad_case'].includes(tgt)) {
           const tlcf = t.toLowerCase().replace(/-/g, '_')
           if (
@@ -1655,6 +1666,14 @@ const totalCards = ref(0)
           if (t === '严重级别' || t === '严重程度' || t.includes('严重级别') || t.includes('严重程度')) {
             return 'severity'
           }
+          if (t === '备注' || t === '评论' || t.includes('追加评论') || t.includes('添加评论')) {
+            return 'append_comment'
+          }
+        }
+        if (['badcase', 'bad_case'].includes(tgt)) {
+          if (t === '备注' || t === '评论' || t.includes('追加评论') || t.includes('添加评论')) {
+            return 'append_comment'
+          }
         }
         if (['testcase', 'test_case'].includes(tgt)) {
           if (t === '严重程度' || t.includes('严重程度')) return 'priority'
@@ -1663,8 +1682,7 @@ const totalCards = ref(0)
           const tlTc = t.toLowerCase().replace(/-/g, '_')
           if (tlTc === 'testcase_type' || tlTc === 'test_case_type') return 'case_type'
           if (t === '测试步骤' || t === '用例步骤' || t.includes('测试步骤')) return 'steps'
-          if (t === '备注') return 'remark'
-          if (t === '基线') return 'baseline'
+          if (t === '备注') return 'append_comment'
           if (t === '前置条件') return 'preconditions'
           if (t === '执行结果' || t.includes('执行结果')) return 'execution_result'
           if (t === '关联缺陷' || t.includes('关联缺陷')) return 'related_defects'
@@ -7175,11 +7193,22 @@ const totalCards = ref(0)
       }
     }, { immediate: true })
     
+    /** 进项目页即预热远端 DB 连接，避免第一次点编辑详情时 TTFB 飙到数秒 */
+    const warmBackendOnce = (() => {
+      let done = false
+      return () => {
+        if (done) return
+        done = true
+        void pingBackend().catch(() => {})
+      }
+    })()
+
     // 监听项目id变化，确保在路由切换或刷新时同步加载数据
     watch(() => route.params.id, async (newId) => {
       if (newId) {
         projectId.value = newId
         console.log('项目id发生变化:', newId)
+        warmBackendOnce()
         await loadProjectLongMemoryBootstrap()
         await manualRefreshPlans()
         await restorePendingDiffReviews()
@@ -7197,6 +7226,7 @@ const totalCards = ref(0)
 
     onMounted(async () => {
       console.log('=== ProjectDetail onMounted ===')
+      warmBackendOnce()
       loadProcessedCreateFromStorage(projectId.value)
                        
       // 监听 grep 导航事件
@@ -8217,7 +8247,9 @@ const totalCards = ref(0)
           diff: diff,
           modifications: detailMods,
           messageId: messageId,
-          batchIndex: batchIndex
+          batchIndex: batchIndex,
+          _naturalQuery:
+            typeof detail.natural_query === 'string' ? detail.natural_query : ''
         })
       }
 
@@ -8257,7 +8289,9 @@ const totalCards = ref(0)
               diff: diff,
               modifications: detailModsBatch,
               messageId: messageId,
-              batchIndex: batchIndex
+              batchIndex: batchIndex,
+              _naturalQuery:
+                typeof detail.natural_query === 'string' ? detail.natural_query : ''
             })
           } catch (_e) {
             /* ignore */

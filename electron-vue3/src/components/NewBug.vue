@@ -677,7 +677,7 @@
            </div>
            <div v-else class="comment-empty">暂无评论</div>
            <h4 class="comment-input-subtitle">输入评论</h4>
-           <div class="comment-input-container">
+           <div ref="commentInputContainerRef" class="comment-input-container">
              <template v-if="!commentEditorActive">
                <textarea
                  class="comment-textarea-simple"
@@ -693,11 +693,12 @@
                <RichTextHtmlEditor
                  v-model="commentDraft"
                  variant="compact"
-                 placeholder="请输入评论"
+                 submit-on-enter
+                 placeholder="请输入评论（Enter 发送，Shift+Enter 换行）"
                  class="rich-editor"
+                 @submit="submitCommentDraft"
                />
                <div class="comment-editor-actions">
-                 <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
                  <button
                    v-if="isEdit && bugId"
                    type="button"
@@ -722,7 +723,7 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, onActivated, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
+import { ref, reactive, onMounted, onActivated, onUnmounted, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, addBugComment, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
@@ -771,6 +772,7 @@ export default {
   setup(props, { emit }) {
     const router = useRouter()
     const route = useRoute()
+    const embeddedProjectWorkspace = inject('embeddedProjectWorkspace', null)
     if (import.meta.env.DEV) {
       console.log('[NewBug] props.card_id:', props.card_id, 'id:', props.id)
     }
@@ -822,7 +824,8 @@ export default {
       expected_result: '预期结果',
       actual_result: '实际结果',
       reproduction_steps: '复现步骤',
-      comment: '备注',
+      comment: '追加评论',
+      remark: '追加评论',
       severity: '严重级别',
       case_category: '问题分类',
       environment: '环境',
@@ -1052,12 +1055,21 @@ export default {
     // 获取当前用户信息
     const fetchCurrentUser = async () => {
       try {
-        // 如果全局用户状态已经存在，直接使用
         if (user.value) {
           console.log('使用全局用户状态:', user.value)
           return
         }
-        
+        try {
+          const cached = localStorage.getItem('user')
+          if (cached) {
+            user.value = JSON.parse(cached)
+            console.log('使用 localStorage 用户缓存')
+            return
+          }
+        } catch (_e) {
+          /* ignore */
+        }
+
         const response = await getCurrentUser()
         if (response.data.success) {
           // 更新全局用户状态
@@ -1075,11 +1087,31 @@ export default {
     
     /** 一次请求拉齐 project + plans + members（与 /edit-context 对齐），避免 /plans + /members 各打一遍 */
     const projectWorkspaceLoaded = ref(false)
+
+    const tryApplyEmbeddedProjectWorkspace = async (projectId) => {
+      const pidStr = snowflakeIdStr(projectId) || (projectId != null && String(projectId).trim() !== '' ? String(projectId).trim() : '')
+      if (!props.embedded || !pidStr) return false
+      const ws = embeddedProjectWorkspace?.value
+      if (!ws?.ready || String(ws.projectId) !== String(pidStr)) return false
+      const prj = ws.project
+      if (prj) {
+        projectInfo.value = { ...projectInfo.value, ...prj }
+        if (!availableProjects.value.find((p) => p.id == prj.id)) {
+          availableProjects.value.push(prj)
+        }
+      }
+      projectMembers.value = ws.members || []
+      await setAvailablePlansFromTree(ws.plans || [])
+      projectWorkspaceLoaded.value = true
+      return true
+    }
+
     const applyProjectEditContext = async (projectId) => {
       const pidStr = snowflakeIdStr(projectId) || (projectId != null && String(projectId).trim() !== '' ? String(projectId).trim() : '')
       if (!pidStr) return false
+      if (await tryApplyEmbeddedProjectWorkspace(projectId)) return true
       try {
-        const resp = await getProjectEditContext(pidStr)
+        const resp = await getProjectEditContext(pidStr, { lite: true })
         if (!resp.data?.success) return false
         projectInfo.value = resp.data.project || projectInfo.value
         projectMembers.value = resp.data.members || []
@@ -1290,29 +1322,14 @@ export default {
       }
     }
     
-    // 初始化Bug数据
-    const initBug = async () => {
+    /** 编辑模式：仅拉 Bug 详情（plans/members 由 onMounted 与工作区任务并行加载） */
+    const loadBugDetailForEdit = async (normalizedBugId) => {
+      console.log('编辑模式，Bug ID:', normalizedBugId)
+      isEdit.value = true
+      bugId.value = normalizedBugId
       try {
-        // 优先使用 props，其次使用路由参数
-        const query = route.query
-        console.log('=== 初始化Bug开始 ===')
-        console.log('路由查询参数:', query)
-        console.log('Props 参数:', props)
-        
-        // 判断是否编辑模式
-        const isEditMode = props.edit || query.edit === 'true'
-        const itemId = props.id || query.id
-        
-        const normalizedBugId = snowflakeIdStr(itemId) || (itemId != null && String(itemId).trim() !== '' ? String(itemId).trim() : '')
-        if (isEditMode && normalizedBugId) {
-          console.log('编辑模式，Bug ID:', itemId)
-          isEdit.value = true
-          bugId.value = normalizedBugId
-          loading.value = true
-        
-        try {
-          const response = await getBugDetail(normalizedBugId)
-          if (response.data.success && response.data.bug) {
+        const response = await getBugDetail(normalizedBugId)
+        if (response.data.success && response.data.bug) {
             console.log('=== Bug详情API响应 ===')
             console.log('完整响应:', response.data)
             console.log('Bug数据:', response.data.bug)
@@ -1360,86 +1377,33 @@ export default {
 
             if (bug.project_id) {
               bug.associate_project = true
-              console.log('编辑模式：设置associate_project为true，项目ID:', bug.project_id)
-              
-              // 初始化_previousProjectId，避免handleProjectChange误判
               bug._previousProjectId = bug.project_id
-              console.log('编辑模式：初始化_previousProjectId:', bug._previousProjectId)
             }
-            
-            // 复现步骤由 RichTextHtmlEditor v-model 绑定 bug.reproduction_steps
-
-            // 获取项目计划列表和成员列表（编辑模式）
-            if (bug.project_id) {
-              console.log('编辑模式，获取项目计划，项目ID:', bug.project_id)
-              
-              // 确保项目列表已加载
-              if (availableProjects.value.length === 0) {
-                console.log('编辑模式：项目列表为空，先加载项目列表')
-                await fetchProjects()
-              }
-              
-              // 设置项目信息
-              const project = availableProjects.value.find(p => p.id == bug.project_id)
-              if (project) {
-                projectInfo.value = project
-                console.log('编辑模式：设置项目信息:', project.name)
-              } else {
-                console.log('编辑模式：未找到项目信息，availableProjects:', availableProjects.value)
-                console.log('尝试查找项目，bug.project_id:', bug.project_id)
-                console.log('availableProjects中的项目ID类型:', availableProjects.value.map(p => ({ id: p.id, type: typeof p.id, name: p.name })))
-              }
-              
-              await applyProjectEditContext(bug.project_id)
-              await ensurePlanOptionVisible(bug.plan)
-              
-              // 确保数据同步
-              console.log('编辑模式初始化完成后，当前状态:')
-              console.log('- bug.project_id:', bug.project_id)
-              console.log('- bug.associate_project:', bug.associate_project)
-              console.log('- bug.plan:', bug.plan)
-              console.log('- projectInfo:', projectInfo.value)
-              console.log('- projectMembers.length:', projectMembers.value.length)
-              console.log('- availablePlans.length:', availablePlans.value.length)
-              
-              // 强制触发响应式更新
-              await nextTick()
-              
-              // 检查计划和负责人是否成功加载
-              console.log('检查计划和负责人是否加载成功:')
-              if (bug.plan) {
-                const planMatch = availablePlans.value.find(p => p.value === bug.plan || p.value === bug.plan.toString())
-                console.log(`计划 ${bug.plan} 匹配结果:`, planMatch ? '✓ 找到' : '✗ 未找到')
-              }
-              if (bug.assignee && bug.assignee.length > 0) {
-                const assigneeId = bug.assignee[0]
-                const memberMatch = projectMembers.value.find(
-                  m => m.id != null && String(m.id) === String(assigneeId)
-                )
-                console.log(`负责人 ${assigneeId} 匹配结果:`, memberMatch ? `✓ 找到 (${memberMatch.name})` : '✗ 未找到')
-              }
-            } else {
-              console.log('编辑模式，Bug没有项目ID')
-            }
-          } else {
-            alert('获取Bug信息失败')
-            goBack()
+            return true
           }
+          alert('获取Bug信息失败')
+          goBack()
+          return false
         } catch (error) {
-          console.error('=== 获取Bug信息失败 ===')
-          console.error('错误类型:', error.name)
-          console.error('错误消息:', error.message)
-          console.error('错误堆栈:', error.stack)
+          console.error('获取Bug信息失败:', error)
           alert('获取Bug信息失败: ' + error.message)
           goBack()
-        } finally {
-          loading.value = false
-          // 编辑模式下通知父组件更新Tab标题
-          if (isEdit.value && bug.title) {
-            emit('titleLoaded', bug.title)
-          }
+          return false
         }
-      } else if (query.project_id || props.project_id) {
+    }
+
+    // 初始化Bug数据（新建模式；编辑模式请用 loadBugDetailForEdit + 并行工作区）
+    const initBug = async () => {
+      try {
+        const query = route.query
+        console.log('=== 初始化Bug开始 ===')
+        const isEditMode = props.edit || query.edit === 'true'
+        const itemId = props.id || query.id
+        const normalizedBugId = snowflakeIdStr(itemId) || (itemId != null && String(itemId).trim() !== '' ? String(itemId).trim() : '')
+        if (isEditMode && normalizedBugId) {
+          return loadBugDetailForEdit(normalizedBugId)
+        }
+        if (query.project_id || props.project_id) {
         console.log('新建模式，项目ID:', query.project_id)
         console.log('query.project_id类型:', typeof query.project_id)
         console.log('availableProjects:', availableProjects.value)
@@ -1649,12 +1613,36 @@ export default {
 
     const fileInput = ref(null)
     const commentEditorActive = ref(false)
+    const commentInputContainerRef = ref(null)
     const activateCommentEditor = () => {
       commentEditorActive.value = true
     }
     const finishCommentEditor = () => {
       commentEditorActive.value = false
     }
+    const COMMENT_EDITOR_POPUP_SEL = '.-t-v-popup-panel, .-t-v-popup-panel-h, .-t-v-h-content'
+    const onCommentEditorOutsidePointerDown = (e) => {
+      if (!commentEditorActive.value) return
+      const root = commentInputContainerRef.value
+      if (!root) return
+      const target = e.target
+      if (!(target instanceof Node)) return
+      if (root.contains(target)) return
+      if (target.closest?.(COMMENT_EDITOR_POPUP_SEL)) return
+      finishCommentEditor()
+    }
+    watch(commentEditorActive, (active) => {
+      if (active) {
+        nextTick(() => {
+          document.addEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+        })
+      } else {
+        document.removeEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+      }
+    })
+    onUnmounted(() => {
+      document.removeEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+    })
 
     const bugDraftPreset = inject('bugDraftPreset', null)
 
@@ -1706,6 +1694,7 @@ export default {
       const mods = pendingDiff.value?.modifications
       if (!mods) return null
       const keys = [field, 'comment']
+      if (field === 'append_comment') keys.push('remark')
       if (field === 'reproduction_steps') keys.push('steps_to_reproduce')
       for (const k of keys) {
         const m = mods[k]
@@ -1864,7 +1853,9 @@ export default {
       const tryKeys = [
         requested,
         requested === 'append_comment' ? 'comment' : null,
+        requested === 'append_comment' ? 'remark' : null,
         requested === 'comment' ? 'append_comment' : null,
+        requested === 'remark' ? 'append_comment' : null,
         requested === 'reproduction_steps' ? 'steps_to_reproduce' : null,
         requested === 'reproduction_steps' ? 'reproduce_steps' : null,
         requested === 'steps_to_reproduce' ? 'reproduction_steps' : null
@@ -1937,6 +1928,13 @@ export default {
         const tgt = String(pd?.target || 'bug').toLowerCase().replace(/-/g, '_')
         const isBug = tgt === 'bug' || tgt === ''
         if (!isBug || (cur && tid && tid !== cur)) return
+        const mods = pd?.modifications
+        if (mods && typeof mods === 'object') {
+          if (mods.remark && !mods.append_comment) {
+            mods.append_comment = mods.remark
+            delete mods.remark
+          }
+        }
         pendingDiff.value = pd
         applyPendingModificationsToBugForm()
       } catch (e) {
@@ -2073,7 +2071,7 @@ export default {
     
     onMounted(async () => {
       console.log('=== 组件挂载开始 ===')
-      
+      loading.value = true
       try {
         const query = route.query
         const showDiffMode = props.show_diff || query.show_diff === 'true'
@@ -2093,13 +2091,42 @@ export default {
           pendingDiff.value = null
         }
 
-        // 后台并行加载用户信息（不阻塞首屏）
-        console.log('开始加载用户信息...')
-        await fetchCurrentUser()
-        
-        // 先拉项目列表再 initBug，避免竞态下 initBug 误以为列表为空再次请求 /api/projects
-        await fetchProjects()
-        await initBug()
+        const isEditModeEarly = props.edit || query.edit === 'true'
+        const itemIdEarly = props.id || query.id
+        const normalizedBugIdEarly =
+          snowflakeIdStr(itemIdEarly) ||
+          (itemIdEarly != null && String(itemIdEarly).trim() !== '' ? String(itemIdEarly).trim() : '')
+        const knownProjectId =
+          snowflakeIdStr(props.project_id) ||
+          snowflakeIdStr(query.project_id) ||
+          null
+
+        /**
+         * 依赖关系（可并发的打 ✓）：
+         * ✓ user — 无依赖
+         * ✓ bug/testcase 详情 — 仅需实体 id
+         * ✓ edit-context / 父页工作区 — 仅需 project_id（嵌入时 props 即有）
+         * ✗ 工作区 — 若 project_id 只在详情里，须等详情返回后再请求
+         * ✗ ensurePlanOptionVisible — 须有计划 id（来自详情）
+         */
+        const bootTasks = []
+        if (!user.value) bootTasks.push(fetchCurrentUser())
+        if (!(props.embedded && isEditModeEarly)) {
+          bootTasks.push(fetchProjects())
+        }
+        if (isEditModeEarly && normalizedBugIdEarly) {
+          bootTasks.push(loadBugDetailForEdit(normalizedBugIdEarly))
+          if (knownProjectId) {
+            bootTasks.push(
+              tryApplyEmbeddedProjectWorkspace(knownProjectId).then((ok) =>
+                ok ? true : applyProjectEditContext(knownProjectId)
+              )
+            )
+          }
+        } else {
+          bootTasks.push(initBug())
+        }
+        await Promise.all(bootTasks)
         console.log('Bug初始化完成')
 
         const ctxProjectId = bug.project_id
@@ -2112,6 +2139,12 @@ export default {
         } else if (ctxProjectId && !projectInfo.value?.name) {
           const prj = availableProjects.value.find((p) => String(p.id) === String(ctxProjectId))
           if (prj) projectInfo.value = prj
+        }
+        if (isEdit.value && !isEmptyPlanKey(bug.plan)) {
+          await ensurePlanOptionVisible(bug.plan)
+        }
+        if (isEdit.value && bug.title) {
+          emit('titleLoaded', bug.title)
         }
 
         const clearPendingModifyIfNotThisBug = () => {
@@ -2193,6 +2226,8 @@ export default {
         console.log('=== 组件挂载完成 ===')
       } catch (error) {
         console.error('组件挂载过程中发生错误:', error)
+      } finally {
+        loading.value = false
       }
     })
     
@@ -2263,6 +2298,7 @@ export default {
       loadEntityComments,
       submitCommentDraft,
       commentEditorActive,
+      commentInputContainerRef,
       activateCommentEditor,
       finishCommentEditor,
       isRightSidebarOpen,
@@ -4096,7 +4132,29 @@ export default {
   padding: 8px;
   background: #f8f9fa;
   border-bottom: 1px solid #e9ecef;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.editor-toolbar:hover {
+  scrollbar-width: thin;
+}
+
+.editor-toolbar::-webkit-scrollbar {
+  height: 0;
+}
+
+.editor-toolbar:hover::-webkit-scrollbar {
+  height: 6px;
+}
+
+.editor-toolbar:hover::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
 }
 
 .editor-toolbar .toolbar-btn {
@@ -4111,6 +4169,7 @@ export default {
   cursor: pointer;
   font-size: 12px;
   transition: all 0.2s;
+  flex-shrink: 0;
 }
 
 .editor-toolbar .toolbar-btn:hover {
@@ -4123,6 +4182,7 @@ export default {
   height: 16px;
   background: #e9ecef;
   margin: 0 2px;
+  flex-shrink: 0;
 }
 
 .editor-content {

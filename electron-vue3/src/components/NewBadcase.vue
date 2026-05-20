@@ -1071,6 +1071,7 @@ export default {
       aliasPendingModKey(mods, 'reproduction_step', 'reproduction_steps')
       aliasPendingModKey(mods, 'badcase_reproduction_steps', 'reproduction_steps')
       aliasPendingModKey(mods, 'comment', 'append_comment')
+      aliasPendingModKey(mods, 'remark', 'append_comment')
       return { ...pd, modifications: mods }
     }
 
@@ -1881,6 +1882,7 @@ export default {
       const mods = pendingDiff.value?.modifications
       if (!mods) return null
       const keys = [field, 'comment']
+      if (field === 'append_comment') keys.push('remark')
       for (const k of keys) {
         const m = mods[k]
         if (m && typeof m === 'object' && ('old' in m || 'new' in m)) return m

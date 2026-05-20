@@ -371,7 +371,7 @@ _ZH_FIELD_LABELS: Dict[str, str] = {
     "test_type": "测试类型",
     "preconditions": "前置条件",
     "steps": "测试步骤",
-    "remark": "备注",
+    "remark": "追加评论",
     "execution_result": "执行结果",
     "related_defects": "关联缺陷",
     "append_comment": "追加评论",
@@ -409,7 +409,7 @@ _EN_FIELD_LABELS: Dict[str, str] = {
     "test_type": "Test type",
     "preconditions": "Preconditions",
     "steps": "Test steps",
-    "remark": "Remark",
+    "remark": "Append comment",
     "execution_result": "Execution result",
     "related_defects": "Related defects",
     "append_comment": "Append comment",
@@ -471,7 +471,6 @@ def modify_modifiable_fields_rows(target: str, locale: Optional[str]) -> List[Di
         "assignee",
         "preconditions",
         "steps",
-        "remark",
         "baseline",
         "case_type",
         "test_type",
@@ -1142,6 +1141,7 @@ Required format:
 - **Risks and blockers**: "- None" when there are none.
 - Keep facts, no invention.
 - **When the tool is `modify`**: any entity name (Bug / BadCase / test case / Card) in Confirmed must match the **fact line** `target` below; do **not** write BadCase just because the product name contains "BadCase"; IDs must match `target_id`.
+- **Comments (Bug/BadCase/TestCase)**: use `append_comment` only (no remark field). For "add comment", only say done if `comment_records` contains that text.
 
 Previous summary:
 {prev_block}
@@ -1168,6 +1168,7 @@ Output only the new summary."""
 - **风险与阻塞**：无则写「- 无」。
 - 忠实合并，不编造。
 - **modify 工具**：若观察摘要或待办中出现「Bug / BadCase / 测试用例」等实体名，**必须与下方「事实行」中的 target 一致**；**禁止**因产品名含「BadCase」就把 Bug 写成 BadCase；ID 须与 target_id 一致。
+- **评论（Bug/BadCase/TestCase）**：无 remark 字段；留言用 append_comment。仅当 comment_records 中已有该正文才可写「评论已存在」。
 
 已有总览：
 {prev_block}

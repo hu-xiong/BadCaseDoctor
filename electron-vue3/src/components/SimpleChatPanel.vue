@@ -813,7 +813,14 @@
 import { ref, reactive, nextTick, onMounted, onUnmounted, watch, computed, toRaw, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
-import { BACKEND_BASE_URL, getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
+import {
+  BACKEND_BASE_URL,
+  getChatSession,
+  addChatMessage,
+  saveAgentBugs,
+  generateSessionTitle,
+  getBugDetail
+} from '../api.js'
 import { apiLocaleParam } from '../i18n/index.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
@@ -854,6 +861,9 @@ import {
   testcaseDetailFieldValuesEqual,
   normalizeTestcaseSandboxDiffRow,
   enrichTestcaseSandboxDiffRows,
+  buildTestcaseRelatedDefectTitleMap,
+  collectTestcaseRelatedDefectIdsFromNav,
+  isPlaceholderTestcaseDefectTitle,
   remapMislabeledTestcaseSandboxFieldKey,
   isTestcaseExecutionResultEnumValue,
   TESTCASE_DETAIL_FIELDS,
@@ -941,6 +951,8 @@ function readDebugReactThinkSSE() {
 const isDebugReactThinkSSE = readDebugReactThinkSSE()
 
 const messages = ref([])
+/** 沙箱/修改预览：关联缺陷 id → Bug 标题（按需 getBugDetail 补全） */
+const sandboxBugTitleById = ref({})
 /** GET /api/chat-sessions/:id 同步，用于判断是否为默认标题并触发生成 */
 const sessionTitleRef = ref('')
 const titleGenInFlight = ref(false)
@@ -1037,19 +1049,96 @@ function isPlaceholderSessionTitle(title) {
     return explicit
   }
 
+  const mergeSandboxDefectTitleMap = (nav) => ({
+    ...sandboxBugTitleById.value,
+    ...buildTestcaseRelatedDefectTitleMap(nav)
+  })
+
+  const hydrateSandboxDefectTitles = async (nav) => {
+    if (!nav || typeof nav !== 'object') return
+    const merged = mergeSandboxDefectTitleMap(nav)
+    const ids = collectTestcaseRelatedDefectIdsFromNav(nav).filter(
+      (id) => !merged[id] || isPlaceholderTestcaseDefectTitle(id, merged[id])
+    )
+    if (!ids.length) return
+    const updates = {}
+    await Promise.all(
+      ids.map(async (id) => {
+        if (
+          sandboxBugTitleById.value[id] &&
+          !isPlaceholderTestcaseDefectTitle(id, sandboxBugTitleById.value[id])
+        ) {
+          return
+        }
+        try {
+          const res = await getBugDetail(id)
+          const payload = res?.data
+          const bug =
+            payload?.bug ??
+            payload?.data ??
+            (payload?.success && payload?.title != null ? payload : null)
+          const title = String(bug?.title ?? '').trim()
+          if (!title || isPlaceholderTestcaseDefectTitle(id, title)) return
+          updates[id] = title
+        } catch (_e) {
+          /* ignore */
+        }
+      })
+    )
+    if (Object.keys(updates).length) {
+      sandboxBugTitleById.value = { ...sandboxBugTitleById.value, ...updates }
+    }
+  }
+
+  const collectModifyNavsFromMessages = (msgs) => {
+    const navs = []
+    if (!Array.isArray(msgs)) return navs
+    for (const msg of msgs) {
+      if (msg?.modifyNavigation) navs.push(msg.modifyNavigation)
+      for (const grp of msg.modifyGroups || []) {
+        for (const it of grp.items || []) {
+          if (it && typeof it === 'object') navs.push(it)
+        }
+        if (Array.isArray(grp.batch_results)) {
+          for (const br of grp.batch_results) {
+            if (br && typeof br === 'object') navs.push(br)
+          }
+        }
+      }
+      const nav = msg?.modifyNavigation
+      if (nav && Array.isArray(nav.batch_results)) {
+        for (const br of nav.batch_results) {
+          if (br && typeof br === 'object') navs.push(br)
+        }
+      }
+    }
+    return navs
+  }
+
+  watch(
+    messages,
+    (msgs) => {
+      for (const nav of collectModifyNavsFromMessages(msgs)) {
+        void hydrateSandboxDefectTitles(nav)
+      }
+    },
+    { deep: true }
+  )
+
   const resolveSandboxDiffRowsForDisplay = (ctx, groupTarget = null) => {
     const tgt = inferSandboxNavTarget(ctx, groupTarget)
     const base = Array.isArray(ctx?.diff) ? ctx.diff : []
-    return enrichTestcaseSandboxDiffRows(
-      {
-        target: tgt || ctx?.target,
-        before: ctx?.before,
-        after: ctx?.after,
-        modifications: ctx?.modifications
-      },
-      base,
-      t
-    )
+    const navObj = {
+      target: tgt || ctx?.target,
+      before: ctx?.before,
+      after: ctx?.after,
+      modifications: ctx?.modifications,
+      diff: base
+    }
+    void hydrateSandboxDefectTitles(navObj)
+    return enrichTestcaseSandboxDiffRows(navObj, base, t, {
+      defectTitleMap: mergeSandboxDefectTitleMap(navObj)
+    })
   }
 
   const countGroupSandboxDisplayRows = (group) => {
@@ -1235,6 +1324,8 @@ function isPlaceholderSessionTitle(title) {
     const isOtherDetail = (tgt !== 'testcase' && tgt !== 'test_case') && DETAIL_FIELDS.includes(fk)
     if (isTcDetail || isOtherDetail) {
       if (isTcDetail) {
+        const defectMap =
+          fk === 'related_defects' ? mergeSandboxDefectTitleMap(ctx) : null
         const fromTc = readTestcaseModifySideValue(
           ctx,
           fk,
@@ -1242,7 +1333,8 @@ function isPlaceholderSessionTitle(title) {
           label,
           which,
           mods,
-          t
+          t,
+          defectMap
         )
         if (fromTc) return fromTc
       } else {
@@ -1256,7 +1348,18 @@ function isPlaceholderSessionTitle(title) {
           }
         }
         const row = which === 'old' ? ctx?.before : ctx?.after
-        const fromRow = readTestcaseModifySideValue(ctx, fk, fieldDiff?.field, label, which, {}, t)
+        const defectMapRow =
+          fk === 'related_defects' ? mergeSandboxDefectTitleMap(ctx) : null
+        const fromRow = readTestcaseModifySideValue(
+          ctx,
+          fk,
+          fieldDiff?.field,
+          label,
+          which,
+          {},
+          t,
+          defectMapRow
+        )
         if (fromRow) return fromRow
       }
       const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
@@ -1266,6 +1369,10 @@ function isPlaceholderSessionTitle(title) {
           const merged = getMergedPendingForTarget(messages.value, nt, tid)
           const snap = merged?.before && typeof merged.before === 'object' ? merged.before : null
           if (isTcDetail) {
+            const defectMapMerged =
+              fk === 'related_defects'
+                ? mergeSandboxDefectTitleMap({ before: snap, after: null, modifications: mods })
+                : null
             const fromMerged = readTestcaseModifySideValue(
               { before: snap, after: null },
               fk,
@@ -1273,7 +1380,8 @@ function isPlaceholderSessionTitle(title) {
               label,
               'old',
               mods,
-              t
+              t,
+              defectMapMerged
             )
             if (fromMerged) return fromMerged
           }
@@ -1426,7 +1534,9 @@ function isPlaceholderSessionTitle(title) {
       return formatTestcaseSelectFieldLabel(fk, raw, t)
     }
     if (isTcField) {
-      return formatTestcaseModifyFieldValue(fk, raw, { t })
+      const titleMap =
+        fk === 'related_defects' ? mergeSandboxDefectTitleMap(ctx) : undefined
+      return formatTestcaseModifyFieldValue(fk, raw, { t, titleMap })
     }
     if ((tgt === 'testcase' || tgt === 'test_case') && isPriority) {
       return formatTestcaseModifyFieldValue('priority', raw)

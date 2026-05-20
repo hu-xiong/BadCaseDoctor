@@ -8,8 +8,6 @@ export const TESTCASE_LIST_FIELDS = ['title', 'status', 'assignee']
 export const TESTCASE_DETAIL_FIELDS = [
   'preconditions',
   'steps',
-  'remark',
-  'baseline',
   'priority',
   'case_type',
   'test_type',
@@ -65,8 +63,6 @@ export const TESTCASE_FIELD_LABEL_I18N = {
   priority: 'cardDetail.priority',
   preconditions: 'cardDetail.preconditions',
   steps: 'cardDetail.steps',
-  remark: 'cardDetail.remark',
-  baseline: 'cardDetail.baseline',
   case_type: 'cardDetail.caseType',
   test_type: 'cardDetail.testType',
   execution_result: 'cardDetail.executionResult',
@@ -79,8 +75,6 @@ const LABEL_TO_KEY_ZH = {
   用例步骤: 'steps',
   测试步骤: 'steps',
   步骤: 'steps',
-  备注: 'remark',
-  基线: 'baseline',
   用例类型: 'case_type',
   测试类型: 'test_type',
   重要程度: 'priority',
@@ -93,6 +87,7 @@ const LABEL_TO_KEY_ZH = {
   评论: 'append_comment',
   追加评论: 'append_comment',
   添加评论: 'append_comment',
+  备注: 'append_comment',
   标题: 'title',
   状态: 'status',
   负责人: 'assignee'
@@ -119,14 +114,13 @@ const TESTCASE_FIELD_KEY_ALIASES = {
   related_defects: 'related_defects',
   defects: 'related_defects',
   comment: 'append_comment',
-  append_comment: 'append_comment'
+  append_comment: 'append_comment',
+  remark: 'append_comment'
 }
 
 export const TESTCASE_ROW_ALIASES = {
   preconditions: ['preconditions', 'precondition'],
   steps: ['steps', 'test_steps'],
-  remark: ['remark'],
-  baseline: ['baseline'],
   case_type: ['case_type', 'caseType', 'testcase_type', 'test_case_type'],
   test_type: ['test_type', 'testType', 'testcase_test_type'],
   priority: ['priority'],
@@ -174,16 +168,126 @@ export function normalizeTestcaseRelatedDefectIds(raw) {
     if (fromLines.length) return [...new Set(fromLines)]
     return t
       .split(/[,;，；\s]+/)
-      .map((s) => s.trim())
+      .map((s) => {
+        const x = s.trim()
+        if (!x) return ''
+        const m = x.match(/(\d{10,})/)
+        return m ? m[1] : x
+      })
       .filter(Boolean)
   }
   return []
+}
+
+/** 从沙箱/修改导航快照提取 bugId → 标题（非占位） */
+export function buildTestcaseRelatedDefectTitleMap(nav = {}) {
+  const map = {}
+  const ingestList = (raw) => {
+    if (!Array.isArray(raw)) return
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue
+      let id = String(item.bug_id ?? item.bugId ?? item.id ?? '').trim()
+      const m = id.match(/(\d{10,})/)
+      if (m) id = m[1]
+      if (!id) continue
+      const title = String(item.title ?? item.name ?? '').trim()
+      if (title && !isPlaceholderTestcaseDefectTitle(id, title)) map[id] = title
+    }
+  }
+  const b = nav?.before
+  const a = nav?.after
+  if (b && typeof b === 'object') ingestList(b.related_defects ?? b.relatedDefects)
+  if (a && typeof a === 'object') ingestList(a.related_defects ?? a.relatedDefects)
+  const mods = nav?.modifications
+  if (mods && typeof mods === 'object') {
+    const rd = mods.related_defects ?? mods.relatedDefects
+    if (rd && typeof rd === 'object' && !Array.isArray(rd) && ('old' in rd || 'new' in rd)) {
+      ingestList(rd.old)
+      ingestList(rd.new)
+    } else {
+      ingestList(rd)
+    }
+  }
+  return map
+}
+
+/** 收集导航中涉及的关联缺陷 id（含 diff 行文案） */
+export function collectTestcaseRelatedDefectIdsFromNav(nav = {}) {
+  const out = []
+  const push = (raw) => {
+    for (const id of normalizeTestcaseRelatedDefectIds(raw)) {
+      if (!out.includes(id)) out.push(id)
+    }
+  }
+  if (!nav || typeof nav !== 'object') return out
+  const b = nav.before
+  const a = nav.after
+  if (b && typeof b === 'object') push(b.related_defects ?? b.relatedDefects)
+  if (a && typeof a === 'object') push(a.related_defects ?? a.relatedDefects)
+  const mods = nav.modifications
+  if (mods && typeof mods === 'object') {
+    const rd = mods.related_defects ?? mods.relatedDefects
+    if (rd && typeof rd === 'object' && !Array.isArray(rd) && ('old' in rd || 'new' in rd)) {
+      push(rd.old)
+      push(rd.new)
+    } else {
+      push(rd)
+    }
+  }
+  if (Array.isArray(nav.diff)) {
+    for (const row of nav.diff) {
+      const fk = normalizeTestcaseModifyFieldKey(row?.field, row?.field_label)
+      if (fk !== 'related_defects') continue
+      for (const l of row.lines || []) {
+        if (l?.content != null) push(l.content)
+      }
+    }
+  }
+  return out
 }
 
 export function testcaseRelatedDefectsEqual(a, b) {
   const aa = [...normalizeTestcaseRelatedDefectIds(a)].sort()
   const bb = [...normalizeTestcaseRelatedDefectIds(b)].sort()
   return JSON.stringify(aa) === JSON.stringify(bb)
+}
+
+const TESTCASE_COMMENT_INTENT_RE =
+  /(?:添加|追加|发表|写|留|输入|新增).{0,10}?评论|评论.{0,10}?(?:一下|内容|为|：|:)|(?:append|add)\s*comment/i
+const TESTCASE_REMARK_INTENT_RE =
+  /(?:修改|更新|改|设置|填写|替换).{0,10}?备注|备注.{0,10}?(?:为|成|改成|改为|更新)/i
+
+/** 自然语言是否表达「追加评论」而非改备注 */
+export function intentRequestsTestcaseComment(intentText) {
+  const t = String(intentText || '').trim()
+  if (!t) return false
+  const hasComment = TESTCASE_COMMENT_INTENT_RE.test(t)
+  const hasRemark = TESTCASE_REMARK_INTENT_RE.test(t)
+  if (hasRemark && !hasComment) return false
+  return hasComment
+}
+
+/**
+ * 纠正 Agent 误将评论写入 remark：remark → append_comment（保留 {old,new} 结构中的 new）
+ * @returns {boolean} 是否发生了纠正
+ */
+export function coerceTestcaseRemarkToAppendComment(mods, intentText) {
+  if (!mods || typeof mods !== 'object') return false
+  if (mods.append_comment != null || mods.comment != null) return false
+  if (mods.remark == null) return false
+  if (!intentRequestsTestcaseComment(intentText)) return false
+  const raw = mods.remark
+  let newVal = raw
+  if (raw && typeof raw === 'object') {
+    if ('new' in raw) newVal = raw.new
+    else if (raw.old != null) newVal = raw.old
+  }
+  mods.append_comment =
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? { ...raw, new: newVal, old: '' }
+      : { new: newVal, old: '' }
+  delete mods.remark
+  return true
 }
 
 /** 是否为占位标题（Bug-123 / 纯 id），需拉取真实 Bug 标题 */
@@ -709,7 +813,7 @@ export function formatTestcaseModifyFieldValue(fieldKey, raw, opts = {}) {
     s = formatTestcaseRelatedDefectsForDisplay(raw, { t, titleMap: opts.titleMap })
   } else if (isTestcaseSelectDetailField(nk)) {
     s = formatTestcaseSelectFieldLabel(nk, raw, t)
-  } else if (nk === 'append_comment' || nk === 'preconditions' || nk === 'remark') {
+  } else if (nk === 'append_comment' || nk === 'preconditions') {
     s = stripHtmlForModifyDisplay(raw)
   } else if (raw != null && typeof raw === 'object') {
     try {
@@ -724,7 +828,7 @@ export function formatTestcaseModifyFieldValue(fieldKey, raw, opts = {}) {
   return s
 }
 
-export function readTestcaseRowField(row, fieldKey) {
+export function readTestcaseRowField(row, fieldKey, opts = {}) {
   if (!row || typeof row !== 'object') return ''
   const nk = normalizeTestcaseModifyFieldKey(fieldKey)
   const keys = TESTCASE_ROW_ALIASES[nk] || [nk]
@@ -734,7 +838,11 @@ export function readTestcaseRowField(row, fieldKey) {
     if (v == null) continue
     if (Array.isArray(v) && v.length === 0) continue
     if (typeof v === 'string' && v.trim() === '') continue
-    return formatTestcaseModifyFieldValue(nk, v, { maxLen: 2000 })
+    return formatTestcaseModifyFieldValue(nk, v, {
+      maxLen: 2000,
+      t: opts.t,
+      titleMap: nk === 'related_defects' ? opts.titleMap : undefined
+    })
   }
   return ''
 }
@@ -764,12 +872,16 @@ function remapTestcaseSandboxDiffRowForDisplay(row, nav, t) {
   return normalizeTestcaseSandboxDiffRow({ ...row, field: fk }, t)
 }
 
-export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
+export function enrichTestcaseSandboxDiffRows(nav, baseRows, t, opts = {}) {
   const tgt = String(nav?.target || '')
     .trim()
     .toLowerCase()
   if (tgt !== 'testcase' && tgt !== 'test_case') {
     return Array.isArray(baseRows) ? baseRows : []
+  }
+  const defectTitleMap = {
+    ...buildTestcaseRelatedDefectTitleMap(nav),
+    ...(opts.defectTitleMap || {})
   }
   const rows = Array.isArray(baseRows)
     ? baseRows
@@ -784,7 +896,10 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
   const formatSide = (fk, val) =>
     isTestcaseSelectDetailField(fk)
       ? formatTestcaseSelectFieldLabel(fk, val, t)
-      : formatTestcaseModifyFieldValue(fk, val, { t })
+      : formatTestcaseModifyFieldValue(fk, val, {
+          t,
+          titleMap: fk === 'related_defects' ? defectTitleMap : undefined
+        })
 
   const upsertRow = (fk, bo, ao) => {
     if (testcaseDetailFieldValuesEqual(fk, bo, ao) && !formatSide(fk, ao)) {
@@ -856,10 +971,37 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t) {
     }
   }
 
+  for (let i = 0; i < rows.length; i++) {
+    const fk = normalizeTestcaseModifyFieldKey(rows[i]?.field, rows[i]?.field_label)
+    if (fk !== 'related_defects') continue
+    const bo = readTestcaseEffectiveBefore(nav, fk)
+    const ao = readTestcaseEffectiveAfter(nav, fk)
+    const oldD = formatTestcaseRelatedDefectsForDisplay(bo, { t, titleMap: defectTitleMap })
+    const newD = formatTestcaseRelatedDefectsForDisplay(ao, { t, titleMap: defectTitleMap })
+    rows[i] = {
+      ...rows[i],
+      lines: [
+        { type: 'delete', content: oldD, line_no: 0 },
+        { type: 'add', content: newD, line_no: 0 }
+      ]
+    }
+  }
+
   return rows.filter((r) => !shouldSuppressMislabeledTestcaseStatusSandboxRow(r, nav))
 }
 
-export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel, which, mods = {}, t = null) {
+export function readTestcaseModifySideValue(
+  ctx,
+  fieldKey,
+  rawField,
+  fieldLabel,
+  which,
+  mods = {},
+  t = null,
+  defectTitleMap = null
+) {
+  const titleMap =
+    defectTitleMap && typeof defectTitleMap === 'object' ? defectTitleMap : {}
   const modSample =
     mods?.execution_result && typeof mods.execution_result === 'object'
       ? which === 'old'
@@ -871,8 +1013,12 @@ export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel,
           : mods.status.new
         : null
   const nk = remapMislabeledTestcaseSandboxFieldKey(fieldKey, fieldLabel, modSample)
-  const fromBefore = readTestcaseRowField(ctx?.before, nk)
-  const fromAfter = readTestcaseRowField(ctx?.after, nk)
+  const rowReadOpts = {
+    t,
+    titleMap: nk === 'related_defects' ? titleMap : undefined
+  }
+  const fromBefore = readTestcaseRowField(ctx?.before, nk, rowReadOpts)
+  const fromAfter = readTestcaseRowField(ctx?.after, nk, rowReadOpts)
 
   if (which === 'old' && fromBefore) return fromBefore
   if (which === 'new' && fromAfter) return fromAfter
@@ -882,7 +1028,10 @@ export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel,
     if (fromEff !== undefined) {
       const formatted = isTestcaseSelectDetailField(nk)
         ? formatTestcaseSelectFieldLabel(nk, fromEff, t)
-        : formatTestcaseModifyFieldValue(nk, fromEff, { t })
+        : formatTestcaseModifyFieldValue(nk, fromEff, {
+            t,
+            titleMap: nk === 'related_defects' ? titleMap : undefined
+          })
       if (formatted || nk === 'execution_result' || nk === 'related_defects') return formatted
     }
   }
@@ -895,7 +1044,10 @@ export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel,
       const v = which === 'old' ? m.old : m.new
       const formatted = isTestcaseSelectDetailField(nk)
         ? formatTestcaseSelectFieldLabel(nk, v, t)
-        : formatTestcaseModifyFieldValue(nk, v, { t })
+        : formatTestcaseModifyFieldValue(nk, v, {
+            t,
+            titleMap: nk === 'related_defects' ? titleMap : undefined
+          })
       if (
         formatted ||
         (nk === 'execution_result' && which === 'old' && (v === '' || v == null)) ||
@@ -904,7 +1056,10 @@ export function readTestcaseModifySideValue(ctx, fieldKey, rawField, fieldLabel,
         return formatted
       }
     } else if (which === 'new') {
-      const formatted = formatTestcaseModifyFieldValue(nk, m, { t })
+      const formatted = formatTestcaseModifyFieldValue(nk, m, {
+        t,
+        titleMap: nk === 'related_defects' ? titleMap : undefined
+      })
       if (formatted) return formatted
     }
   }

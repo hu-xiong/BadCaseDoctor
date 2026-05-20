@@ -873,7 +873,7 @@
     "appendTitle": "Append comment",
     "historyTitle": "Comments",
     "inputTitle": "Add comment",
-    "placeholder": "Click to add a comment…",
+    "placeholder": "Click to add a comment… (Enter to send, Shift+Enter for newline)",
     "submit": "Post comment",
     "empty": "No comments yet",
     "linkedOp": "From chat action"

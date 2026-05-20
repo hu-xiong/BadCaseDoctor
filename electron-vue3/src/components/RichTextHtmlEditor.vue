@@ -116,15 +116,18 @@ async function uploadAndInsertClipboardImages(editor, files) {
 const props = defineProps({
   modelValue: { type: String, default: '' },
   placeholder: { type: String, default: '' },
-  variant: { type: String, default: 'default' }
+  variant: { type: String, default: 'default' },
+  /** 评论框等：Enter 提交，Shift+Enter 换行 */
+  submitOnEnter: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'submit'])
 
 const editorRef = ref(null)
 const converting = ref(false)
 let detachEditorUpdate = null
 let detachPasteHandler = null
+let detachEnterSubmitHandler = null
 let isUnmounted = false
 let syncGeneration = 0
 let syncingFromModel = false
@@ -159,6 +162,15 @@ function onUploadUrlReady(url) {
   })
 }
 
+function tryEmitSubmitOnEnter(event) {
+  if (!props.submitOnEnter) return false
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return false
+  event.preventDefault()
+  event.stopPropagation()
+  emit('submit')
+  return true
+}
+
 /** vue3-tiptap-editor 已内置 image 扩展，勿再重复注册 */
 const editorOptions = computed(() => ({
   uploaderHooks: {
@@ -175,8 +187,8 @@ const editorOptions = computed(() => ({
       const url = uploadResponseToImageUrl(rs)
       if (url) onUploadUrlReady(url)
       return url
-    }
-  }
+    },
+  },
 }))
 
 const toolbarItems = computed(() => [...TOOLBAR_ITEMS])
@@ -223,12 +235,27 @@ function bindEditorPaste() {
   detachPasteHandler = () => dom.removeEventListener('paste', onPaste, true)
 }
 
+function bindEnterSubmitKeydown() {
+  detachEnterSubmitHandler?.()
+  detachEnterSubmitHandler = null
+  if (!props.submitOnEnter) return
+  const editor = getTiptapEditor()
+  const dom = editor?.view?.dom
+  if (!dom) return
+  const onKeydown = (event) => {
+    tryEmitSubmitOnEnter(event)
+  }
+  dom.addEventListener('keydown', onKeydown, true)
+  detachEnterSubmitHandler = () => dom.removeEventListener('keydown', onKeydown, true)
+}
+
 function bindEditorUpdate() {
   detachEditorUpdate?.()
   detachEditorUpdate = null
   const editor = getTiptapEditor()
   if (!editor || editor.isDestroyed) return
   bindEditorPaste()
+  bindEnterSubmitKeydown()
   const handler = ({ transaction }) => {
     if (!transaction?.docChanged) return
     nextTick(() => {
@@ -345,7 +372,15 @@ onBeforeUnmount(() => {
   syncScheduleTimer = null
   detachEditorUpdate?.()
   detachPasteHandler?.()
+  detachEnterSubmitHandler?.()
 })
+
+watch(
+  () => props.submitOnEnter,
+  () => {
+    scheduleSyncFromModel()
+  }
+)
 </script>
 
 <style scoped>
@@ -385,6 +420,53 @@ onBeforeUnmount(() => {
 .rich-text-html-editor.compact :deep(.-t-v-tiptap-editor) {
   min-height: 140px;
   max-height: 280px;
+}
+
+/* 侧栏等窄容器：工具栏单行横向滚动；滚动条仅悬停时显示 */
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-container) {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-container::-webkit-scrollbar) {
+  height: 0;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-container:hover) {
+  scrollbar-width: thin;
+  scrollbar-color: #c1c1c1 transparent;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-container:hover::-webkit-scrollbar) {
+  height: 6px;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-container:hover::-webkit-scrollbar-thumb) {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-container:hover::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-h) {
+  flex-wrap: nowrap !important;
+  width: max-content;
+  min-width: 100%;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar) {
+  flex-wrap: nowrap !important;
+}
+
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar-h > *),
+.rich-text-html-editor.compact :deep(.-t-v-editor-toolbar button) {
+  flex-shrink: 0;
 }
 
 .rich-text-html-editor :deep(.uploader-wrap) {

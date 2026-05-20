@@ -111,8 +111,6 @@ export const DETAIL_FIELDS = [
   'actual_result',
   'preconditions',
   'steps',
-  'remark',
-  'baseline',
   'reproduce_steps',
   /** 列表列不展示或仅详情表单项确认的字段（沙箱点击应可直达详情） */
   'priority',

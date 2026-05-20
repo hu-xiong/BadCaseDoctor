@@ -875,7 +875,7 @@
     "appendTitle": "追加评论",
     "historyTitle": "评论记录",
     "inputTitle": "输入评论",
-    "placeholder": "点击输入评论…",
+    "placeholder": "点击输入评论…（Enter 发送，Shift+Enter 换行）",
     "submit": "发表评论",
     "empty": "暂无评论",
     "linkedOp": "来自对话操作"

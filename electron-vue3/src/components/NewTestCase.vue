@@ -423,65 +423,6 @@
               </div>
             </div>
 
-            <!-- 备注 -->
-            <div class="form-group" :class="{ 'has-diff': hasDetailFieldDiff('remark') }" id="diff-field-remark">
-              <label class="field-label">{{ testcaseFieldLabel('remark') }}</label>
-              <div v-if="hasDetailFieldDiff('remark')" class="field-diff-panel">
-                <div class="diff-header">
-                  <span class="diff-label">{{ testcaseFieldLabel('remark') }} · 修改预览</span>
-                  <div class="diff-actions">
-                    <button @click="applyFieldChange('remark')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                    <button @click="cancelFieldChange('remark')" class="btn-cancel" title="取消">✗</button>
-                  </div>
-                </div>
-                <div class="diff-content">
-                  <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
-                    <span class="diff-value">{{ formatDiffFieldValue('remark', detailFieldDiff('remark')?.old) }}</span>
-                  </div>
-                  <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
-                    <span class="diff-value">{{ formatDiffFieldValue('remark', detailFieldDiff('remark')?.new) }}</span>
-                  </div>
-                </div>
-              </div>
-              <textarea 
-                v-model="testcase.remark" 
-                class="form-textarea"
-                placeholder="输入备注信息"
-                rows="4"
-              ></textarea>
-            </div>
-
-            <!-- 基线 -->
-            <div class="form-group" :class="{ 'has-diff': hasDetailFieldDiff('baseline') }" id="diff-field-baseline">
-              <label class="field-label">{{ testcaseFieldLabel('baseline') }}</label>
-              <div v-if="hasDetailFieldDiff('baseline')" class="field-diff-panel">
-                <div class="diff-header">
-                  <span class="diff-label">{{ testcaseFieldLabel('baseline') }} · 修改预览</span>
-                  <div class="diff-actions">
-                    <button type="button" @click="applyFieldChange('baseline')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                    <button type="button" @click="cancelFieldChange('baseline')" class="btn-cancel" title="取消">✗</button>
-                  </div>
-                </div>
-                <div class="diff-content">
-                  <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
-                    <span class="diff-value">{{ formatDiffFieldValue('baseline', detailFieldDiff('baseline')?.old) }}</span>
-                  </div>
-                  <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
-                    <span class="diff-value">{{ formatDiffFieldValue('baseline', detailFieldDiff('baseline')?.new) }}</span>
-                  </div>
-                </div>
-              </div>
-              <textarea
-                v-model="testcase.baseline"
-                class="form-textarea"
-                placeholder="输入基线信息"
-                rows="3"
-              ></textarea>
-            </div>
           </div>
           
           <!-- 缺陷 Tab -->
@@ -611,17 +552,7 @@
         <!-- 所属项目 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">所属项目</h3>
-          <div class="radio-group">
-            <label class="radio-item">
-              <input type="radio" v-model="testcase.associate_project" :value="true" />
-              <span class="radio-text">关联所属项目</span>
-            </label>
-            <label class="radio-item">
-              <input type="radio" v-model="testcase.associate_project" :value="false" />
-              <span class="radio-text">暂不关联所属项目</span>
-            </label>
-          </div>
-          <div v-if="testcase.associate_project" class="project-select">
+          <div class="project-select">
             <label class="select-label">项目名称:</label>
             <select
               class="form-select"
@@ -693,7 +624,11 @@
         </div>
 
         <!-- 评论：历史只读 + 仅追加；对话可带 append_comment diff -->
-        <div class="sidebar-section comment-section" :class="{ 'has-diff': hasDetailFieldDiff('append_comment') }">
+        <motion.div
+          id="diff-field-append_comment"
+          class="sidebar-section comment-section"
+          :class="{ 'has-diff': hasDetailFieldDiff('append_comment') }"
+        >
           <h3 class="sidebar-title">{{ t('testcaseComment.historyTitle') }}</h3>
           <div v-if="hasDetailFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
             <div class="diff-header">
@@ -722,7 +657,7 @@
           </div>
           <div v-else class="comment-empty">{{ t('testcaseComment.empty') }}</div>
           <h4 class="comment-input-subtitle">{{ t('testcaseComment.inputTitle') }}</h4>
-          <div class="comment-input-container">
+          <div ref="commentInputContainerRef" class="comment-input-container">
             <template v-if="!commentEditorActive">
               <textarea
                 class="comment-textarea-simple"
@@ -738,11 +673,12 @@
               <RichTextHtmlEditor
                 v-model="commentDraft"
                 variant="compact"
+                submit-on-enter
                 :placeholder="t('testcaseComment.placeholder')"
                 class="rich-editor"
+                @submit="submitCommentDraft"
               />
               <div class="comment-editor-actions">
-                <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
                 <button
                   v-if="isEdit && testcaseId"
                   type="button"
@@ -844,6 +780,8 @@ import {
   normalizeTestcaseRelatedDefectIds,
   formatTestcaseRelatedDefectsForDisplay,
   isPlaceholderTestcaseDefectTitle,
+  coerceTestcaseRemarkToAppendComment,
+  intentRequestsTestcaseComment,
   isTestcaseSelectDetailField,
   TESTCASE_MONACO_DETAIL_FIELDS,
   TESTCASE_SELECT_DETAIL_FIELDS
@@ -855,6 +793,7 @@ import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowfl
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import { richTextHtmlDisplayLength, richTextHtmlHasContent } from '../utils/richTextContent.js'
 import { ensureEditorHtmlContent } from '../utils/uploadImageUrl.js'
+import { htmlToPlainText } from '../utils/richTextContent.js'
 import { defineAsyncComponent } from 'vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 
@@ -1029,8 +968,11 @@ export default {
         void hydrateRelatedDefectTitles()
         return
       }
-      if (nk === 'preconditions' || nk === 'remark') {
-        testcase[nk] = ensureEditorHtmlContent(val || '')
+      if (nk === 'preconditions') {
+        testcase.preconditions = ensureEditorHtmlContent(val || '')
+        return
+      }
+      if (nk === 'remark') {
         return
       }
       if (isTestcaseSelectDetailField(nk)) {
@@ -1111,12 +1053,36 @@ export default {
     const commentDraft = ref('')
     const commentSubmitting = ref(false)
     const commentEditorActive = ref(false)
+    const commentInputContainerRef = ref(null)
     const activateCommentEditor = () => {
       commentEditorActive.value = true
     }
     const finishCommentEditor = () => {
       commentEditorActive.value = false
     }
+    const COMMENT_EDITOR_POPUP_SEL = '.-t-v-popup-panel, .-t-v-popup-panel-h, .-t-v-h-content'
+    const onCommentEditorOutsidePointerDown = (e) => {
+      if (!commentEditorActive.value) return
+      const root = commentInputContainerRef.value
+      if (!root) return
+      const target = e.target
+      if (!(target instanceof Node)) return
+      if (root.contains(target)) return
+      if (target.closest?.(COMMENT_EDITOR_POPUP_SEL)) return
+      finishCommentEditor()
+    }
+    watch(commentEditorActive, (active) => {
+      if (active) {
+        nextTick(() => {
+          document.addEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+        })
+      } else {
+        document.removeEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+      }
+    })
+    onUnmounted(() => {
+      document.removeEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+    })
     const defectSearchText = ref('')
     const defectSearchResults = ref([])
     const defectSearchLoading = ref(false)
@@ -1139,10 +1105,8 @@ export default {
       test_type: '手动',
       preconditions: '',
       steps: [{ step: '', expected: '' }],
-      remark: '',
       requirement_id: null,
       related_defects: [],
-      baseline: '',
       estimated_time: 0,
       version: 'v1',
       plan_id: null,
@@ -1156,11 +1120,6 @@ export default {
       attachments: []
     })
 
-    const _escHtml = (s) =>
-      String(s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
     watch(
       () => testcaseDraftPreset?.value?.token ?? 0,
       async (tok) => {
@@ -1168,10 +1127,12 @@ export default {
         if (isEdit) return
         const block = String(testcaseDraftPreset.value.description).trim()
         if (!block) return
-        const fragment = `<p><strong>【终端关联】</strong></p><pre style="white-space:pre-wrap;word-break:break-all;">${_escHtml(block)}</pre>`
+        const fragment = `【终端关联】\n${block}`
         await nextTick()
-        const cur = (testcase.remark || '').trim()
-        testcase.remark = cur ? `${cur}<p><br></p>${fragment}` : fragment
+        const cur = htmlToPlainText(testcase.preconditions || '').trim()
+        testcase.preconditions = cur
+          ? ensureEditorHtmlContent(`${cur}\n\n${fragment}`)
+          : ensureEditorHtmlContent(fragment)
       }
     )
 
@@ -1724,6 +1685,39 @@ export default {
       }
     }
 
+    const plainCommentFromDiffValue = (val) => {
+      if (val == null) return ''
+      let raw = val
+      if (typeof raw === 'object' && raw !== null && 'new' in raw) raw = raw.new
+      const s = String(raw ?? '')
+      if (/<[a-z][\s\S]*>/i.test(s)) return htmlToPlainText(s).trim()
+      return s.trim()
+    }
+
+    const commentBodyAlreadyListed = (plain) => {
+      const want = String(plain || '').trim()
+      if (!want) return false
+      return testcaseComments.value.some(
+        (c) => htmlToPlainText(c.content || '').trim() === want
+      )
+    }
+
+    const optimisticAppendTestcaseComment = (text) => {
+      const plain = String(text || '').trim()
+      if (!plain || commentBodyAlreadyListed(plain)) return
+      const author = currentUser.value ? personPrimaryLabel(currentUser.value) : '—'
+      testcaseComments.value = [
+        ...testcaseComments.value,
+        {
+          id: `pending-${Date.now()}`,
+          content: plain.includes('<') ? plain : `<p>${plain.replace(/\n/g, '<br>')}</p>`,
+          user_name: author,
+          created_at: new Date().toISOString(),
+          source_message_id: pendingDiff.value?.messageId ?? null
+        }
+      ]
+    }
+
     const loadTestcaseComments = async () => {
       if (!testcaseId) return
       try {
@@ -1733,6 +1727,16 @@ export default {
         testcaseComments.value = Array.isArray(list) ? [...list] : []
       } catch (e) {
         console.error('[TestCase] 加载评论失败:', e)
+      }
+    }
+
+    const reloadTestcaseCommentsAfterAdopt = async (expectedPlain = '') => {
+      const want = String(expectedPlain || '').trim()
+      const delays = want ? [0, 200, 450, 800] : [0]
+      for (const ms of delays) {
+        if (ms) await new Promise((resolve) => setTimeout(resolve, ms))
+        await loadTestcaseComments()
+        if (!want || commentBodyAlreadyListed(want)) return
       }
     }
 
@@ -1858,7 +1862,7 @@ export default {
 
         // 创建/编辑时 project_id：统一走兜底解析，避免引用未定义变量 projectId
         const pidFallback = currentProjectId.value
-        const rawProjectId = testcase.associate_project ? (testcase.project_id || pidFallback) : pidFallback
+        const rawProjectId = testcase.project_id || pidFallback
         const finalProjectId = idStrOrNull(rawProjectId)
         if (!isEdit && !finalProjectId) {
           alert('请选择所属项目，或从项目详情页进入新建')
@@ -1874,10 +1878,8 @@ export default {
           test_type: testcase.test_type,
           preconditions: testcase.preconditions,
           steps: testcase.steps,
-          remark: testcase.remark,
           requirement_id: testcase.requirement_id,
           related_defects: relatedDefectIds,
-          baseline: testcase.baseline,
           estimated_time: testcase.estimated_time,
           version: testcase.version,
           plan_id: planId,
@@ -1974,7 +1976,9 @@ export default {
     const applyDetailFieldToTestcase = (nk, newValue) => {
       if (newValue === undefined) return
       if (nk === 'append_comment') {
-        void loadTestcaseComments()
+        const plain = plainCommentFromDiffValue(newValue)
+        optimisticAppendTestcaseComment(plain)
+        void reloadTestcaseCommentsAfterAdopt(plain)
         return
       }
       if (nk === 'steps') {
@@ -1997,8 +2001,11 @@ export default {
         testcase[nk] = normalizeTestcaseSelectFieldForEditor(nk, newValue)
         return
       }
-      if (nk === 'preconditions' || nk === 'remark') {
-        testcase[nk] = ensureEditorHtmlContent(newValue)
+      if (nk === 'preconditions') {
+        testcase.preconditions = ensureEditorHtmlContent(newValue)
+        return
+      }
+      if (nk === 'remark') {
         return
       }
       if (Object.prototype.hasOwnProperty.call(testcase, nk)) {
@@ -2062,7 +2069,12 @@ export default {
         }
 
         if (nk === 'append_comment') {
-          await loadTestcaseComments()
+          const plain = plainCommentFromDiffValue(newValue)
+          optimisticAppendTestcaseComment(plain)
+          if (result.async === true) {
+            await new Promise((resolve) => setTimeout(resolve, 420))
+          }
+          await reloadTestcaseCommentsAfterAdopt(plain)
           commentDraft.value = ''
         } else {
           applyDetailFieldToTestcase(nk, newValue)
@@ -2151,6 +2163,26 @@ export default {
         }
         pendingDiff.value = pd
         const mods = pendingDiff.value?.modifications
+        const commentIntent = String(
+          pd?._naturalQuery || pd?.naturalQuery || ''
+        ).trim()
+        if (mods && coerceTestcaseRemarkToAppendComment(mods, commentIntent)) {
+          if (Array.isArray(pendingDiff.value.diff)) {
+            for (const row of pendingDiff.value.diff) {
+              const nk = normalizeTestcaseModifyFieldKey(row?.field, row?.field_label)
+              if (nk !== 'remark' || !intentRequestsTestcaseComment(commentIntent)) continue
+              row.field = 'append_comment'
+              row.field_label = getTestcaseFieldLabel('append_comment')
+              const addLine = row.lines?.find((l) => l.type === 'add')
+              if (addLine) {
+                row.lines = [
+                  { type: 'delete', content: '', line_no: 0 },
+                  { type: 'add', content: addLine.content, line_no: 0 }
+                ]
+              }
+            }
+          }
+        }
         if (mods) {
           for (const [field, data] of Object.entries(mods)) {
             if (String(field).startsWith('_')) continue
@@ -2287,9 +2319,7 @@ export default {
             testcase.test_type = data.test_type || '手动'
             assignPreconditionsFromApi(data.preconditions)
             testcase.steps = normalizeTestcaseStepsForEditor(data.steps)
-            testcase.remark = ensureEditorHtmlContent(data.remark || '')
             testcase.requirement_id = data.requirement_id
-            testcase.baseline = data.baseline || ''
             testcase.estimated_time = data.estimated_time || 0
             testcase.version = data.version || 'v1'
             testcase.plan_id = data.plan_id
@@ -2416,7 +2446,6 @@ export default {
           testcase.test_type = data.test_type || '手动'
           assignPreconditionsFromApi(data.preconditions)
           testcase.steps = normalizeTestcaseStepsForEditor(data.steps)
-          testcase.remark = ensureEditorHtmlContent(data.remark || '')
           testcase.plan_id = data.plan_id
           testcase.project_id = data.project_id
           testcase.execution_result = normalizeTestcaseExecutionResultForSelect(data.execution_result)
@@ -2503,6 +2532,7 @@ export default {
       commentDraftLength,
       commentSubmitting,
       commentEditorActive,
+      commentInputContainerRef,
       activateCommentEditor,
       finishCommentEditor,
       formatCommentTime,
@@ -3123,7 +3153,29 @@ export default {
   padding: 8px;
   background: #f8f9fa;
   border-bottom: 1px solid #e9ecef;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.rich-editor .editor-toolbar:hover {
+  scrollbar-width: thin;
+}
+
+.rich-editor .editor-toolbar::-webkit-scrollbar {
+  height: 0;
+}
+
+.rich-editor .editor-toolbar:hover::-webkit-scrollbar {
+  height: 6px;
+}
+
+.rich-editor .editor-toolbar:hover::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
 }
 
 .rich-editor .toolbar-btn {

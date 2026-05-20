@@ -331,6 +331,35 @@ def get_redis_client():
 
 # ==================== Prometheus 指标端点 ====================
 
+@app.route('/api/ping', methods=['GET'])
+def api_ping():
+    """无鉴权探活 + 预热 DB/Redis，供前端进项目页时先打一遍，避免首条业务接口冷连远端库 4s+"""
+    t0 = time.perf_counter()
+    db_ok = False
+    try:
+        db.session.execute(db.text('SELECT 1'))
+        db_ok = True
+    except Exception as ex:
+        print(f"[ping] db failed: {ex}", flush=True)
+    finally:
+        db.session.remove()
+    db_ms = (time.perf_counter() - t0) * 1000
+    redis_ok = False
+    t1 = time.perf_counter()
+    try:
+        rc = get_redis_client()
+        if rc is not None:
+            rc.ping()
+            redis_ok = True
+    except Exception:
+        pass
+    redis_ms = (time.perf_counter() - t1) * 1000
+    total_ms = (time.perf_counter() - t0) * 1000
+    if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+        print(f"[PERF] GET /api/ping total={total_ms:.1f}ms db={db_ms:.1f}ms redis={redis_ms:.1f}ms", flush=True)
+    return jsonify({'ok': db_ok, 'db_ms': round(db_ms, 1), 'redis_ok': redis_ok, 'redis_ms': round(redis_ms, 1)})
+
+
 @app.route('/metrics', methods=['GET'])
 def metrics():
     """
@@ -651,12 +680,19 @@ def get_upload_image_cache_key(file_path: str) -> str:
 
 db = SQLAlchemy(app)
 
-# 预热数据库连接池：启动时建立 min(50, pool_size) 个连接，避免第一个请求冷启动
+# 预热数据库连接池（默认 8 条，避免对远端 MySQL 连续握手拖慢启动；可用 DB_WARMUP_CONNECTIONS 覆盖）
 try:
-    _warmup_size = min(50, app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_size', 100))
+    try:
+        _warmup_size = int((os.getenv("DB_WARMUP_CONNECTIONS") or "8").strip())
+    except Exception:
+        _warmup_size = 8
+    _warmup_size = max(1, min(_warmup_size, 50))
+    _pool_cap = app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_size', 100)
+    _warmup_size = min(_warmup_size, max(1, int(_pool_cap)))
     with app.app_context():
         for _ in range(_warmup_size):
             db.session.execute(db.text('SELECT 1'))
+        db.session.remove()
         print(f"[DB] 连接池预热完成，已建立 {_warmup_size} 个连接", flush=True)
 except Exception as e:
     print(f"[DB] 连接池预热失败: {e}", flush=True)
@@ -867,13 +903,11 @@ def _testcase_related_defects_detail_payload(testcase) -> list:
     if not id_strs:
         return []
     try:
-        from app import Bug
-
         id_ints = [int(x) for x in id_strs]
         rows = (
-            Bug.query.filter(
-                Bug.project_id == testcase.project_id, Bug.id.in_(id_ints)
-            ).all()
+            db.session.query(Bug)
+            .filter(Bug.project_id == testcase.project_id, Bug.id.in_(id_ints))
+            .all()
         )
         by_id = {}
         for b in rows:
@@ -929,6 +963,13 @@ def _comment_author_name(user_id: int) -> str:
     return ""
 
 
+def _invalidate_testcase_detail_cache(test_case_id) -> None:
+    try:
+        _redis_cache_delete(f"testcase-detail:{int(test_case_id)}")
+    except Exception:
+        pass
+
+
 def _append_testcase_comment_row(
     testcase,
     content: str,
@@ -947,6 +988,7 @@ def _append_testcase_comment_row(
     )
     db.session.add(row)
     db.session.flush()
+    _invalidate_testcase_detail_cache(testcase.id)
     uname = _comment_author_name(user_id)
     return {
         "id": row.id,
@@ -3876,6 +3918,23 @@ def _finalize_chat_message_after_modify_adopt(message_id, target=None, target_id
         db.session.rollback()
 
 
+def _is_append_comment_only_adopt(modifications) -> bool:
+    """采纳 payload 是否仅含侧栏追加评论（可同步落库，避免前端刷新竞态）。"""
+    if not modifications or not isinstance(modifications, dict):
+        return False
+    keys = {
+        str(k).strip().lower()
+        for k in modifications
+        if k is not None and not str(k).startswith("_")
+    }
+    if not keys:
+        return False
+    allowed = frozenset({"append_comment", "comment", "remark"})
+    if not keys.issubset(allowed):
+        return False
+    return bool(keys.intersection({"append_comment", "comment", "remark"}))
+
+
 def _run_modify_in_background(
     project_id,
     target,
@@ -4079,14 +4138,53 @@ def api_project_modify(project_id):
                 if pend.operator_id is not None and pend.operator_id != current_user.id:
                     return jsonify({"success": False, "error": "无权采纳他人待确认的变更"}), 403
             _delete_diff_review_state_rows(project_id, target, [tid], current_user.id)
-            # 采纳即落库：后台异步执行 ModifyTool，立即返回（diff 行已同步删除）
+            mods_dict = dict(modifications)
+            # 仅追加评论：同步落库并失效测例详情缓存，避免采纳后评论列表仍读旧缓存
+            if _is_append_comment_only_adopt(mods_dict):
+                modify_tool = ModifyTool(db.session, database_uri=db_uri)
+
+                async def run_comment_adopt():
+                    return await modify_tool.execute(
+                        target=target,
+                        target_id=int(target_id),
+                        modifications=mods_dict,
+                        project_id=project_id,
+                        confirm=True,
+                        natural_query=natural_query_top,
+                        message_id=message_id,
+                        operator_user_id=current_user.id,
+                    )
+
+                result = asyncio.run(run_comment_adopt())
+                if result.get("success"):
+                    if message_id:
+                        _finalize_chat_message_after_modify_adopt(
+                            message_id,
+                            target=target,
+                            target_id=int(target_id),
+                            modifications=mods_dict,
+                        )
+                    return jsonify({
+                        "success": True,
+                        "message": "已保存",
+                        "async": False,
+                        "before": None,
+                        "after": None,
+                        "diff": None,
+                    })
+                return jsonify({
+                    "success": False,
+                    "error": result.get("error") or "保存评论失败",
+                }), 500
+
+            # 其它字段：后台异步执行 ModifyTool，立即返回（diff 行已同步删除）
             thread = threading.Thread(
                 target=_run_modify_in_background,
                 args=(
                     project_id,
                     target,
                     target_id,
-                    dict(modifications),
+                    mods_dict,
                     message_id,
                     db_uri,
                     natural_query_top,
@@ -5217,8 +5315,10 @@ def api_get_project_edit_context(project_id):
     """编辑页专用：一次性返回最小必要上下文（project + plans + members）"""
     t0 = time.perf_counter()
     try:
+        lite = (request.args.get('lite') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+        cache_suffix = ':lite' if lite else ''
         # Redis 缓存检查（优先于内存缓存，跨进程共享）
-        redis_hit, redis_cached = _redis_cache_get(f'edit-context:{project_id}')
+        redis_hit, redis_cached = _redis_cache_get(f'edit-context:{project_id}{cache_suffix}')
         if redis_hit:
             t_total = (time.perf_counter() - t0) * 1000
             if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
@@ -5246,7 +5346,7 @@ def api_get_project_edit_context(project_id):
         bug_counts = {}
         testcase_counts = {}
         t_counts0 = time.perf_counter()
-        if plan_ids:
+        if plan_ids and not lite:
             # 单次 RTT：bad_case / bug / test_case 三个聚合（原为 3 条独立查询）
             ids_sql = ','.join(str(int(x)) for x in plan_ids)
             cnt_rows = db.session.execute(
@@ -5395,7 +5495,7 @@ def api_get_project_edit_context(project_id):
             'plans': plans_tree,
             'members': list(direct_member_map.values()) + team_members,
         }
-        _redis_cache_set(f'edit-context:{project_id}', result, ttl_s=30)
+        _redis_cache_set(f'edit-context:{project_id}{cache_suffix}', result, ttl_s=30)
         return jsonify(result)
 
     except Exception as e:
@@ -10180,6 +10280,16 @@ def api_testcase_detail(testcase_id):
     """测试用例详情接口：GET查询，PUT更新，DELETE删除"""
     if request.method == 'GET':
         try:
+            t0 = time.perf_counter()
+            redis_hit, redis_cached = _redis_cache_get(f'testcase-detail:{testcase_id}')
+            if redis_hit and isinstance(redis_cached, dict) and redis_cached.get('success'):
+                if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+                    print(
+                        f"[PERF] GET /api/testcases/{testcase_id} redis_hit total={(time.perf_counter() - t0) * 1000:.1f}ms",
+                        flush=True,
+                    )
+                return jsonify(redis_cached)
+
             testcase, access_err = _model_for_user_collaborator_access(TestCase, testcase_id, current_user.id)
             if access_err == 'not_found':
                 return jsonify({'success': False, 'error': '测试用例不存在'}), 404
@@ -10192,7 +10302,7 @@ def api_testcase_detail(testcase_id):
             _exec = testcase.execution_result
             if _exec is not None and hasattr(_exec, 'value'):
                 _exec = _exec.value
-            return jsonify({
+            payload = {
                 'success': True,
                 'testcase': {
                     'id': _json_snowflake_id(testcase.id),
@@ -10223,7 +10333,14 @@ def api_testcase_detail(testcase_id):
                     'updated_at': testcase.updated_at.isoformat(),
                     'comments': _testcase_comments_detail_payload(testcase.id),
                 }
-            })
+            }
+            _redis_cache_set(f'testcase-detail:{testcase_id}', payload, ttl_s=60)
+            if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+                print(
+                    f"[PERF] GET /api/testcases/{testcase_id} total={(time.perf_counter() - t0) * 1000:.1f}ms",
+                    flush=True,
+                )
+            return jsonify(payload)
             
         except Exception as e:
             print(f"获取TestCase详情失败: {e}")
@@ -10330,6 +10447,7 @@ def api_testcase_detail(testcase_id):
             if hasattr(status_val, 'value'):
                 status_val = status_val.value
             
+            _redis_cache_delete(f'testcase-detail:{testcase_id}')
             return jsonify({
                 'success': True,
                 'message': '测试用例更新成功',
@@ -10372,6 +10490,7 @@ def api_testcase_detail(testcase_id):
                 print(f"[DELETE-TESTCASE] 清理 test_case_comment 失败（继续）: {_ce}")
             db.session.delete(testcase)
             db.session.commit()
+            _redis_cache_delete(f'testcase-detail:{testcase_id}')
             _cache_invalidate_plans(pid)
             try:
                 _schedule_workflow_notify(
@@ -10426,6 +10545,7 @@ def api_add_testcase_comment(testcase_id):
             source_message_id=data.get('message_id'),
         )
         db.session.commit()
+        _invalidate_testcase_detail_cache(testcase_id)
         return jsonify({'success': True, 'comment': comment})
     except Exception as e:
         db.session.rollback()
@@ -11070,11 +11190,19 @@ if __name__ == '__main__':
     else:
         print("❌ Redis初始化失败，缓存功能将不可用")
 
-    # 开发热重载：默认开启（修改 .py 后自动重启子进程）。
-    # 但在 PERF_LOG=1 性能定位场景下强制关闭，避免 reloader 分裂出父/子多进程抢占端口导致请求落到“旧进程”。
-    # 关闭：FLASK_DEBUG=0 或 FLASK_ENV=production
-    _fd = os.getenv("FLASK_DEBUG", "1").strip().lower()
-    _use_reload = _fd not in ("0", "false", "no", "off", "")
+    # 热重载：显式 FLASK_DEBUG=1 时开启；未设置且 BADCASE_USE_WAITRESS=1 时默认 waitress（无 reload，支持 Keep-Alive）
+    _use_waitress = (os.getenv("BADCASE_USE_WAITRESS", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    _fd_raw = os.getenv("FLASK_DEBUG")
+    if _fd_raw is None or str(_fd_raw).strip() == "":
+        _use_reload = not _use_waitress
+    else:
+        _fd = str(_fd_raw).strip().lower()
+        _use_reload = _fd not in ("0", "false", "no", "off")
     if os.getenv("FLASK_ENV", "").strip().lower() == "production":
         _use_reload = False
     if os.getenv("PERF_LOG", "").strip() == "1":
@@ -11089,9 +11217,43 @@ if __name__ == '__main__':
     else:
         print("ℹ️ 热重载已关闭（FLASK_DEBUG=0 或 FLASK_ENV=production）")
 
-    app.run(
-        debug=_use_reload,
-        use_reloader=_use_reload,
-        host=_host,
-        port=_port,
-    )
+    if _use_waitress and not _use_reload:
+        try:
+            from waitress import serve
+
+            _threads = int((os.getenv("WSGI_THREADS") or "8").strip())
+            print(
+                f"🚀 使用 waitress（Keep-Alive / 多线程）：http://{_host}:{_port} threads={_threads}",
+                flush=True,
+            )
+            print(
+                "   首请求仍可能较慢（远端 MySQL 冷连）；进项目页会先打 /api/ping 预热",
+                flush=True,
+            )
+            serve(app, host=_host, port=_port, threads=max(1, _threads))
+        except ImportError:
+            print("⚠️ 未安装 waitress，回退 Flask 开发服务器（pip install waitress）", flush=True)
+            app.run(
+                debug=False,
+                use_reloader=False,
+                host=_host,
+                port=_port,
+                threaded=True,
+            )
+    else:
+        if _use_reload and _use_waitress:
+            print(
+                "ℹ️ 热重载与 waitress 不能同时开；当前用 Flask 开发服（响应头 Connection: close，首请求偏慢）",
+                flush=True,
+            )
+            print(
+                "   若要 Keep-Alive：FLASK_DEBUG=0 BADCASE_USE_WAITRESS=1 python app.py",
+                flush=True,
+            )
+        app.run(
+            debug=_use_reload,
+            use_reloader=_use_reload,
+            host=_host,
+            port=_port,
+            threaded=True,
+        )

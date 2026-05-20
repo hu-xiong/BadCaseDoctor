@@ -168,6 +168,10 @@ class ModifyTool(BaseTool):
 - project_id: 项目ID（必需）
 - natural_query: 自然语言查询（可选）
 
+**评论（Bug / BadCase / TestCase 均无 remark 备注字段）：**
+- 用户要留言、评论、备注（口语）→ 一律 **append_comment**（侧栏评论记录，仅追加）
+- **禁止**使用已下线的 remark 字段（误传将转为 append_comment 或丢弃）
+
 返回：before / after / diff / confirmation_required 等。
 """
         
@@ -321,7 +325,6 @@ class ModifyTool(BaseTool):
         tcish = {
             "preconditions",
             "steps",
-            "remark",
             "baseline",
             "test_type",
             "case_type",
@@ -1416,6 +1419,7 @@ class ModifyTool(BaseTool):
                 nav_cid = self._nav_card_pk_for_source_orm_row(
                     flask_db.session, "bug", bug, project_id
                 )
+                _bug_comments = self._load_comment_records("bug", bug.id)
                 out[bug.id] = {
                     "id": bug.id,
                     "title": bug.title,
@@ -1430,6 +1434,7 @@ class ModifyTool(BaseTool):
                     "steps_to_reproduce": bug.steps_to_reproduce or "",
                     "expected_result": bug.expected_result or "",
                     "actual_result": bug.actual_result or "",
+                    "comment_records": _bug_comments,
                 }
             return out
         if target == "badcase":
@@ -1447,6 +1452,7 @@ class ModifyTool(BaseTool):
                 nav_cid = self._nav_card_pk_for_source_orm_row(
                     flask_db.session, "badcase", bc, project_id
                 )
+                _bc_comments = self._load_comment_records("badcase", bc.id)
                 out[bc.id] = {
                     "id": bc.id,
                     "title": bc.title,
@@ -1461,6 +1467,7 @@ class ModifyTool(BaseTool):
                     "correct_answer": bc.correct_answer or "",
                     "badcase_result": bc.badcase_result or "",
                     "base_problem": bc.base_problem or "",
+                    "comment_records": _bc_comments,
                 }
             return out
         if target == "testcase":
@@ -1494,6 +1501,7 @@ class ModifyTool(BaseTool):
                 nav_cid = self._nav_card_pk_for_source_orm_row(
                     flask_db.session, "testcase", testcase, project_id
                 )
+                _tc_comments = self._load_comment_records("testcase", testcase.id)
                 out[testcase.id] = {
                     "id": testcase.id,
                     "title": testcase.title,
@@ -1506,7 +1514,7 @@ class ModifyTool(BaseTool):
                     "steps": json.dumps(testcase.steps, ensure_ascii=False)
                     if testcase.steps
                     else "",
-                    "remark": testcase.remark or "",
+                    "comment_records": _tc_comments,
                     "execution_result": testcase.execution_result.value
                     if testcase.execution_result
                     else "",
@@ -1909,7 +1917,7 @@ class ModifyTool(BaseTool):
                             'error': modify_error_row_not_found(target, target_id, loc),
                         }
                     diff_empty = self._generate_line_diff(
-                        original_data, original_data.copy(), [], ui_locale=loc
+                        original_data, original_data.copy(), [], target, ui_locale=loc
                     )
                     return {
                         'success': True,
@@ -2020,6 +2028,29 @@ class ModifyTool(BaseTool):
                     )
             except Exception as ex:
                 print(f"[MODIFY] related_defects 归一失败: {ex}", flush=True)
+
+        if t_norm in ("testcase", "test_case", "bug", "badcase", "bad_case"):
+            _intent_text = (
+                kwargs.get("intent_combined_text") or natural_query or ""
+            ).strip()
+            self._coerce_remark_to_append_comment(
+                modifications, _intent_text, target
+            )
+            if _intent_text and target_id:
+                try:
+                    from agents.intent.comment_intent import (
+                        apply_append_comment_intent_fallback,
+                    )
+
+                    with self._get_app_context():
+                        _crecords = self._load_comment_records(target, target_id)
+                    _merged = apply_append_comment_intent_fallback(
+                        modifications, _intent_text, _crecords
+                    )
+                    modifications.clear()
+                    modifications.update(_merged)
+                except Exception as ex:
+                    print(f"[MODIFY] comment intent fallback: {ex}", flush=True)
 
         if t_norm in ("testcase", "test_case", "bug", "badcase", "bad_case"):
             self._normalize_append_comment_mods(modifications)
@@ -2147,6 +2178,7 @@ class ModifyTool(BaseTool):
                         original_data,
                         modified_data,
                         preview_mods.keys(),
+                        target,
                         ui_locale=loc,
                         project_id=project_id,
                         flask_db=flask_db,
@@ -2499,6 +2531,7 @@ class ModifyTool(BaseTool):
             nav_card_id = self._nav_card_pk_for_source_orm_row(
                 flask_db.session, "bug", bug, project_id
             )
+            _bug_comments = self._load_comment_records("bug", bug.id)
             return {
                 'id': bug.id,
                 'title': bug.title,
@@ -2512,7 +2545,8 @@ class ModifyTool(BaseTool):
                 'card_id': nav_card_id,
                 'steps_to_reproduce': bug.steps_to_reproduce or '',
                 'expected_result': bug.expected_result or '',
-                'actual_result': bug.actual_result or ''
+                'actual_result': bug.actual_result or '',
+                'comment_records': _bug_comments,
             }
         
         elif target == 'badcase':
@@ -2548,6 +2582,7 @@ class ModifyTool(BaseTool):
                     f"且无 Card.source_id 指向该记录（未自动建卡）",
                     flush=True,
                 )
+            _bc_comments = self._load_comment_records("badcase", badcase.id)
             return {
                 'id': badcase.id,
                 'title': badcase.title,
@@ -2561,7 +2596,8 @@ class ModifyTool(BaseTool):
                 'answer': badcase.answer or '',
                 'correct_answer': badcase.correct_answer or '',
                 'badcase_result': badcase.badcase_result or '',
-                'base_problem': badcase.base_problem or ''
+                'base_problem': badcase.base_problem or '',
+                'comment_records': _bc_comments,
             }
         
         elif target == 'testcase':
@@ -2593,6 +2629,7 @@ class ModifyTool(BaseTool):
             nav_card_id = self._nav_card_pk_for_source_orm_row(
                 flask_db.session, "testcase", testcase, project_id
             )
+            _tc_comments = self._load_comment_records("testcase", testcase.id)
             return {
                 'id': testcase.id,
                 'title': testcase.title,
@@ -2602,7 +2639,7 @@ class ModifyTool(BaseTool):
                 'test_type': testcase.test_type or '',
                 'preconditions': testcase.preconditions or '',
                 'steps': json.dumps(testcase.steps, ensure_ascii=False) if testcase.steps else '',
-                'remark': testcase.remark or '',
+                'comment_records': _tc_comments,
                 'execution_result': testcase.execution_result.value if testcase.execution_result else '',
                 'related_defects': _json_safe_ids_in_list(
                     getattr(testcase, "related_defects", None) or []
@@ -2826,6 +2863,19 @@ class ModifyTool(BaseTool):
         """
         with self._get_app_context():
             current = self._get_original_data(target, target_id, project_id)
+            tgt = (target or "").strip().lower().replace("-", "_")
+            if current and tgt in (
+                "testcase",
+                "test_case",
+                "bug",
+                "badcase",
+                "bad_case",
+            ):
+                current = dict(current)
+                if "comment_records" not in current:
+                    current["comment_records"] = self._load_comment_records(
+                        target, target_id
+                    )
             users = []
             try:
                 from app import User
@@ -2834,10 +2884,27 @@ class ModifyTool(BaseTool):
             except Exception as e:
                 print(f"[MODIFY] explore_record 查询用户失败: {e}")
             loc = normalize_locale(ui_locale)
+            en = is_english_locale(loc)
+            field_semantics = {}
+            if tgt in ("testcase", "test_case", "bug", "badcase", "bad_case"):
+                field_semantics = {
+                    "comment_records": (
+                        "Sidebar comment history. To check if a comment exists, "
+                        "use this list only."
+                        if en
+                        else "侧栏「评论记录」列表。判断评论是否已存在只看此列表。"
+                    ),
+                    "append_comment": (
+                        "Append one new sidebar comment (modify field)."
+                        if en
+                        else "追加一条侧栏评论（modify 用 append_comment）。"
+                    ),
+                }
             return {
                 'current_record': current,
                 'users': users,
                 'modifiable_fields': self._get_modifiable_fields(target, loc),
+                'field_semantics': field_semantics,
             }
     
     def _get_modifiable_fields(self, target: str, ui_locale: Optional[str] = None) -> List[Dict[str, str]]:
@@ -2862,6 +2929,68 @@ class ModifyTool(BaseTool):
 
     _APPEND_ONLY_FIELDS = frozenset({"append_comment"})
 
+    def _load_comment_records(self, target: str, record_id: Any) -> List[Dict[str, Any]]:
+        """侧栏评论记录（与 remark 备注无关）。"""
+        tgt = (target or "").strip().lower().replace("-", "_")
+        try:
+            rid = int(record_id)
+        except (TypeError, ValueError):
+            return []
+        try:
+            if tgt in ("testcase", "test_case"):
+                from app import _testcase_comments_detail_payload
+
+                return _testcase_comments_detail_payload(rid) or []
+            if tgt == "bug":
+                from app import BugComment, User, db as flask_db
+
+                rows = (
+                    flask_db.session.query(BugComment, User.name)
+                    .outerjoin(User, User.id == BugComment.user_id)
+                    .filter(BugComment.bug_id == rid)
+                    .order_by(BugComment.created_at.asc())
+                    .all()
+                )
+                out = []
+                for c, uname in rows:
+                    out.append(
+                        {
+                            "id": c.id,
+                            "content": c.content,
+                            "user_name": uname or "",
+                            "created_at": c.created_at.isoformat()
+                            if c.created_at
+                            else None,
+                        }
+                    )
+                return out
+            if tgt in ("badcase", "bad_case"):
+                from app import Comment, User, db as flask_db
+
+                rows = (
+                    flask_db.session.query(Comment, User.name)
+                    .outerjoin(User, User.id == Comment.user_id)
+                    .filter(Comment.badcase_id == rid)
+                    .order_by(Comment.created_at.asc())
+                    .all()
+                )
+                out = []
+                for c, uname in rows:
+                    out.append(
+                        {
+                            "id": c.id,
+                            "content": c.content,
+                            "user_name": uname or "",
+                            "created_at": c.created_at.isoformat()
+                            if c.created_at
+                            else None,
+                        }
+                    )
+                return out
+        except Exception as ex:
+            print(f"[MODIFY] _load_comment_records 失败: {ex}", flush=True)
+        return []
+
     def _diff_immutable_fields(self, target: str) -> set:
         """diff/沙箱 UPDATE 不可改字段；Bug/BadCase/TestCase 允许改 plan_id、project_id。"""
         tgt = (target or "").strip().lower()
@@ -2884,6 +3013,41 @@ class ModifyTool(BaseTool):
         if tgt in ("bug", "badcase", "bad_case", "testcase", "test_case"):
             return base
         return base | {"project_id", "plan_id"}
+
+    def _intent_requests_testcase_comment(self, intent_text: str) -> bool:
+        from agents.intent.comment_intent import intent_requests_append_comment
+
+        return intent_requests_append_comment(intent_text)
+
+    def _coerce_remark_to_append_comment(
+        self,
+        modifications: Optional[Dict[str, Any]],
+        intent_text: str,
+        target: str,
+    ) -> None:
+        """Bug/BadCase/TestCase 均无 remark：误传时转为 append_comment（有正文）或丢弃。"""
+        del intent_text  # 保留参数以兼容调用方
+        if not modifications or "remark" not in modifications:
+            return
+        t_norm = (target or "").strip().lower().replace("-", "_")
+        if t_norm not in ("testcase", "test_case", "bug", "badcase", "bad_case"):
+            return
+        raw = modifications.pop("remark")
+        if "append_comment" in modifications or "comment" in modifications:
+            return
+        if isinstance(raw, dict):
+            val = raw["new"] if "new" in raw else raw.get("old")
+        else:
+            val = raw
+        if val is None or not str(val).strip():
+            return
+        modifications["append_comment"] = val
+        print(
+            f"[MODIFY] {t_norm} remark 已下线，已转为 append_comment",
+            flush=True,
+        )
+
+    _coerce_testcase_remark_to_append_comment = _coerce_remark_to_append_comment
 
     def _normalize_append_comment_mods(
         self, modifications: Optional[Dict[str, Any]]
@@ -3151,6 +3315,7 @@ class ModifyTool(BaseTool):
         before: Dict,
         after: Dict,
         changed_fields: List[str],
+        target: str = "bug",
         ui_locale: Optional[str] = None,
         project_id: int = None,
         flask_db=None,
@@ -3725,6 +3890,7 @@ class ModifyTool(BaseTool):
                 original_data,
                 modified_data,
                 preview_mods.keys(),
+                target,
                 ui_locale=loc,
                 project_id=project_id,
                 flask_db=flask_db,
@@ -4604,7 +4770,7 @@ class ModifyTool(BaseTool):
             '测试类型': 'test_type',
             'testcase_type': 'case_type',
             'test_case_type': 'case_type',
-            '备注': 'remark',
+            '备注': 'append_comment',
             '基线': 'baseline',
             '关联缺陷': 'related_defects',
             'related_defects': 'related_defects',
@@ -4612,6 +4778,10 @@ class ModifyTool(BaseTool):
             'defects': 'related_defects',
             '评论': 'append_comment',
             '追加评论': 'append_comment',
+            '添加评论': 'append_comment',
+            '发表评论': 'append_comment',
+            '输入评论': 'append_comment',
+            '写评论': 'append_comment',
             'comment': 'append_comment',
             'append_comment': 'append_comment',
             '所属计划': 'plan_id',

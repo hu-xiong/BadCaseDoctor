@@ -513,6 +513,21 @@ def _tool_params_signature(tool: str, params: Dict[str, Any]) -> str:
         return f"{tool}\t{repr(d)}"
 
 
+def _append_running_summary_stop_note(state: Dict[str, Any], note: str) -> None:
+    """卡死/达上限等终局原因写入运行总览，避免增量总结未提及中断原因。"""
+    note = (note or "").strip()
+    if not note:
+        return
+    prev = str(state.get("text") or "").strip()
+    if note in prev:
+        return
+    state["text"] = f"{prev}\n\n{note}".strip() if prev else note
+    try:
+        state["version"] = int(state.get("version") or 0) + 1
+    except Exception:
+        state["version"] = 1
+
+
 def _unified_snapshot_rounds_1based() -> Optional[set]:
     """
     在构建统一流 prompt **之前**打印快照的轮次（1-based）。
@@ -4269,6 +4284,12 @@ class SimplifiedReActEngine:
                                 params['modifications'] = await self._extract_modifications_with_llm(todo, user_input, exploration=exploration)
                             if not params.get('modifications') and user_input:
                                 params['modifications'] = self._extract_modifications_with_regex(user_input)
+                            params['modifications'] = self._finalize_comment_modifications(
+                                params.get('modifications'),
+                                user_input,
+                                todo,
+                                exploration,
+                            )
                             print(f"[REACT-thought] 探索后提取的 modifications: {params.get('modifications')}")
                     except Exception as e:
                         print(f"[REACT-thought] 探索记录失败，回退到仅 LLM 提取: {e}")
@@ -5622,8 +5643,9 @@ class SimplifiedReActEngine:
                         "processType": PROCESS_TYPE_STREAMING,
                         "react_phase": REACT_PHASE_THINK,
                     }
-                    await self._wait_for_background_summary(running_summary_state)
                     findings_acc.append(_stall_msg)
+                    await self._wait_for_background_summary(running_summary_state)
+                    _append_running_summary_stop_note(running_summary_state, _stall_msg)
                     yield {
                         "event": "finished",
                         "finished": True,
@@ -5631,7 +5653,16 @@ class SimplifiedReActEngine:
                         "duration": time.time() - _t0,
                         "thinking_time": _total_think_time,
                     }
-                    _sum_stall = "\n".join(findings_acc).strip()
+                    _sum_lines = "\n".join(findings_acc).strip()
+                    _incr_stall = str(running_summary_state.get("text") or "").strip()
+                    if use_react_incremental_running_summary() and _incr_stall:
+                        _lsi_stall = max(0, (_steps_done if _steps_done > 0 else 1) - 1)
+                        async for _rs_ev in self._stream_running_summary_final_wire(
+                            running_summary_state,
+                            last_step_index=_lsi_stall,
+                        ):
+                            yield _rs_ev
+                    _sum_stall = _incr_stall or _sum_lines
                     yield {
                         "event": "done",
                         "status": "partial",
@@ -6959,6 +6990,12 @@ class SimplifiedReActEngine:
                             )
                         if not params.get('modifications') and user_input:
                             params['modifications'] = self._extract_modifications_with_regex(user_input)
+                        params['modifications'] = self._finalize_comment_modifications(
+                            params.get('modifications'),
+                            user_input,
+                            todo,
+                            exploration,
+                        )
                 except Exception as e:
                     print(f"[REACT-execution] 主循环 explore_record 失败: {e}")
                     if not params.get('modifications'):
@@ -8015,9 +8052,20 @@ class SimplifiedReActEngine:
             fields = exploration.get('modifiable_fields') or []
             users_str = ", ".join([f"id={u.get('id')} name={u.get('name', '')}" for u in users[:30]])
             fields_str = "、".join([f"{f.get('field', '')}({f.get('label', '')})" for f in fields])
+            semantics = exploration.get("field_semantics") or {}
+            semantics_block = ""
+            if semantics:
+                semantics_block = (
+                    "\n字段语义说明："
+                    + json.dumps(semantics, ensure_ascii=False)
+                    + "\n"
+                )
             exploration_block = f"""
 【探索到的上下文】（类似 Cursor 探索文件：先看表记录与字段再决定改什么）
 当前记录：{json.dumps(cur, ensure_ascii=False)}
+{semantics_block}【评论 — 必须遵守】（Bug / BadCase / TestCase 均无 remark 备注字段）
+- 用户要留言、评论、口语「备注」→ 一律 append_comment（侧栏评论记录）。
+- 判断评论是否已存在只看 current_record.comment_records；缺该正文则须 modify append_comment。
 本表可修改字段（仅可输出以下 field 名）：{fields_str}
 可选用户（id/名称）：{users_str}
 请结合上述记录、可修改字段与用户列表思考用户意图（例如负责人「33」对应用户列表中的谁）；只输出上述可修改字段中的 field 名作为 key，负责人用 assignee、值为用户名称，系统会按名称解析为 id。
@@ -8062,13 +8110,13 @@ class SimplifiedReActEngine:
 - "负责人" -> assignee（内部映射为 assignee_id）
 - "前置条件" -> preconditions
 - "测试步骤" -> steps
-- "备注" -> remark
 - "基线" -> baseline
 - "用例类型" -> case_type
 - "测试类型" -> test_type
 - "执行结果" -> execution_result
 - "关联缺陷" / "关联 Bug" / "关联缺陷列表" -> related_defects（值为 Bug 源表主键 id 的 JSON 数组，全量替换）
-- "评论" / "追加评论" / "添加评论" -> append_comment（仅追加一条评论正文，不可修改历史评论；值为字符串或 {{"new":"评论内容"}}）
+- "评论" / "追加评论" / "添加评论" / "发表评论" / "写评论" / 「备注」（口语，无 remark 字段）-> append_comment（侧栏评论记录，仅追加一条）
+- 反例：用户说「添加评论：改错了还是没好」→ {{"append_comment": "改错了还是没好"}}
 - "所属计划" / "所属迭代" -> plan_id（计划主键 id 或计划名称，服务端会解析）
 - "所属项目" / "项目名称" -> project_id（项目主键 id 或项目名称，须为当前用户有权限的项目）
 - "预估工时" -> estimated_time
@@ -8090,7 +8138,12 @@ class SimplifiedReActEngine:
             # _collect_llm_text 一般为字符串；若以后改为结构化再处理 dict
             if isinstance(response, dict):
                 print(f"[REACT-planing] 提取的修改参数: {response}")
-                return self._normalize_modifications_for_bug_expected_result(response, user_input)
+                mods = self._normalize_modifications_for_bug_expected_result(
+                    response, user_input
+                )
+                return self._finalize_comment_modifications(
+                    mods, user_input, todo, exploration
+                )
             
             # 如果是字符串，提取 JSON 部分
             if isinstance(response, str):
@@ -8098,11 +8151,16 @@ class SimplifiedReActEngine:
                 if json_match:
                     modifications = json.loads(json_match.group())
                     print(f"[REACT-planing] 提取的修改参数: {modifications}")
-                    return self._normalize_modifications_for_bug_expected_result(modifications, user_input)
+                    mods = self._normalize_modifications_for_bug_expected_result(
+                        modifications, user_input
+                    )
+                    return self._finalize_comment_modifications(
+                        mods, user_input, todo, exploration
+                    )
         except Exception as e:
             print(f"[REACT-planing] 提取修改参数失败: {e}")
         
-        return {}
+        return self._finalize_comment_modifications({}, user_input, todo, exploration)
     
     def _user_facing_reasoning_summary(self, user_input: str, raw_reasoning: str) -> str:
         """将模型内部思考转为给用户看的说明。不截取深度思考文本，仅做 ID 转名称与内部词过滤。
@@ -8277,6 +8335,35 @@ class SimplifiedReActEngine:
             modifications['expected_result'] = modifications.pop('base_problem')
             print(f"[REACT-planing] 兜底：用户说期望结果，将 base_problem 改为 expected_result")
         return modifications
+
+    def _finalize_comment_modifications(
+        self,
+        modifications: Optional[Dict[str, Any]],
+        user_input: str = "",
+        todo: str = "",
+        exploration: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """追加评论意图：补全 append_comment，且不因 remark 已有相同文而跳过 modify。"""
+        try:
+            from agents.intent.comment_intent import apply_append_comment_intent_fallback
+
+            records = []
+            if exploration and isinstance(exploration.get("current_record"), dict):
+                records = exploration["current_record"].get("comment_records") or []
+            merged = apply_append_comment_intent_fallback(
+                modifications,
+                f"{user_input or ''} {todo or ''}".strip(),
+                records,
+            )
+            if merged != (modifications or {}):
+                print(
+                    f"[REACT-planing] comment intent fallback → modifications={merged}",
+                    flush=True,
+                )
+            return merged
+        except Exception as ex:
+            print(f"[REACT-planing] comment intent fallback 失败: {ex}", flush=True)
+            return dict(modifications or {})
     
     def _extract_modifications_with_regex(self, user_input: str) -> Dict[str, Any]:
         """
@@ -8295,6 +8382,21 @@ class SimplifiedReActEngine:
             key = 'assignee' if field_name == '负责人' else ('title' if field_name == '标题' else 'status')
             modifications[key] = value
             print(f"[REACT-REGEX] 兜底（极简）：{field_name} -> {key} = {value}")
+        try:
+            from agents.intent.comment_intent import (
+                extract_append_comment_body,
+                intent_requests_append_comment,
+            )
+
+            if intent_requests_append_comment(user_input):
+                body = extract_append_comment_body(user_input)
+                if body:
+                    modifications = dict(modifications)
+                    modifications["append_comment"] = body
+                    modifications.pop("remark", None)
+                    print(f"[REACT-REGEX] 兜底（评论）：append_comment = {body[:80]!r}")
+        except Exception as _ce:
+            print(f"[REACT-REGEX] 评论兜底失败: {_ce}", flush=True)
         if not modifications and '负责人' in user_input:
             m2 = re.search(
                 r'负责人\s*(?:修改|改|改为|设为|调整为|为)?\s*[：:\s]*([^\s，,。]+)',
