@@ -19,9 +19,9 @@ export const TESTCASE_DETAIL_FIELDS = [
 /** 属性区下拉框：与 Bug 优先级一致，行内 diff + 灌入 new 到 select */
 export const TESTCASE_SELECT_DETAIL_FIELDS = ['case_type', 'priority', 'test_type', 'execution_result']
 
-/** 长文本详情字段：仅 Monaco / 富文本 diff，不预填控件 */
+/** 长文本详情字段：仅 Monaco / 富文本 diff，不预填控件（评论仅在侧栏展示） */
 export const TESTCASE_MONACO_DETAIL_FIELDS = TESTCASE_DETAIL_FIELDS.filter(
-  (f) => !TESTCASE_SELECT_DETAIL_FIELDS.includes(f)
+  (f) => !TESTCASE_SELECT_DETAIL_FIELDS.includes(f) && f !== 'append_comment'
 )
 
 /** 详情富文本/步骤等不把 new 预填进控件；下拉属性会预填（对齐 NewBug） */

@@ -612,17 +612,7 @@
         <!-- 所属项目 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">所属项目</h3>
-          <div class="radio-group">
-            <label class="radio-item">
-              <input type="radio" v-model="badcase.associate_project" :value="true" />
-              <span class="radio-text">关联所属项目</span>
-            </label>
-            <label class="radio-item">
-              <input type="radio" v-model="badcase.associate_project" :value="false" />
-              <span class="radio-text">暂不关联所属项目</span>
-            </label>
-          </div>
-          <div v-if="badcase.associate_project" class="project-select">
+          <div class="project-select">
             <label class="select-label">项目名称:</label>
             <select v-model="badcase.project_id" class="form-select" @change="handleProjectChange">
               <option value="">请选择</option>
@@ -690,7 +680,11 @@
            />
          </div>
 
-         <div class="sidebar-section comment-section" :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }">
+         <div
+           id="diff-field-append_comment"
+           class="sidebar-section comment-section"
+           :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }"
+         >
            <h3 class="sidebar-title">评论记录</h3>
            <div v-if="hasEntityFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
              <div class="diff-header">
@@ -763,7 +757,7 @@
 </template>
 
 <script>
-import { ref, reactive, onMounted, onActivated, computed, nextTick, watch, inject } from 'vue'
+import { ref, reactive, onMounted, onActivated, onUnmounted, computed, nextTick, watch, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, addBadcaseComment, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getPlanDetail } from '../api.js'
@@ -1106,7 +1100,14 @@ export default {
     }
 
     /** 沙箱跳入已打开的嵌入 Tab：keep-alive 复用时重新灌入 session 中的 pending diff */
-    const reloadPendingDiffFromSession = () => {
+    const focusAppendCommentDiffInSidebar = async () => {
+      if (!hasEntityFieldDiff('append_comment')) return
+      isRightSidebarOpen.value = true
+      await nextTick()
+      scrollToDiffField('append_comment')
+    }
+
+    const reloadPendingDiffFromSession = async () => {
       if (!props.embedded) return
       const showDiffMode = props.show_diff
       if (!showDiffMode) {
@@ -1133,6 +1134,7 @@ export default {
         pd = normalizePendingDiffModifications(pd)
         pendingDiff.value = pd
         applyPendingModificationsToForm()
+        await focusAppendCommentDiffInSidebar()
       } catch (e) {
         console.error('[DIFF] reloadPendingDiffFromSession 失败:', e)
       }
@@ -1900,6 +1902,36 @@ export default {
       return val != null ? String(val) : ''
     }
 
+    const plainCommentFromDiffValue = (val) =>
+      formatEntityDiffValue('append_comment', typeof val === 'object' && val !== null && 'new' in val ? val.new : val)
+
+    const commentPlainAlreadyListed = (plain) => {
+      const want = String(plain || '').trim()
+      if (!want) return false
+      return entityComments.value.some((c) => {
+        const tempDiv = document.createElement('div')
+        tempDiv.innerHTML = String(c.content || '')
+        const body = (tempDiv.textContent || tempDiv.innerText || '').trim()
+        return body === want
+      })
+    }
+
+    const optimisticAppendEntityComment = (text) => {
+      const plain = String(text || '').trim()
+      if (!plain || commentPlainAlreadyListed(plain)) return
+      const author = currentUser.value ? personPrimaryLabel(currentUser.value) : '—'
+      entityComments.value = [
+        ...entityComments.value,
+        {
+          id: `pending-${Date.now()}`,
+          content: plain.includes('<') ? plain : `<p>${plain.replace(/\n/g, '<br>')}</p>`,
+          user_name: author,
+          created_at: new Date().toISOString(),
+          source_message_id: pendingDiff.value?.messageId ?? null
+        }
+      ]
+    }
+
     const loadEntityComments = async () => {
       const id = badcaseId.value
       if (!id) return
@@ -1909,6 +1941,64 @@ export default {
         entityComments.value = Array.isArray(list) ? [...list] : []
       } catch (e) {
         console.error('[Badcase] 加载评论失败:', e)
+      }
+    }
+
+    const reloadEntityCommentsAfterAdopt = async (expectedPlain = '') => {
+      const want = String(expectedPlain || '').trim()
+      const delays = want ? [0, 200, 450, 800] : [0]
+      for (const ms of delays) {
+        if (ms) await new Promise((resolve) => setTimeout(resolve, ms))
+        await loadEntityComments()
+        if (!want || commentPlainAlreadyListed(want)) return
+      }
+    }
+
+    const clearCommentPendingDiffKeys = () => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return
+      for (const k of ['append_comment', 'comment', 'remark']) {
+        delete mods[k]
+      }
+      if (Object.keys(mods).filter((key) => !String(key).startsWith('_')).length === 0) {
+        sessionStorage.removeItem('pendingModifyDiff')
+        pendingDiff.value = null
+      }
+    }
+
+    const resolveEditorBadcaseId = () => {
+      const raw =
+        props.id != null && props.id !== ''
+          ? props.id
+          : badcaseId.value != null && badcaseId.value !== ''
+            ? badcaseId.value
+            : null
+      return raw != null ? String(raw).trim() : ''
+    }
+
+    const onDetailModifyAdopted = async (event) => {
+      const tid = event?.detail?.targetId != null ? String(event.detail.targetId).trim() : ''
+      const cur = resolveEditorBadcaseId()
+      if (!tid || !cur || tid !== cur) return
+
+      const fieldUpdates = event?.detail?.fieldUpdates
+      if (fieldUpdates && typeof fieldUpdates === 'object') {
+        for (const [field, val] of Object.entries(fieldUpdates)) {
+          const f = String(field)
+          if (f === 'append_comment' || f === 'comment' || f === 'remark') {
+            const plain = plainCommentFromDiffValue(val)
+            optimisticAppendEntityComment(plain)
+            await reloadEntityCommentsAfterAdopt(plain)
+            clearCommentPendingDiffKeys()
+          }
+        }
+      }
+
+      if (
+        pendingDiff.value?.modifications &&
+        Object.keys(pendingDiff.value.modifications).filter((k) => !String(k).startsWith('_')).length === 0
+      ) {
+        pendingDiff.value = null
       }
     }
 
@@ -2100,6 +2190,28 @@ export default {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
 
+    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue) => {
+      if (pendingDiff.value) return
+      const tid =
+        props.id != null && props.id !== ''
+          ? String(props.id).trim()
+          : badcaseId.value
+            ? String(badcaseId.value).trim()
+            : ''
+      if (!tid) return
+      window.dispatchEvent(
+        new CustomEvent('detail-modify-adopted', {
+          detail: {
+            targetId: tid,
+            targetType: 'badcase',
+            adoptedField,
+            adoptedValue
+          },
+          bubbles: true
+        })
+      )
+    }
+
     // 采纳字段修改：单字段落库（复用既有 /api/projects/{project_id}/modify）
     const applyFieldChange = async (field) => {
       if (!pendingDiff.value?.modifications?.[field]) return
@@ -2134,7 +2246,12 @@ export default {
         }
 
         if (field === 'append_comment' || field === 'comment') {
-          await loadEntityComments()
+          const plain = plainCommentFromDiffValue(newValue)
+          optimisticAppendEntityComment(plain)
+          if (result.async === true) {
+            await new Promise((resolve) => setTimeout(resolve, 420))
+          }
+          await reloadEntityCommentsAfterAdopt(plain)
           commentDraft.value = ''
         } else if (field === 'plan_id') {
           badcase.plan = normalizePlanId(newValue) || ''
@@ -2152,6 +2269,7 @@ export default {
         }
 
         confirmFieldChange(field)
+        notifyDetailAdoptCompleteIfDone(field, newValue)
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
       }
@@ -2249,6 +2367,7 @@ export default {
     }
     
     onMounted(async () => {
+      window.addEventListener('badcase-detail-refresh', onDetailModifyAdopted)
       console.log('=== 组件挂载开始 ===')
       
       try {
@@ -2412,6 +2531,10 @@ export default {
       } catch (error) {
         console.error('组件挂载过程中发生错误:', error)
       }
+    })
+
+    onUnmounted(() => {
+      window.removeEventListener('badcase-detail-refresh', onDetailModifyAdopted)
     })
     
     return {

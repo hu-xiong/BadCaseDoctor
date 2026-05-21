@@ -38,6 +38,7 @@ class Config:
     # 复用 QWEN_API_KEY，可指定不同模型
     DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', QWEN_API_KEY)
     DASHSCOPE_MODEL = os.getenv('DASHSCOPE_MODEL', 'qwen3.5-plus')
+    VISION_MODEL = (os.getenv('VISION_MODEL') or 'qwen3.6-plus').strip()
     # 全项目 Qwen 文本对话统一走 OpenAI 兼容 HTTP：.../compatible-mode/v1/chat/completions
     DASHSCOPE_COMPAT_BASE_URL = os.getenv(
         'DASHSCOPE_COMPAT_BASE_URL',

@@ -14,8 +14,41 @@
     <!-- 图片大图预览弹层 -->
     <Teleport to="body">
       <div v-if="imagePreviewSrc" class="image-preview-overlay" @click.self="closeImagePreview">
-        <button type="button" class="image-preview-close" @click="closeImagePreview" :title="t('chat.closePreview')">×</button>
-        <img :src="imagePreviewSrc" class="image-preview-full" :alt="t('chat.imagePreview')" @click.stop />
+        <div class="image-preview-stage" @click.stop>
+          <div class="image-preview-toolbar">
+            <button
+              type="button"
+              class="image-preview-tool-btn"
+              :title="t('chat.copyImage')"
+              @click.stop="copyPreviewImage"
+            >
+              <svg class="image-preview-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="image-preview-tool-btn"
+              :title="t('chat.downloadImage')"
+              @click.stop="downloadPreviewImage"
+            >
+              <svg class="image-preview-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="image-preview-tool-btn image-preview-tool-btn--close"
+              :title="t('chat.closePreview')"
+              @click.stop="closeImagePreview"
+            >
+              <svg class="image-preview-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+              </svg>
+            </button>
+          </div>
+          <img :src="imagePreviewSrc" class="image-preview-full" :alt="t('chat.imagePreview')" />
+        </div>
       </div>
     </Teleport>
 
@@ -49,7 +82,7 @@
             >
               <template v-if="message.images && message.images.length > 0">
                 <div class="user-message-images">
-                  <img v-for="(img, i) in message.images" :key="i" :src="img.data" class="user-msg-thumb" :alt="t('chat.uploadImageAlt')" @click.stop="openImagePreview(img.data)" />
+                  <img v-for="(img, i) in message.images" :key="i" :src="img.data" class="user-msg-thumb" :alt="t('chat.uploadImageAlt')" @click.stop="openImagePreview(img.data, img.filename)" />
                 </div>
               </template>
               <template v-if="message.content">{{ message.content }}</template>
@@ -67,7 +100,12 @@
             >
               <div v-if="inlinePendingImages.length > 0" class="pending-images-row">
                 <div v-for="(img, idx) in inlinePendingImages" :key="idx" class="pending-image-item">
-                  <img :src="img.data" class="pending-thumb" :alt="t('chat.imagePreview')" @click="openImagePreview(img.data)" />
+                  <img
+                    :src="img.data"
+                    class="pending-thumb"
+                    :alt="t('chat.imagePreview')"
+                    @click.stop="openImagePreview(img.data, img.filename)"
+                  />
                   <button type="button" class="pending-image-remove" @click.stop="removePendingInline(idx)" :title="t('chat.removeImage')">×</button>
                 </div>
               </div>
@@ -114,12 +152,11 @@
                       class="model-icon"
                     />
                     <select v-model="inlineEditSelectedModel" class="footer-select">
-                      <option value="auto">Auto</option>
-                      <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
-                      <option value="qwen-max-thinking">Qwen-Max</option>
-                      <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
-                      <option value="deepseek-v4-flash">DeepSeek-V4-Flash</option>
-                      <option value="glm-5">GLM-5</option>
+                      <option
+                        v-for="opt in chatModelOptions"
+                        :key="'inline-' + opt.id"
+                        :value="opt.id"
+                      >{{ opt.label }}</option>
                     </select>
                   </div>
                 </div>
@@ -412,9 +449,40 @@
             </div>
           </div>
           
+          <div
+            v-if="message.modifyNavigation?.is_create && tempCardProposalForMessage(message.id)"
+            class="temp-card-proposal-bar temp-card-proposal-bar--inline"
+          >
+            <span class="temp-card-proposal-text">{{
+              t('chat.tempCardProposal', {
+                plan: tempCardProposalForMessage(message.id).planLabel,
+                cardTitle: tempCardProposalForMessage(message.id).cardTitle
+              })
+            }}</span>
+            <div class="temp-card-proposal-actions">
+              <button
+                type="button"
+                class="temp-card-proposal-btn temp-card-proposal-btn--approve"
+                @click="approveTempCardProposal(tempCardProposalForMessage(message.id))"
+              >
+                {{ t('chat.tempCardApprove') }}
+              </button>
+              <button
+                type="button"
+                class="temp-card-proposal-btn temp-card-proposal-btn--reject"
+                @click="rejectTempCardProposal(tempCardProposalForMessage(message.id))"
+              >
+                {{ t('chat.tempCardReject') }}
+              </button>
+            </div>
+          </div>
           <div :id="'sandbox-mod-below-' + message.id" class="agent-modify-sandbox-anchor" />
           <Teleport
-            v-if="sandboxTeleportTargetExists(message) && (message.modifyGroups?.length || message.modifyNavigation)"
+            v-if="
+              sandboxTeleportTargetExists(message) &&
+              (message.modifyGroups?.length || message.modifyNavigation) &&
+              !(message.modifyNavigation?.is_create && isCreateAwaitingTempCard(message.id))
+            "
             :to="sandboxModifyTeleportTargetForMessage(message)"
           >
           <!-- 修改预览导航区域 - 沙箱预览：整行点击跳转，下三角=展开/收起，无单独跳转按钮 -->
@@ -424,6 +492,7 @@
               <div
                 v-if="groupHasPendingSandboxConfirm(group, message)"
                 class="collapsible-card findings-card sandbox-card"
+                :class="{ 'sandbox-card--has-expand': sandboxPreviewNeedsCollapse(message, groupIdx) }"
                 style="margin-bottom: 12px;"
               >
                 <div class="collapsible-header sandbox-header" @click="handleShowGroupInList(group, message.id)">
@@ -431,33 +500,43 @@
                   <span class="card-title">{{ t('chat.sandboxPreview') }}</span>
                   <span class="card-count">{{ t('chat.itemsCount', { n: countGroupSandboxDisplayRows(group) }) }}</span>
                   <span v-if="group.plan_id" class="plan-badge">{{ t('chat.planBadge', { id: group.plan_id }) }}</span>
-                  <img
-                    class="sandbox-toggle"
-                    :class="{ expanded: isSandboxExpanded(message.id, groupIdx) }"
-                    :src="isSandboxExpanded(message.id, groupIdx) ? chevronDownIcon : chevronRightIcon"
-                    alt="toggle"
-                    @click.stop="toggleSandboxExpand(message.id, groupIdx)"
-                  />
                 </div>
-                <div v-show="isSandboxExpanded(message.id, groupIdx)" class="collapsible-content modify-navigation-content">
-                  <template v-for="(git, gix) in group.items" :key="gix">
-                    <div v-if="group.items.length > 1" class="group-item-target">{{ t('chat.recordNum', { id: git.target_id }) }}</div>
+                <div
+                  class="collapsible-content modify-navigation-content sandbox-preview-body"
+                  :class="{ 'sandbox-preview-body--collapsed': isSandboxPreviewCollapsed(message, groupIdx) }"
+                >
+                  <div
+                    v-if="isSandboxPreviewCollapsed(message, groupIdx)"
+                    class="sandbox-preview-fade"
+                    aria-hidden="true"
+                  />
+                  <template v-for="(entry, vidx) in visibleGroupSandboxEntries(message, groupIdx)" :key="`${entry.gix}-${entry.rowIdx}-${vidx}`">
+                    <div v-if="entry.showRecordHeader" class="group-item-target">
+                      {{ t('chat.recordNum', { id: entry.git.target_id }) }}
+                    </div>
+                    <div class="modify-field-preview">
+                      <span class="field-label">{{ sandboxFieldHeaderLabel(entry.fieldDiff, entry.git, group.target) }}:</span>
+                      <span :class="['old-value', { 'empty-value': !(formatSandboxModifySideDisplay(entry.git, entry.fieldDiff, 'old') || getFieldOldValue(entry.fieldDiff)) }]">
+                        {{ (formatSandboxModifySideDisplay(entry.git, entry.fieldDiff, 'old') || getFieldOldValue(entry.fieldDiff)) || t('chat.notSet') }}
+                      </span>
+                      <span class="arrow">→</span>
+                      <span class="new-value">{{ (formatSandboxModifySideDisplay(entry.git, entry.fieldDiff, 'new') || getFieldNewValue(entry.fieldDiff)) || '-' }}</span>
+                    </div>
+                  </template>
+                  <template
+                    v-if="!sandboxPreviewNeedsCollapse(message, groupIdx) || isSandboxExpanded(message, groupIdx)"
+                    v-for="(git, gix) in group.items"
+                    :key="'muted-' + gix"
+                  >
                     <template v-if="!isSandboxModifyItemPending(git, message)">
                       <div class="modify-field-preview modify-field-preview--muted">
                         {{ t('chat.adoptedNoPendingDetail') }}
                       </div>
                     </template>
-                    <template v-else-if="resolveSandboxDiffRowsForDisplay(git, group.target).length">
-                      <div v-for="(fieldDiff, idx) in resolveSandboxDiffRowsForDisplay(git, group.target)" :key="`${gix}-${idx}`" class="modify-field-preview">
-                        <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, git, group.target) }}:</span>
-                        <span :class="['old-value', { 'empty-value': !(formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) }]">
-                          {{ (formatSandboxModifySideDisplay(git, fieldDiff, 'old') || getFieldOldValue(fieldDiff)) || t('chat.notSet') }}
-                        </span>
-                        <span class="arrow">→</span>
-                        <span class="new-value">{{ (formatSandboxModifySideDisplay(git, fieldDiff, 'new') || getFieldNewValue(fieldDiff)) || '-' }}</span>
-                      </div>
-                    </template>
-                    <div v-else-if="group.items.length > 1" class="modify-field-preview modify-field-preview--muted">
+                    <div
+                      v-else-if="group.items.length > 1 && isSandboxModifyItemPending(git, message) && !resolveSandboxDiffRowsForDisplay(git, group.target).length"
+                      class="modify-field-preview modify-field-preview--muted"
+                    >
                       {{ t('chat.noDiffLines', { id: git.target_id }) }}
                     </div>
                   </template>
@@ -465,6 +544,16 @@
                     {{ t('chat.mergeGroupHint', { n: group.items.length }) }}
                   </div>
                 </div>
+                <button
+                  v-if="sandboxPreviewNeedsCollapse(message, groupIdx)"
+                  type="button"
+                  class="sandbox-expand-bar"
+                  :class="{ expanded: isSandboxExpanded(message, groupIdx) }"
+                  :title="isSandboxExpanded(message, groupIdx) ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
+                  @click.stop="toggleSandboxExpand(message, groupIdx)"
+                >
+                  <img class="sandbox-expand-chevron" :src="chevronDownIcon" alt="" />
+                </button>
               </div>
               <!-- 本组已全部采纳：只保留一行摘要，避免重复 N 条「已采纳」占用空间 -->
               <div
@@ -504,20 +593,25 @@
                 }}</span>
               </div>
             </div>
-            <div v-else class="collapsible-card findings-card sandbox-card">
+            <div
+              v-else
+              class="collapsible-card findings-card sandbox-card"
+              :class="{ 'sandbox-card--has-expand': sandboxPreviewNeedsCollapse(message, null) }"
+            >
               <div class="collapsible-header sandbox-header" @click="handleShowModifyInList(message.modifyNavigation, message.id)">
                 <span class="card-icon">{{ message.modifyNavigation.batch_modify ? '🧩' : (message.modifyNavigation.navigate_to_existing ? '🔍' : (message.modifyNavigation.is_create ? '➕' : '📝')) }}</span>
                 <span class="card-title">{{ message.modifyNavigation.batch_modify ? t('chat.batchSandboxPreview') : (message.modifyNavigation.navigate_to_existing ? t('chat.createdLocate') : (message.modifyNavigation.is_create ? t('chat.newPreview') : t('chat.sandboxPreview'))) }}</span>
                 <span class="card-count">{{ t('chat.itemsCount', { n: message.modifyNavigation.batch_modify ? (message.modifyNavigation.batch_count || message.modifyNavigation.batch_results?.length || 0) : getSandboxDiffRows(message).length }) }}</span>
-                <img
-                  class="sandbox-toggle"
-                  :class="{ expanded: isSandboxExpanded(message.id, null) }"
-                  :src="isSandboxExpanded(message.id, null) ? chevronDownIcon : chevronRightIcon"
-                  alt="toggle"
-                  @click.stop="toggleSandboxExpand(message.id, null)"
-                />
               </div>
-              <div v-show="isSandboxExpanded(message.id, null)" class="collapsible-content modify-navigation-content">
+              <div
+                class="collapsible-content modify-navigation-content sandbox-preview-body"
+                :class="{ 'sandbox-preview-body--collapsed': isSandboxPreviewCollapsed(message, null) }"
+              >
+                <div
+                  v-if="isSandboxPreviewCollapsed(message, null)"
+                  class="sandbox-preview-fade"
+                  aria-hidden="true"
+                />
                 <!-- 批量 modify：按条与列表一致；已采纳项不再展示 diff -->
                 <template
                   v-if="message.modifyNavigation.batch_modify && message.modifyNavigation.batch_results?.length"
@@ -531,36 +625,33 @@
                   >
                     {{ t('chat.batchSandboxBatchHint') }}
                   </div>
-                  <template v-for="(br, bix) in message.modifyNavigation.batch_results" :key="bix">
-                    <div
-                      v-if="message.modifyNavigation.batch_results.length > 1"
-                      class="group-item-target"
-                    >
-                      {{ t('chat.recordNum', { id: br.target_id }) }}
+                  <template v-for="(entry, vidx) in visibleBatchSandboxEntries(message)" :key="`batch-${entry.bix}-${entry.rowIdx}-${vidx}`">
+                    <div v-if="entry.showRecordHeader" class="group-item-target">
+                      {{ t('chat.recordNum', { id: entry.br.target_id }) }}
                     </div>
+                    <div class="modify-field-preview">
+                      <span class="field-label">{{ sandboxFieldHeaderLabel(entry.fieldDiff, entry.br) }}:</span>
+                      <span
+                        :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(entry.br, entry.fieldDiff, 'old') }]"
+                      >
+                        {{ formatSandboxModifySideDisplay(entry.br, entry.fieldDiff, 'old') || t('chat.notSet') }}
+                      </span>
+                      <span class="arrow">→</span>
+                      <span class="new-value">{{ formatSandboxModifySideDisplay(entry.br, entry.fieldDiff, 'new') || '-' }}</span>
+                    </div>
+                  </template>
+                  <template
+                    v-if="!sandboxPreviewNeedsCollapse(message, null) || isSandboxExpanded(message, null)"
+                    v-for="(br, bix) in message.modifyNavigation.batch_results"
+                    :key="'batch-muted-' + bix"
+                  >
                     <template v-if="!isSandboxModifyItemPending(br, message)">
                       <div class="modify-field-preview modify-field-preview--muted">
                         {{ t('chat.adoptedNoPendingDetail') }}
                       </div>
                     </template>
-                    <template v-else-if="getBatchItemSandboxDiffRows(br, message.modifyNavigation?.target).length">
-                      <div
-                        v-for="(fieldDiff, idx) in getBatchItemSandboxDiffRows(br, message.modifyNavigation?.target)"
-                        :key="`${bix}-${idx}`"
-                        class="modify-field-preview"
-                      >
-                        <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, br) }}:</span>
-                        <span
-                          :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(br, fieldDiff, 'old') }]"
-                        >
-                          {{ formatSandboxModifySideDisplay(br, fieldDiff, 'old') || t('chat.notSet') }}
-                        </span>
-                        <span class="arrow">→</span>
-                        <span class="new-value">{{ formatSandboxModifySideDisplay(br, fieldDiff, 'new') || '-' }}</span>
-                      </div>
-                    </template>
                     <div
-                      v-else-if="message.modifyNavigation.batch_results.length > 1"
+                      v-else-if="message.modifyNavigation.batch_results.length > 1 && !getBatchItemSandboxDiffRows(br, message.modifyNavigation?.target).length"
                       class="modify-field-preview modify-field-preview--muted"
                     >
                       {{ t('chat.noDiffLines', { id: br.target_id }) }}
@@ -583,7 +674,7 @@
                   >
                     {{ t('chat.detailFieldsHint') }}
                   </div>
-                  <div v-for="(fieldDiff, idx) in getSandboxDiffRows(message)" :key="idx" class="modify-field-preview">
+                  <div v-for="(fieldDiff, idx) in visibleSandboxPreviewRows(message, null)" :key="idx" class="modify-field-preview">
                     <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, message.modifyNavigation) }}:</span>
                     <template v-if="message.modifyNavigation.is_create">
                       <span class="new-value create-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
@@ -598,6 +689,16 @@
                   </div>
                 </template>
               </div>
+              <button
+                v-if="sandboxPreviewNeedsCollapse(message, null)"
+                type="button"
+                class="sandbox-expand-bar"
+                :class="{ expanded: isSandboxExpanded(message, null) }"
+                :title="isSandboxExpanded(message, null) ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
+                @click.stop="toggleSandboxExpand(message, null)"
+              >
+                <img class="sandbox-expand-chevron" :src="chevronDownIcon" alt="" />
+              </button>
             </div>
           </div>
           
@@ -696,6 +797,21 @@
       </div>
     </div>
     
+    <!-- 临时卡片确认（新建预览未指定卡片时） -->
+    <div v-for="p in tempCardProposals" :key="p.scopeKey" class="temp-card-proposal-bar">
+      <span class="temp-card-proposal-text">{{
+        t('chat.tempCardProposal', { plan: p.planLabel, cardTitle: p.cardTitle })
+      }}</span>
+      <div class="temp-card-proposal-actions">
+        <button type="button" class="temp-card-proposal-btn temp-card-proposal-btn--approve" @click="approveTempCardProposal(p)">
+          {{ t('chat.tempCardApprove') }}
+        </button>
+        <button type="button" class="temp-card-proposal-btn temp-card-proposal-btn--reject" @click="rejectTempCardProposal(p)">
+          {{ t('chat.tempCardReject') }}
+        </button>
+      </div>
+    </div>
+
     <!-- 输入区域 -->
     <div class="input-container">
       <div 
@@ -708,7 +824,12 @@
         <!-- 图片缩略图预览 -->
         <div v-if="pendingImages.length > 0" class="pending-images-row">
           <div v-for="(img, idx) in pendingImages" :key="idx" class="pending-image-item">
-            <img :src="img.data" class="pending-thumb" :alt="t('chat.imagePreview')" @click="openImagePreview(img.data)" />
+            <img
+              :src="img.data"
+              class="pending-thumb"
+              :alt="t('chat.imagePreview')"
+              @click.stop="openImagePreview(img.data, img.filename)"
+            />
             <button type="button" class="pending-image-remove" @click.stop="removePendingImage(idx)" :title="t('chat.removeImage')">×</button>
           </div>
         </div>
@@ -755,12 +876,11 @@
               class="model-icon"
             />
             <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
-              <option value="auto">Auto</option>
-              <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
-              <option value="qwen-max-thinking">Qwen-Max</option>
-              <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
-              <option value="deepseek-v4-flash">DeepSeek-V4-Flash</option>
-              <option value="glm-5">GLM-5</option>
+              <option
+                v-for="opt in chatModelOptions"
+                :key="opt.id"
+                :value="opt.id"
+              >{{ opt.label }}</option>
             </select>
           </div>
           </div>
@@ -829,7 +949,6 @@ import AgentTaskRun from './AgentTaskRun.vue'
 import ExecutionResult from './ExecutionResult.vue'
 import CreatePreview from './CreatePreview.vue'
 import deepThinkingIcon from '../assets/deep-thinking-icon.svg'
-import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
 import qwenIcon from '../assets/qwen-icon.png'
 import glmIcon from '../assets/glm-icon.png'
@@ -848,6 +967,10 @@ import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationS
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
 import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
 import { snowflakeIdStr } from '../utils/snowflakeId.js'
+import {
+  readBugReproductionStepsFromRow,
+  formatBugReproductionStepsForDisplay
+} from '../utils/bugModifyFields.js'
 import {
   normalizeTestcaseModifyFieldKey,
   isTestcaseDetailModifyField,
@@ -907,6 +1030,23 @@ const { t } = useI18n()
 
 /** 由 ProjectDetail 在打开项目时拉取（mode=recent），避免每条对话在后端做向量检索 */
 const projectLongMemoryContext = inject('projectLongMemoryContext', null)
+/** 项目页当前聚焦的 Bug/用例等（雪花 record_id），供 Agent 复制新建 */
+const agentUiContext = inject('agentUiContext', null)
+
+const agentUiContextForReact = () => {
+  try {
+    const r =
+      agentUiContext && typeof agentUiContext === 'object' && 'value' in agentUiContext
+        ? agentUiContext.value
+        : agentUiContext
+    if (!r || typeof r !== 'object') return {}
+    const rid = r.record_id ?? r.recordId
+    if (rid == null || String(rid).trim() === '') return {}
+    return { ui_context: r }
+  } catch (_e) {
+    return {}
+  }
+}
 
 const localGoProxyOk = inject('localGoProxyOk', sharedLocalGoProxyRef)
 const pingLocalGoProxy = inject('pingLocalGoProxy', sharedPingLocalGoProxy)
@@ -951,6 +1091,10 @@ function readDebugReactThinkSSE() {
 const isDebugReactThinkSSE = readDebugReactThinkSSE()
 
 const messages = ref([])
+/** 新建预览缺卡片时：对话区确认是否创建临时 Bug/BadCase/用例卡片 */
+const tempCardProposals = ref([])
+/** 已发起临时卡片确认、尚未落列表时隐藏沙箱新建预览 */
+const createAwaitingTempCardMessageIds = ref([])
 /** 沙箱/修改预览：关联缺陷 id → Bug 标题（按需 getBugDetail 补全） */
 const sandboxBugTitleById = ref({})
 /** GET /api/chat-sessions/:id 同步，用于判断是否为默认标题并触发生成 */
@@ -1484,6 +1628,38 @@ function isPlaceholderSessionTitle(title) {
         }
       }
     }
+    const isBugRepro =
+      tgt === 'bug' &&
+      (fk === 'reproduction_steps' ||
+        fk === 'steps_to_reproduce' ||
+        fk === 'reproduce_steps' ||
+        label.includes('复现步骤'))
+    if (isBugRepro) {
+      for (const mk of ['steps_to_reproduce', 'reproduction_steps', 'reproduce_steps', 'description']) {
+        const m = mods[mk]
+        if (m && typeof m === 'object') {
+          const v = which === 'old' ? m.old : m.new
+          if (v != null && String(v).trim() !== '') {
+            return formatBugReproductionStepsForDisplay(v)
+          }
+        }
+      }
+      const row = which === 'old' ? ctx?.before : ctx?.after
+      const fromRow = readBugReproductionStepsFromRow(row)
+      if (fromRow) return formatBugReproductionStepsForDisplay(fromRow)
+      if (which === 'old' && Array.isArray(messages.value)) {
+        const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+        if (tid) {
+          try {
+            const merged = getMergedPendingForTarget(messages.value, 'bug', tid)
+            const fromMerged = readBugReproductionStepsFromRow(merged?.before)
+            if (fromMerged) return formatBugReproductionStepsForDisplay(fromMerged)
+          } catch (_e) {
+            /* noop */
+          }
+        }
+      }
+    }
     const lineType = which === 'old' ? 'delete' : 'add'
     const line = fieldDiff?.lines?.find((l) => l.type === lineType)
     return line?.content != null ? String(line.content).trim() : ''
@@ -1846,6 +2022,7 @@ const inlinePendingImages = ref([])
 const isDragOver = ref(false)
 const isInlineDragOver = ref(false)
 const imagePreviewSrc = ref(null)
+const imagePreviewFilename = ref('image.png')
 const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024
 const MAX_IMAGES = 5
@@ -1954,12 +2131,61 @@ const onPasteMainComposer = (e) => handleComposerPaste(e, pendingImages)
 const onPasteInlineComposer = (e) => handleComposerPaste(e, inlinePendingImages)
 const removePendingInline = (idx) => removePendingImage(idx, inlinePendingImages)
 
-const openImagePreview = (src) => {
-  if (src) imagePreviewSrc.value = src
+const guessFilenameFromDataUrl = (src) => {
+  const s = String(src || '')
+  const m = s.match(/^data:image\/([\w+.-]+);/i)
+  if (!m) return 'image.png'
+  const ext = m[1].toLowerCase().replace('jpeg', 'jpg').replace('svg+xml', 'svg')
+  return `image.${ext}`
+}
+
+const dataUrlToBlob = async (dataUrl) => {
+  const res = await fetch(dataUrl)
+  return res.blob()
+}
+
+const openImagePreview = (src, filename) => {
+  if (!src) return
+  imagePreviewSrc.value = src
+  const fn = filename != null && String(filename).trim() !== '' ? String(filename).trim() : ''
+  imagePreviewFilename.value = fn || guessFilenameFromDataUrl(src)
 }
 
 const closeImagePreview = () => {
   imagePreviewSrc.value = null
+  imagePreviewFilename.value = 'image.png'
+}
+
+const copyPreviewImage = async () => {
+  const src = imagePreviewSrc.value
+  if (!src) return
+  try {
+    const blob = await dataUrlToBlob(src)
+    const type = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/png'
+    if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
+      await navigator.clipboard.write([new ClipboardItem({ [type]: blob })])
+      return
+    }
+    throw new Error('clipboard unsupported')
+  } catch (err) {
+    console.warn('[CHAT] 复制图片失败:', err)
+  }
+}
+
+const downloadPreviewImage = () => {
+  const src = imagePreviewSrc.value
+  if (!src) return
+  try {
+    const a = document.createElement('a')
+    a.href = src
+    a.download = imagePreviewFilename.value || 'image.png'
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  } catch (err) {
+    console.warn('[CHAT] 下载图片失败:', err)
+  }
 }
 
 const clearPendingImages = () => {
@@ -1973,25 +2199,57 @@ const handleDocumentPointerDown = (e) => {
   if (!target) return
   // 点击在内联编辑器内部则不处理
   if (target.closest && target.closest('.inline-composer')) return
+  if (target.closest && target.closest('.image-preview-overlay')) return
+  if (target.closest && target.closest('.pending-thumb')) return
   // 点到另一条用户气泡时不要在这里 cancel：同步卸载/重排会导致随后的 click 丢失，表现为“点了没反应”
   if (target.closest && target.closest('.user-message-bubble')) return
   cancelEditUserMessage()
 }
 const selectedAgent = ref('agent')
 
-/** 与后端 llm/model_registry 已启用 id 对齐；含 auto（服务端 choose_auto_model 解析） */
-const CHAT_MODEL_IDS = new Set([
-  'auto',
-  'qwen3.5-plus',
-  'qwen-max-thinking',
-  'deepseek-v4-pro',
-  'deepseek-v4-flash',
-  'glm-5',
-])
+/** 下拉选项：默认内置列表，onMounted 时由 GET /api/models 覆盖 */
+const FALLBACK_CHAT_MODEL_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'qwen3.5-plus', label: 'Qwen-3.5-Plus' },
+  { id: 'qwen3.6-flash', label: 'Qwen-3.6-Flash' },
+  { id: 'qwen3.6-plus', label: 'Qwen-3.6-Plus' },
+  { id: 'qwen-max-thinking', label: 'Qwen-Max' },
+  { id: 'deepseek-v4-pro', label: 'DeepSeek-V4-Pro' },
+  { id: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash' },
+  { id: 'glm-5', label: 'GLM-5' },
+]
+const chatModelOptions = ref([...FALLBACK_CHAT_MODEL_OPTIONS])
+const chatModelIds = computed(() => new Set(chatModelOptions.value.map((o) => o.id)))
+
 function normalizeSavedChatModel(saved) {
   const s = (saved || '').trim()
-  if (CHAT_MODEL_IDS.has(s)) return s
+  if (chatModelIds.value.has(s)) return s
   return 'auto'
+}
+
+async function loadChatModelsFromApi() {
+  try {
+    const resp = await fetch(`${BACKEND_BASE_URL}/api/models`, { credentials: 'include' })
+    if (!resp.ok) return
+    const data = await resp.json()
+    const models = data?.models
+    if (!data?.success || !Array.isArray(models) || !models.length) return
+    const opts = [{ id: 'auto', label: 'Auto' }]
+    for (const m of models) {
+      const id = (m?.id || '').trim()
+      if (!id) continue
+      opts.push({ id, label: (m?.label || id).trim() || id })
+    }
+    chatModelOptions.value = opts
+    const normalized = normalizeSavedChatModel(selectedModel.value)
+    if (normalized !== selectedModel.value) {
+      selectedModel.value = normalized
+      localStorage.setItem('selectedChatModel', normalized)
+    }
+    inlineEditSelectedModel.value = normalizeSavedChatModel(inlineEditSelectedModel.value)
+  } catch (e) {
+    console.warn('[MODEL] GET /api/models failed, using fallback list', e)
+  }
 }
 
 /** 历史用户消息无 llm_model 时，用紧随其后的助手消息的模型推断（与落库顺序一致） */
@@ -2039,13 +2297,140 @@ const reactSseReaderRef = ref(null)
 /** 与 SSE 信封 request_id 一致，停止时 POST /api/agent/react/cancel 让后端主循环合作退出 */
 const reactStreamRequestIdRef = ref(null)
 const currentProjectId = ref(null)
-// 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`，点击下三角切换
+// 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`；>3 项默认收起，悬停显示上/下箭头
 const sandboxExpanded = ref({})
 const getSandboxKey = (messageId, groupIdx) => (groupIdx == null ? `${messageId}-single` : `${messageId}-${groupIdx}`)
-const isSandboxExpanded = (messageId, groupIdx) => sandboxExpanded.value[getSandboxKey(messageId, groupIdx)] !== false
-const toggleSandboxExpand = (messageId, groupIdx) => {
+/** 新建/修改沙箱预览 diff 行数超过该值时默认收起（与深度思考区 reasoning-toggle 交互一致） */
+const SANDBOX_PREVIEW_COLLAPSE_OVER = 3
+
+const findChatMessageById = (messageId) => {
+  const idStr = String(messageId)
+  return messages.value.find((m) => m && String(m.id) === idStr) ?? null
+}
+
+/** 模板传入 message 对象或 id；避免 Teleport/响应式下仅 id 查找不到导致始终「展开」 */
+const resolveSandboxExpandMessage = (messageOrId) => {
+  if (messageOrId != null && typeof messageOrId === 'object' && 'id' in messageOrId) {
+    return messageOrId
+  }
+  return findChatMessageById(messageOrId)
+}
+
+const sandboxExpandMessageId = (messageOrId) => {
+  const msg = resolveSandboxExpandMessage(messageOrId)
+  return msg?.id ?? messageOrId
+}
+
+const getSandboxPreviewRowCount = (message, groupIdx) => {
+  if (!message) return 0
+  if (groupIdx != null) {
+    const group = message.modifyGroups?.[groupIdx]
+    return countGroupSandboxDisplayRows(group)
+  }
+  return getSandboxDiffRows(message).length
+}
+
+const sandboxPreviewNeedsCollapse = (message, groupIdx) =>
+  getSandboxPreviewRowCount(message, groupIdx) > SANDBOX_PREVIEW_COLLAPSE_OVER
+
+const shouldDefaultCollapseSandboxPreview = (message, groupIdx) =>
+  sandboxPreviewNeedsCollapse(message, groupIdx)
+
+const isSandboxExpanded = (messageOrId, groupIdx) => {
+  const msg = resolveSandboxExpandMessage(messageOrId)
+  const messageId = sandboxExpandMessageId(messageOrId)
   const key = getSandboxKey(messageId, groupIdx)
-  sandboxExpanded.value = { ...sandboxExpanded.value, [key]: sandboxExpanded.value[key] === false }
+  const explicit = sandboxExpanded.value[key]
+  if (explicit === true) return true
+  if (explicit === false) return false
+  return !shouldDefaultCollapseSandboxPreview(msg, groupIdx)
+}
+
+const toggleSandboxExpand = (messageOrId, groupIdx) => {
+  const messageId = sandboxExpandMessageId(messageOrId)
+  const key = getSandboxKey(messageId, groupIdx)
+  sandboxExpanded.value = {
+    ...sandboxExpanded.value,
+    [key]: !isSandboxExpanded(messageOrId, groupIdx)
+  }
+}
+
+const isSandboxPreviewCollapsed = (messageOrId, groupIdx) =>
+  sandboxPreviewNeedsCollapse(resolveSandboxExpandMessage(messageOrId), groupIdx) &&
+  !isSandboxExpanded(messageOrId, groupIdx)
+
+/** 收起时仍展示前 N 项（与 Cursor 一致），而非整块隐藏 */
+const visibleSandboxPreviewRows = (messageOrId, groupIdx, sourceRows = null) => {
+  const msg = resolveSandboxExpandMessage(messageOrId)
+  if (!msg) return sourceRows || []
+  const rows = sourceRows ?? getSandboxDiffRows(msg)
+  if (!sandboxPreviewNeedsCollapse(msg, groupIdx)) return rows
+  if (isSandboxExpanded(msg, groupIdx)) return rows
+  return rows.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
+}
+
+const flattenGroupSandboxEntries = (message, groupIdx) => {
+  const group = message?.modifyGroups?.[groupIdx]
+  if (!group?.items?.length) return []
+  const out = []
+  const multi = group.items.length > 1
+  for (let gix = 0; gix < group.items.length; gix++) {
+    const git = group.items[gix]
+    if (!isSandboxModifyItemPending(git, message)) continue
+    const diffs = resolveSandboxDiffRowsForDisplay(git, group.target)
+    for (let rowIdx = 0; rowIdx < diffs.length; rowIdx++) {
+      out.push({
+        git,
+        gix,
+        rowIdx,
+        fieldDiff: diffs[rowIdx],
+        showRecordHeader: multi && (out.length === 0 || out[out.length - 1].gix !== gix)
+      })
+    }
+  }
+  return out
+}
+
+const visibleGroupSandboxEntries = (messageOrId, groupIdx) => {
+  const msg = resolveSandboxExpandMessage(messageOrId)
+  if (!msg) return []
+  const flat = flattenGroupSandboxEntries(msg, groupIdx)
+  if (!sandboxPreviewNeedsCollapse(msg, groupIdx)) return flat
+  if (isSandboxExpanded(msg, groupIdx)) return flat
+  return flat.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
+}
+
+const flattenBatchSandboxEntries = (message) => {
+  const nav = message?.modifyNavigation
+  if (!nav?.batch_modify || !Array.isArray(nav.batch_results) || !nav.batch_results.length) {
+    return []
+  }
+  const out = []
+  const multi = nav.batch_results.length > 1
+  for (let bix = 0; bix < nav.batch_results.length; bix++) {
+    const br = nav.batch_results[bix]
+    if (!isSandboxModifyItemPending(br, message)) continue
+    const diffs = getBatchItemSandboxDiffRows(br, nav.target)
+    for (let rowIdx = 0; rowIdx < diffs.length; rowIdx++) {
+      out.push({
+        br,
+        bix,
+        rowIdx,
+        fieldDiff: diffs[rowIdx],
+        showRecordHeader: multi && (out.length === 0 || out[out.length - 1].bix !== bix)
+      })
+    }
+  }
+  return out
+}
+
+const visibleBatchSandboxEntries = (messageOrId) => {
+  const msg = resolveSandboxExpandMessage(messageOrId)
+  if (!msg) return []
+  const flat = flattenBatchSandboxEntries(msg)
+  if (!sandboxPreviewNeedsCollapse(msg, null)) return flat
+  if (isSandboxExpanded(msg, null)) return flat
+  return flat.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
 }
 
 /** 最后一个标题含 modify 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
@@ -3288,7 +3673,7 @@ const hasDetailFieldInPreview = (diffRows, mods) => {
     const fk = String(fd?.field || '').trim().toLowerCase()
     if (fk && DETAIL_FIELDS.includes(fk)) return true
     const lab = String(fd?.field_label || '')
-    return /优先级|严重程度|严重级别|用例类型|测试类型|问题分类|相似问题|复现|正确答案|答案|原因|描述|步骤|备注|基线/i.test(lab)
+    return /优先级|严重程度|严重级别|用例类型|测试类型|问题分类|相似问题|复现|正确答案|答案|原因|描述|步骤|备注|评论|追加评论|基线/i.test(lab)
   }
   const diffHasDetail = Array.isArray(diffRows) && diffRows.some(diffRowImpliesDetail)
   if (diffHasDetail) return true
@@ -3999,6 +4384,37 @@ function scheduleIdle(fn) {
   }
 }
 
+/** 解析落库的 images 字段（JSON 字符串或数组）为编辑/展示用的 { data, filename }[] */
+function parseStoredMessageImages(raw) {
+  if (raw == null || raw === '') return []
+  let parsed = raw
+  if (typeof raw === 'string') {
+    const s = raw.trim()
+    if (!s) return []
+    try {
+      parsed = JSON.parse(s)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(parsed)) return []
+  const out = []
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue
+    let data = item.data ?? item.url ?? item.base64 ?? ''
+    if (typeof data !== 'string' || !data.trim()) continue
+    data = data.trim()
+    if (!data.startsWith('data:') && /^[A-Za-z0-9+/=\s]+$/.test(data.replace(/\s/g, '').slice(0, 80))) {
+      data = `data:image/png;base64,${data.replace(/\s/g, '')}`
+    }
+    out.push({
+      data,
+      filename: item.filename || item.name || 'image.png',
+    })
+  }
+  return out
+}
+
 /** 从 GET /api/chat-sessions/:id 单条消息转为 UI 结构（与原先 map 逻辑一致） */
 function rawApiMessageToUi(msg) {
   if (msg.is_user) {
@@ -4006,6 +4422,7 @@ function rawApiMessageToUi(msg) {
       msg.llm_model != null && String(msg.llm_model).trim() !== ''
         ? normalizeSavedChatModel(String(msg.llm_model))
         : null
+    const histImages = parseStoredMessageImages(msg.images)
     return {
       id: msg.id,
       isUser: true,
@@ -4013,6 +4430,7 @@ function rawApiMessageToUi(msg) {
       time: new Date(msg.created_at).toLocaleTimeString(),
       isHistorical: true,
       llmModel: lm,
+      images: histImages.length > 0 ? histImages : undefined,
     }
   }
   let modifyNav = msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null
@@ -4575,9 +4993,7 @@ const beginEditUserMessage = (msg) => {
   if (!msg) return
   editingUserMessageId.value = msg.id
   inlineInputMessage.value = msg.content || ''
-  inlinePendingImages.value = Array.isArray(msg.images)
-    ? msg.images.map((im) => ({ data: im.data, filename: im.filename || 'image.png' }))
-    : []
+  inlinePendingImages.value = parseStoredMessageImages(msg.images)
   const idx = messages.value.findIndex((m) => m && String(m.id) === String(msg.id))
   const fromMsg =
     msg.llmModel != null && String(msg.llmModel).trim() !== ''
@@ -4707,7 +5123,11 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
         ...(props.planId != null && String(props.planId).trim() !== ''
           ? { plan_id: String(props.planId).trim() }
           : {}),
-        ...longMemoryContextForReact()
+        ...(props.sessionId
+          ? { request_id: String(props.sessionId), session_id: String(props.sessionId) }
+          : {}),
+        ...longMemoryContextForReact(),
+        ...agentUiContextForReact()
       })
     })
     
@@ -4995,7 +5415,9 @@ const handleChatMode = async (userMessage, images = [], opts = {}) => {
         inputMessage: userMessage,
         model: modelUsed,
         images: images || [],
-        locale: localeForApi()
+        locale: localeForApi(),
+        projectId: currentProjectId.value || props.projectId || null,
+        ...(props.sessionId ? { sessionId: String(props.sessionId) } : {}),
       })
     })
     
@@ -5288,7 +5710,64 @@ const patchMessageLocateTitlesAfterAdopt = (msg, want, targetType, newTitle) => 
   return touched
 }
 
+const onChatTempCardProposal = (event) => {
+  const d = event?.detail || {}
+  if (!d.scopeKey) return
+  const ix = tempCardProposals.value.findIndex((p) => p.scopeKey === d.scopeKey)
+  const entry = { ...d }
+  if (ix >= 0) {
+    const next = [...tempCardProposals.value]
+    next[ix] = entry
+    tempCardProposals.value = next
+  } else {
+    tempCardProposals.value = [...tempCardProposals.value, entry]
+  }
+}
+
+const dismissTempCardProposal = (scopeKey) => {
+  tempCardProposals.value = tempCardProposals.value.filter((p) => p.scopeKey !== scopeKey)
+}
+
+const isCreateAwaitingTempCard = (messageId) => {
+  if (messageId == null || messageId === undefined) return false
+  return createAwaitingTempCardMessageIds.value.includes(String(messageId))
+}
+
+const tempCardProposalForMessage = (messageId) => {
+  if (messageId == null || messageId === undefined) return null
+  const id = String(messageId)
+  return tempCardProposals.value.find((p) => p.messageId != null && String(p.messageId) === id) ?? null
+}
+
+const onCreateAwaitingTempCard = (event) => {
+  const { messageId, active } = event?.detail || {}
+  if (messageId == null || messageId === undefined) return
+  const id = String(messageId)
+  let arr = [...createAwaitingTempCardMessageIds.value]
+  if (active) {
+    if (!arr.includes(id)) arr.push(id)
+  } else {
+    arr = arr.filter((x) => x !== id)
+  }
+  createAwaitingTempCardMessageIds.value = arr
+}
+
+const approveTempCardProposal = (p) => {
+  window.dispatchEvent(
+    new CustomEvent('temp-card-approve', { detail: { scopeKey: p.scopeKey }, bubbles: true })
+  )
+  dismissTempCardProposal(p.scopeKey)
+}
+
+const rejectTempCardProposal = (p) => {
+  window.dispatchEvent(
+    new CustomEvent('temp-card-reject', { detail: { scopeKey: p.scopeKey }, bubbles: true })
+  )
+  dismissTempCardProposal(p.scopeKey)
+}
+
 onMounted(() => {
+  void loadChatModelsFromApi()
   scrollToBottom()
   // 初始化textarea高度
   nextTick(() => {
@@ -5301,6 +5780,8 @@ onMounted(() => {
   window.addEventListener('modify-cancelled', handleModifyCancelled)
   window.addEventListener('modify-confirmed', handleModifyConfirmed)
   window.addEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
+  window.addEventListener('chat-temp-card-proposal', onChatTempCardProposal)
+  window.addEventListener('create-awaiting-temp-card', onCreateAwaitingTempCard)
 
   // 历史消息：滚动到顶部时按需加载更早内容（先出最新一屏）
   nextTick(() => {
@@ -5525,6 +6006,8 @@ onUnmounted(() => {
   } catch (e) {}
 
   window.removeEventListener('modify-cancelled', handleModifyCancelled)
+  window.removeEventListener('chat-temp-card-proposal', onChatTempCardProposal)
+  window.removeEventListener('create-awaiting-temp-card', onCreateAwaitingTempCard)
   window.removeEventListener('modify-confirmed', handleModifyConfirmed)
   window.removeEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
 
@@ -6306,49 +6789,84 @@ watch(() => props.sessionId, (newSessionId) => {
   cursor: pointer;
 }
 
-/* 图片大图预览弹层 */
+/* 图片大图预览弹层（须高于 ProjectWorkspaceShell 顶栏 10100） */
 .image-preview-overlay {
   position: fixed;
   inset: 0;
-  z-index: 10000;
-  background: rgba(0, 0, 0, 0.85);
+  z-index: 120000;
+  background: rgba(0, 0, 0, 0.88);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: 48px 24px 24px;
   cursor: zoom-out;
 }
 
-.image-preview-close {
+.image-preview-stage {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: min(96vw, 1400px);
+  max-height: min(88vh, 900px);
+  cursor: default;
+}
+
+.image-preview-toolbar {
   position: absolute;
-  top: 16px;
-  right: 16px;
-  width: 36px;
-  height: 36px;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(30, 30, 30, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+
+.image-preview-tool-btn {
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: none;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
-  font-size: 24px;
-  line-height: 1;
+  border-radius: 6px;
+  background: transparent;
+  color: #e8e8e8;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s;
+  transition: background 0.15s, color 0.15s;
 }
 
-.image-preview-close:hover {
-  background: rgba(255, 255, 255, 0.25);
+.image-preview-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.image-preview-tool-btn--close:hover {
+  background: rgba(220, 80, 80, 0.35);
+}
+
+.image-preview-tool-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
 }
 
 .image-preview-full {
-  max-width: 100%;
-  max-height: 100%;
+  display: block;
+  max-width: min(96vw, 1400px);
+  max-height: min(88vh, 900px);
+  width: auto;
+  height: auto;
   object-fit: contain;
-  border-radius: 4px;
-  cursor: default;
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
 .message-input {
@@ -6821,24 +7339,64 @@ watch(() => props.sessionId, (newSessionId) => {
   opacity: 0.95;
 }
 
-.sandbox-toggle {
-  width: 10px;
-  height: 10px;
+/* Cursor 风格：展开条在卡片底边居中，悬停整张卡片才显示 */
+.sandbox-card--has-expand {
+  position: relative;
+}
+
+.sandbox-preview-body {
+  position: relative;
+}
+
+.sandbox-preview-body--collapsed {
+  padding-bottom: 4px;
+}
+
+.sandbox-preview-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, rgba(15, 23, 42, 0.88));
+}
+
+.sandbox-expand-bar {
+  position: relative;
   display: block;
-  flex-shrink: 0;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
   cursor: pointer;
-  /* 让 chevron 图片呈现灰白（深色背景下接近 Qoder 风格） */
-  filter: brightness(0) saturate(100%) invert(73%) sepia(11%) saturate(326%) hue-rotate(176deg) brightness(90%) contrast(86%);
-  opacity: 0.6;
+  opacity: 0;
   transition: opacity 0.15s ease;
+  overflow: visible;
 }
 
-.sandbox-header:hover .sandbox-toggle {
-  opacity: 0.95;
+.sandbox-card--has-expand:hover .sandbox-expand-bar {
+  opacity: 1;
 }
 
-.sandbox-toggle.expanded {
-  opacity: 0.95;
+/*  chevron 骑在底边线上（与 Cursor diff 块一致） */
+.sandbox-expand-chevron {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  display: block;
+  transform: translate(-50%, -50%);
+  filter: brightness(0) saturate(100%) invert(73%) sepia(11%) saturate(326%) hue-rotate(176deg) brightness(90%) contrast(86%);
+  transition: transform 0.12s ease;
+  pointer-events: none;
+}
+
+.sandbox-expand-bar.expanded .sandbox-expand-chevron {
+  transform: translate(-50%, -50%) rotate(180deg);
 }
 
 .group-item-target {
@@ -7530,6 +8088,57 @@ watch(() => props.sessionId, (newSessionId) => {
 .model-icon--ernie {
   width: 16px;
   height: 16px;
+}
+
+.temp-card-proposal-bar--inline {
+  margin: 8px 0 10px;
+}
+
+.temp-card-proposal-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 12px 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.1);
+  font-size: 12px;
+  color: #e2e8f0;
+  line-height: 1.45;
+}
+
+.temp-card-proposal-text {
+  flex: 1;
+  min-width: 200px;
+}
+
+.temp-card-proposal-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.temp-card-proposal-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.temp-card-proposal-btn--approve {
+  color: #052e16;
+  background: #4ade80;
+  border-color: #22c55e;
+}
+
+.temp-card-proposal-btn--reject {
+  color: #fecaca;
+  background: transparent;
+  border-color: rgba(248, 113, 113, 0.45);
 }
 </style>
 

@@ -624,7 +624,7 @@
         </div>
 
         <!-- 评论：历史只读 + 仅追加；对话可带 append_comment diff -->
-        <motion.div
+        <div
           id="diff-field-append_comment"
           class="sidebar-section comment-section"
           :class="{ 'has-diff': hasDetailFieldDiff('append_comment') }"
@@ -2027,6 +2027,24 @@ export default {
       return raw != null ? (idStrOrNull(raw) || String(raw).trim()) : ''
     }
 
+    /** 详情内单字段采纳且 pending 已清空：通知工作区 Tab 退出 show_diff 并刷新 */
+    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue) => {
+      if (pendingDiff.value) return
+      const tid = resolveEditorTestcaseId()
+      if (!tid) return
+      window.dispatchEvent(
+        new CustomEvent('detail-modify-adopted', {
+          detail: {
+            targetId: tid,
+            targetType: 'testcase',
+            adoptedField,
+            adoptedValue
+          },
+          bubbles: true
+        })
+      )
+    }
+
     const applyFieldChange = async (field) => {
       const mod = detailFieldDiff(field)
       if (!mod) return
@@ -2082,6 +2100,7 @@ export default {
           preconditionsEditorRef.value?.syncFromModel?.()
         }
         confirmFieldChange(field)
+        notifyDetailAdoptCompleteIfDone(nk, newValue)
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
       }
@@ -2221,7 +2240,11 @@ export default {
         }
         reconcilePendingOldFromLoadedTestcase()
         applyPendingModificationsToTestcaseForm()
-        if (detailFieldDiff('execution_result')) {
+        if (detailFieldDiff('append_comment')) {
+          isRightSidebarOpen.value = true
+          await nextTick()
+          scrollToDiffField('append_comment')
+        } else if (detailFieldDiff('execution_result')) {
           activeTab.value = 'execution'
           await nextTick()
           scrollToDiffField('execution_result')
@@ -2391,6 +2414,7 @@ export default {
       () => props.initial_tab,
       (tab) => {
         if (!props.show_diff) return
+        if (detailFieldDiff('append_comment')) return
         if (detailFieldDiff('execution_result')) return
         if (detailFieldDiff('related_defects')) return
         if (tab === 'execution' || tab === 'basic' || tab === 'defects') {

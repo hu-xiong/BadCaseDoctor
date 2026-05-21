@@ -29,21 +29,12 @@ from agents.evidence_extractor import deep_sse_json_safe as _sse_sanitize_for_js
 from agents.sse_react_v1 import engine_dict_to_wire_packets, is_wire_v1_packet
 import logging
 import re
-from llm.model_registry import choose_auto_model, supports_vision
-from llm.model_registry import get_model
+from llm.model_registry import get_model, supports_vision
+from llm.failure_attribution import record_auto_route_outcome
+from llm.model_router import resolve_route
+from llm.task_complexity import classify_image_intent
 
 logger = logging.getLogger(__name__)
-
-# Auto 路由：前端可能传 model="auto"（或误传 gpt/claude 等），但上游 LLM 不认识这些字符串。
-# 这里将其解析为“实际可调用”的模型名，避免 invalid_model。
-def _resolve_auto_model(model_name: str | None, *, has_images: bool) -> str | None:
-    m = (model_name or "").strip()
-    if not m:
-        return None
-    ml = m.lower()
-    if ml == "auto":
-        return choose_auto_model(has_images=has_images)
-    return m
 
 def model_supports_images(model_name: str) -> bool:
     """判断模型是否支持图片输入"""
@@ -181,8 +172,15 @@ def execute_agent():
         user_input = data.get('user_input', '')
         conversation_history = data.get('conversation_history', [])
         agent_mode = data.get('agent_mode', 'auto')
-        model_name = _resolve_auto_model(data.get('model'), has_images=False)
-        project_id = data.get('project_id')  # 获取项目ID
+        project_id = data.get('project_id')
+        model_name = resolve_route(
+            data.get('model'),
+            has_images=False,
+            channel='react',
+            project_id=project_id,
+            user_input=user_input,
+            user_id=str(getattr(current_user, 'id', '') or ''),
+        ).business_model_id
         ui_locale = data.get('locale') or data.get('ui_locale')
         
         print(f"[AGENT] 用户ID: {current_user.id}")
@@ -608,13 +606,35 @@ def react_agent():
         images = data.get('images') or []
         stream_mode = data.get('stream', True)
         raw_model_name = data.get('model')
-        model_name = _resolve_auto_model(raw_model_name, has_images=bool(images))
         project_id = data.get('project_id')
         plan_id = data.get('plan_id')
         card_id = data.get('card_id') or data.get('cardId')
         card_type = data.get('card_type') or data.get('cardType')
         ui_locale = data.get('locale') or data.get('ui_locale')
         pending_diff_context = data.get('pending_diff_context') or []
+        react_request_id = (
+            (data.get('request_id') or data.get('react_request_id') or '').strip() or str(uuid.uuid4())
+        )
+        image_intent_for_route = classify_image_intent(user_input) if images else None
+        _route = resolve_route(
+            raw_model_name,
+            has_images=bool(images),
+            channel='react',
+            image_intent=image_intent_for_route,
+            project_id=project_id,
+            session_id=react_request_id,
+            user_input=user_input,
+            has_pending_diff=bool(pending_diff_context),
+            user_id=str(getattr(current_user, 'id', '') or ''),
+        )
+        model_name = _route.business_model_id
+        logger.info(
+            "[REACT] model_route reason=%s resolved=%s used_auto=%s ms=%.2f",
+            _route.route_reason,
+            model_name,
+            _route.used_auto,
+            _route.route_resolve_ms,
+        )
         long_memory_context = data.get('long_memory_context') or data.get('longMemoryContext')
         if not isinstance(long_memory_context, dict):
             long_memory_context = None
@@ -666,6 +686,8 @@ def react_agent():
 
         _cs = data.get("client_shell") or data.get("clientShell")
         client_shell = _cs if isinstance(_cs, dict) else None
+        _uc = data.get("ui_context") or data.get("uiContext")
+        ui_context = _uc if isinstance(_uc, dict) else None
 
         t_llm0 = time.perf_counter()
         llm = _get_cached_llm(model_name)
@@ -709,7 +731,6 @@ def react_agent():
         from flask import stream_with_context
 
         # §6.1.2 信封：整次 SSE 连接唯一 request_id（与 seq 配套，便于日志与前端 reducer）
-        react_request_id = str(uuid.uuid4())
         t_sse0 = time.perf_counter()
 
         def _ms_since(t0: float) -> float:
@@ -777,6 +798,8 @@ def react_agent():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 async def task():
+                    _task_ok = True
+                    _task_err = ""
                     try:
                         if perf:
                             logger.info(
@@ -886,7 +909,14 @@ def react_agent():
                                     from agents.vision_describe import VisionDescribeService
 
                                     def _describe_sync():
-                                        vision_svc = VisionDescribeService()
+                                        from agents.locale_prompts import format_ui_context_for_prompt
+
+                                        vision_svc = VisionDescribeService(
+                                            vision_model=_route.vision_model_id
+                                        )
+                                        _vision_ctx = format_ui_context_for_prompt(
+                                            ui_context, locale=ui_locale
+                                        )
                                         descriptions = []
                                         for img in images[:5]:
                                             data_field = img.get('data') or img.get('url', '')
@@ -894,7 +924,9 @@ def react_agent():
                                                 continue
                                             if _image_intent == 'ocr':
                                                 desc = vision_svc.describe_image(
-                                                    data_field, user_intent=user_input or '', context=''
+                                                    data_field,
+                                                    user_intent=user_input or '',
+                                                    context=_vision_ctx,
                                                 )
                                             else:
                                                 desc = vision_svc.describe_prototype_for_testcase(
@@ -997,6 +1029,7 @@ def react_agent():
                             hint_plan_name=hint_plan_name,
                             client_shell=client_shell,
                             images=_stream_images,
+                            ui_context=ui_context,
                         ):
                             if perf and not getattr(task, "_first_chunk_logged", False):
                                 setattr(task, "_first_chunk_logged", True)
@@ -1027,8 +1060,24 @@ def react_agent():
                                 q.put(chunk)
                     except Exception as e:
                         logger.exception("[REACT-execution] 异常: %s", str(e))
+                        _task_ok = False
+                        _task_err = str(e)
                         q.put({'type': 'err', 'payload': {'message': str(e)}})
                     finally:
+                        try:
+                            record_auto_route_outcome(
+                                user_id=str(getattr(current_user, "id", "") or ""),
+                                project_id=project_id,
+                                session_id=react_request_id,
+                                used_auto=_route.used_auto,
+                                business_model_id=model_name,
+                                vision_model_id=_route.vision_model_id,
+                                success=_task_ok,
+                                error_message=_task_err,
+                                task_was_simple=(_route.task_complexity == "simple"),
+                            )
+                        except Exception:
+                            logger.exception("[REACT] record_auto_route_outcome failed")
                         logger.info("[REACT] 任务结束")
                         q.put(done)
                 try:

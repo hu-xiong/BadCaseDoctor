@@ -3301,7 +3301,7 @@ class ModifyTool(BaseTool):
             return self._format_plan_id_diff_display(value, project_id, flask_db)
         if field == "project_id":
             return self._format_project_id_diff_display(value, flask_db)
-        if field in ('preconditions', 'remark'):
+        if field in ('preconditions', 'remark', 'steps_to_reproduce', 'reproduction_steps', 'reproduce_steps'):
             return self._strip_html_for_diff_display(value)
         if isinstance(value, (list, tuple)):
             try:

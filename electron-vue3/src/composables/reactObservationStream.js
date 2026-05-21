@@ -1081,7 +1081,14 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           }
         }
 
-        handleNavigation(navigationData)
+        const createPending =
+          aiMessage.modifyNavigation?.is_create === true &&
+          aiMessage.modifyNavigation?.confirmation_required !== false
+        if (createPending) {
+          console.log('[GREP-NAV] 新建待澄清卡片，仅保存导航不自动跳转')
+        } else {
+          handleNavigation(navigationData)
+        }
       } else {
         console.log('[GREP-NAV] 未找到navigation字段')
       }

@@ -187,6 +187,7 @@ class IntelligentDevOpsAgent:
         hint_plan_name: str = None,
         client_shell: dict = None,
         images: list = None,
+        ui_context: dict = None,
     ):
         """流式处理用户请求。plan_id 为当前迭代计划ID时，grep 会只检索该计划下的记录（人类式先看本迭代）。"""
         _llm = self.llm
@@ -209,14 +210,22 @@ class IntelligentDevOpsAgent:
 
         # ReAct：run_stream 已在引擎出口转为 v1（type/payload），此处只透传
         # 卡片层适配：将卡片上下文注入 user_input，避免改动引擎签名的同时让模型“以卡片为主”决策工具参数
+        from agents.locale_prompts import format_ui_context_for_prompt
+
         _effective_input = user_input
+        _ui_block = format_ui_context_for_prompt(
+            ui_context if isinstance(ui_context, dict) else None,
+            locale=locale,
+        )
+        if _ui_block:
+            _effective_input = f"{_ui_block}{user_input}"
         if card_id is not None and str(card_id).strip():
             try:
                 _ct = str(card_type).strip() if card_type is not None else ""
             except Exception:
                 _ct = ""
             _hint = f"[上下文] 当前卡片(card) id={card_id}" + (f", type={_ct}" if _ct else "")
-            _effective_input = f"{_hint}\n{user_input}"
+            _effective_input = f"{_hint}\n{_effective_input}"
 
         async for pkt in self.react_engine.run_stream(
             _effective_input,
@@ -230,6 +239,7 @@ class IntelligentDevOpsAgent:
             hint_plan_name=hint_plan_name,
             client_shell=client_shell if isinstance(client_shell, dict) else None,
             images=images if isinstance(images, list) else None,
+            ui_context=ui_context if isinstance(ui_context, dict) else None,
         ):
             yield pkt
 

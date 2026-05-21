@@ -786,6 +786,13 @@ import ProjectManage from './ProjectManage.vue'
 import userStore from '../store/user.js'
 import { persistStableCreatedId, getStableCreatedId } from '../utils/createPreviewKeys.js'
 import {
+  tempCardScopeKey,
+  isVirtualTempCardId,
+  buildVirtualTempCardId,
+  normalizeEntityTypeForTempCard,
+  entityTypeToCardPanelType
+} from '../utils/tempCardForCreate.js'
+import {
   readTestcaseRowField,
   readTestcaseDetailRawField,
   normalizeTestcaseStepsForEditor,
@@ -793,6 +800,11 @@ import {
   TESTCASE_DETAIL_FIELDS,
   pickTestcaseEditorTabForPendingModify
 } from '../utils/testcaseModifyFields.js'
+import {
+  readBugReproductionStepsFromRow,
+  formatBugReproductionStepsForDisplay
+} from '../utils/bugModifyFields.js'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import { useLocalGoProxyStatus } from '../composables/useLocalGoProxyStatus'
 import SelectableTitleTip from './SelectableTitleTip.vue'
 
@@ -1228,6 +1240,64 @@ export default {
       return { planId: pid, planTitle: String(title || '') }
     })
     provide('terminalPlanContext', terminalPlanContext)
+
+    /** Agent：当前界面聚焦的记录（雪花 id），避免模型从截图臆造 9、11 等小整数 */
+    const agentUiContext = computed(() => {
+      const tab = activeWorkbenchTab.value
+      const planId = normalizePlanId(selectedPlan.value)
+      const pickRow = (idStr) => {
+        const rows = Array.isArray(filteredBadcases.value) ? filteredBadcases.value : []
+        return rows.find((b) => sameEntityId(b.id, idStr)) || null
+      }
+      const build = (target, recordId, title, view, cardId = null) => {
+        const rid = entityIdStr(recordId)
+        if (!rid || !/^\d+$/.test(rid)) return null
+        const ctx = { target, record_id: rid, view }
+        if (title) ctx.title = String(title).trim()
+        if (planId) ctx.plan_id = planId
+        const cid = entityIdStr(cardId)
+        if (cid) ctx.card_id = cid
+        return ctx
+      }
+
+      if (!tab) return null
+
+      if (tab.kind === 'detail') {
+        const et = tab.meta?.editorPlanType
+        let target = 'bug'
+        if (et === 'badcase') target = 'badcase'
+        else if (et === 'test_case') target = 'testcase'
+        const eid = tab.meta?.entityId
+        const row = pickRow(eid)
+        return build(target, eid, row?.title || tab.title, 'detail', tab.meta?.cardId)
+      }
+
+      if (tab.kind === 'type-list') {
+        const rawType = tab.meta?.type
+        let target = 'bug'
+        if (rawType === 'badcase') target = 'badcase'
+        else if (rawType === 'testcase' || rawType === 'test_case') target = 'testcase'
+        else if (rawType !== 'bug') return null
+
+        let rid =
+          highlightRowId.value != null
+            ? entityIdStr(highlightRowId.value)
+            : highlightBugId.value != null
+              ? entityIdStr(highlightBugId.value)
+              : ''
+        if (!rid) {
+          const rows = Array.isArray(filteredBadcases.value) ? filteredBadcases.value : []
+          if (rows.length === 1) rid = entityIdStr(rows[0].id)
+        }
+        if (!rid) return null
+        const row = pickRow(rid)
+        return build(target, rid, row?.title, 'type-list', tab.meta?.cardId)
+      }
+
+      return null
+    })
+    provide('agentUiContext', agentUiContext)
+
     const workbenchMenuRef = ref(null)
     const workbenchTabsStripRef = ref(null)
     /** Tab 条左键拖拽平移时用于样式（抓手 / 禁止选中文本） */
@@ -1423,6 +1493,10 @@ const totalCards = ref(0)
     /** 须在 restorePendingDiffReviews 之前声明：route watch immediate 会立刻恢复 diff，避免 TDZ */
     const highlightRowId = ref(null) // 高亮的列表行，用于滚动&样式
     const pendingCreates = ref([]) // 存储待确认的新建（无 before diff）
+    /** scopeKey → { virtualId, realCardId, status, cardType, planId, title, proposalSent } */
+    const tempCardByScope = ref({})
+    /** 待用户确认临时卡片后再落列表：scopeKey → { tempId, target, preview, messageId, createKey } */
+    const heldCreatesAwaitingCard = ref({})
     const processedCreateKeyMap = reactive({})
     const createdIdByCreateKey = reactive({})
     const expandedDetailRows = ref([]) // 展开的详情行
@@ -1444,8 +1518,39 @@ const totalCards = ref(0)
       if (s === 'card') return 'card'
       return s
     }
+    const getTempCardTitleI18n = (entityType) => {
+      const et = normalizeEntityTypeForTempCard(entityType)
+      if (et === 'badcase') return t('chat.tempCardTitleBadcase')
+      if (et === 'testcase') return t('chat.tempCardTitleTestcase')
+      if (et === 'card') return t('chat.tempCardTitleCard')
+      return t('chat.tempCardTitleBug')
+    }
+
+    const upsertVirtualCardInMemory = (virtualId, planId, cardType, title) => {
+      const pid = parsePositivePlanId(planId)
+      const row = {
+        id: String(virtualId),
+        title: title || getTempCardTitleI18n(cardType),
+        type: entityTypeToCardPanelType(cardType),
+        plan_id: pid,
+        _isVirtualTempCard: true
+      }
+      const list = Array.isArray(cards.value) ? [...cards.value] : []
+      const ix = list.findIndex((c) => String(c.id) === String(virtualId))
+      if (ix >= 0) list[ix] = { ...list[ix], ...row }
+      else list.unshift(row)
+      cards.value = list
+      filteredCards.value = list
+    }
+
+    const removeVirtualCardFromMemory = (virtualId) => {
+      const vid = String(virtualId)
+      cards.value = (cards.value || []).filter((c) => String(c.id) !== vid)
+      filteredCards.value = (filteredCards.value || []).filter((c) => String(c.id) !== vid)
+    }
+
     /**
-     * 仅在「当前视图」展示待确认新建行：内容类型一致，且 plan_id 与当前选中的迭代计划一致（未计划视图只显示无 plan 的预览）。
+     * 仅在「当前视图」展示待确认新建行：类型与计划一致；Bug/BadCase/用例须在对应卡片的 type-list Tab 内展示。
      */
     const pendingCreatesForCurrentView = computed(() => {
       const list = pendingCreates.value || []
@@ -1454,6 +1559,9 @@ const totalCards = ref(0)
       const tfRaw = (currentTypeFilter.value ?? '').toString().toLowerCase()
       const onCardOverview =
         tfRaw !== 'badcase' && tfRaw !== 'bug' && tfRaw !== 'testcase'
+      const tab = activeWorkbenchTab.value
+      const tabKind = tab?.kind
+      const tabCardId = entityIdStr(tab?.meta?.cardId)
       return list.filter((pc) => {
         const t = normalizeCreateTarget(pc.target)
         if (onCardOverview) {
@@ -1467,12 +1575,22 @@ const totalCards = ref(0)
         const isUnplannedTab =
           sp === null || sp === undefined || sp === 'unplanned'
         if (isUnplannedTab) {
-          return isUnplannedPreview
+          if (!isUnplannedPreview) return false
+        } else {
+          const sid = parsePositivePlanId(sp)
+          if (!sid) return false
+          if (isUnplannedPreview) return false
+          if (ppStr !== sid) return false
         }
-        const sid = parsePositivePlanId(sp)
-        if (!sid) return false
-        if (isUnplannedPreview) return false
-        return ppStr === sid
+        const pcCid = entityIdStr(pc.preview?.card_id ?? pc.preview?.cardId)
+        if (tabKind === 'type-list' && tabCardId) {
+          if (!pcCid) return false
+          return sameEntityId(pcCid, tabCardId) || String(pcCid) === String(tabCardId)
+        }
+        if (tabKind === 'plan-list' && !onCardOverview && pcCid) {
+          return false
+        }
+        return true
       })
     })
 
@@ -1694,7 +1812,6 @@ const totalCards = ref(0)
           const m = LABEL_TO_FIELD[t]
           return m === 'assignee_id' ? 'assignee' : m
         }
-        const tl = t.toLowerCase().replace(/-/g, '_')
         const snakeAliases = {
           case_status: 'status',
           workflow_status: 'status',
@@ -2185,7 +2302,7 @@ const totalCards = ref(0)
     }
 
     /** 雪花主键：与列表/API 比较时一律用字符串，禁止 parseInt/Number 以免精度丢失 */
-    const entityIdStr = (v) => (v == null || v === '' ? '' : String(v).trim())
+    const entityIdStr = (v) => snowflakeIdStr(v) || (v == null || v === '' ? '' : String(v).trim())
     const sameEntityId = (a, b) => {
       const sa = entityIdStr(a)
       const sb = entityIdStr(b)
@@ -4784,12 +4901,18 @@ const totalCards = ref(0)
       if (showMainEditor.value && sameEntityId(mainEditorItemId.value, tid)) {
         mainEditorShowDiff.value = false
       }
+      const refreshDetail = { targetId: tid, asyncPersist, fieldUpdates }
       if (tt === 'testcase' || tt === 'test_case') {
         window.dispatchEvent(
-          new CustomEvent('testcase-detail-refresh', {
-            detail: { targetId: tid, asyncPersist, fieldUpdates },
-            bubbles: true
-          })
+          new CustomEvent('testcase-detail-refresh', { detail: refreshDetail, bubbles: true })
+        )
+      } else if (tt === 'bug') {
+        window.dispatchEvent(
+          new CustomEvent('bug-detail-refresh', { detail: refreshDetail, bubbles: true })
+        )
+      } else if (tt === 'badcase' || tt === 'bad_case') {
+        window.dispatchEvent(
+          new CustomEvent('badcase-detail-refresh', { detail: refreshDetail, bubbles: true })
         )
       }
     }
@@ -7242,11 +7365,14 @@ const totalCards = ref(0)
           
       // 监听 modify-confirmed 事件（来自对话区）
       window.addEventListener('modify-confirmed', handleModifyConfirmed)
+      window.addEventListener('detail-modify-adopted', handleDetailModifyAdopted)
           
       // 监听 modify-cancelled 事件（来自对话区）
       window.addEventListener('modify-cancelled', handleModifyCancelled)
       window.addEventListener('create-pending', handleCreatePending)
       window.addEventListener('show-create-in-list', handleShowCreateInList)
+      window.addEventListener('temp-card-approve', handleTempCardApprove)
+      window.addEventListener('temp-card-reject', handleTempCardReject)
                   
       // 检查URL参数，如果有expand_plan参数，先设置选中的计划ID
       // 这样后续的manualRefreshPlans中的fetchBadcases就能带上正确的plan_id
@@ -7375,9 +7501,12 @@ const totalCards = ref(0)
       window.removeEventListener('show-delete-in-list', handleShowDeleteInList)
       window.removeEventListener('clear-pending-modification', handleClearPendingModification)
       window.removeEventListener('modify-confirmed', handleModifyConfirmed)
+      window.removeEventListener('detail-modify-adopted', handleDetailModifyAdopted)
       window.removeEventListener('modify-cancelled', handleModifyCancelled)
       window.removeEventListener('create-pending', handleCreatePending)
       window.removeEventListener('show-create-in-list', handleShowCreateInList)
+      window.removeEventListener('temp-card-approve', handleTempCardApprove)
+      window.removeEventListener('temp-card-reject', handleTempCardReject)
     })
 
     const inferCreateTargetFromPreview = (pv, explicit) => {
@@ -7416,6 +7545,225 @@ const totalCards = ref(0)
       return 'bug'
     }
 
+    const currentTypeListTabCardIfMatches = (typeForNav) => {
+      const tab = activeWorkbenchTab.value
+      if (tab?.kind !== 'type-list') return null
+      const tabType = String(tab.meta?.type || '').toLowerCase()
+      const want =
+        typeForNav === 'badcase'
+          ? 'badcase'
+          : typeForNav === 'testcase' || typeForNav === 'test_case'
+            ? 'testcase'
+            : 'bug'
+      if (tabType !== want) return null
+      const cid = entityIdStr(tab.meta?.cardId)
+      if (!cid) return null
+      const title =
+        (tab.meta?.cardTitle && String(tab.meta.cardTitle).trim()) ||
+        resolveTypeListCardTitleFromMeta(tab.meta || {}) ||
+        getTempCardTitleI18n(typeForNav)
+      return { id: cid, title }
+    }
+
+    /** 仅发起对话区确认，不写入 preview.card_id、不打开列表 Tab */
+    const proposeTempCardDecision = (preview, typeForNav, planId, messageId, createKey) => {
+      const pnStr = parsePositivePlanId(planId)
+      if (!pnStr) return null
+      const scopeKey = tempCardScopeKey(projectId.value, pnStr, typeForNav)
+      let slot = tempCardByScope.value[scopeKey]
+      if (!slot) {
+        slot = {
+          scopeKey,
+          virtualId: buildVirtualTempCardId(scopeKey),
+          realCardId: null,
+          status: 'awaiting_user',
+          cardType: typeForNav,
+          planId: pnStr,
+          title: getTempCardTitleI18n(typeForNav),
+          proposalSent: false
+        }
+        tempCardByScope.value = { ...tempCardByScope.value, [scopeKey]: slot }
+      }
+      if (!slot.proposalSent && !slot.realCardId) {
+        tempCardByScope.value = {
+          ...tempCardByScope.value,
+          [scopeKey]: { ...slot, proposalSent: true }
+        }
+        const planLabel =
+          workbenchSelectedPlanTitle.value || t('tab.planFallback', { id: pnStr })
+        window.dispatchEvent(
+          new CustomEvent('chat-temp-card-proposal', {
+            detail: {
+              scopeKey,
+              cardType: typeForNav,
+              cardTitle: slot.title,
+              planLabel,
+              planId: pnStr,
+              messageId,
+              createKey,
+              projectId: projectId.value
+            },
+            bubbles: true
+          })
+        )
+        setCreateAwaitingTempCardUi(messageId, true)
+      }
+      return scopeKey
+    }
+
+    const setCreateAwaitingTempCardUi = (messageId, active) => {
+      if (messageId == null || messageId === undefined) return
+      window.dispatchEvent(
+        new CustomEvent('create-awaiting-temp-card', {
+          detail: { messageId, active: !!active },
+          bubbles: true
+        })
+      )
+    }
+
+    const flushHeldCreateAfterCardResolved = async (scopeKey, cardId, cardTitle) => {
+      const held = heldCreatesAwaitingCard.value[scopeKey]
+      if (!held) return
+      const cid = entityIdStr(cardId)
+      if (!cid) return
+      const pnStr = parsePositivePlanId(held.preview?.plan_id ?? held.preview?.planId)
+      const typeForNav =
+        held.target === 'badcase'
+          ? 'badcase'
+          : held.target === 'testcase' || held.target === 'test_case'
+            ? 'testcase'
+            : 'bug'
+      held.preview.card_id = cid
+      held.preview.cardId = cid
+      pendingCreates.value = [
+        ...pendingCreates.value.filter((x) => x.createKey !== held.createKey),
+        {
+          tempId: held.tempId,
+          target: held.target,
+          preview: { ...held.preview },
+          messageId: held.messageId,
+          createdAt: Date.now(),
+          createKey: held.createKey
+        }
+      ]
+      const nextHeld = { ...heldCreatesAwaitingCard.value }
+      delete nextHeld[scopeKey]
+      heldCreatesAwaitingCard.value = nextHeld
+      expandPlanTreeToPlanId(pnStr)
+      selectedPlan.value = pnStr
+      await fetchCards()
+      await upsertAndActivateTypeListTab({
+        planId: pnStr,
+        cardId: cid,
+        type: typeForNav,
+        cardTitle: cardTitle || getTempCardTitleI18n(typeForNav)
+      })
+      await fetchBadcasesByPlan(pnStr, 1, cid)
+      setCreateAwaitingTempCardUi(held.messageId, false)
+      setTimeout(() => {
+        const el = document.querySelector(`[data-create-id="${held.tempId}"]`)
+        if (el?.scrollIntoView) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      }, 50)
+    }
+
+    const materializeVirtualCardOnPreview = async (previewBody, target) => {
+      const cid = previewBody?.card_id ?? previewBody?.cardId
+      if (!isVirtualTempCardId(cid)) return previewBody
+      const pnStr = parsePositivePlanId(previewBody?.plan_id ?? previewBody?.planId)
+      const scopeKey = tempCardScopeKey(projectId.value, pnStr, target)
+      const slot = tempCardByScope.value[scopeKey]
+      let realId = slot?.realCardId ? entityIdStr(slot.realCardId) : null
+      if (!realId || !/^\d+$/.test(realId)) {
+        const prevPlan = selectedPlan.value
+        if (pnStr) selectedPlan.value = pnStr
+        const row = await handleQuickCreate(
+          slot?.title || getTempCardTitleI18n(target),
+          entityTypeToCardPanelType(target)
+        )
+        if (prevPlan !== undefined) selectedPlan.value = prevPlan
+        realId = row?.id != null ? entityIdStr(row.id) : null
+        if (realId && /^\d+$/.test(realId) && slot) {
+          tempCardByScope.value = {
+            ...tempCardByScope.value,
+            [scopeKey]: { ...slot, realCardId: realId, status: 'approved' }
+          }
+          removeVirtualCardFromMemory(slot.virtualId)
+          pendingCreates.value = pendingCreates.value.map((pc) => {
+            const pcid = entityIdStr(pc.preview?.card_id ?? pc.preview?.cardId)
+            if (pcid && String(pcid) === String(slot.virtualId)) {
+              return {
+                ...pc,
+                preview: { ...pc.preview, card_id: realId, cardId: realId }
+              }
+            }
+            return pc
+          })
+        }
+      }
+      if (!realId) return previewBody
+      return { ...previewBody, card_id: realId, cardId: realId }
+    }
+
+    const handleTempCardApprove = async (event) => {
+      const scopeKey = event?.detail?.scopeKey
+      if (!scopeKey) return
+      const slot = tempCardByScope.value[scopeKey]
+      if (!slot) return
+      if (slot.realCardId) {
+        await flushHeldCreateAfterCardResolved(scopeKey, slot.realCardId, slot.title)
+        return
+      }
+      const prevPlan = selectedPlan.value
+      if (slot.planId) selectedPlan.value = slot.planId
+      const row = await handleQuickCreate(slot.title, entityTypeToCardPanelType(slot.cardType))
+      selectedPlan.value = prevPlan
+      const realId = row?.id != null ? entityIdStr(row.id) : null
+      if (!realId || !/^\d+$/.test(realId)) return
+      tempCardByScope.value = {
+        ...tempCardByScope.value,
+        [scopeKey]: { ...slot, realCardId: realId, status: 'approved' }
+      }
+      removeVirtualCardFromMemory(slot.virtualId)
+      pendingCreates.value = pendingCreates.value.map((pc) => {
+        const pcid = entityIdStr(pc.preview?.card_id ?? pc.preview?.cardId)
+        if (pcid && String(pcid) === String(slot.virtualId)) {
+          return { ...pc, preview: { ...pc.preview, card_id: realId, cardId: realId } }
+        }
+        return pc
+      })
+      await fetchCards()
+      await flushHeldCreateAfterCardResolved(scopeKey, realId, row?.title || slot.title)
+    }
+
+    const handleTempCardReject = (event) => {
+      const scopeKey = event?.detail?.scopeKey
+      if (!scopeKey) return
+      const slot = tempCardByScope.value[scopeKey]
+      const held = heldCreatesAwaitingCard.value[scopeKey]
+      if (held) {
+        setCreateAwaitingTempCardUi(held.messageId, false)
+        const nextHeld = { ...heldCreatesAwaitingCard.value }
+        delete nextHeld[scopeKey]
+        heldCreatesAwaitingCard.value = nextHeld
+        window.dispatchEvent(
+          new CustomEvent('create-held-cancelled', {
+            detail: { messageId: held.messageId, createKey: held.createKey, scopeKey },
+            bubbles: true
+          })
+        )
+      }
+      if (slot) {
+        removeVirtualCardFromMemory(slot.virtualId)
+        pendingCreates.value = pendingCreates.value.filter((pc) => {
+          const pcid = entityIdStr(pc.preview?.card_id ?? pc.preview?.cardId)
+          return !(pcid && String(pcid) === String(slot.virtualId))
+        })
+        const next = { ...tempCardByScope.value }
+        delete next[scopeKey]
+        tempCardByScope.value = next
+      }
+    }
+
     const handleCreatePending = async (event) => {
       const detail = event?.detail || {}
       const rawPreview = detail.preview
@@ -7452,6 +7800,8 @@ const totalCards = ref(0)
       const createKey = makeCreateKey(target, preview, messageId)
 
       const navigateCreatePreviewToWorkbench = async () => {
+        /** @type {{ ok: boolean, awaitingTempCard?: boolean, scopeKey?: string }} */
+        const navOutcome = { ok: true }
         const pPlan = preview.plan_id ?? preview.planId
         const pn = Number(pPlan)
         const tgt = (target || 'badcase').toString().toLowerCase()
@@ -7472,7 +7822,7 @@ const totalCards = ref(0)
             selectedPlan.value = null
             await nextTick()
           }
-          return
+          return navOutcome
         }
         const uct =
           tgt === 'badcase' ? 'badcase' : tgt === 'testcase' || tgt === 'test_case' ? 'test_case' : 'bug'
@@ -7502,7 +7852,12 @@ const totalCards = ref(0)
             const explicitCardId = preview.card_id ?? preview.cardId
             if (!cardRow && explicitCardId != null && explicitCardId !== '') {
               const cid = entityIdStr(explicitCardId)
-              if (cid && /^\d+$/.test(cid)) {
+              if (cid && isVirtualTempCardId(cid)) {
+                const mem = (cards.value || []).find((c) => String(c.id) === cid)
+                cardRow = mem
+                  ? { id: mem.id, title: mem.title }
+                  : { id: cid, title: getTempCardTitleI18n(typeForNav) }
+              } else if (cid && /^\d+$/.test(cid)) {
                 cardRow = cards.value.find((c) => sameEntityId(c.id, cid)) || null
                 if (!cardRow?.id) {
                   try {
@@ -7562,6 +7917,29 @@ const totalCards = ref(0)
                 }
               }
             }
+            if (!cardRow?.id) {
+              const tabHit = currentTypeListTabCardIfMatches(typeForNav)
+              if (tabHit?.id) cardRow = tabHit
+            }
+            if (!cardRow?.id) {
+              const scopeKey = tempCardScopeKey(projectId.value, pnStr, typeForNav)
+              const slot = tempCardByScope.value[scopeKey]
+              if (slot?.realCardId) {
+                cardRow = { id: slot.realCardId, title: slot.title }
+              }
+            }
+            if (!cardRow?.id) {
+              navOutcome.ok = false
+              navOutcome.awaitingTempCard = true
+              navOutcome.scopeKey = tempCardScopeKey(projectId.value, pnStr, typeForNav)
+              logListNav('createPreviewNavigate', {
+                planId: pn,
+                typeForNav,
+                awaitingTempCard: true,
+                scopeKey: navOutcome.scopeKey
+              })
+              return navOutcome
+            }
             logListNav('createPreviewNavigate', {
               planId: pn,
               typeForNav,
@@ -7575,13 +7953,18 @@ const totalCards = ref(0)
               fallthroughToPlanTab: !cardRow?.id
             })
             if (cardRow?.id) {
+              const cardTitle =
+                cardRow.title ||
+                resolveTypeListCardTitleFromMeta({ cardId: cardRow.id }) ||
+                getTempCardTitleI18n(typeForNav)
               await upsertAndActivateTypeListTab({
-                planId: pn,
+                planId: pnStr,
                 cardId: cardRow.id,
                 type: typeForNav,
-                cardTitle: cardRow.title
+                cardTitle
               })
               openedTypeList = true
+              await fetchBadcasesByPlan(pnStr, 1, cardRow.id)
             }
           }
           if (!openedTypeList) {
@@ -7596,6 +7979,7 @@ const totalCards = ref(0)
           selectedPlan.value = null
           await nextTick()
         }
+        return navOutcome
       }
 
       // 仅在带 messageId 时才应用「已确认/已取消」拦截；拦截时仍应跳到对应计划/卡片列表（否则点击预览条无反馈）
@@ -7620,16 +8004,61 @@ const totalCards = ref(0)
           )
           return
         }
-        await navigateCreatePreviewToWorkbench()
+        const navEarly = await navigateCreatePreviewToWorkbench()
+        if (navEarly?.awaitingTempCard) {
+          const typeForNav =
+            target === 'badcase'
+              ? 'badcase'
+              : target === 'testcase' || target === 'test_case'
+                ? 'testcase'
+                : 'bug'
+          const sk =
+            navEarly.scopeKey ||
+            proposeTempCardDecision(
+              preview,
+              typeForNav,
+              preview.plan_id ?? preview.planId,
+              messageId,
+              createKey
+            )
+          if (sk) {
+            const tempId = `create_${Date.now()}_${Math.random().toString(16).slice(2)}`
+            heldCreatesAwaitingCard.value = {
+              ...heldCreatesAwaitingCard.value,
+              [sk]: { tempId, target, preview, messageId, createKey }
+            }
+            setCreateAwaitingTempCardUi(messageId, true)
+          }
+        }
         return
       }
 
       const tempId = `create_${Date.now()}_${Math.random().toString(16).slice(2)}`
+      const navResult = await navigateCreatePreviewToWorkbench()
+      if (navResult?.awaitingTempCard) {
+        const pnStr = parsePositivePlanId(preview.plan_id ?? preview.planId)
+        const typeForNav =
+          target === 'badcase'
+            ? 'badcase'
+            : target === 'testcase' || target === 'test_case'
+              ? 'testcase'
+              : 'bug'
+        const scopeKey =
+          navResult.scopeKey ||
+          proposeTempCardDecision(preview, typeForNav, pnStr, messageId, createKey)
+        if (scopeKey) {
+          heldCreatesAwaitingCard.value = {
+            ...heldCreatesAwaitingCard.value,
+            [scopeKey]: { tempId, target, preview, messageId, createKey }
+          }
+          setCreateAwaitingTempCardUi(messageId, true)
+        }
+        return
+      }
       pendingCreates.value = [
         ...pendingCreates.value.filter(x => x.createKey !== createKey),
         { tempId, target, preview, messageId, createdAt: Date.now(), createKey }
       ]
-      await navigateCreatePreviewToWorkbench()
 
       setTimeout(() => {
         const el = document.querySelector(`[data-create-id="${tempId}"]`)
@@ -7692,7 +8121,8 @@ const totalCards = ref(0)
       const target = item.target
       const preview = item.preview || {}
       const createKey = item.createKey || makeCreateKey(target, preview, item.messageId || null)
-      const previewForApi = stripNavOnlyCreatePreview(preview)
+      let previewForApi = stripNavOnlyCreatePreview(preview)
+      previewForApi = await materializeVirtualCardOnPreview(previewForApi, target)
       try {
         let createdId = null
         let createdCardId = null
@@ -7907,6 +8337,30 @@ const totalCards = ref(0)
       console.log('[MODIFY] 已清除 pendingModifications:', pendingModifications.value)
     }
     
+    /** 详情 Tab 内单字段采纳落库后：退出 show_diff、同步评论/字段并刷新 diff-reviews */
+    const handleDetailModifyAdopted = async (event) => {
+      const detail = event?.detail || {}
+      const tid = entityIdStr(detail.targetId)
+      if (!tid) return
+      let tt = String(detail.targetType || 'testcase').toLowerCase().replace(/-/g, '_')
+      if (tt === 'test_case') tt = 'testcase'
+      const adoptedField = detail.adoptedField
+      const adoptedValue = detail.adoptedValue
+      const fieldUpdates =
+        adoptedField != null && adoptedField !== ''
+          ? { [String(adoptedField)]: adoptedValue }
+          : null
+      refreshOpenDetailEditorAfterAdopt(tt, tid, {
+        asyncPersist: false,
+        fieldUpdates
+      })
+      try {
+        await restorePendingDiffReviews({ afterAdopt: true })
+      } catch (e) {
+        console.warn('[DIFF] restorePendingDiffReviews(detail-adopt) 失败:', e)
+      }
+    }
+
     // 处理 modify-confirmed 事件（来自对话区）
     const handleModifyConfirmed = async (event) => {
       const detail = event.detail || {}
@@ -7993,6 +8447,20 @@ const totalCards = ref(0)
         const v = row[fieldKey]
         return v == null ? '' : String(v)
       }
+      const isBugReproFieldKey = (fk, rawLabel) => {
+        const f = String(fk || '').toLowerCase()
+        const lab = String(rawLabel || '')
+        return (
+          f === 'reproduction_steps' ||
+          f === 'steps_to_reproduce' ||
+          f === 'reproduce_steps' ||
+          lab.includes('复现步骤')
+        )
+      }
+      const snapBugReproField = (row) => {
+        const raw = readBugReproductionStepsFromRow(row)
+        return raw ? formatBugReproductionStepsForDisplay(raw) : ''
+      }
       if (diff && Array.isArray(diff) && diff.length > 0) {
         diff.forEach((fieldDiff) => {
           const rawField = fieldDiff.field ?? fieldDiff.field_label
@@ -8028,6 +8496,12 @@ const totalCards = ref(0)
                 if (bo !== undefined && bo !== null && String(bo).trim() !== '') oldC = bo
                 if (ao !== undefined && ao !== null && String(ao).trim() !== '') newC = ao
               }
+            }
+            if (tgt === 'bug' && (before || after) && isBugReproFieldKey(fieldKey, rawField)) {
+              const bo = snapBugReproField(before)
+              const ao = snapBugReproField(after)
+              if (bo) oldC = bo
+              if (ao) newC = ao
             }
             if (
               rowSnapshotTargets &&
@@ -8069,6 +8543,12 @@ const totalCards = ref(0)
               if (bo !== undefined && bo !== null && String(bo).trim() !== '') oldC = bo
               if (ao !== undefined && ao !== null && String(ao).trim() !== '') newC = ao
             }
+            if (tgt === 'bug' && (before || after) && isBugReproFieldKey(fieldKey, rawField)) {
+              const bo = snapBugReproField(before)
+              const ao = snapBugReproField(after)
+              if (bo) oldC = bo
+              if (ao) newC = ao
+            }
             if (oldC !== newC) {
               modifyData[fieldKey] = { old: oldC, new: newC }
             }
@@ -8107,6 +8587,15 @@ const totalCards = ref(0)
               (!entry.old || String(entry.old).trim() === '')
             ) {
               const bo = snapListField(before, fk)
+              if (bo) entry = { ...entry, old: bo }
+            }
+            if (
+              tgt === 'bug' &&
+              (before || after) &&
+              isBugReproFieldKey(fk, field) &&
+              (!entry.old || String(entry.old).trim() === '')
+            ) {
+              const bo = snapBugReproField(before)
               if (bo) entry = { ...entry, old: bo }
             }
             modifyData[fk] = entry

@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from agents.tool_registry import BaseTool
 from agents.tools.create_tool import CreateTool
+from utils.entity_id import coerce_plausible_entity_pk, is_plausible_entity_pk
 
 
 class CopyTool(BaseTool):
@@ -136,10 +137,15 @@ class CopyTool(BaseTool):
         if sid is None or str(sid).strip() == "":
             return {"success": False, "error": "缺少 source_id（或 copy_from_*_id / *_id）"}
 
-        try:
-            sid_int = int(sid)
-        except (TypeError, ValueError):
-            return {"success": False, "error": f"source_id 须为整数，收到: {sid!r}"}
+        sid_int = coerce_plausible_entity_pk(sid)
+        if sid_int is None:
+            return {
+                "success": False,
+                "error": (
+                    f"source_id={sid!r} 不是有效的雪花主键（过小或无效）。"
+                    "请勿从截图猜测小整数 ID；须使用界面上下文 record_id，或先 grep 标题再 copy/create。"
+                ),
+            }
 
         if project_id is None or str(project_id).strip() == "":
             return {"success": False, "error": "缺少 project_id"}

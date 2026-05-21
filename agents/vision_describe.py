@@ -28,7 +28,13 @@ PROMPT_PROTOTYPE_TESTCASE = """你是一个 UI 原型图分析助手。用户上
 输出要求：清晰、结构化，便于后续模型生成测试用例。"""
 
 
-def _call_vision_api(image_base64: str, prompt: str, user_intent: str = "") -> str:
+def _call_vision_api(
+    image_base64: str,
+    prompt: str,
+    user_intent: str = "",
+    *,
+    model: str | None = None,
+) -> str:
     """
     调用 DashScope 视觉模型（qwen3.5-plus 支持图像）。
     使用 OpenAI 兼容接口。
@@ -53,8 +59,14 @@ def _call_vision_api(image_base64: str, prompt: str, user_intent: str = "") -> s
     base = getattr(Config, "DASHSCOPE_COMPAT_BASE_URL", None) or "https://dashscope.aliyuncs.com/compatible-mode/v1"
     client = OpenAI(api_key=api_key, base_url=base.rstrip("/"))
 
+    vision_model = (
+        (model or "").strip()
+        or (getattr(Config, "VISION_MODEL", None) or os.getenv("VISION_MODEL") or "").strip()
+        or "qwen3.6-plus"
+    )
+
     response = client.chat.completions.create(
-        model="qwen3.5-plus",
+        model=vision_model,
         messages=[
             {
                 "role": "user",
@@ -81,8 +93,12 @@ class VisionDescribeService:
     - 原型图 → 测试用例（describe_prototype_for_testcase）
     """
 
-    def __init__(self, vision_model: str = "qwen3.5-plus"):
-        self.vision_model = vision_model
+    def __init__(self, vision_model: str | None = None):
+        self.vision_model = (
+            (vision_model or "").strip()
+            or (getattr(Config, "VISION_MODEL", None) or os.getenv("VISION_MODEL") or "").strip()
+            or "qwen3.6-plus"
+        )
 
     def describe_image(
         self,
@@ -98,7 +114,7 @@ class VisionDescribeService:
         prompt = "请详细、准确地描述这张图片的内容，包括：可识别的文字、布局结构、关键元素、视觉层次等。根据用户的补充说明调整描述侧重点。"
         if context:
             prompt += f"\n\n上下文：{context}"
-        return _call_vision_api(image_base64, prompt, user_intent)
+        return _call_vision_api(image_base64, prompt, user_intent, model=self.vision_model)
 
     def describe_prototype_for_testcase(
         self, image_base64: str, user_intent: str = "", locale: Optional[str] = None
@@ -106,4 +122,6 @@ class VisionDescribeService:
         """场景：原型图 → 测试用例。针对 UI 原型图输出结构化描述，便于生成测试用例。"""
         from .locale_prompts import vision_prototype_prompt
 
-        return _call_vision_api(image_base64, vision_prototype_prompt(locale), user_intent)
+        return _call_vision_api(
+            image_base64, vision_prototype_prompt(locale), user_intent, model=self.vision_model
+        )

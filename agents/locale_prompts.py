@@ -110,6 +110,60 @@ def vision_image_block_labels(locale: Optional[str]) -> tuple[str, str, str]:
     )
 
 
+def format_ui_context_for_prompt(ui_context: Optional[Dict[str, Any]], locale: Optional[str] = None) -> str:
+    """
+    将前端当前界面焦点格式化为 Agent 可读上下文。
+    强调：主键为雪花 ID，禁止从截图臆造 9、11 等小整数。
+    """
+    if not isinstance(ui_context, dict) or not ui_context:
+        return ""
+    target = str(ui_context.get("target") or "").strip().lower()
+    rid = ui_context.get("record_id") or ui_context.get("recordId")
+    if rid is None or str(rid).strip() == "":
+        return ""
+    title = str(ui_context.get("title") or "").strip()
+    plan_id = ui_context.get("plan_id") or ui_context.get("planId")
+    card_id = ui_context.get("card_id") or ui_context.get("cardId")
+    view = str(ui_context.get("view") or "").strip()
+    if is_english_locale(locale):
+        lines = [
+            "[UI context] The user is focused on a record in the app (authoritative; do not invent IDs from screenshots):",
+            f"- target={target or 'unknown'}",
+            f"- record_id={rid} (snowflake primary key; never use small integers like 9 or 11)",
+        ]
+        if title:
+            lines.append(f"- title={title!r}")
+        if plan_id not in (None, "", 0, "0"):
+            lines.append(f"- plan_id={plan_id}")
+        if card_id not in (None, "", 0, "0"):
+            lines.append(f"- card_id={card_id}")
+        if view:
+            lines.append(f"- view={view}")
+        lines.append(
+            "For copy/create based on «this/current bug», use this record_id or grep by title first; "
+            "never trust row numbers or IDs read only from images."
+        )
+        return "\n".join(lines) + "\n\n"
+    lines = [
+        "[界面上下文] 用户当前在应用中聚焦的记录（权威来源；勿从截图臆造 ID）：",
+        f"- target={target or '未知'}",
+        f"- record_id={rid}（雪花主键；禁止使用 9、11 等小整数）",
+    ]
+    if title:
+        lines.append(f"- title={title!r}")
+    if plan_id not in (None, "", 0, "0"):
+        lines.append(f"- plan_id={plan_id}")
+    if card_id not in (None, "", 0, "0"):
+        lines.append(f"- card_id={card_id}")
+    if view:
+        lines.append(f"- view={view}")
+    lines.append(
+        "用户说「这个/当前 bug」复制新建时，须使用上述 record_id，或先 grep 标题再取 first_bug_id；"
+        "禁止仅依据截图中的行号或小数字当作主键。"
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 def react_think_prelude_after_gate(locale: Optional[str]) -> str:
     """
     独立门控已判定走工具链之后、首轮 THINK 流式首 token 之前，下发一行可见 reasoning，

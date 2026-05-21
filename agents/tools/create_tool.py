@@ -166,7 +166,12 @@ class CreateTool(BaseTool):
                 m = re.search(pat, q)
                 if not m:
                     continue
-                bid = int(m.group(1))
+                from utils.entity_id import is_plausible_entity_pk
+
+                bid_raw = m.group(1)
+                if not is_plausible_entity_pk(bid_raw):
+                    continue
+                bid = int(bid_raw)
                 row = self.db.query(_Bug).get(bid)
                 if row and int(row.project_id or 0) == pid:
                     print(f"[CREATE] NL 推断复制源：按 Bug id 模式 {pat!r} -> id={bid} title={row.title!r}")
@@ -191,11 +196,15 @@ class CreateTool(BaseTool):
         m3 = re.search(r'(?:复制|拷贝)\s*Bug\s*[#＃]?\s*(\d+)', q, re.I)
         if m3:
             try:
-                bid = int(m3.group(1))
-                row = self.db.query(_Bug).get(bid)
-                if row and int(row.project_id or 0) == int(project_id):
-                    print(f"[CREATE] NL 推断复制源：按 Bug id={bid}")
-                    return bid
+                from utils.entity_id import is_plausible_entity_pk
+
+                bid_raw = m3.group(1)
+                if is_plausible_entity_pk(bid_raw):
+                    bid = int(bid_raw)
+                    row = self.db.query(_Bug).get(bid)
+                    if row and int(row.project_id or 0) == int(project_id):
+                        print(f"[CREATE] NL 推断复制源：按 Bug id={bid}")
+                        return bid
             except (TypeError, ValueError):
                 pass
 

@@ -369,7 +369,7 @@
             <div class="diff-content">
               <div class="diff-old">
                 <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ (pendingDiff.modifications.reproduction_steps || pendingDiff.modifications.steps_to_reproduce)?.old || '未设置' }}</span>
+                <span class="diff-value">{{ bugReproStepsOldDisplay || '未设置' }}</span>
               </div>
               <div class="diff-arrow">→</div>
               <div class="diff-new">
@@ -570,17 +570,7 @@
         <!-- 所属项目 -->
         <div class="sidebar-section">
           <h3 class="sidebar-title">所属项目</h3>
-          <div class="radio-group">
-            <label class="radio-item">
-              <input type="radio" v-model="bug.associate_project" :value="true" />
-              <span class="radio-text">关联所属项目</span>
-            </label>
-            <label class="radio-item">
-              <input type="radio" v-model="bug.associate_project" :value="false" />
-              <span class="radio-text">暂不关联所属项目</span>
-            </label>
-          </div>
-          <div v-if="bug.associate_project" class="project-select">
+          <div class="project-select">
             <label class="select-label">项目名称:</label>
             <select v-model="bug.project_id" class="form-select" @change="handleProjectChange">
               <option value="">请选择</option>
@@ -648,7 +638,11 @@
            />
          </div>
 
-         <div class="sidebar-section comment-section" :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }">
+         <div
+           id="diff-field-append_comment"
+           class="sidebar-section comment-section"
+           :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }"
+         >
            <h3 class="sidebar-title">评论记录</h3>
            <div v-if="hasEntityFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
              <div class="diff-header">
@@ -727,6 +721,11 @@ import { ref, reactive, onMounted, onActivated, onUnmounted, computed, nextTick,
 import { useRouter, useRoute } from 'vue-router'
 import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, addBugComment, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
+import {
+  resolveBugReproModifyStoreKey,
+  resolveBugReproStepsOldDisplay,
+  readBugReproductionStepsFromRow
+} from '../utils/bugModifyFields.js'
 import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/richTextContent.js'
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import user from '../store/user.js'
@@ -814,7 +813,10 @@ export default {
       'steps_to_reproduce',
       'reproduce_steps',
       'expected_result',
-      'actual_result'
+      'actual_result',
+      'append_comment',
+      'comment',
+      'remark'
     ])
     const PENDING_FIELD_LABELS = {
       title: '标题',
@@ -949,6 +951,18 @@ export default {
 
     const pendingDiffFieldLabel = (field) =>
       PENDING_FIELD_LABELS[String(field)] || String(field)
+
+    const bugReproStepsOldDisplay = computed(() => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return ''
+      const key = resolveBugReproModifyStoreKey(mods)
+      if (!key) return ''
+      return resolveBugReproStepsOldDisplay(
+        mods[key],
+        bug.reproduction_steps,
+        pendingDiff.value?.before
+      )
+    })
 
     const shouldShowPendingFieldInTop = (field) => {
       const f = String(field || '')
@@ -1642,6 +1656,7 @@ export default {
     })
     onUnmounted(() => {
       document.removeEventListener('pointerdown', onCommentEditorOutsidePointerDown, true)
+      window.removeEventListener('bug-detail-refresh', onDetailModifyAdopted)
     })
 
     const bugDraftPreset = inject('bugDraftPreset', null)
@@ -1713,6 +1728,36 @@ export default {
       return val != null ? String(val) : ''
     }
 
+    const plainCommentFromDiffValue = (val) =>
+      formatEntityDiffValue('append_comment', typeof val === 'object' && val !== null && 'new' in val ? val.new : val)
+
+    const commentPlainAlreadyListed = (plain) => {
+      const want = String(plain || '').trim()
+      if (!want) return false
+      return entityComments.value.some((c) => {
+        const tempDiv = document.createElement('div')
+        tempDiv.innerHTML = String(c.content || '')
+        const body = (tempDiv.textContent || tempDiv.innerText || '').trim()
+        return body === want
+      })
+    }
+
+    const optimisticAppendEntityComment = (text) => {
+      const plain = String(text || '').trim()
+      if (!plain || commentPlainAlreadyListed(plain)) return
+      const author = currentUser.value ? personPrimaryLabel(currentUser.value) : '—'
+      entityComments.value = [
+        ...entityComments.value,
+        {
+          id: `pending-${Date.now()}`,
+          content: plain.includes('<') ? plain : `<p>${plain.replace(/\n/g, '<br>')}</p>`,
+          user_name: author,
+          created_at: new Date().toISOString(),
+          source_message_id: pendingDiff.value?.messageId ?? null
+        }
+      ]
+    }
+
     const loadEntityComments = async () => {
       const id = bugId.value
       if (!id) return
@@ -1722,6 +1767,64 @@ export default {
         entityComments.value = Array.isArray(list) ? [...list] : []
       } catch (e) {
         console.error('[Bug] 加载评论失败:', e)
+      }
+    }
+
+    const reloadEntityCommentsAfterAdopt = async (expectedPlain = '') => {
+      const want = String(expectedPlain || '').trim()
+      const delays = want ? [0, 200, 450, 800] : [0]
+      for (const ms of delays) {
+        if (ms) await new Promise((resolve) => setTimeout(resolve, ms))
+        await loadEntityComments()
+        if (!want || commentPlainAlreadyListed(want)) return
+      }
+    }
+
+    const clearCommentPendingDiffKeys = () => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return
+      for (const k of ['append_comment', 'comment', 'remark']) {
+        delete mods[k]
+      }
+      if (Object.keys(mods).filter((key) => !String(key).startsWith('_')).length === 0) {
+        sessionStorage.removeItem('pendingModifyDiff')
+        pendingDiff.value = null
+      }
+    }
+
+    const resolveEditorBugId = () => {
+      const raw =
+        props.id != null && props.id !== ''
+          ? props.id
+          : bugId.value != null && bugId.value !== ''
+            ? bugId.value
+            : null
+      return raw != null ? String(raw).trim() : ''
+    }
+
+    const onDetailModifyAdopted = async (event) => {
+      const tid = event?.detail?.targetId != null ? String(event.detail.targetId).trim() : ''
+      const cur = resolveEditorBugId()
+      if (!tid || !cur || tid !== cur) return
+
+      const fieldUpdates = event?.detail?.fieldUpdates
+      if (fieldUpdates && typeof fieldUpdates === 'object') {
+        for (const [field, val] of Object.entries(fieldUpdates)) {
+          const f = String(field)
+          if (f === 'append_comment' || f === 'comment' || f === 'remark') {
+            const plain = plainCommentFromDiffValue(val)
+            optimisticAppendEntityComment(plain)
+            await reloadEntityCommentsAfterAdopt(plain)
+            clearCommentPendingDiffKeys()
+          }
+        }
+      }
+
+      if (
+        pendingDiff.value?.modifications &&
+        Object.keys(pendingDiff.value.modifications).filter((k) => !String(k).startsWith('_')).length === 0
+      ) {
+        pendingDiff.value = null
       }
     }
 
@@ -1909,7 +2012,14 @@ export default {
       }
     }
 
-    const reloadPendingDiffFromSession = () => {
+    const focusAppendCommentDiffInSidebar = async () => {
+      if (!hasEntityFieldDiff('append_comment')) return
+      isRightSidebarOpen.value = true
+      await nextTick()
+      scrollToDiffField('append_comment')
+    }
+
+    const reloadPendingDiffFromSession = async () => {
       if (!props.embedded) return
       if (!props.show_diff) {
         pendingDiff.value = null
@@ -1937,6 +2047,7 @@ export default {
         }
         pendingDiff.value = pd
         applyPendingModificationsToBugForm()
+        await focusAppendCommentDiffInSidebar()
       } catch (e) {
         console.error('[DIFF] reloadPendingDiffFromSession 失败:', e)
       }
@@ -1985,6 +2096,28 @@ export default {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
 
+    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue) => {
+      if (pendingDiff.value) return
+      const tid =
+        props.id != null && props.id !== ''
+          ? String(props.id).trim()
+          : bugId.value
+            ? String(bugId.value).trim()
+            : ''
+      if (!tid) return
+      window.dispatchEvent(
+        new CustomEvent('detail-modify-adopted', {
+          detail: {
+            targetId: tid,
+            targetType: 'bug',
+            adoptedField,
+            adoptedValue
+          },
+          bubbles: true
+        })
+      )
+    }
+
     const applyFieldChange = async (requestedField) => {
       const storeKey = resolvePendingModifyStoreKey(requestedField)
       if (!storeKey || !pendingDiff.value?.modifications?.[storeKey]) return
@@ -2020,7 +2153,12 @@ export default {
         }
 
         if (storeKey === 'append_comment' || apiField === 'append_comment') {
-          await loadEntityComments()
+          const plain = plainCommentFromDiffValue(newValue)
+          optimisticAppendEntityComment(plain)
+          if (result.async === true) {
+            await new Promise((resolve) => setTimeout(resolve, 420))
+          }
+          await reloadEntityCommentsAfterAdopt(plain)
           commentDraft.value = ''
         } else if (apiField === 'plan_id') {
           bug.plan = normalizePlanId(newValue) || ''
@@ -2034,6 +2172,7 @@ export default {
         }
 
         confirmFieldChange(storeKey)
+        notifyDetailAdoptCompleteIfDone(storeKey, newValue)
       } catch (e) {
         console.error('[DIFF] 采纳字段异常:', e)
       }
@@ -2070,6 +2209,7 @@ export default {
     }
     
     onMounted(async () => {
+      window.addEventListener('bug-detail-refresh', onDetailModifyAdopted)
       console.log('=== 组件挂载开始 ===')
       loading.value = true
       try {
@@ -2178,10 +2318,24 @@ export default {
         // 待确认 diff 的「旧值」若与当前库表不一致（常见：会话里错成默认 new/空），以 initBug 拉取后的表单为准
         const reconcilePendingOldFromLoadedBug = () => {
           if (!pendingDiff.value?.modifications) return
+          const reproKey = resolveBugReproModifyStoreKey(pendingDiff.value.modifications)
+          if (reproKey) {
+            const data = pendingDiff.value.modifications[reproKey]
+            const loaded = readBugReproductionStepsFromRow({
+              reproduction_steps: bug.reproduction_steps
+            })
+            const oldS = data?.old != null ? String(data.old).trim() : ''
+            if (loaded && !oldS) {
+              data.old = bug.reproduction_steps || loaded
+            }
+          }
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (String(field).startsWith('_')) continue
-            if (!bug.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
-            if (field !== 'status' && field !== 'title') continue
+            if (!data || typeof data !== 'object' || !('new' in data)) continue
+            if (field === 'steps_to_reproduce' || field === 'reproduction_steps' || field === 'reproduce_steps') {
+              continue
+            }
+            if (field !== 'status' && field !== 'title' && !bug.hasOwnProperty(field)) continue
             const bv = bug[field]
             const bs = bv != null ? String(bv).trim() : ''
             if (!bs) continue
@@ -2271,6 +2425,7 @@ export default {
       togglePlanExpansion,
       goBack,
       pendingDiff,
+      bugReproStepsOldDisplay,
       showPendingDiffTopPanel,
       shouldShowPendingFieldInTop,
       pendingDiffFieldLabel,

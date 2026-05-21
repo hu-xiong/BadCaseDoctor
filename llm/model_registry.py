@@ -111,6 +111,24 @@ def _build_registry() -> List[ModelSpec]:
             priority=60,
         ),
         ModelSpec(
+            id="qwen3.6-flash",
+            label="Qwen-3.6-Flash",
+            provider="qwen",
+            enabled=_enabled("qwen3.6-flash", default=True),
+            vision=False,
+            pricing=_price_for("qwen3.6-flash"),
+            priority=58,
+        ),
+        ModelSpec(
+            id="qwen3.6-plus",
+            label="Qwen-3.6-Plus",
+            provider="qwen",
+            enabled=_enabled("qwen3.6-plus", default=True),
+            vision=True,
+            pricing=_price_for("qwen3.6-plus"),
+            priority=62,
+        ),
+        ModelSpec(
             id="qwen-max-thinking",
             label="Qwen-Max (auto thinking)",
             provider="qwen",
@@ -221,20 +239,20 @@ def _total_price_per_million(m: ModelSpec) -> float:
 
 def choose_auto_model(*, has_images: bool) -> Optional[str]:
     """
-    Auto 选模：在「已启用」模型中按 priority（越大越优先）、再按成本、再按 id 稳定选取。
-    - 有图片：仅在 vision=true 的模型中选
-    - 无图片：在全部启用模型中选（不再回退 QIANFAN_MODEL 默认 X1，避免 Auto 恒为 ernie-x1）
+    Auto 选模（兼容旧调用方）。新代码请用 llm.model_router.resolve_request_model。
     """
-    enabled = list_models(include_disabled=False)
-    if has_images:
-        candidates = [m for m in enabled if m.vision]
-    else:
-        candidates = list(enabled)
-    if not candidates:
-        return None
-    best = sorted(
-        candidates,
-        key=lambda x: (-int(x.priority or 0), _total_price_per_million(x), x.id),
-    )[0]
-    return best.id
+    from .model_scheduler import choose_auto_model as _choose
+
+    cost_policy = "quality_first" if has_images else "balanced"
+    return _choose(has_images=has_images, cost_policy=cost_policy)
+
+
+def reload_registry() -> None:
+    """环境变量变更后重建注册表与调度缓存。"""
+    global _REGISTRY, _BY_ID
+    _REGISTRY = _build_registry()
+    _BY_ID = {m.id: m for m in _REGISTRY}
+    from . import model_scheduler
+
+    model_scheduler.refresh_scheduler_cache()
 

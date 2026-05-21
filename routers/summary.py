@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, Iterator, List
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask_login import current_user
 
 from llm.factory import get_llm
 from config import Config
@@ -118,14 +119,17 @@ def generate_summary():
     - stream false：一次性 JSON（兼容旧客户端）
     """
     data = request.get_json(silent=True) or {}
-    model_name = (data.get("model") or "").strip()
-    if model_name.lower() == "auto":
-        # summary 不涉及图片；auto 回退到“默认 provider 的默认模型”
-        model_name = (
-            Config.QIANFAN_MODEL
-            if (getattr(Config, "DEFAULT_LLM", "") or "").strip().lower() == "qianfan"
-            else Config.DASHSCOPE_MODEL
-        )
+    from llm.model_router import resolve_route
+
+    raw_model = (data.get("model") or "").strip()
+    uid = str(getattr(current_user, "id", "") or "") if current_user.is_authenticated else ""
+    model_name = resolve_route(
+        raw_model or "auto",
+        has_images=False,
+        channel="summary",
+        user_input="",
+        user_id=uid or None,
+    ).business_model_id
     turns = data.get("turns") or []
     meta: Dict[str, Any] = data.get("meta") or {}
     use_stream = _coerce_bool(data.get("stream"), default=True)

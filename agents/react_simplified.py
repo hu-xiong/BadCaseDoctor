@@ -111,6 +111,7 @@ from .react_function_call import (
 from .self_correction import SelfCorrectionEngine
 from .evidence_extractor import EvidenceExtractor, _json_safe_tool_params, deep_sse_json_safe
 from llm.multimodal_content import openai_style_user_content
+from utils.entity_id import coerce_plausible_entity_pk, sanitize_tool_entity_ids
 
 # 与 SSE 信封 request_id（agent_session_id）对齐：前端停止时合作式打断主循环
 _REACT_STREAM_CANCEL_EVENTS: Dict[str, threading.Event] = {}
@@ -4326,19 +4327,27 @@ class SimplifiedReActEngine:
             )
             if wants_copy:
                 if target_type == 'bug':
-                    source_id = grep_result.get('first_bug_id') or result_context.get('first_bug_id')
+                    source_id = coerce_plausible_entity_pk(
+                        grep_result.get('first_bug_id') or result_context.get('first_bug_id')
+                    )
                     if source_id and not fields.get('copy_from_bug_id'):
                         fields['copy_from_bug_id'] = source_id
                 elif target_type == 'badcase':
-                    source_id = grep_result.get('first_badcase_id') or result_context.get('first_badcase_id')
+                    source_id = coerce_plausible_entity_pk(
+                        grep_result.get('first_badcase_id') or result_context.get('first_badcase_id')
+                    )
                     if source_id and not fields.get('copy_from_badcase_id'):
                         fields['copy_from_badcase_id'] = source_id
                 elif target_type == 'testcase':
-                    source_id = grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
+                    source_id = coerce_plausible_entity_pk(
+                        grep_result.get('first_testcase_id') or result_context.get('first_testcase_id')
+                    )
                     if source_id and not fields.get('copy_from_testcase_id'):
                         fields['copy_from_testcase_id'] = source_id
                 elif target_type == 'card':
-                    source_id = grep_result.get('first_card_id') or result_context.get('first_card_id')
+                    source_id = coerce_plausible_entity_pk(
+                        grep_result.get('first_card_id') or result_context.get('first_card_id')
+                    )
                     if source_id and not fields.get('copy_from_card_id'):
                         fields['copy_from_card_id'] = source_id
 
@@ -4387,6 +4396,13 @@ class SimplifiedReActEngine:
             params.setdefault('confirm', False)
             params.setdefault('natural_query', user_input)
             print(f"[REACT-planing] create 参数补齐: target={target_type}, fields={fields}")
+            sanitize_tool_entity_ids(
+                "create",
+                params,
+                grep_result=result_context.get("grep_result") or {},
+                result_context=result_context,
+                ui_context=getattr(self, "_ui_context", None),
+            )
 
         if tool_name == 'copy':
             grep_result = result_context.get('grep_result', {})
@@ -4410,6 +4426,13 @@ class SimplifiedReActEngine:
                 params['title'] = extracted_title
             params.setdefault('natural_query', user_input)
             print(f"[REACT-planing] copy 参数补齐: target={params.get('target')}, source_id={params.get('source_id')}")
+            sanitize_tool_entity_ids(
+                "copy",
+                params,
+                grep_result=result_context.get("grep_result") or {},
+                result_context=result_context,
+                ui_context=getattr(self, "_ui_context", None),
+            )
 
         if tool_name == "delete":
             grep_result = result_context.get("grep_result", {})
@@ -4633,12 +4656,14 @@ class SimplifiedReActEngine:
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
         images: Optional[List[Dict[str, Any]]] = None,
+        ui_context: Optional[Dict[str, Any]] = None,
     ):
         '''唯一流式引擎：三段式 XML；前置 gather 与旧链路一致。'''
         perf = (os.getenv("PERF_LOG") == "1")
         print(f"\n[REACT] unified stream engine start")
         self._ui_locale = normalize_locale(locale)
         self._client_shell = client_shell if isinstance(client_shell, dict) else None
+        self._ui_context = ui_context if isinstance(ui_context, dict) else None
         self._agent_session_id = (agent_session_id or "").strip() or None
         if self._agent_session_id:
             _REACT_STREAM_CANCEL_EVENTS[self._agent_session_id] = threading.Event()
@@ -5563,10 +5588,9 @@ class SimplifiedReActEngine:
                                         or bool(re.search(r"(?i)\bcopy\b", _todo_eff))
                                     )
                                     if _copy_hint_x:
-                                        try:
-                                            _cf2["copy_from_bug_id"] = int(_fbid)
-                                        except (TypeError, ValueError):
-                                            pass
+                                        _fbid_ok = coerce_plausible_entity_pk(_fbid)
+                                        if _fbid_ok is not None:
+                                            _cf2["copy_from_bug_id"] = _fbid_ok
                 elif tool_name == "copy":
                     if not tool_params.get("project_id") and project_id is not None:
                         tool_params["project_id"] = project_id
@@ -5617,6 +5641,15 @@ class SimplifiedReActEngine:
                             _tid = None
                         if _tid:
                             tool_params["target_id"] = _tid
+
+                if tool_name in ("copy", "create", "modify", "delete"):
+                    sanitize_tool_entity_ids(
+                        tool_name,
+                        tool_params,
+                        grep_result=(result_ctx or {}).get("grep_result") or {},
+                        result_context=result_ctx or {},
+                        ui_context=getattr(self, "_ui_context", None),
+                    )
 
                 decision_dict: Dict[str, Any] = {
                     "execute": True,
@@ -6083,6 +6116,7 @@ class SimplifiedReActEngine:
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
         images: Optional[List[Dict[str, Any]]] = None,
+        ui_context: Optional[Dict[str, Any]] = None,
     ):
         """
         流式执行 ReAct（Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下记录。
@@ -6101,6 +6135,7 @@ class SimplifiedReActEngine:
             hint_plan_name=hint_plan_name,
             client_shell=client_shell,
             images=images,
+            ui_context=ui_context,
         ):
             if not isinstance(raw, dict):
                 continue
