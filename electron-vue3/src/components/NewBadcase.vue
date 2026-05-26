@@ -767,6 +767,10 @@ import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate 
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
+import {
+  getPendingModifyDiffForDetail,
+  clearPendingModifyDiffForDetail
+} from '../utils/bcdSessionStore.js'
 
 
 export default {
@@ -1069,6 +1073,80 @@ export default {
       return { ...pd, modifications: mods }
     }
 
+    const clearPendingDiffFieldByAliases = (aliases) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods || !Array.isArray(aliases)) return
+      for (const key of aliases) {
+        if (key && Object.prototype.hasOwnProperty.call(mods, key)) {
+          delete mods[key]
+        }
+      }
+    }
+
+    const clearBadcaseDetailPendingDiffField = (field) => {
+      const f = String(field || '')
+      if (!f) return
+      const aliases = [f]
+      if (f === 'reproduction_steps' || f === 'steps_to_reproduce' || f === 'reproduce_steps' || f === 'badcase_reproduction_steps') {
+        aliases.push('reproduction_steps', 'steps_to_reproduce', 'reproduce_steps', 'badcase_reproduction_steps')
+      } else if (f === 'correct_answer' || f === 'correct_answer_final' || f === 'correct_answer_text' || f === 'answer') {
+        aliases.push('correct_answer', 'correct_answer_final', 'correct_answer_text', 'answer')
+      } else if (f === 'priority' || f === 'severity') {
+        aliases.push('priority', 'severity')
+      } else if (f === 'case_category' || f === 'classification' || f === 'category') {
+        aliases.push('case_category', 'classification', 'category')
+      } else if (f === 'base_problem' || f === 'similar_questions' || f === 'similar_question' || f === 'related_questions' || f === 'related_problem' || f === 'specific_problem') {
+        aliases.push('base_problem', 'similar_questions', 'similar_question', 'related_questions', 'related_problem', 'specific_problem')
+      } else if (f === 'append_comment' || f === 'comment' || f === 'remark') {
+        aliases.push('append_comment', 'comment', 'remark')
+      }
+      clearPendingDiffFieldByAliases([...new Set(aliases)])
+    }
+
+    const applyDetailFieldToBadcase = (field, val) => {
+      const f = String(field || '')
+      if (!f) return
+      if (f === 'append_comment' || f === 'comment' || f === 'remark') return
+      if (f === 'plan_id') {
+        badcase.plan = normalizePlanId(val) || ''
+        return
+      }
+      if (f === 'project_id') {
+        badcase.project_id = val != null ? String(val) : ''
+        badcase.associate_project = !!badcase.project_id
+        return
+      }
+      if (f === 'steps_to_reproduce' || f === 'reproduce_steps' || f === 'badcase_reproduction_steps') {
+        badcase.reproduction_steps = val || ''
+        return
+      }
+      if (f === 'correct_answer_final' || f === 'correct_answer_text') {
+        badcase.correct_answer = val || ''
+        return
+      }
+      if (f === 'severity') {
+        badcase.priority = val || ''
+        return
+      }
+      if (f === 'classification' || f === 'category') {
+        badcase.case_category = val || ''
+        return
+      }
+      if (
+        f === 'similar_questions' ||
+        f === 'similar_question' ||
+        f === 'related_questions' ||
+        f === 'related_problem' ||
+        f === 'specific_problem'
+      ) {
+        badcase.base_problem = val || ''
+        return
+      }
+      if (Object.prototype.hasOwnProperty.call(badcase, f)) {
+        badcase[f] = val
+      }
+    }
+
     const applyPendingModificationsToForm = () => {
       if (!pendingDiff.value?.modifications) return
       for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
@@ -1114,13 +1192,15 @@ export default {
         pendingDiff.value = null
         return
       }
-      const raw = sessionStorage.getItem('pendingModifyDiff')
-      if (!raw) {
+      const pd0 = getPendingModifyDiffForDetail(
+        snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+      )
+      if (!pd0) {
         pendingDiff.value = null
         return
       }
       try {
-        let pd = JSON.parse(raw)
+        let pd = { ...pd0 }
         const tid = pd?.targetId != null ? String(pd.targetId).trim() : ''
         const cur =
           props.id != null
@@ -1961,7 +2041,9 @@ export default {
         delete mods[k]
       }
       if (Object.keys(mods).filter((key) => !String(key).startsWith('_')).length === 0) {
-        sessionStorage.removeItem('pendingModifyDiff')
+        clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
         pendingDiff.value = null
       }
     }
@@ -1990,6 +2072,9 @@ export default {
             optimisticAppendEntityComment(plain)
             await reloadEntityCommentsAfterAdopt(plain)
             clearCommentPendingDiffKeys()
+          } else {
+            applyDetailFieldToBadcase(f, val)
+            clearBadcaseDetailPendingDiffField(f)
           }
         }
       }
@@ -2129,7 +2214,9 @@ export default {
         // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
         const remainingFields = Object.keys(pendingDiff.value.modifications || {}).filter(k => !String(k).startsWith('_'))
         if (remainingFields.length === 0) {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
           // 通知对话区修改已确认
           const event = new CustomEvent('modify-confirmed', {
             detail: { targetId: pendingDiff.value.targetId },
@@ -2178,7 +2265,9 @@ export default {
         // 如果所有字段都已取消，清除 sessionStorage
         const remainingFields = Object.keys(pendingDiff.value.modifications || {}).filter(k => !String(k).startsWith('_'))
         if (remainingFields.length === 0) {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
           pendingDiff.value = null
         }
       }
@@ -2375,12 +2464,14 @@ export default {
         const query = route.query
         const showDiffMode = props.show_diff || query.show_diff === 'true'
         if (showDiffMode) {
-          const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
+          const diffEarly = getPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
           console.log('[DIFF] showDiffMode:', showDiffMode)
-          console.log('[DIFF] sessionStorage.pendingModifyDiff:', diffDataStrEarly)
-          if (diffDataStrEarly) {
+          console.log('[DIFF] bcd:ss:diff active:', !!diffEarly)
+          if (diffEarly) {
             try {
-              pendingDiff.value = JSON.parse(diffDataStrEarly)
+              pendingDiff.value = diffEarly
               console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
               console.log('[DIFF] pendingDiff.modifications:', pendingDiff.value?.modifications)
               console.log('[DIFF] modifications keys:', pendingDiff.value?.modifications ? Object.keys(pendingDiff.value.modifications) : [])
@@ -2393,7 +2484,9 @@ export default {
           }
         } else {
           // 普通编辑模式：防止历史 diff 污染任意 BadCase 详情
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
           pendingDiff.value = null
         }
 
@@ -2445,7 +2538,9 @@ export default {
           const tgt = String(pd.target || '').toLowerCase().replace(/-/g, '_')
           const isBc = tgt === 'badcase' || tgt === 'bad_case' || tgt === ''
           if (!isBc || (isEdit.value && cur && tid && tid !== cur)) {
-            sessionStorage.removeItem('pendingModifyDiff')
+            clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
             pendingDiff.value = null
           }
         }
@@ -2463,7 +2558,9 @@ export default {
           }
           const remaining = Object.keys(mods).filter(k => !String(k).startsWith('_'))
           if (remaining.length === 0) {
-            sessionStorage.removeItem('pendingModifyDiff')
+            clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+          )
             pendingDiff.value = null
           }
         }

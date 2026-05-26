@@ -356,9 +356,9 @@
 
                 
         <!-- 复现步骤编辑器（Tiptap） -->
-        <div class="editor-section" :class="{ 'has-diff': pendingDiff?.modifications?.reproduction_steps || pendingDiff?.modifications?.steps_to_reproduce }">
+        <div class="editor-section" :class="{ 'has-diff': !!bugReproPendingKey }">
           <!-- diff 显示区域 -->
-          <div v-if="pendingDiff?.modifications?.reproduction_steps || pendingDiff?.modifications?.steps_to_reproduce" class="field-diff-panel">
+          <div v-if="bugReproPendingKey" class="field-diff-panel">
             <div class="diff-header">
               <span class="diff-label">复现步骤修改预览:</span>
               <div class="diff-actions">
@@ -374,7 +374,7 @@
               <div class="diff-arrow">→</div>
               <div class="diff-new">
                 <span class="diff-tag new">新值</span>
-                <span class="diff-value">{{ (pendingDiff.modifications.reproduction_steps || pendingDiff.modifications.steps_to_reproduce)?.new }}</span>
+                <span class="diff-value">{{ pendingDiff.modifications[bugReproPendingKey]?.new }}</span>
               </div>
             </div>
           </div>
@@ -406,7 +406,7 @@
             <div class="diff-content">
               <div class="diff-row">
                 <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.expected_result?.old || '未设置' }}</span>
+                <span class="diff-value">{{ bugExpectedResultOldDisplay || '未设置' }}</span>
               </div>
               <div class="diff-row">
                 <span class="diff-tag new">新值</span>
@@ -719,17 +719,24 @@
 <script>
 import { ref, reactive, onMounted, onActivated, onUnmounted, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { BACKEND_BASE_URL, createBug, getBugDetail, updateBug, addBugComment, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
+import { BACKEND_BASE_URL, createBug, getBugDetail, getCardDetail, updateBug, addBugComment, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
 import {
   resolveBugReproModifyStoreKey,
   resolveBugReproStepsOldDisplay,
-  readBugReproductionStepsFromRow
+  readBugReproductionStepsFromRow,
+  normalizeBugPendingReproMods,
+  resolveBugExpectedResultOldDisplay,
+  normalizeBugPendingExpectedMods
 } from '../utils/bugModifyFields.js'
 import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/richTextContent.js'
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import user from '../store/user.js'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
+import {
+  getPendingModifyDiffForDetail,
+  clearPendingModifyDiffForDetail
+} from '../utils/bcdSessionStore.js'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
 
@@ -765,9 +772,14 @@ export default {
     embedded: {
       type: Boolean,
       default: false
+    },
+    /** M2+：Tab 切回时先灌入表单，避免等 GET 才出字 */
+    cached_entity_snapshot: {
+      type: Object,
+      default: null
     }
   },
-  emits: ['close', 'titleLoaded'],
+  emits: ['close', 'titleLoaded', 'entitySnapshot'],
   setup(props, { emit }) {
     const router = useRouter()
     const route = useRoute()
@@ -812,6 +824,8 @@ export default {
       'reproduction_steps',
       'steps_to_reproduce',
       'reproduce_steps',
+      'repro_steps',
+      'steps',
       'expected_result',
       'actual_result',
       'append_comment',
@@ -823,7 +837,7 @@ export default {
       status: '流程状态',
       assignee: '负责人',
       priority: '优先级',
-      expected_result: '预期结果',
+      expected_result: '期望结果',
       actual_result: '实际结果',
       reproduction_steps: '复现步骤',
       comment: '追加评论',
@@ -952,10 +966,14 @@ export default {
     const pendingDiffFieldLabel = (field) =>
       PENDING_FIELD_LABELS[String(field)] || String(field)
 
+    const bugReproPendingKey = computed(() =>
+      resolveBugReproModifyStoreKey(pendingDiff.value?.modifications)
+    )
+
     const bugReproStepsOldDisplay = computed(() => {
       const mods = pendingDiff.value?.modifications
       if (!mods) return ''
-      const key = resolveBugReproModifyStoreKey(mods)
+      const key = bugReproPendingKey.value || resolveBugReproModifyStoreKey(mods)
       if (!key) return ''
       return resolveBugReproStepsOldDisplay(
         mods[key],
@@ -963,6 +981,77 @@ export default {
         pendingDiff.value?.before
       )
     })
+
+    const bugExpectedResultOldDisplay = computed(() => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return ''
+      const entry =
+        mods.expected_result ||
+        mods.expected ||
+        mods['期望结果'] ||
+        mods['预期结果']
+      return resolveBugExpectedResultOldDisplay(
+        entry,
+        bug.expected_result,
+        pendingDiff.value?.before
+      )
+    })
+
+    const clearPendingDiffFieldByAliases = (aliases) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods || !Array.isArray(aliases)) return
+      for (const key of aliases) {
+        if (key && Object.prototype.hasOwnProperty.call(mods, key)) {
+          delete mods[key]
+        }
+      }
+    }
+
+    const clearBugDetailPendingDiffField = (field) => {
+      const f = String(field || '')
+      if (!f) return
+      const aliases = [f]
+      if (f === 'steps_to_reproduce' || f === 'reproduction_steps' || f === 'reproduce_steps' || f === 'repro_steps' || f === 'steps') {
+        aliases.push('steps_to_reproduce', 'reproduction_steps', 'reproduce_steps', 'repro_steps', 'steps')
+      } else if (f === 'expected_result' || f === 'expected') {
+        aliases.push('expected_result', 'expected', '期望结果', '预期结果')
+      } else if (f === 'actual_result' || f === 'actual') {
+        aliases.push('actual_result', 'actual', '实际结果')
+      } else if (f === 'append_comment' || f === 'comment' || f === 'remark') {
+        aliases.push('append_comment', 'comment', 'remark')
+      }
+      clearPendingDiffFieldByAliases([...new Set(aliases)])
+    }
+
+    const applyDetailFieldToBug = (field, val) => {
+      const f = String(field || '')
+      if (!f) return
+      if (f === 'append_comment' || f === 'comment' || f === 'remark') return
+      if (f === 'plan_id') {
+        bug.plan = normalizePlanId(val) || ''
+        return
+      }
+      if (f === 'project_id') {
+        bug.project_id = val != null ? String(val) : ''
+        bug.associate_project = !!bug.project_id
+        return
+      }
+      if (f === 'steps_to_reproduce' || f === 'reproduction_steps' || f === 'reproduce_steps' || f === 'repro_steps' || f === 'steps') {
+        bug.reproduction_steps = val || ''
+        return
+      }
+      if (f === 'expected') {
+        bug.expected_result = val || ''
+        return
+      }
+      if (f === 'actual') {
+        bug.actual_result = val || ''
+        return
+      }
+      if (Object.prototype.hasOwnProperty.call(bug, f)) {
+        bug[f] = val
+      }
+    }
 
     const shouldShowPendingFieldInTop = (field) => {
       const f = String(field || '')
@@ -1336,13 +1425,117 @@ export default {
       }
     }
     
-    /** 编辑模式：仅拉 Bug 详情（plans/members 由 onMounted 与工作区任务并行加载） */
-    const loadBugDetailForEdit = async (normalizedBugId) => {
-      console.log('编辑模式，Bug ID:', normalizedBugId)
-      isEdit.value = true
-      bugId.value = normalizedBugId
+    /** 编辑入参可能是 Card.id；解析为 Bug 源表主键后再请求详情 */
+    const resolveBugIdForDetail = async (rawId) => {
+      const id = snowflakeIdStr(rawId) || (rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : '')
+      if (!id) return ''
       try {
-        const response = await getBugDetail(normalizedBugId)
+        const res = await getBugDetail(id)
+        if (res?.data?.success && res.data.bug) return id
+      } catch (_e) {
+        /* 可能误传 Card.id */
+      }
+      try {
+        const cr = await getCardDetail(id)
+        const card = cr?.data?.data
+        if (cr?.data?.success && card) {
+          const st = String(card.source_type || card.type || '').toLowerCase()
+          if (st === 'bug' && card.source_id != null && card.source_id !== '') {
+            const sid = snowflakeIdStr(card.source_id) || String(card.source_id)
+            if (sid) {
+              const r2 = await getBugDetail(sid)
+              if (r2?.data?.success && r2.data.bug) return sid
+            }
+          }
+        }
+      } catch (_e2) {
+        /* ignore */
+      }
+      return id
+    }
+
+    const applyBugEntityToForm = (row) => {
+      if (!row || typeof row !== 'object') return false
+      if (row.title != null) bug.title = row.title
+      if (row.case_category != null) bug.case_category = row.case_category
+      if (row.reproduction_steps != null) bug.reproduction_steps = row.reproduction_steps
+      if (row.expected_result != null) bug.expected_result = row.expected_result
+      if (row.actual_result != null) bug.actual_result = row.actual_result
+      if (row.severity != null) bug.severity = row.severity
+      if (row.priority != null) bug.priority = row.priority
+      if (row.status != null) bug.status = row.status
+      if (row.project_id != null) bug.project_id = String(row.project_id)
+      if (row.plan != null) bug.plan = normalizePlanId(row.plan) || ''
+      if (Array.isArray(row.assignee)) bug.assignee = [...row.assignee]
+      else if (row.assignee != null) bug.assignee = [String(row.assignee)]
+      if (row.attachments) bug.attachments = row.attachments
+      if (bug.project_id) {
+        bug.associate_project = true
+        bug._previousProjectId = bug.project_id
+      }
+      return true
+    }
+
+    const emitEntitySnapshotDebounced = (() => {
+      let t = null
+      return () => {
+        if (!props.embedded) return
+        if (t) clearTimeout(t)
+        t = setTimeout(() => {
+          emit('entitySnapshot', {
+            entity: {
+              id: bugId.value,
+              title: bug.title,
+              expected_result: bug.expected_result,
+              actual_result: bug.actual_result,
+              severity: bug.severity,
+              priority: bug.priority,
+              status: bug.status,
+              case_category: bug.case_category,
+              reproduction_steps: bug.reproduction_steps,
+              assignee: Array.isArray(bug.assignee) ? [...bug.assignee] : bug.assignee,
+              plan: bug.plan,
+              project_id: bug.project_id,
+              comment: bug.comment,
+              attachments: bug.attachments
+            }
+          })
+        }, 350)
+      }
+    })()
+
+    watch(
+      () => [
+        bug.title,
+        bug.status,
+        bug.reproduction_steps,
+        bug.expected_result,
+        bug.actual_result,
+        bug.assignee,
+        bug.plan
+      ],
+      () => {
+        if (isEdit.value && props.embedded) emitEntitySnapshotDebounced()
+      },
+      { deep: true }
+    )
+
+    /** 编辑模式：仅拉 Bug 详情（plans/members 由 onMounted 与工作区任务并行加载） */
+    const loadBugDetailForEdit = async (normalizedBugId, opts = {}) => {
+      const background = opts.background === true
+      const resolvedBugId = await resolveBugIdForDetail(normalizedBugId)
+      if (resolvedBugId !== normalizedBugId) {
+        console.warn('[NewBug] 入参 ID 已按 Card 解析为 Bug 源表主键', {
+          was: normalizedBugId,
+          now: resolvedBugId
+        })
+      }
+      console.log('编辑模式，Bug ID:', resolvedBugId)
+      isEdit.value = true
+      bugId.value = resolvedBugId
+      if (!background) loading.value = true
+      try {
+        const response = await getBugDetail(resolvedBugId)
         if (response.data.success && response.data.bug) {
             console.log('=== Bug详情API响应 ===')
             console.log('完整响应:', response.data)
@@ -1353,7 +1546,7 @@ export default {
             // 映射后端字段到前端响应式对象
             bug.title = response.data.bug.title
             bug.case_category = response.data.bug.bug_type
-            bug.reproduction_steps = response.data.bug.steps_to_reproduce || response.data.bug.description || ''
+            bug.reproduction_steps = response.data.bug.steps_to_reproduce || ''
             bug.expected_result = response.data.bug.expected_result
             bug.actual_result = response.data.bug.actual_result
             bug.severity = response.data.bug.severity
@@ -1400,9 +1593,14 @@ export default {
           return false
         } catch (error) {
           console.error('获取Bug信息失败:', error)
+          if (background) {
+            return false
+          }
           alert('获取Bug信息失败: ' + error.message)
           goBack()
           return false
+        } finally {
+          if (!background) loading.value = false
         }
     }
 
@@ -1530,8 +1728,7 @@ export default {
         const bugData = {
           title: bug.title,
           bug_type: bug.case_category, // 对应后端的 bug_type
-          description: bug.reproduction_steps || '', // 对应后端的 description
-          steps_to_reproduce: bug.reproduction_steps || '', // 对应后端的 steps_to_reproduce
+          steps_to_reproduce: bug.reproduction_steps || '',
           expected_result: bug.expected_result || '待确认',
           actual_result: bug.actual_result || '待确认',
           priority: bug.priority,
@@ -1671,9 +1868,9 @@ export default {
     watch(
       () => bugDraftPreset?.value?.token ?? 0,
       async (tok) => {
-        if (!tok || !bugDraftPreset?.value?.description) return
+        if (!tok || !bugDraftPreset?.value?.reproduction_steps) return
         if (isEdit.value) return
-        const block = String(bugDraftPreset.value.description).trim()
+        const block = String(bugDraftPreset.value.reproduction_steps).trim()
         if (!block) return
         const fragment = `<p><strong>【终端关联】</strong></p><pre style="white-space:pre-wrap;word-break:break-all;">${_escHtml(block)}</pre>`
         await nextTick()
@@ -1787,7 +1984,7 @@ export default {
         delete mods[k]
       }
       if (Object.keys(mods).filter((key) => !String(key).startsWith('_')).length === 0) {
-        sessionStorage.removeItem('pendingModifyDiff')
+        clearPendingModifyDiffForDetail(snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id))
         pendingDiff.value = null
       }
     }
@@ -1816,6 +2013,9 @@ export default {
             optimisticAppendEntityComment(plain)
             await reloadEntityCommentsAfterAdopt(plain)
             clearCommentPendingDiffKeys()
+          } else {
+            applyDetailFieldToBug(f, val)
+            clearBugDetailPendingDiffField(f)
           }
         }
       }
@@ -1930,7 +2130,7 @@ export default {
         delete pendingDiff.value.modifications[field]
         
         if (Object.keys(pendingDiff.value.modifications).filter(k => !k.startsWith('_')).length === 0) {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id))
           const event = new CustomEvent('modify-confirmed', {
             detail: { targetId: pendingDiff.value.targetId },
             bubbles: true
@@ -2025,7 +2225,10 @@ export default {
         pendingDiff.value = null
         return
       }
-      const raw = sessionStorage.getItem('pendingModifyDiff')
+      const rawDiff = getPendingModifyDiffForDetail(
+        snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id)
+      )
+      const raw = rawDiff ? JSON.stringify(rawDiff) : null
       if (!raw) {
         pendingDiff.value = null
         return
@@ -2044,6 +2247,8 @@ export default {
             mods.append_comment = mods.remark
             delete mods.remark
           }
+          normalizeBugPendingReproMods(mods)
+          normalizeBugPendingExpectedMods(mods)
         }
         pendingDiff.value = pd
         applyPendingModificationsToBugForm()
@@ -2063,6 +2268,9 @@ export default {
 
     onActivated(() => {
       reloadPendingDiffFromSession()
+      if (props.embedded && isEdit.value && bugId.value) {
+        emitEntitySnapshotDebounced()
+      }
     })
 
     // 取消字段修改
@@ -2085,7 +2293,7 @@ export default {
       }
       delete pendingDiff.value.modifications[storeKey]
       if (Object.keys(pendingDiff.value.modifications).filter((k) => !k.startsWith('_')).length === 0) {
-        sessionStorage.removeItem('pendingModifyDiff')
+        clearPendingModifyDiffForDetail(snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id))
         pendingDiff.value = null
       }
     }
@@ -2217,17 +2425,23 @@ export default {
         const showDiffMode = props.show_diff || query.show_diff === 'true'
         // 与 NewBadcase 一致：普通编辑不得读 session 里的待采纳 diff，否则会误把（如卡片）title 覆盖到刚拉取的 Bug 上
         if (showDiffMode) {
-          const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
-          if (diffDataStrEarly) {
+          const diffEarly = getPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id)
+          )
+          if (diffEarly) {
             try {
-              pendingDiff.value = JSON.parse(diffDataStrEarly)
+              if (diffEarly.modifications) {
+                normalizeBugPendingReproMods(diffEarly.modifications)
+                normalizeBugPendingExpectedMods(diffEarly.modifications)
+              }
+              pendingDiff.value = diffEarly
               console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
             } catch (e) {
               console.error('[DIFF] 预读取 diff 失败:', e)
             }
           }
         } else {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id))
           pendingDiff.value = null
         }
 
@@ -2255,7 +2469,22 @@ export default {
           bootTasks.push(fetchProjects())
         }
         if (isEditModeEarly && normalizedBugIdEarly) {
-          bootTasks.push(loadBugDetailForEdit(normalizedBugIdEarly))
+          const snap = props.cached_entity_snapshot
+          const snapId = snap?.id != null ? String(snap.id) : ''
+          if (
+            props.embedded &&
+            snap &&
+            snapId &&
+            (snapId === normalizedBugIdEarly || snowflakeIdStr(snapId) === normalizedBugIdEarly)
+          ) {
+            isEdit.value = true
+            bugId.value = normalizedBugIdEarly
+            applyBugEntityToForm(snap)
+            loading.value = false
+            bootTasks.push(loadBugDetailForEdit(normalizedBugIdEarly, { background: true }))
+          } else {
+            bootTasks.push(loadBugDetailForEdit(normalizedBugIdEarly))
+          }
           if (knownProjectId) {
             bootTasks.push(
               tryApplyEmbeddedProjectWorkspace(knownProjectId).then((ok) =>
@@ -2295,7 +2524,7 @@ export default {
           const tgt = String(pd.target || 'bug').toLowerCase().replace(/-/g, '_')
           const isBug = tgt === 'bug' || tgt === ''
           if (!isBug || (isEdit.value && cur && tid && tid !== cur)) {
-            sessionStorage.removeItem('pendingModifyDiff')
+            clearPendingModifyDiffForDetail(snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id))
             pendingDiff.value = null
           }
         }
@@ -2311,7 +2540,7 @@ export default {
             if (newVal && curVal === newVal) delete mods[field]
           }
           if (Object.keys(mods).filter(k => !String(k).startsWith('_')).length === 0) {
-            sessionStorage.removeItem('pendingModifyDiff')
+            clearPendingModifyDiffForDetail(snowflakeIdStr(props.project_id) || snowflakeIdStr(bug.project_id))
             pendingDiff.value = null
           }
         }
@@ -2425,7 +2654,9 @@ export default {
       togglePlanExpansion,
       goBack,
       pendingDiff,
+      bugReproPendingKey,
       bugReproStepsOldDisplay,
+      bugExpectedResultOldDisplay,
       showPendingDiffTopPanel,
       shouldShowPendingFieldInTop,
       pendingDiffFieldLabel,

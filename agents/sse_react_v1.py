@@ -312,20 +312,21 @@ def _pack_tool_end(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         body = raw
     idx = step_data.get("index")
     _computed_sid = _compute_step_id_for_tool(step_data)
-    return [
-        {
-            "type": ClientWireType.TOOL.value,
-            "payload": {
-                "op": ToolPayloadOp.END.value,
-                "name": step_data.get("tool"),
-                "index": idx,
-                "step_id": _computed_sid,
-                "body": body,
-                "summary_nl": step_data.get("summary_nl"),
-                "react_phase": step_data.get("react_phase"),
-            },
-        }
-    ]
+    pl: Dict[str, Any] = {
+        "op": ToolPayloadOp.END.value,
+        "name": step_data.get("tool"),
+        "index": idx,
+        "step_id": _computed_sid,
+        "body": body,
+        "summary_nl": step_data.get("summary_nl"),
+        "react_phase": step_data.get("react_phase"),
+    }
+    if step_data.get("tool_duration_ms") is not None:
+        try:
+            pl["duration_ms"] = float(step_data["tool_duration_ms"])
+        except (TypeError, ValueError):
+            pass
+    return [{"type": ClientWireType.TOOL.value, "payload": pl}]
 
 
 def _pack_step_status(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:

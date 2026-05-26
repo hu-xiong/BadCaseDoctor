@@ -481,7 +481,11 @@
             v-if="
               sandboxTeleportTargetExists(message) &&
               (message.modifyGroups?.length || message.modifyNavigation) &&
-              !(message.modifyNavigation?.is_create && isCreateAwaitingTempCard(message.id))
+              !(
+                message.modifyNavigation?.is_create &&
+                isCreateAwaitingTempCard(message.id) &&
+                tempCardProposalForMessage(message.id)
+              )
             "
             :to="sandboxModifyTeleportTargetForMessage(message)"
           >
@@ -902,9 +906,10 @@
             >
               <img :src="imageUploadIcon" :alt="t('chat.uploadImageAlt')" class="image-upload-icon" />
             </button>
-            <button 
+            <button
               v-if="!isSending"
-              @click="handleSend" 
+              type="button"
+              @click="handleSend"
               class="send-icon-button"
               :disabled="!inputMessage.trim() && pendingImages.length === 0"
               :title="t('chat.send')"
@@ -941,6 +946,16 @@ import {
   generateSessionTitle,
   getBugDetail
 } from '../api.js'
+import {
+  patchAgentRunSeq,
+  patchAgentRunSnapshot,
+  getAgentRun,
+  clearAgentRun,
+  saveDraft,
+  getDraft,
+  clearDraft,
+  AGENT_RUN_STALE_MS
+} from '../utils/bcdSessionStore.js'
 import { apiLocaleParam } from '../i18n/index.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
@@ -959,17 +974,26 @@ import {
   foldAgentSseText,
   consumeAgentSseV1Chunk,
   yieldAgentSseUiFrame,
+  createSseUiPaintScheduler,
+  sseChunkNeedsImmediatePaint,
   shouldMergeModifyPreviewItems,
   DETAIL_FIELDS,
   extractToolName
 } from '../composables/useAgentStream.js'
 import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
+import { reconcileReactMessageAfterSseClose } from '../composables/reactEngineLegacyStream.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
 import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
 import { snowflakeIdStr } from '../utils/snowflakeId.js'
+import { diffReviewPushShared } from '../composables/useDiffReviewPush.js'
 import {
   readBugReproductionStepsFromRow,
-  formatBugReproductionStepsForDisplay
+  formatBugReproductionStepsForDisplay,
+  readBugExpectedResultFromRow,
+  formatBugExpectedResultForDisplay,
+  BUG_EXPECTED_RESULT_KEYS,
+  BUG_EXPECTED_PENDING_ALIASES,
+  enrichBugSandboxDiffRows
 } from '../utils/bugModifyFields.js'
 import {
   normalizeTestcaseModifyFieldKey,
@@ -1280,9 +1304,10 @@ function isPlaceholderSessionTitle(title) {
       diff: base
     }
     void hydrateSandboxDefectTitles(navObj)
-    return enrichTestcaseSandboxDiffRows(navObj, base, t, {
+    const tcRows = enrichTestcaseSandboxDiffRows(navObj, base, t, {
       defectTitleMap: mergeSandboxDefectTitleMap(navObj)
     })
+    return enrichBugSandboxDiffRows(navObj, tcRows)
   }
 
   const countGroupSandboxDisplayRows = (group) => {
@@ -1400,6 +1425,27 @@ function isPlaceholderSessionTitle(title) {
     if (f === 'precondition' || lab === 'precondition' || lab === '前置条件') return 'preconditions'
     if (f === 'reproduce_steps' || f === 'steps_to_reproduce') return 'reproduction_steps'
     if (lab === '复现步骤' || lab.includes('复现步骤')) return 'reproduction_steps'
+    if (t === 'bug' && f === 'steps') return 'reproduction_steps'
+    if (
+      t === 'bug' &&
+      (f === 'expected' ||
+        f === 'expected_result' ||
+        lab === '期望结果' ||
+        lab === '预期结果' ||
+        (lab.includes('期望') && lab.includes('结果')) ||
+        (lab.includes('预期') && lab.includes('结果')))
+    ) {
+      return 'expected_result'
+    }
+    if (
+      t === 'bug' &&
+      (f === 'actual' ||
+        f === 'actual_result' ||
+        lab === '实际结果' ||
+        (lab.includes('实际') && lab.includes('结果')))
+    ) {
+      return 'actual_result'
+    }
     return f || lab
   }
 
@@ -1462,10 +1508,83 @@ function isPlaceholderSessionTitle(title) {
       if (which === 'new' && a?.status != null && String(a.status).trim() !== '') return String(a.status).trim()
     }
 
+    const isBugRepro =
+      tgt === 'bug' &&
+      (fk === 'reproduction_steps' ||
+        fk === 'steps_to_reproduce' ||
+        fk === 'reproduce_steps' ||
+        fk === 'steps' ||
+        label.includes('复现步骤'))
+    if (isBugRepro) {
+      for (const mk of ['steps_to_reproduce', 'reproduction_steps', 'reproduce_steps']) {
+        const m = mods[mk]
+        if (m && typeof m === 'object') {
+          const v = which === 'old' ? m.old : m.new
+          if (v != null && String(v).trim() !== '') {
+            return formatBugReproductionStepsForDisplay(v)
+          }
+        }
+      }
+      const row = which === 'old' ? ctx?.before : ctx?.after
+      const fromRow = readBugReproductionStepsFromRow(row)
+      if (fromRow) return formatBugReproductionStepsForDisplay(fromRow)
+      if (which === 'old' && Array.isArray(messages.value)) {
+        const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+        if (tid) {
+          try {
+            const merged = getMergedPendingForTarget(messages.value, 'bug', tid)
+            const fromMerged = readBugReproductionStepsFromRow(merged?.before)
+            if (fromMerged) return formatBugReproductionStepsForDisplay(fromMerged)
+          } catch (_e) {
+            /* noop */
+          }
+        }
+      }
+    }
+
+    const isBugExpected =
+      tgt === 'bug' &&
+      (fk === 'expected_result' ||
+        fk === 'expected' ||
+        label === '期望结果' ||
+        label === '预期结果' ||
+        (label.includes('期望') && label.includes('结果')) ||
+        (label.includes('预期') && label.includes('结果')))
+    if (isBugExpected && (tgt === 'bug' || tgt === 'card')) {
+      for (const mk of [...BUG_EXPECTED_RESULT_KEYS, ...BUG_EXPECTED_PENDING_ALIASES]) {
+        const m = mods[mk]
+        if (m && typeof m === 'object') {
+          const v = which === 'old' ? m.old : m.new
+          if (v != null && String(v).trim() !== '') {
+            return formatBugExpectedResultForDisplay(v)
+          }
+        }
+      }
+      const row = which === 'old' ? ctx?.before : ctx?.after
+      const fromRow = readBugExpectedResultFromRow(row)
+      if (fromRow) return formatBugExpectedResultForDisplay(fromRow)
+      if (which === 'old' && Array.isArray(messages.value)) {
+        const tid = snowflakeIdStr(
+          tgt === 'card' ? ctx?.before?.source_id ?? ctx?.after?.source_id : null
+        ) ?? snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
+        const nt = tgt === 'card' ? 'bug' : tgt
+        if (tid) {
+          try {
+            const merged = getMergedPendingForTarget(messages.value, nt, tid)
+            const fromMerged = readBugExpectedResultFromRow(merged?.before)
+            if (fromMerged) return formatBugExpectedResultForDisplay(fromMerged)
+          } catch (_e) {
+            /* noop */
+          }
+        }
+      }
+    }
+
     /** 详情字段：diff delete 常为空，须读 modifications / before / 会话合并快照 */
     const isTcDetail =
       (tgt === 'testcase' || tgt === 'test_case') && isTestcaseDetailModifyField(fk, label)
-    const isOtherDetail = (tgt !== 'testcase' && tgt !== 'test_case') && DETAIL_FIELDS.includes(fk)
+    const isOtherDetail =
+      (tgt !== 'testcase' && tgt !== 'test_case') && DETAIL_FIELDS.includes(fk) && !isBugRepro
     if (isTcDetail || isOtherDetail) {
       if (isTcDetail) {
         const defectMap =
@@ -1628,38 +1747,6 @@ function isPlaceholderSessionTitle(title) {
         }
       }
     }
-    const isBugRepro =
-      tgt === 'bug' &&
-      (fk === 'reproduction_steps' ||
-        fk === 'steps_to_reproduce' ||
-        fk === 'reproduce_steps' ||
-        label.includes('复现步骤'))
-    if (isBugRepro) {
-      for (const mk of ['steps_to_reproduce', 'reproduction_steps', 'reproduce_steps', 'description']) {
-        const m = mods[mk]
-        if (m && typeof m === 'object') {
-          const v = which === 'old' ? m.old : m.new
-          if (v != null && String(v).trim() !== '') {
-            return formatBugReproductionStepsForDisplay(v)
-          }
-        }
-      }
-      const row = which === 'old' ? ctx?.before : ctx?.after
-      const fromRow = readBugReproductionStepsFromRow(row)
-      if (fromRow) return formatBugReproductionStepsForDisplay(fromRow)
-      if (which === 'old' && Array.isArray(messages.value)) {
-        const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-        if (tid) {
-          try {
-            const merged = getMergedPendingForTarget(messages.value, 'bug', tid)
-            const fromMerged = readBugReproductionStepsFromRow(merged?.before)
-            if (fromMerged) return formatBugReproductionStepsForDisplay(fromMerged)
-          } catch (_e) {
-            /* noop */
-          }
-        }
-      }
-    }
     const lineType = which === 'old' ? 'delete' : 'add'
     const line = fieldDiff?.lines?.find((l) => l.type === lineType)
     return line?.content != null ? String(line.content).trim() : ''
@@ -1773,6 +1860,13 @@ function isPlaceholderSessionTitle(title) {
       }
     }
     if (tgt === 'bug') {
+      const nkBug = normalizeSandboxFieldKey(fd?.field, lab, tgt)
+      if (nkBug === 'expected_result' || (lab.includes('期望') && lab.includes('结果')) || (lab.includes('预期') && lab.includes('结果'))) {
+        return '期望结果'
+      }
+      if (nkBug === 'actual_result' || (lab.includes('实际') && lab.includes('结果'))) {
+        return '实际结果'
+      }
       if (fk === 'severity' || (/严重/.test(lab) && !lab.includes('优先级'))) return t('cardDetail.severity')
       if (fk === 'priority' || lab.includes('优先级')) return t('cardDetail.priority')
     }
@@ -1787,8 +1881,7 @@ function isPlaceholderSessionTitle(title) {
         steps_to_reproduce: 'cardDetail.reproducer',
         reproduction_steps: 'cardDetail.reproducer',
         expected_result: 'cardDetail.expected',
-        actual_result: 'cardDetail.actual',
-        description: 'cardDetail.description'
+        actual_result: 'cardDetail.actual'
       },
       badcase: {
         title: 'cardDetail.title',
@@ -2296,6 +2389,17 @@ const abortController = ref(null)  // 用于终止请求
 const reactSseReaderRef = ref(null)
 /** 与 SSE 信封 request_id 一致，停止时 POST /api/agent/react/cancel 让后端主循环合作退出 */
 const reactStreamRequestIdRef = ref(null)
+/** 刷新后续流：轮询 /api/agent/react/buffer（仅断线/F5；在线 SSE 不走 buffer） */
+const REACT_RESUME_POLL_MS = 1200
+/** 在线 SSE：仅记 lastSeq，避免每条 chunk 全量 JSON 快照拖慢主线程 */
+const REACT_STREAM_PATCH_SEQ_MS = 2500
+/** F5 续流 UI 壳：与 lastSeq 分键 + 降频（buffer 仍是主真相） */
+const REACT_AGENT_RUN_SNAPSHOT_MS = 10000
+/** 在线 SSE：stream 增量合并刷新上限（ms），约 30fps；工具/phase 仍立即 flush */
+const REACT_SSE_PAINT_MIN_MS = 32
+const reactResumePollTimerRef = ref(null)
+const reactResumeInFlightRef = ref(false)
+let draftSaveTimer = null
 const currentProjectId = ref(null)
 // 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`；>3 项默认收起，悬停显示上/下箭头
 const sandboxExpanded = ref({})
@@ -2433,13 +2537,13 @@ const visibleBatchSandboxEntries = (messageOrId) => {
   return flat.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
 }
 
-/** 最后一个标题含 modify 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
-const lastModifyToolStepIndex = (steps) => {
+/** 最后一个含 modify/create 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
+const lastSandboxToolStepIndex = (steps) => {
   if (!Array.isArray(steps)) return -1
   let last = -1
   for (let i = 0; i < steps.length; i++) {
     const title = String(steps[i]?.title || '').toLowerCase()
-    if (title.includes('modify')) last = i
+    if (title.includes('modify') || title.includes('create')) last = i
   }
   return last
 }
@@ -2450,14 +2554,13 @@ const lastModifyToolStepIndex = (steps) => {
 const sandboxEmbedAfterModifyStepIndexFromSteps = (message, steps) => {
   if (!message || message.isUser) return -1
   if (message._placeholderSteps) return -1
-  const hasModifyUi =
-    (message.modifyGroups && message.modifyGroups.length > 0) ||
-    (message.modifyNavigation && !message.modifyNavigation.is_create)
-  if (!hasModifyUi) return -1
+  const hasSandboxUi =
+    (message.modifyGroups && message.modifyGroups.length > 0) || !!message.modifyNavigation
+  if (!hasSandboxUi) return -1
   if (!Array.isArray(steps) || steps.length < 2) return -1
-  const lastMod = lastModifyToolStepIndex(steps)
-  if (lastMod < 0 || lastMod >= steps.length - 1) return -1
-  return lastMod
+  const lastTool = lastSandboxToolStepIndex(steps)
+  if (lastTool < 0 || lastTool >= steps.length - 1) return -1
+  return lastTool
 }
 
 /** 剪枝步骤 + 嵌入下标（同一 tick 内可能对同一 message 读多次） */
@@ -2479,12 +2582,11 @@ const sandboxModifyTeleportTargetForMessage = (message) => {
   return `#sandbox-mod-below-${idPart}`
 }
 
-/** 检查 Teleport 目标元素是否存在，避免卸载时 patch 崩溃 */
+/** 检查 Teleport 目标锚点是否已挂载（与 #sandbox-mod-below-{id} 同条消息内联） */
 const sandboxTeleportTargetExists = (message) => {
+  if (message?.id == null || message?.id === undefined) return false
   try {
-    const selector = sandboxModifyTeleportTargetForMessage(message)
-    if (!selector) return false
-    return !!document.querySelector(selector)
+    return !!document.getElementById(`sandbox-mod-below-${String(message.id)}`)
   } catch {
     return false
   }
@@ -2748,6 +2850,9 @@ const buildReactStepsFromTodoStrings = (todoData) => {
       thoughtTiming: null, // { durationMs, kind, segment, briefThresholdMs } Cursor 式耗时
       /** 首次收到本步 executing 时的 Date.now()：用于 Thought 墙钟勿把 grep/modify 整段算进「思考」*/
       thoughtPhaseEndAtMs: null,
+      toolExecStartedAt: null,
+      /** 后端 grep_perf_ms / 墙钟 tool 段，用于工具行秒数（勿用整步 stepDurationMs） */
+      toolExecDurationMs: null,
       /** phase_wait SSE：接收 decision_xml / result_xml 等等待中 */
       phaseWait: null
     }
@@ -3209,26 +3314,26 @@ const appendStepDetailLine = (step, line) => {
   step.detailLog = [...step.detailLog]
 }
 
-// 获取 diff 字段的旧值（兼容 delete 和 unchanged 类型）
+// 获取 diff 字段的旧值（多行 diff 须合并全部 delete 行）
 const getFieldOldValue = (fieldDiff) => {
   if (!fieldDiff || !fieldDiff.lines) return null
-  // 优先取 delete 类型
-  const deleteLine = fieldDiff.lines.find(l => l.type === 'delete')
-  if (deleteLine) return deleteLine.content
-  // 如果只有 unchanged，说明值没变，返回该值作为旧值
-  const unchangedLine = fieldDiff.lines.find(l => l.type === 'unchanged')
+  const deleteLines = fieldDiff.lines.filter((l) => l.type === 'delete')
+  if (deleteLines.length > 0) {
+    return deleteLines.map((l) => (l.content != null ? String(l.content) : '')).join('\n').trim() || null
+  }
+  const unchangedLine = fieldDiff.lines.find((l) => l.type === 'unchanged')
   if (unchangedLine) return unchangedLine.content
   return null
 }
 
-// 获取 diff 字段的新值（兼容 add 和 unchanged 类型）
+// 获取 diff 字段的新值（多行 diff 须合并全部 add 行）
 const getFieldNewValue = (fieldDiff) => {
   if (!fieldDiff || !fieldDiff.lines) return null
-  // 优先取 add 类型
-  const addLine = fieldDiff.lines.find(l => l.type === 'add')
-  if (addLine) return addLine.content
-  // 如果只有 unchanged，说明值没变，返回该值作为新值
-  const unchangedLine = fieldDiff.lines.find(l => l.type === 'unchanged')
+  const addLines = fieldDiff.lines.filter((l) => l.type === 'add')
+  if (addLines.length > 0) {
+    return addLines.map((l) => (l.content != null ? String(l.content) : '')).join('\n').trim() || null
+  }
+  const unchangedLine = fieldDiff.lines.find((l) => l.type === 'unchanged')
   if (unchangedLine) return unchangedLine.content
   return null
 }
@@ -3613,6 +3718,9 @@ const makePersistDiffKey = (target, targetId) => {
 const persistedPendingDiffKeys = ref(new Set())
 const persistedPendingLoaded = ref(false)
 let _persistedPendingLoadedAt = 0
+let _persistedPendingFetchInFlight = null
+let _persistedPendingEtag = ''
+let _persistedPendingForceFetchAt = 0
 
 /**
  * 是否仍应对列表派发「待确认」：
@@ -3638,33 +3746,92 @@ const resolveAlreadyProcessedByPersisted = (
  * @param {boolean} force
  * @param {{ emitListSync?: boolean }} opts emitListSync：是否派发 diff-review-sync。从沙箱/聊天侧即将 show-modify-in-list 时应为 false，否则左侧会再 restore 一次，diff 连闪且可能与合并后的 payload 不一致。
  */
+const applyPersistedKeysFromServerItems = (items) => {
+  const next = new Set()
+  ;(Array.isArray(items) ? items : []).forEach((it) => {
+    const key = makePersistDiffKey(it.target, it.target_id)
+    if (key) next.add(key)
+  })
+  persistedPendingDiffKeys.value = next
+  persistedPendingLoaded.value = true
+  _persistedPendingLoadedAt = Date.now()
+}
+
+const onDiffReviewPushForChat = (ev) => {
+  const { type, payload } = ev?.detail || {}
+  if (type === 'snapshot') {
+    applyPersistedKeysFromServerItems(payload?.items || [])
+    return
+  }
+  if (type === 'upsert' && payload) {
+    const key = makePersistDiffKey(payload.target, payload.target_id)
+    if (!key) return
+    const next = new Set(persistedPendingDiffKeys.value)
+    next.add(key)
+    persistedPendingDiffKeys.value = next
+    persistedPendingLoaded.value = true
+    _persistedPendingLoadedAt = Date.now()
+    return
+  }
+  if (type === 'resolve' && payload) {
+    const key = makePersistDiffKey(payload.target, payload.target_id)
+    if (!key) return
+    const next = new Set(persistedPendingDiffKeys.value)
+    next.delete(key)
+    persistedPendingDiffKeys.value = next
+  }
+}
+
 const refreshPersistedPendingDiffKeys = async (force = false, opts = {}) => {
   const emitListSync = opts.emitListSync !== false
+  const allowNetworkWhenPushOk = opts.allowNetworkWhenPushOk === true
   try {
     if (!props.projectId) return
     const now = Date.now()
     if (!force && now - _persistedPendingLoadedAt < 1500) return
-    const resp = await fetch(
-      `${BACKEND_BASE_URL}/api/projects/${props.projectId}/diff-reviews?status=pending`,
-      { credentials: 'include' }
-    )
-    if (!resp.ok) return
-    const data = await resp.json()
-    const items = Array.isArray(data?.items) ? data.items : []
-    const next = new Set()
-    items.forEach((it) => {
-      const key = makePersistDiffKey(it.target, it.target_id)
-      if (key) next.add(key)
-    })
-    persistedPendingDiffKeys.value = next
-    persistedPendingLoaded.value = true
-    _persistedPendingLoadedAt = now
-    if (emitListSync) {
-      window.dispatchEvent(new CustomEvent('diff-review-sync', { bubbles: true }))
-    }
+    const pushOk =
+      diffReviewPushShared.connected.value &&
+      now - (diffReviewPushShared.lastEventAt.value || 0) < 120000
+    if (pushOk && !allowNetworkWhenPushOk) return
+    if (force && now - _persistedPendingForceFetchAt < 5000) return
+    if (_persistedPendingFetchInFlight) return _persistedPendingFetchInFlight
+    _persistedPendingForceFetchAt = force ? now : _persistedPendingForceFetchAt
+    _persistedPendingFetchInFlight = (async () => {
+      const headers = {}
+      if (_persistedPendingEtag) headers['If-None-Match'] = _persistedPendingEtag
+      const resp = await fetch(
+        `${BACKEND_BASE_URL}/api/projects/${props.projectId}/diff-reviews?status=pending`,
+        { credentials: 'include', headers }
+      )
+      if (resp.status === 304) {
+        persistedPendingLoaded.value = true
+        _persistedPendingLoadedAt = now
+        return
+      }
+      if (!resp.ok) return
+      const et = resp.headers.get('ETag')
+      if (et) _persistedPendingEtag = et.replace(/^"|"$/g, '')
+      const data = await resp.json()
+      const items = Array.isArray(data?.items) ? data.items : []
+      const next = new Set()
+      items.forEach((it) => {
+        const key = makePersistDiffKey(it.target, it.target_id)
+        if (key) next.add(key)
+      })
+      persistedPendingDiffKeys.value = next
+      persistedPendingLoaded.value = true
+      _persistedPendingLoadedAt = now
+      if (emitListSync) {
+        window.dispatchEvent(new CustomEvent('diff-review-sync', { bubbles: true }))
+      }
+    })()
+    await _persistedPendingFetchInFlight
+    return
   } catch (e) {
     persistedPendingLoaded.value = false
     console.warn('[DIFF] 刷新持久化 pending keys 失败:', e)
+  } finally {
+    _persistedPendingFetchInFlight = null
   }
 }
 
@@ -4078,6 +4245,26 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   }
 }
 
+/** 将本会话内仍待确认的 create 预览同步到左侧列表（无需先点沙箱卡片） */
+const syncPendingCreatePreviewsToWorkbench = async () => {
+  for (const msg of messages.value) {
+    if (!msg || msg.isUser || !msg.modifyNavigation) continue
+    const nav = msg.modifyNavigation
+    if (
+      nav.is_create !== true ||
+      nav.navigate_to_existing ||
+      nav.confirmation_required === false
+    ) {
+      continue
+    }
+    try {
+      await handleShowModifyInList(nav, msg.id)
+    } catch (e) {
+      console.warn('[CREATE] 同步待确认新建到列表失败:', e)
+    }
+  }
+}
+
 // 取消修改
 const handleCancelModify = () => {
   console.log('[MODIFY] 用户取消修改')
@@ -4222,6 +4409,45 @@ const scrollAgentStepLogIntoView = (messageId, stepIndex) => {
   })
 }
 
+/** 是否已是可用的 modify 沙箱导航（单条或批量）；勿因缺少 batch_results 就覆盖为「新建预览」 */
+const isValidModifySandboxNavigation = (nav) => {
+  if (!nav || typeof nav !== 'object') return false
+  if (nav.is_create === true || nav.target_id === 'new' || nav.targetId === 'new') return false
+  if (nav.batch_modify === true && Array.isArray(nav.batch_results) && nav.batch_results.length > 0) {
+    return true
+  }
+  const tid = snowflakeIdStr(nav.target_id ?? nav.targetId)
+  if (!tid) return false
+  const hasDiff = Array.isArray(nav.diff) && nav.diff.length > 0
+  const hasMods =
+    nav.modifications &&
+    typeof nav.modifications === 'object' &&
+    Object.keys(nav.modifications).filter((k) => !String(k).startsWith('_')).length > 0
+  return hasDiff || hasMods || nav.before != null || nav.after != null
+}
+
+/** execution_results 内单条 observation 是否像 modify 沙箱（有 preview 的是 create，不能仅凭 diff 误判） */
+const looksLikeModifyToolObservation = (toolData) => {
+  if (!toolData || typeof toolData !== 'object') return false
+  if (toolData.created_id != null && toolData.created_id !== '') return false
+  if (toolData.batch_modify === true) return true
+  if (Array.isArray(toolData.batch_results) && toolData.batch_results.length > 0) return true
+  if (Array.isArray(toolData.results) && toolData.results.length > 0) return true
+  const tid = snowflakeIdStr(toolData.target_id ?? toolData.targetId)
+  if (!tid || tid === 'new') return false
+  const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
+  if (!hasDiff) return false
+  if (toolData.preview && typeof toolData.preview === 'object' && Object.keys(toolData.preview).length > 0) {
+    return false
+  }
+  return (
+    toolData.before != null ||
+    toolData.after != null ||
+    toolData.confirmation_required === true ||
+    toolData.sandbox_preview != null
+  )
+}
+
 /**
  * 从流式阶段写入的 executionResults 中恢复 modify 批量预览（应因 observation 未写入 modifyNavigation 的旧消息）
  * 注意：executionResults 的 step 常为步骤标题（中文），不能要求 step === 'modify'
@@ -4241,6 +4467,22 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
   const fromToolData = (toolData, topTarget) => {
     if (!toolData || typeof toolData !== 'object') return null
     const tgt = toolData.target || topTarget || 'badcase'
+    if (looksLikeModifyToolObservation(toolData)) {
+      const tid = snowflakeIdStr(toolData.target_id ?? toolData.targetId)
+      if (tid && tid !== 'new') {
+        return {
+          target: tgt,
+          target_id: tid,
+          diff: Array.isArray(toolData.diff) ? toolData.diff : [],
+          modifications: toolData.modifications || {},
+          confirmation_required: toolData.confirmation_required !== false,
+          before: toolData.before ?? null,
+          after: toolData.after ?? null,
+          plan_id: toolData.plan_id ?? toolData.before?.plan_id ?? null,
+          success: toolData.success === true
+        }
+      }
+    }
     if (Array.isArray(toolData.batch_results) && toolData.batch_results.length > 0) {
       return {
         batch_modify: true,
@@ -4294,8 +4536,31 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
     }
     if (!td || typeof td !== 'object') continue
     const inner = td.data && typeof td.data === 'object' ? td.data : td
-    const hit = fromToolData(inner, td.target) || fromToolData(td, td.target)
-    if (hit) return hit
+    const tryCreatePreview = (toolData, topTarget) => {
+      if (!toolData || typeof toolData !== 'object') return null
+      if (looksLikeModifyToolObservation(toolData)) return null
+      const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
+      const hasPreview =
+        toolData.preview &&
+        typeof toolData.preview === 'object' &&
+        Object.keys(toolData.preview).length > 0
+      if (toolData.success === false || toolData.created_id) return null
+      if (!hasPreview) return null
+      const tgt = toolData.target || topTarget || 'bug'
+      return {
+        target: tgt,
+        target_id: 'new',
+        diff: hasDiff ? toolData.diff : [],
+        preview: toolData.preview,
+        modifications: toolData.preview || {},
+        confirmation_required: toolData.confirmation_required !== false,
+        is_create: true
+      }
+    }
+    const hitModify = fromToolData(inner, td.target) || fromToolData(td, td.target)
+    if (hitModify) return hitModify
+    const hitCreate = tryCreatePreview(inner, td.target) || tryCreatePreview(td, td.target)
+    if (hitCreate) return hitCreate
   }
   return null
 }
@@ -4435,10 +4700,7 @@ function rawApiMessageToUi(msg) {
   }
   let modifyNav = msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null
   let modifyGroups = msg.modify_groups ? JSON.parse(msg.modify_groups) : null
-  if (
-    (!modifyNav || !Array.isArray(modifyNav.batch_results) || modifyNav.batch_results.length === 0) &&
-    msg.execution_results
-  ) {
+  if (!isValidModifySandboxNavigation(modifyNav) && msg.execution_results) {
     const recovered = recoverModifyNavigationFromExecutionResults(msg.execution_results)
     if (recovered) modifyNav = recovered
   }
@@ -4582,8 +4844,11 @@ const loadSessionMessages = async () => {
       scheduleIdle(async () => {
         try {
           await refreshPersistedPendingDiffKeys(true)
+          await syncPendingCreatePreviewsToWorkbench()
           await nextTick()
           scrollToBottom()
+          restoreInputDraftForSession()
+          await resolveSessionRecoveryOnLoad()
         } catch (e) {
           console.error('[MODIFY] 刷新 diff pending 失败', e)
         }
@@ -4664,6 +4929,15 @@ const normalizeModifyTarget = (target) => {
 const isSandboxModifyItemPending = (item, message = null) => {
   if (!item || typeof item !== 'object') return false
   if (item.cancelled === true) return false
+  if (
+    item.is_create === true ||
+    item.target_id === 'new' ||
+    item.targetId === 'new'
+  ) {
+    if (item.confirmation_required === false) return false
+    if (message?.isHistorical) return item.confirmation_required !== false
+    return true
+  }
   const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
   if (!tid) return false
   const tgt = normalizeModifyTarget(item.target || 'badcase')
@@ -4699,7 +4973,8 @@ const messageHasPendingSandboxConfirm = (message) => {
         confirmation_required: nav.confirmation_required,
         success: nav.success,
         target_id: nav.target_id ?? nav.targetId,
-        target: nav.target
+        target: nav.target,
+        is_create: nav.is_create === true
       },
       message
     )
@@ -4804,6 +5079,18 @@ const handleRequestPendingModifyForPlan = async (event) => {
       continue
     }
 
+    if (nav.is_create) {
+      const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
+      if (snowflakeIdStr(tplPid) !== planKey) continue
+      if (nav.navigate_to_existing || nav.confirmation_required === false) continue
+      try {
+        await handleShowModifyInList(nav, msg.id)
+      } catch (e) {
+        console.warn('[CREATE] 计划切换同步新建预览失败:', e)
+      }
+      continue
+    }
+
     if (!nav.batch_modify && !nav.is_create) {
       if (nav.cancelled === true) continue
       const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
@@ -4853,6 +5140,290 @@ const safeJsonForDb = (val, label = 'json') => {
     console.error(`[CHAT] ${label} 序列化失败`, e)
     return 'null'
   }
+}
+
+const newReactRunId = () => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+  } catch {
+    /* ignore */
+  }
+  return `react-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/** 流式草稿由 buffer 重放即可，不必进 sessionStorage */
+const REACT_RESUME_SNAPSHOT_OMIT_KEYS = new Set([
+  'thinkReasoningDraft',
+  'thinkContentDraft',
+  'runningSummaryDraft',
+  'summaryStreamDraft'
+])
+
+const snapshotReactMessageForResume = (aiMessage) => {
+  if (!aiMessage) return null
+  try {
+    const raw = toRaw(aiMessage)
+    return JSON.parse(
+      JSON.stringify(raw, (k, v) => {
+        if (k.startsWith('_') || REACT_RESUME_SNAPSHOT_OMIT_KEYS.has(k)) return undefined
+        return v
+      })
+    )
+  } catch {
+    return null
+  }
+}
+
+let lastAgentRunSnapshotTs = 0
+const maybePatchAgentRunSnapshot = (projectId, sessionId, aiMessage, { force = false } = {}) => {
+  if (!projectId || !sessionId || !aiMessage) return
+  const now = Date.now()
+  if (!force && now - lastAgentRunSnapshotTs < REACT_AGENT_RUN_SNAPSHOT_MS) return
+  lastAgentRunSnapshotTs = now
+  const snap = snapshotReactMessageForResume(aiMessage)
+  if (snap) patchAgentRunSnapshot(projectId, sessionId, snap)
+}
+
+const flushAgentRunSnapshotOnPageHide = () => {
+  if (!isSending.value && reactStreamRequestIdRef.value == null) return
+  const pid = currentProjectId.value || props.projectId
+  const sid = props.sessionId
+  if (!pid || !sid) return
+  const runMeta = getAgentRun(pid, sid)
+  if (!runMeta?.runId || runMeta.status !== 'streaming') return
+  let aiMessage = null
+  const cid = runMeta.clientMessageId
+  if (cid != null) aiMessage = findChatMessageById(cid)
+  if (!aiMessage) {
+    const last = messages.value[messages.value.length - 1]
+    if (last && !last.isUser) aiMessage = last
+  }
+  if (aiMessage) maybePatchAgentRunSnapshot(pid, sid, aiMessage, { force: true })
+}
+
+const applyReactSnapshotToMessage = (aiMessage, snap) => {
+  if (!aiMessage || !snap || typeof snap !== 'object') return
+  const keys = [
+    'understanding',
+    'steps',
+    'finalResponse',
+    'reasoningContent',
+    'thinkReasoningDraft',
+    'thinkContentDraft',
+    'executionResults',
+    'modifyNavigation',
+    'modifyGroups',
+    'agentResult',
+    'evidences',
+    'reactPlanSteps',
+    'runningSummaryDraft',
+    'summaryStreamDraft',
+    'reactDirectChatReply',
+    'lastReactPhase'
+  ]
+  for (const k of keys) {
+    if (snap[k] !== undefined) aiMessage[k] = snap[k]
+  }
+}
+
+const buildReactSseConsumeCtx = () => ({
+  scrollToBottom,
+  isDebugReactThinkSSE,
+  buildReactStepsFromTodoStrings,
+  thinkCtx: {
+    resolveStreamStepIndex,
+    scheduleReasoningTypewriter,
+    scheduleTodosStreamTypewriter,
+    sseIsReactThinkPhase,
+    logReactThinkStepDetail
+  },
+  engineCtx: {
+    flushReasoningTypewriter,
+    cancelTodosStreamTypewriter,
+    buildReactStepsFromTodoStrings,
+    resolveStreamStepIndex,
+    appendStepDetailLine,
+    scrollAgentStepLogIntoView,
+    handleShowGroupInList,
+    handleShowModifyInList,
+    projectId: props.projectId,
+    handleNavigation,
+    nextTick
+  }
+})
+
+const stopReactResumePoll = () => {
+  if (reactResumePollTimerRef.value) {
+    clearInterval(reactResumePollTimerRef.value)
+    reactResumePollTimerRef.value = null
+  }
+}
+
+const persistReactAssistantMessage = async (aiMessage, modelUsed) => {
+  let modifyNavForSave = aiMessage.modifyNavigation
+  if (!isValidModifySandboxNavigation(modifyNavForSave) && aiMessage.executionResults?.length) {
+    const recovered = recoverModifyNavigationFromExecutionResults(aiMessage.executionResults)
+    if (recovered) {
+      modifyNavForSave = recovered
+      aiMessage.modifyNavigation = recovered
+    }
+  }
+  if (
+    modifyNavForSave &&
+    modifyNavForSave.batch_modify === true &&
+    (!aiMessage.modifyGroups || !Array.isArray(aiMessage.modifyGroups) || aiMessage.modifyGroups.length === 0)
+  ) {
+    const rebuilt = rebuildModifyGroupsFromBatchNav(modifyNavForSave, shouldMergeModifyPreviewItems)
+    if (rebuilt?.length) {
+      aiMessage.modifyGroups = Object.freeze([...rebuilt])
+      await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+      for (const grp of rebuilt) {
+        if (grp.items && grp.items.length > 0) {
+          await handleShowGroupInList(grp, aiMessage.id, { skipPersistedRefresh: true })
+        }
+      }
+    }
+  }
+  if (
+    modifyNavForSave?.is_create === true &&
+    modifyNavForSave.confirmation_required !== false &&
+    !modifyNavForSave.navigate_to_existing
+  ) {
+    await syncPendingCreatePreviewsToWorkbench()
+  }
+
+  const _persistAgent = { ...(aiMessage.agentResult || {}) }
+  const _persistRunning = String(aiMessage.runningSummaryDraft || '').trim()
+  const _persistSummaryStream = String(aiMessage.summaryStreamDraft || '').trim()
+  if (_persistRunning) _persistAgent.summaryText = _persistRunning
+  else if (_persistSummaryStream) _persistAgent.summaryText = _persistSummaryStream
+  if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
+  else delete _persistAgent.direct_chat_reply
+  _persistAgent.react_plan_panel_suppressed = !!aiMessage.reactPlanPanelSuppressed
+  if (Array.isArray(aiMessage.reactPlanSteps) && aiMessage.reactPlanSteps.length > 0) {
+    _persistAgent.react_plan_steps = aiMessage.reactPlanSteps
+  } else {
+    try {
+      delete _persistAgent.react_plan_steps
+    } catch {
+      /* ignore */
+    }
+  }
+  if (aiMessage.agentResult?.status) {
+    _persistAgent.status = aiMessage.agentResult.status
+  }
+  if (aiMessage.agentResult?.interrupt_reason) {
+    _persistAgent.interrupt_reason = aiMessage.agentResult.interrupt_reason
+  }
+
+  await saveMessageToDb({
+    is_user: false,
+    content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
+    understanding: aiMessage.understanding,
+    reasoning: aiMessage.reasoningContent || '',
+    steps: safeJsonForDb(aiMessage.steps, 'steps'),
+    execution_results: safeJsonForDb(aiMessage.executionResults || [], 'execution_results'),
+    agent_result: safeJsonForDb(_persistAgent, 'agent_result'),
+    evidences: safeJsonForDb(aiMessage.evidences || [], 'evidences'),
+    navigation: safeJsonForDb(aiMessage.navigation ?? null, 'navigation'),
+    modify_navigation: safeJsonForDb(aiMessage.modifyNavigation ?? null, 'modify_navigation'),
+    modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
+    final_response: aiMessage.finalResponse,
+    llm_model: modelUsed
+  })
+}
+
+const findUserInputBeforeAssistant = (aiMessage) => {
+  const idx = messages.value.findIndex((m) => m && String(m.id) === String(aiMessage?.id))
+  for (let i = idx - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m?.isUser) return String(m.content || '').trim()
+  }
+  return ''
+}
+
+const fetchReactRunStatus = async (reactRequestId) => {
+  const rid = (reactRequestId || '').trim()
+  if (!rid) return { running: false, status: 'unknown' }
+  try {
+    const resp = await fetch(
+      `${BACKEND_BASE_URL}/api/agent/react/run-status?request_id=${encodeURIComponent(rid)}`,
+      { credentials: 'include' }
+    )
+    if (!resp.ok) return { running: false, status: 'unknown' }
+    const data = await resp.json().catch(() => ({}))
+    if (!data?.success) return { running: false, status: 'unknown' }
+    return {
+      running: !!(data.running || data.status === 'running'),
+      status: data.status || 'unknown'
+    }
+  } catch {
+    return { running: false, status: 'unknown' }
+  }
+}
+
+/** §5.2.1：仅 SSE 续流；§5.2.2 任务延续暂缓（性能优化 + DAG 后再做） */
+const resolveSessionRecoveryOnLoad = async () => {
+  const pid = currentProjectId.value || props.projectId
+  const sid = props.sessionId
+  if (!sid || !pid || reactResumeInFlightRef.value || isSending.value) return
+
+  const runMeta = getAgentRun(pid, sid)
+  if (!runMeta?.runId || runMeta.status !== 'streaming') return
+
+  const st = await fetchReactRunStatus(runMeta.runId)
+  if (st.running) {
+    await tryResumeReactStreamAfterLoad()
+  } else {
+    clearAgentRun(pid, sid)
+  }
+}
+
+const flushDraftSaveTimer = () => {
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+}
+
+const scheduleDraftSave = () => {
+  const pid = currentProjectId.value || props.projectId
+  const sid = props.sessionId
+  if (!pid || !sid) return
+  flushDraftSaveTimer()
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = null
+    saveDraft(pid, sid, inputMessage.value)
+  }, 600)
+}
+
+/** §5.1.5：切会话时同步落盘旧草稿，再恢复新会话草稿（不等防抖） */
+const onSessionIdChangeForDraft = (newId, oldId) => {
+  const pid = currentProjectId.value || props.projectId
+  if (!pid) return
+  flushDraftSaveTimer()
+  if (oldId != null && oldId !== '') {
+    saveDraft(pid, oldId, inputMessage.value)
+  }
+  if (newId != null && newId !== '') {
+    inputMessage.value = getDraft(pid, newId) || ''
+    nextTick(() => autoResize())
+  } else {
+    inputMessage.value = ''
+    nextTick(() => autoResize())
+  }
+}
+
+const restoreInputDraftForSession = () => {
+  const pid = currentProjectId.value || props.projectId
+  const sid = props.sessionId
+  if (!pid || !sid) return
+  if (inputMessage.value.trim()) return
+  const d = getDraft(pid, sid)
+  inputMessage.value = d || ''
+  nextTick(() => autoResize())
 }
 
 const formatReactStreamError = (err) => {
@@ -4950,6 +5521,8 @@ const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
       inputMessage.value = ''
       autoResize()
     })
+    const pidDraft = currentProjectId.value || props.projectId
+    if (pidDraft && props.sessionId) clearDraft(pidDraft, props.sessionId)
 
     scrollToBottom()
 
@@ -4967,7 +5540,9 @@ const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
 
     // Agent 模式一律走后端 /api/agent/react，由后端统一做意图识别与分流
     if (selectedAgent.value === 'agent') {
-      await handleReactAgentMode(messageContent, imagesPayload, { model: requestModel })
+      await handleReactAgentMode(messageContent, imagesPayload, {
+        model: requestModel
+      })
     } else {
       await handleChatMode(messageContent, imagesPayload, { model: requestModel })
     }
@@ -4984,6 +5559,13 @@ const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
 const handleSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
+  // 续流或上一轮 SSE 未复位时 isSending=true，发送钮会变成停止钮且 sendText 直接 return
+  if (isSending.value) {
+    handleStop()
+    stopReactResumePoll()
+    reactResumeInFlightRef.value = false
+    await nextTick()
+  }
   const text = inputMessage.value
   const imgs = [...pendingImages.value]
   await sendText(text, imgs, { consumeMainPending: true })
@@ -5030,15 +5612,37 @@ const cancelEditUserMessage = () => {
   inlinePendingImages.value = []
 }
 
+/** 内联发送前：把编辑内容写回气泡并退出编辑态，避免 isSending 期间仍挂着空 textarea */
+const finishInlineEditBeforeSend = (text, imgs) => {
+  const editId = editingUserMessageId.value
+  if (editId != null) {
+    const idx = messages.value.findIndex((m) => m && String(m.id) === String(editId))
+    if (idx >= 0) {
+      const m = messages.value[idx]
+      const trimmed = (text || '').trim()
+      if (trimmed) m.content = trimmed
+      if (imgs && imgs.length > 0) {
+        m.images = imgs.map(({ data, filename }) => ({ data, filename }))
+      } else {
+        m.images = undefined
+      }
+    }
+  }
+  editingUserMessageId.value = null
+  inlineInputMessage.value = ''
+  inlinePendingImages.value = []
+}
+
 const handleInlineSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
   const text = inlineInputMessage.value
   const imgs = [...inlinePendingImages.value]
-  inlineInputMessage.value = ''
-  // 先发送消息，再退出编辑态：避免 key 变化与新消息添加同一 tick 导致 Vue patch 冲突
+  const trimmed = (text || '').trim()
+  if (!trimmed && imgs.length === 0) return
+  finishInlineEditBeforeSend(text, imgs)
+  await nextTick()
   await sendText(text, imgs, { clearInlinePending: true, requestModel: inlineEditSelectedModel.value })
-  editingUserMessageId.value = null
 }
 
 const addNewLineInline = (e) => {
@@ -5048,7 +5652,151 @@ const addNewLineInline = (e) => {
 
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown, true)
+  window.addEventListener('diff-review-push', onDiffReviewPushForChat)
 })
+
+/** F5 / 断线后：从 bcd:ss:agent + 后端 SSE 缓冲续流（仅由 resolveSessionRecoveryOnLoad P1 触发） */
+const tryResumeReactStreamAfterLoad = async () => {
+  const pid = currentProjectId.value || props.projectId
+  const sid = props.sessionId
+  if (!pid || !sid || reactResumeInFlightRef.value || isSending.value) return
+
+  const runMeta = getAgentRun(pid, sid)
+  if (!runMeta?.runId || runMeta.status !== 'streaming') return
+
+  let stResp
+  try {
+    stResp = await fetch(
+      `${BACKEND_BASE_URL}/api/agent/react/run-status?request_id=${encodeURIComponent(runMeta.runId)}`,
+      { credentials: 'include' }
+    )
+  } catch {
+    return
+  }
+  if (!stResp.ok) return
+  const stJson = await stResp.json().catch(() => ({}))
+  if (!stJson?.success) return
+  if (!stJson.running && stJson.status !== 'running') {
+    clearAgentRun(pid, sid)
+    return
+  }
+
+  reactResumeInFlightRef.value = true
+  isSending.value = true
+  stopReactResumePoll()
+
+  let resumeFailed = false
+  let aiMessage = null
+  const cid = runMeta.clientMessageId
+  if (cid != null) {
+    aiMessage = findChatMessageById(cid)
+  }
+  if (!aiMessage) {
+    const last = messages.value[messages.value.length - 1]
+    if (last && !last.isUser && last.agentResult?.status === 'running') {
+      aiMessage = last
+    }
+  }
+  if (!aiMessage) {
+    aiMessage = reactive(createReactAiMessageState(runMeta.clientMessageId || Date.now() + 1))
+    if (runMeta.uiSnapshot) applyReactSnapshotToMessage(aiMessage, runMeta.uiSnapshot)
+    messages.value.push(aiMessage)
+    scrollToBottom()
+  } else if (runMeta.uiSnapshot) {
+    applyReactSnapshotToMessage(aiMessage, runMeta.uiSnapshot)
+  }
+
+  reactStreamRequestIdRef.value = runMeta.runId
+  let sinceSeq = Number(runMeta.lastSeq) || 0
+  const modelUsed = runMeta.llmModel || selectedModel.value
+  const sseCtx = buildReactSseConsumeCtx()
+  const uiPaintResume = createSseUiPaintScheduler(nextTick, { minIntervalMs: REACT_SSE_PAINT_MIN_MS })
+  let finished = false
+
+  const pollOnce = async () => {
+    if (finished) return
+    try {
+      const resp = await fetch(
+        `${BACKEND_BASE_URL}/api/agent/react/buffer?request_id=${encodeURIComponent(runMeta.runId)}&since_seq=${sinceSeq}`,
+        { credentials: 'include' }
+      )
+      if (!resp.ok) return
+      const data = await resp.json().catch(() => ({}))
+      if (!data?.success) return
+      const events = Array.isArray(data.events) ? data.events : []
+      let maxSeq = sinceSeq
+      let needsImmediatePaint = false
+      for (const chunk of events) {
+        try {
+          const seq = Number(chunk?.seq)
+          if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq
+          consumeAgentSseV1Chunk(chunk, aiMessage, sseCtx)
+          if (sseChunkNeedsImmediatePaint(chunk)) needsImmediatePaint = true
+        } catch (e) {
+          console.error('[CHAT-RESUME] chunk:', e)
+        }
+      }
+      sinceSeq = maxSeq
+      if (events.length > 0) {
+        if (needsImmediatePaint) await uiPaintResume.flushNow()
+        else uiPaintResume.schedule()
+        await uiPaintResume.drain()
+        patchAgentRunSeq(pid, sid, {
+          runId: runMeta.runId,
+          status: 'streaming',
+          clientMessageId: aiMessage.id,
+          lastSeq: sinceSeq,
+          llmModel: modelUsed
+        })
+        maybePatchAgentRunSnapshot(pid, sid, aiMessage)
+      }
+
+      const run = data.run || {}
+      if (!run.running && run.status !== 'running') {
+        finished = true
+        stopReactResumePoll()
+        flushReasoningTypewriter(aiMessage)
+        reconcileReactMessageAfterSseClose(aiMessage)
+        await uiPaintResume.flushNow()
+        await persistReactAssistantMessage(aiMessage, modelUsed)
+        clearAgentRun(pid, sid)
+        reactStreamRequestIdRef.value = null
+        isSending.value = false
+        reactResumeInFlightRef.value = false
+        uiPaintResume.dispose()
+        scrollToBottom()
+      }
+    } catch (e) {
+      console.warn('[CHAT-RESUME] poll failed', e)
+    }
+  }
+
+  try {
+    await pollOnce()
+    reactResumePollTimerRef.value = setInterval(() => {
+      void pollOnce()
+    }, REACT_RESUME_POLL_MS)
+
+    const staleMs = Date.now() - (runMeta.updatedAt || runMeta.startedAt || 0)
+    if (staleMs > AGENT_RUN_STALE_MS * 3) {
+      patchAgentRunSeq(pid, sid, { status: 'stale', runId: runMeta.runId })
+      stopReactResumePoll()
+      isSending.value = false
+      reactResumeInFlightRef.value = false
+      uiPaintResume.dispose()
+    }
+  } catch (e) {
+    resumeFailed = true
+    console.warn('[CHAT-RESUME] aborted', e)
+    stopReactResumePoll()
+    isSending.value = false
+    reactResumeInFlightRef.value = false
+    clearAgentRun(pid, sid)
+    uiPaintResume.dispose()
+  }
+  if (resumeFailed) return
+  /** 续流结束由 pollOnce 内 finished 分支 dispose；此处仅兜底 */
+}
 
 // 停止生成
 const handleStop = () => {
@@ -5084,6 +5832,11 @@ const handleStop = () => {
     abortController.value = null
   }
   isSending.value = false
+  const pid = currentProjectId.value || props.projectId
+  if (pid && props.sessionId) {
+    patchAgentRunSeq(pid, props.sessionId, { status: 'cancelled', runId: rid || undefined })
+  }
+  stopReactResumePoll()
 }
 
 // ReAct Agent 模式 - 调用后端 ReAct 接口 (流式处理)
@@ -5096,9 +5849,26 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
   messages.value.push(aiMessage)
   scrollToBottom()
 
+  const reactRunId = newReactRunId()
+  const pid = currentProjectId.value || props.projectId
+  if (pid && props.sessionId) {
+    patchAgentRunSeq(pid, props.sessionId, {
+      runId: reactRunId,
+      status: 'streaming',
+      clientMessageId: aiMessage.id,
+      lastSeq: 0,
+      llmModel: modelUsed,
+      startedAt: Date.now()
+    })
+    patchAgentRunSnapshot(pid, props.sessionId, null)
+    lastAgentRunSnapshotTs = 0
+  }
+  let lastAgentRunPatchTs = 0
+  let streamLastSeq = 0
+
   const stopSignal = abortController.value?.signal
   reactSseReaderRef.value = null
-  reactStreamRequestIdRef.value = null
+  reactStreamRequestIdRef.value = reactRunId
   
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
@@ -5123,9 +5893,8 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
         ...(props.planId != null && String(props.planId).trim() !== ''
           ? { plan_id: String(props.planId).trim() }
           : {}),
-        ...(props.sessionId
-          ? { request_id: String(props.sessionId), session_id: String(props.sessionId) }
-          : {}),
+        request_id: reactRunId,
+        ...(props.sessionId ? { chat_session_id: String(props.sessionId) } : {}),
         ...longMemoryContextForReact(),
         ...agentUiContextForReact()
       })
@@ -5140,30 +5909,8 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
     const decoder = new TextDecoder()
     let buffer = ''
 
-    const sseV1ConsumeCtx = {
-      scrollToBottom,
-      isDebugReactThinkSSE,
-      buildReactStepsFromTodoStrings,
-      thinkCtx: {
-        resolveStreamStepIndex,
-        scheduleReasoningTypewriter,
-        scheduleTodosStreamTypewriter,
-        sseIsReactThinkPhase,
-        logReactThinkStepDetail
-      },
-      engineCtx: {
-        flushReasoningTypewriter,
-        cancelTodosStreamTypewriter,
-        buildReactStepsFromTodoStrings,
-        resolveStreamStepIndex,
-        appendStepDetailLine,
-        scrollAgentStepLogIntoView,
-        handleShowGroupInList,
-        projectId: props.projectId,
-        handleNavigation,
-        nextTick
-      }
-    }
+    const sseV1ConsumeCtx = buildReactSseConsumeCtx()
+    const uiPaint = createSseUiPaintScheduler(nextTick, { minIntervalMs: REACT_SSE_PAINT_MIN_MS })
 
     try {
       while (true) {
@@ -5175,25 +5922,59 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
         const folded = foldAgentSseText(buffer, chunkText)
         buffer = folded.nextBuffer
 
-        // 每条完整 SSE JSON（fold 后的一行 data:）消费完即让出帧：nextTick 刷 Vue，rAF 给浏览器 paint。一包一渲染。
+        let maxSeq = 0
+        let breakLoop = false
+        let needsImmediatePaint = false
         for (const chunk of folded.chunks) {
           try {
             if (chunk && chunk.request_id) {
               reactStreamRequestIdRef.value = String(chunk.request_id)
             }
             const r = consumeAgentSseV1Chunk(chunk, aiMessage, sseV1ConsumeCtx)
-            if (r && r.breakChunkLoop) break
-            await yieldAgentSseUiFrame(nextTick)
+            if (r && r.breakChunkLoop) {
+              breakLoop = true
+              break
+            }
+            const seq = Number(chunk?.seq)
+            if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq
+            if (sseChunkNeedsImmediatePaint(chunk)) needsImmediatePaint = true
           } catch (e) {
             console.error('[CHAT-STREAM] 解析失败:', e, chunk)
           }
         }
+        if (maxSeq > streamLastSeq) streamLastSeq = maxSeq
+        if (needsImmediatePaint) {
+          await uiPaint.flushNow()
+        } else if (folded.chunks.length > 0) {
+          uiPaint.schedule()
+        }
+        const now = Date.now()
+        if (
+          pid &&
+          props.sessionId &&
+          streamLastSeq > 0 &&
+          now - lastAgentRunPatchTs > REACT_STREAM_PATCH_SEQ_MS
+        ) {
+          lastAgentRunPatchTs = now
+          patchAgentRunSeq(pid, props.sessionId, {
+            runId: reactStreamRequestIdRef.value || reactRunId,
+            status: 'streaming',
+            clientMessageId: aiMessage.id,
+            lastSeq: streamLastSeq,
+            llmModel: modelUsed
+          })
+          maybePatchAgentRunSnapshot(pid, props.sessionId, aiMessage)
+        }
+        if (breakLoop) break
       }
     } finally {
       reactSseReaderRef.value = null
       reactStreamRequestIdRef.value = null
     }
     flushReasoningTypewriter(aiMessage)
+    reconcileReactMessageAfterSseClose(aiMessage)
+    await uiPaint.flushNow()
+    uiPaint.dispose()
   } catch (error) {
     console.error('ReAct 执行失败:', error)
     // 如果用户已点过停止（我们已在 handleStop 里收敛 UI），这里不要再覆盖成错误
@@ -5219,74 +6000,15 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
     }
   }
 
-  // 流式结束时若未写入 modify 沙箱字段，从 executionResults 回填，避免历史落库丢失预览
-  let modifyNavForSave = aiMessage.modifyNavigation
-  if (
-    (!modifyNavForSave ||
-      !Array.isArray(modifyNavForSave.batch_results) ||
-      modifyNavForSave.batch_results.length === 0) &&
-    aiMessage.executionResults?.length
-  ) {
-    const recovered = recoverModifyNavigationFromExecutionResults(aiMessage.executionResults)
-    if (recovered) {
-      modifyNavForSave = recovered
-      aiMessage.modifyNavigation = recovered
-    }
+  if (pid && props.sessionId) {
+    clearAgentRun(pid, props.sessionId)
   }
   if (
-    modifyNavForSave &&
-    modifyNavForSave.batch_modify === true &&
-    (!aiMessage.modifyGroups || !Array.isArray(aiMessage.modifyGroups) || aiMessage.modifyGroups.length === 0)
+    aiMessage?.agentResult?.status !== 'cancelled' &&
+    aiMessage?.agentResult?.status !== 'failed'
   ) {
-    const rebuilt = rebuildModifyGroupsFromBatchNav(modifyNavForSave, shouldMergeModifyPreviewItems)
-    if (rebuilt?.length) {
-      aiMessage.modifyGroups = Object.freeze([...rebuilt])
-      nextTick(async () => {
-        await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
-        for (const grp of rebuilt) {
-          if (grp.items && grp.items.length > 0) {
-            await handleShowGroupInList(grp, aiMessage.id, { skipPersistedRefresh: true })
-          }
-        }
-      })
-    }
+    await persistReactAssistantMessage(aiMessage, modelUsed)
   }
-
-  // 保存最终结果到数据库（纯对话路径写入 direct_chat_reply，便于刷新后仍走气泡而非「总结」）
-  const _persistAgent = { ...(aiMessage.agentResult || {}) }
-  const _persistRunning = String(aiMessage.runningSummaryDraft || '').trim()
-  const _persistSummaryStream = String(aiMessage.summaryStreamDraft || '').trim()
-  if (_persistRunning) _persistAgent.summaryText = _persistRunning
-  else if (_persistSummaryStream) _persistAgent.summaryText = _persistSummaryStream
-  if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
-  else delete _persistAgent.direct_chat_reply
-  _persistAgent.react_plan_panel_suppressed = !!aiMessage.reactPlanPanelSuppressed
-  if (Array.isArray(aiMessage.reactPlanSteps) && aiMessage.reactPlanSteps.length > 0) {
-    _persistAgent.react_plan_steps = aiMessage.reactPlanSteps
-  } else {
-    try {
-      delete _persistAgent.react_plan_steps
-    } catch {
-      // ignore
-    }
-  }
-
-  // 保存最终结果到数据库（toRaw + 安全 stringify，避免 reactive 循环引用导致整段失败）
-  await saveMessageToDb({
-    is_user: false,
-    content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
-    understanding: aiMessage.understanding,
-    reasoning: aiMessage.reasoningContent || '',
-    steps: safeJsonForDb(aiMessage.steps, 'steps'),
-    execution_results: safeJsonForDb(aiMessage.executionResults || [], 'execution_results'),
-    agent_result: safeJsonForDb(_persistAgent, 'agent_result'),
-    evidences: safeJsonForDb(aiMessage.evidences || [], 'evidences'),
-    navigation: safeJsonForDb(aiMessage.navigation ?? null, 'navigation'),
-    modify_navigation: safeJsonForDb(aiMessage.modifyNavigation ?? null, 'modify_navigation'),
-    modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
-    final_response: aiMessage.finalResponse,
-    llm_model: modelUsed,
-  })
 }
 
 // Agent 模式 - 调用后端 Agent 接口
@@ -5527,7 +6249,6 @@ const handleSaveBugs = async (agentResult) => {
       title: bug.title,
       severity: bug.severity || 'medium',
       priority: bug.priority || 'medium',
-      description: bug.description,
       steps_to_reproduce: bug.steps_to_reproduce || '',
       expected: bug.expected || '',
       actual: bug.actual || '',
@@ -5597,6 +6318,12 @@ watch(
     autoResize()
   }
 )
+
+watch(inputMessage, () => {
+  scheduleDraftSave()
+})
+
+watch(() => props.sessionId, onSessionIdChangeForDraft)
 
 const _normAdoptTargetType = (t) =>
   String(t || 'bug')
@@ -5782,6 +6509,7 @@ onMounted(() => {
   window.addEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
   window.addEventListener('chat-temp-card-proposal', onChatTempCardProposal)
   window.addEventListener('create-awaiting-temp-card', onCreateAwaitingTempCard)
+  window.addEventListener('pagehide', flushAgentRunSnapshotOnPageHide)
 
   // 历史消息：滚动到顶部时按需加载更早内容（先出最新一屏）
   nextTick(() => {
@@ -5978,7 +6706,9 @@ watch(imagePreviewSrc, (src) => {
 // 组件卸载：统一移除监听、中断请求、清理 rAF（须在 imagePreviewEscapeHandler 定义之后）
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
+  window.removeEventListener('diff-review-push', onDiffReviewPushForChat)
   document.removeEventListener('keydown', imagePreviewEscapeHandler)
+  stopReactResumePoll()
 
   if (reactSseReaderRef.value) {
     try {
@@ -6010,6 +6740,8 @@ onUnmounted(() => {
   window.removeEventListener('create-awaiting-temp-card', onCreateAwaitingTempCard)
   window.removeEventListener('modify-confirmed', handleModifyConfirmed)
   window.removeEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
+  window.removeEventListener('pagehide', flushAgentRunSnapshotOnPageHide)
+  flushAgentRunSnapshotOnPageHide()
 
   const root = messagesContainer.value
   if (root) root.removeEventListener('scroll', loadOlderHistoryIfNeeded)
@@ -6034,6 +6766,9 @@ watch(() => props.sessionId, (newSessionId) => {
   }
   isSending.value = false
   historyLoading.value = false
+  stopReactResumePoll()
+  reactResumeInFlightRef.value = false
+  reactInterruptedHint.value = null
 
   try {
     messages.value.forEach((msg) => {
@@ -6103,6 +6838,54 @@ watch(() => props.sessionId, (newSessionId) => {
 .agent-local-proxy-hint-dismiss:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
+}
+
+.react-recovery-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #b3e5fc;
+  background: rgba(3, 169, 244, 0.1);
+  border-top: 1px solid rgba(3, 169, 244, 0.22);
+}
+
+.react-recovery-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.react-recovery-banner-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.react-recovery-btn {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: #d4d4d4;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.react-recovery-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.react-recovery-btn--primary {
+  border-color: rgba(3, 169, 244, 0.45);
+  color: #81d4fa;
+}
+
+.react-recovery-btn--primary:hover {
+  background: rgba(3, 169, 244, 0.18);
 }
 
 .messages-container {
@@ -8141,4 +8924,3 @@ watch(() => props.sessionId, (newSessionId) => {
   border-color: rgba(248, 113, 113, 0.45);
 }
 </style>
-

@@ -21,7 +21,7 @@ def _run_waitress(host: str, port: int) -> int:
 
     from app import app as flask_app
 
-    threads = int(os.getenv("WSGI_THREADS", "8"))
+    threads = max(8, min(int(os.getenv("WSGI_THREADS", "200")), 512))
     print(f"[WSGI] Windows 环境：使用 waitress 运行在 http://{host}:{port} (threads={threads})")
     serve(flask_app, host=host, port=port, threads=threads)
     return 0

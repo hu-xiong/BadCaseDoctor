@@ -58,7 +58,7 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 - REACT_CHAT_REPLY_STREAM=1（默认）：纯对话路径用 ``summary_stream`` 分块输出；``REACT_CHAT_REPLY_STREAM_CHARS`` 每块字符数（默认 2）
 - REACT_SUMMARY_STREAM_GAP_MS：``summary_stream`` / 统一总结 LLM 流等分片之间的暂停毫秒数（默认 22；``0`` 关闭）。单靠 ``asyncio.sleep(0)`` 易与单次 TCP/读缓冲合并，前端像「一次性整块」
 - REACT_RUNNING_SUMMARY_STREAM_GAP_MS：终局 ``running_summary_stream`` 分片间隔；**未设置**时与 ``REACT_SUMMARY_STREAM_GAP_MS`` 相同
-- REACT_INCREMENTAL_SUMMARY：每步 observation 后合并「增量运行总览」Markdown。**默认开**；``0``/``false``/``off`` 关闭。``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``（默认 2048）；``REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL=1``（默认）时终局不再跑统一总结 LLM
+- REACT_INCREMENTAL_SUMMARY：每步 observation 后合并「增量运行总览」Markdown。**默认开**；``0``/``false``/``off`` 关闭。``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``（默认 512）；``REACT_INCREMENTAL_SUMMARY_RULE_FAST=1``（默认，单步短观察本地拼总览免 LLM）；``REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL=1``（默认）时终局不再跑统一总结 LLM
 - REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT：主循环结束时等待**后台增量总结线程**的最长秒数（默认 **90**）。旧逻辑仅等 3s 即读队列，LLM 仍在输出时会把「关键发现」裁成半句；可调大或配合 ``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``
 - REACT_INCREMENTAL_SUMMARY_STREAM_SSE（默认 ``1``）：仅影响 **主循环结束后** 下发运行总览的方式。``1``：发 ``running_summary_done`` 整块（与 REPLACE_FINAL 等配合）；``0``：走 ``final_wire`` 切片重放 ``running_summary_stream``。**中途**每步合并一律 asyncio 后台队列 + 静默 LLM，不阻塞「准备下一步」、不向中途 SSE 推流（函数 ``_merge_running_summary_incremental_to_sse`` 保留供专项实验，主路径不再调用）
 - REACT_INCREMENTAL_SUMMARY_BLOCK_LOOP：``1`` 时每步在主循环内 ``await`` 静默合并（排障/复现卡顿用）。**默认 ``0``：后台 worker 串行合并**
@@ -152,6 +152,8 @@ from .unified_think_stream_sanitize import create_unified_think_sanitizer
 from .intent_guards import (
     is_vague_generic_todo,
     infer_modify_target_from_user,
+    react_tools_intent_classify_sync,
+    react_tools_intent_likely_need_tools_heuristic,
     user_text_implies_bug_entity_type,
     user_text_implies_card_entity_type,
     user_text_implies_plan_entity_type,
@@ -168,6 +170,7 @@ from .locale_prompts import (
     react_unified_final_summary_prompt,
     react_unified_sse_xml_markers,
     incremental_running_summary_prompt,
+    try_rule_based_incremental_running_summary,
     wrap_react_user_prompt,
     modify_modifications_kv_summary,
     react_batch_modify_preview_message,
@@ -179,6 +182,7 @@ from .locale_prompts import (
     react_summarize_grep_done_empty,
     react_unified_strict_format_retry_suffix,
     react_unified_duplicate_action_stall_message,
+    react_unified_grep_no_repeat_message,
     react_unified_partial_max_rounds_message,
     react_unified_plan_step_skip_failures_message,
     react_summarize_grep_done_hits,
@@ -750,6 +754,53 @@ def _normalize_plan_rows_for_sse(plan_rows: List[Dict[str, Any]]) -> List[Dict[s
     return out
 
 
+def _react_grep_no_repeat_after_empty_enabled() -> bool:
+    return (os.getenv("REACT_GREP_NO_REPEAT_AFTER_EMPTY", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _react_grep_no_repeat_if_hits_enabled() -> bool:
+    return (os.getenv("REACT_GREP_NO_REPEAT_IF_HITS", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _react_should_block_repeat_grep(
+    *,
+    prev_observation: Optional[Dict[str, Any]],
+    prev_action: Optional[Dict[str, Any]],
+    grep_call_count: int,
+) -> Tuple[bool, str]:
+    """
+    无命中或已有命中后禁止再次 grep（避免换词空转多轮 LLM+检索）。
+    返回 (是否拦截, reason 码：empty / has_hits)。
+    """
+    if grep_call_count < 1:
+        return False, ""
+    if str((prev_action or {}).get("tool") or "").strip().lower() != "grep":
+        return False, ""
+    if _react_grep_no_repeat_after_empty_enabled():
+        if _grep_observation_empty_lists(prev_observation or {}):
+            return True, "empty"
+        _data = (prev_observation or {}).get("data") or {}
+        if isinstance(_data, dict):
+            _meta = _data.get("grep_search_meta") or {}
+            if isinstance(_meta, dict) and _meta.get("low_relevance_empty"):
+                return True, "empty"
+    if _react_grep_no_repeat_if_hits_enabled() and not _grep_observation_empty_lists(
+        prev_observation or {}
+    ):
+        return True, "has_hits"
+    return False, ""
+
+
 def _grep_observation_empty_lists(observation: Dict[str, Any]) -> bool:
     """grep locate 成功但四类工作项列表均为空时视为无命中。"""
     if not isinstance(observation, dict):
@@ -1221,6 +1272,7 @@ def prefer_fast_observe_stub(tool: Optional[str], observation: Any) -> bool:
 def prefer_fast_observe_stub_grep(tool: Optional[str], observation: Any) -> bool:
     """
     grep 定位（locate）成功时跳过 observe_prompt LLM，用 summary_nl 生成最小 <result>。
+    ES 混合检索命中后需 LLM 判定候选，默认不走 fast stub。
     associate/compare 等仍走完整观察分析，避免丢合并/对比类结论。
     """
     v = (os.getenv("REACT_GREP_OBSERVE_FAST_STUB", "1") or "1").strip().lower()
@@ -1233,6 +1285,13 @@ def prefer_fast_observe_stub_grep(tool: Optional[str], observation: Any) -> bool
         return False
     mode = str(d.get("mode") or "locate").strip().lower()
     if mode != "locate":
+        return False
+    data = d.get("data") if isinstance(d.get("data"), dict) else {}
+    meta = data.get("grep_search_meta") if isinstance(data.get("grep_search_meta"), dict) else {}
+    if meta.get("es_ran"):
+        return False
+    lj = meta.get("llm_judge") if isinstance(meta.get("llm_judge"), dict) else {}
+    if lj.get("llm_judge") == "ok":
         return False
     return True
 
@@ -1607,19 +1666,113 @@ def _unified_thinking_is_tool_meta_only(s: str) -> bool:
     return False
 
 
+def _looks_like_unified_protocol_text(t: str) -> bool:
+    if not t or not isinstance(t, str):
+        return False
+    tl = t.lower()
+    return any(
+        m in tl
+        for m in (
+            "<observation",
+            "<thinking",
+            "<decision",
+            "<decide",
+            "<goal_done>",
+            "<execute>",
+            "<tool>",
+            "<params>",
+        )
+    )
+
+
+def _strip_unified_protocol_markup(text: str) -> str:
+    if not text or not isinstance(text, str):
+        return ""
+    t = re.sub(
+        r"</?(?:observation|thinking|decision|decide|task_plan|step|goal_done|execute|tool|params|reason)\b[^>]*>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(r"<[^>]+>", "", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def _build_direct_chat_prompt(user_message: str) -> tuple:
+    """与 ChitchatTool._prepare_prompt 一致；不注册工具时纯对话仍走此提示。"""
+    t = (user_message or "").strip()
+    if not t:
+        return None, "缺少用户消息"
+    try:
+        max_in = int((os.getenv("CHITCHAT_USER_MESSAGE_MAX_CHARS") or "4000").strip())
+    except ValueError:
+        max_in = 4000
+    max_in = max(200, min(max_in, 16000))
+    if len(t) > max_in:
+        t = t[: max_in - 1] + "…"
+    system_hint = (
+        "你是 BadCase Doctor 产品里的助手。用户当前在「项目 Agent」模式下发起了一段与具体缺陷操作无关的对话。"
+        "请用简洁、友好的中文直接回答；不要输出 XML、不要假装调用了 grep/modify；不要编造本系统未提供的功能。"
+    )
+    return f"{system_hint}\n\n用户说：\n{t}", None
+
+
+_DIRECT_CHAT_STREAM_END = object()
+
+
+def _sync_next_direct_chat_chunk(gen_iter):
+    try:
+        return next(gen_iter)
+    except StopIteration:
+        return _DIRECT_CHAT_STREAM_END
+
+
+def _unified_direct_chat_user_text(
+    parsed: Optional[Dict[str, Any]],
+    llm_response: str,
+    user_input: str,
+) -> str:
+    """从解析结果拼用户可见闲聊文案；禁止把统一协议 XML 原样展示。"""
+    parsed = parsed if isinstance(parsed, dict) else {}
+    base = (parsed.get("thinking") or "").strip()
+    if base and not _unified_thinking_is_tool_meta_only(base) and not _looks_like_unified_protocol_text(base):
+        return base
+    dec = parsed.get("decision") if isinstance(parsed.get("decision"), dict) else {}
+    reason = (dec.get("reason") or "").strip()
+    if reason and not _unified_thinking_is_tool_meta_only(reason) and not _looks_like_unified_protocol_text(reason):
+        return reason
+    t = ""
+    if llm_response and isinstance(llm_response, str):
+        t = re.sub(r"```(?:json)?\s*[\s\S]*?```", "", llm_response.strip(), flags=re.IGNORECASE | re.DOTALL).strip()
+        t = _strip_unified_protocol_markup(t)
+    if t and not _looks_like_unified_protocol_text(t):
+        return t
+    _ui = (user_input or "").strip()
+    if "什么软件" in _ui or "你是谁" in _ui or "你是什么" in _ui:
+        return (
+            "我是 BadCase Doctor 里的项目助手，帮你在当前项目里检索、创建和修改 Bug、BadCase、测试用例等。"
+            "日常闲聊也可以聊；要是想操作项目数据，直接说具体想做什么就行。"
+        )
+    return (
+        "我是 BadCase Doctor 里的项目助手，可以帮你处理当前项目里的缺陷与用例。"
+        "有具体任务（比如查 Bug、改状态）直接说即可。"
+    )
+
+
 def _unified_chitchat_fallback_summary(llm_response: str, parsed_thinking: str) -> str:
     """
     统一流模型未给出 execute+tool 时（例如千帆只返回 {"category":"other_request_not_matched"}），
     避免前端走「统一总结 + steps_count=1」导致 finalResponse 被挡、界面像卡住。
     """
     base = (parsed_thinking or "").strip()
-    if base and not _unified_thinking_is_tool_meta_only(base):
+    if base and not _unified_thinking_is_tool_meta_only(base) and not _looks_like_unified_protocol_text(base):
         return base
     if not llm_response or not isinstance(llm_response, str):
         return "（未收到可展示的模型输出；若为闲聊，可稍后重试或更换模型。）"
-    t = llm_response.strip()
-    t = re.sub(r"```(?:json)?\s*[\s\S]*?```", "", t, flags=re.IGNORECASE | re.DOTALL).strip()
-    if t:
+    t = _strip_unified_protocol_markup(
+        re.sub(r"```(?:json)?\s*[\s\S]*?```", "", llm_response.strip(), flags=re.IGNORECASE | re.DOTALL).strip()
+    )
+    if t and not _looks_like_unified_protocol_text(t):
         return t
     try:
         raw = llm_response.strip()
@@ -2290,6 +2443,107 @@ class SimplifiedReActEngine:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._tool_executor, _sync_collect)
 
+    async def _stream_direct_chat_reply(self, user_input: str):
+        """纯闲聊：直接调 LLM 生成自然语言（不注册 chitchat 工具、不展示统一协议 XML）。"""
+        prompt, prep_err = _build_direct_chat_prompt(user_input)
+        if prep_err or not prompt:
+            if prep_err:
+                yield prep_err
+            return
+        if self.llm is None:
+            yield "当前无法调用对话模型，请稍后重试。"
+            return
+        try:
+            max_out = int((os.getenv("CHITCHAT_REPLY_MAX_CHARS") or "8000").strip())
+        except ValueError:
+            max_out = 8000
+        max_out = max(500, min(max_out, 32000))
+        stream_fn = getattr(self.llm, "chat_stream", None)
+        if not callable(stream_fn):
+            chat_fn = getattr(self.llm, "chat", None)
+            if callable(chat_fn):
+                try:
+                    body = await chat_fn(prompt, history=None)
+                    text = (body or "").strip()[:max_out]
+                    for piece in _iter_direct_chat_reply_stream_chunks(text):
+                        yield piece
+                except Exception as e:
+                    yield f"对话生成失败：{e}"
+            else:
+                yield "当前 LLM 不支持流式或整包对话接口。"
+            return
+        loop = asyncio.get_running_loop()
+        it = iter(stream_fn(prompt, history=None))
+        n = 0
+        while True:
+            chunk = await loop.run_in_executor(None, _sync_next_direct_chat_chunk, it)
+            if chunk is _DIRECT_CHAT_STREAM_END:
+                break
+            if not isinstance(chunk, str) or not chunk:
+                continue
+            rest = max_out - n
+            if rest <= 0:
+                break
+            if len(chunk) > rest:
+                chunk = chunk[:rest]
+            yield chunk
+            n += len(chunk)
+
+    async def _yield_unified_pure_direct_chat(
+        self,
+        user_input: str,
+        gate_message: str,
+        _t0: float,
+    ):
+        """纯对话短路：不走统一 XML 流，直接 summary_stream + done。"""
+        msg = (gate_message or "").strip()
+        yield {
+            "event": "intent_clarification",
+            "message": msg or " ",
+            "kind": "llm_chat_only",
+        }
+        yield {"event": "summary_stream_reset"}
+        _sgap = _summary_stream_yield_gap_s()
+        _stream_parts: List[str] = []
+        _got_body = False
+        if msg:
+            for _delta in _iter_direct_chat_reply_stream_chunks(msg):
+                _stream_parts.append(_delta)
+                yield {"event": "summary_stream", "delta": _delta}
+                if _sgap > 0:
+                    await asyncio.sleep(_sgap)
+            _got_body = True
+        else:
+            try:
+                async for _delta in self._stream_direct_chat_reply(user_input):
+                    if isinstance(_delta, str) and _delta:
+                        _stream_parts.append(_delta)
+                        yield {"event": "summary_stream", "delta": _delta}
+                        if _sgap > 0:
+                            await asyncio.sleep(_sgap)
+                _got_body = bool("".join(_stream_parts).strip())
+            except Exception as _ce:
+                if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                    print(f"[REACT-UNIFIED] pure_direct_chat 流式失败: {_ce}", flush=True)
+        if not _got_body:
+            _fallback = _unified_direct_chat_user_text({}, "", user_input)
+            _stream_parts.clear()
+            for _delta in _iter_direct_chat_reply_stream_chunks(_fallback):
+                _stream_parts.append(_delta)
+                yield {"event": "summary_stream", "delta": _delta}
+                if _sgap > 0:
+                    await asyncio.sleep(_sgap)
+        yield {
+            "event": "done",
+            "status": "success",
+            "findings": [],
+            "steps_count": 0,
+            "duration": time.time() - _t0,
+            "thinking_time": 0.0,
+            "summary": "".join(_stream_parts),
+            "direct_reply": True,
+        }
+
     async def _stream_llm_text(self, prompt: str):
         """
         流式收集 LLM 文本输出，边收边 yield。
@@ -2432,6 +2686,36 @@ class SimplifiedReActEngine:
         if ch and len(ch) > 0:
             return getattr(ch[0], "message", None) or ch[0]
         return resp
+
+    def _log_react_decide_compat(
+        self,
+        *,
+        parse_path: str,
+        step_index: int,
+        msg: Any = None,
+        content: str = "",
+        decision: Optional[Dict[str, Any]] = None,
+        note: str = "",
+        raw_text: str = "",
+    ) -> None:
+        from .react_llm_log import log_react_compat
+        from .react_function_call import (
+            use_react_decide_function_call,
+            use_react_decide_xml_fallback,
+        )
+
+        log_react_compat(
+            tag="decide",
+            parse_path=parse_path,
+            step_index=step_index,
+            xml_fallback_on=use_react_decide_xml_fallback(),
+            fc_enabled=use_react_decide_function_call(),
+            assistant=msg,
+            content=content,
+            decision=decision,
+            note=note,
+            raw_text=raw_text,
+        )
 
     async def _react_decide_function_call(
         self,
@@ -2604,16 +2888,19 @@ class SimplifiedReActEngine:
 
         decision = decision_from_assistant_message(msg)
         if decision is None:
-            decision = (
-                parse_xml_decision(content)
-                if use_react_decide_xml_fallback()
-                else {
+            if use_react_decide_xml_fallback():
+                decision = parse_xml_decision(content)
+                _path = "xml_decision"
+            else:
+                decision = {
                     "execute": False,
                     "tool": "",
                     "params": {},
                     "reason": "decide_fc_no_tool_calls",
                 }
-            )
+                _path = "fc_no_tool_calls"
+        else:
+            _path = "function_call"
 
         raw_log = (content or "").strip()
         try:
@@ -2634,6 +2921,14 @@ class SimplifiedReActEngine:
         print(
             f"[REACT-FC] step={step_index} tool={decision.get('tool')!r} "
             f"execute={decision.get('execute')!r}"
+        )
+        self._log_react_decide_compat(
+            parse_path=_path,
+            step_index=step_index,
+            msg=msg,
+            content=content,
+            decision=decision,
+            note="decide_fc_sync",
         )
         return decision, raw_log or (content or "")
 
@@ -3609,19 +3904,6 @@ class SimplifiedReActEngine:
         if not _last_thread:
             return
         _thr, _q, _DONE, _ver = _last_thread
-        if max_wait is None:
-            try:
-                max_wait = float((os.getenv("REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT") or "90").strip())
-            except Exception:
-                max_wait = 90.0
-        max_wait = max(5.0, min(max_wait, 600.0))
-
-        loop = asyncio.get_running_loop()
-
-        def _join_worker() -> None:
-            _thr.join(timeout=max_wait)
-
-        await loop.run_in_executor(None, _join_worker)
 
         def _drain_queue_parts() -> List[str]:
             parts: List[str] = []
@@ -3637,6 +3919,31 @@ class SimplifiedReActEngine:
                     if _d:
                         parts.append(str(_d))
             return parts
+
+        if not _thr.is_alive():
+            _ft = "".join(_drain_queue_parts()).strip()
+            if _ft:
+                state["text"] = _ft
+                state["version"] = _ver
+            print(
+                f"[INCR-SUM] wait_for_background: already_done result_chars={len(_ft)}",
+                flush=True,
+            )
+            return
+
+        if max_wait is None:
+            try:
+                max_wait = float((os.getenv("REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT") or "90").strip())
+            except Exception:
+                max_wait = 90.0
+        max_wait = max(5.0, min(max_wait, 600.0))
+
+        loop = asyncio.get_running_loop()
+
+        def _join_worker() -> None:
+            _thr.join(timeout=max_wait)
+
+        await loop.run_in_executor(None, _join_worker)
 
         _full_parts: List[str] = _drain_queue_parts()
 
@@ -3670,11 +3977,28 @@ class SimplifiedReActEngine:
         """
         if not use_react_incremental_running_summary():
             return
+        prev = str(state.get("text") or "")
         try:
             next_ver = int(state.get("version") or 0) + 1
         except Exception:
             next_ver = 1
-        prev = str(state.get("text") or "")
+        rule_text = try_rule_based_incremental_running_summary(
+            self._ui_locale,
+            prev,
+            step_index,
+            tool,
+            todo,
+            nl_obs,
+        )
+        if rule_text:
+            state["text"] = rule_text
+            state["version"] = next_ver
+            print(
+                f"[INCR-SUM] rule_fast step={step_index} tool={tool} chars={len(rule_text)}",
+                flush=True,
+            )
+            return
+
         prompt = incremental_running_summary_prompt(
             self._ui_locale,
             prev,
@@ -3692,10 +4016,10 @@ class SimplifiedReActEngine:
                 with self._llm_no_thinking():
                     try:
                         _mt = int(
-                            (os.getenv("REACT_INCREMENTAL_SUMMARY_MAX_TOKENS") or "2048").strip()
+                            (os.getenv("REACT_INCREMENTAL_SUMMARY_MAX_TOKENS") or "512").strip()
                         )
                     except Exception:
-                        _mt = 2048
+                        _mt = 512
                     _mt_kw = _mt if _mt > 0 else None
                     for it in self._resolve_chat_stream_iter_content_only(
                         prompt, None, max_tokens=_mt_kw
@@ -3774,10 +4098,10 @@ class SimplifiedReActEngine:
                 with self._llm_no_thinking():
                     try:
                         _mt = int(
-                            (os.getenv("REACT_INCREMENTAL_SUMMARY_MAX_TOKENS") or "2048").strip()
+                            (os.getenv("REACT_INCREMENTAL_SUMMARY_MAX_TOKENS") or "512").strip()
                         )
                     except Exception:
-                        _mt = 2048
+                        _mt = 512
                     _mt_kw = _mt if _mt > 0 else None
                     for it in self._resolve_chat_stream_iter_content_only(
                         prompt, None, max_tokens=_mt_kw
@@ -3876,20 +4200,25 @@ class SimplifiedReActEngine:
             ver = int(state.get("version") or 0)
         except Exception:
             ver = 1
-        # 终局运行总览切片下发前有清空 reset + 分片间隔，前端先发 loading 避免长时间空白像「卡住」
         yield {"event": "unified_summary_loading", "active": True}
         yield {"event": "running_summary_stream_reset", "version": ver}
+        yield {"event": "unified_summary_loading", "active": False}
+        # 默认 STREAM_SSE=1：终局直接 done 全文，避免短总览仍切片+间隔（多耗数百 ms～数秒）
+        if use_react_incremental_running_summary_stream_sse():
+            yield {
+                "event": "running_summary_done",
+                "full_text": text,
+                "version": ver,
+                "index": last_step_index,
+            }
+            return
         try:
             _slice = int((os.getenv("REACT_SUMMARY_STREAM_SLICE_CHARS") or "24").strip())
         except Exception:
             _slice = 24
         _slice = max(1, _slice)
         _rgap = _running_summary_wire_yield_gap_s()
-        _first_chunk = True
         for j in range(0, len(text), _slice):
-            if _first_chunk:
-                yield {"event": "unified_summary_loading", "active": False}
-                _first_chunk = False
             yield {
                 "event": "running_summary_stream",
                 "delta": text[j : j + _slice],
@@ -4747,6 +5076,7 @@ class SimplifiedReActEngine:
             return
 
         result_ctx: Dict[str, Any] = {}
+        self._unified_result_ctx = result_ctx
         if project_id is not None:
             result_ctx["project_id"] = project_id
             if project_name:
@@ -4804,6 +5134,24 @@ class SimplifiedReActEngine:
             if _co:
                 result_ctx["client_os"] = _co
 
+        _need_tools = react_tools_intent_likely_need_tools_heuristic(user_input)
+        _gate_reply = ""
+        if not _need_tools:
+            _need_tools, _gate_reply, _ = await asyncio.to_thread(
+                react_tools_intent_classify_sync,
+                user_input,
+                getattr(self, "_ui_locale", None),
+            )
+        if not _need_tools:
+            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                print(
+                    "[REACT-UNIFIED] tools_intent gate → pure direct chat (skip XML stream)",
+                    flush=True,
+                )
+            async for _ev in self._yield_unified_pure_direct_chat(user_input, _gate_reply, _t0):
+                yield _ev
+            return
+
         _max_rounds = _react_max_rounds_cap()
         prev_observation: Optional[Dict[str, Any]] = None
         prev_action: Optional[Dict[str, Any]] = None
@@ -4818,6 +5166,7 @@ class SimplifiedReActEngine:
         _dup_win = _react_duplicate_action_window()
         _plan_step_max_fail = _react_plan_step_max_retries()
         _sig_history: deque = deque(maxlen=_dup_win)
+        _grep_call_count = 0
         _unified_round_for_debug: int = -1
         try:
             for round_idx in range(_max_rounds):
@@ -5408,41 +5757,29 @@ class SimplifiedReActEngine:
                         _done_sent = True
                         return
 
-                    # 首轮纯闲聊：direct_reply + summary_stream 打字机
+                    # 首轮纯闲聊：收起 Thought 壳，走 summary_stream 自然语言（不展示统一协议 XML）
+                    yield {"event": "agent_thought_done", "index": round_idx}
                     yield {"event": "direct_reply_prepare", "active": True}
                     yield {"event": "summary_stream_reset"}
 
                     _sgap = _summary_stream_yield_gap_s()
                     _stream_parts: List[str] = []
-                    # 纯闲聊不要把模型的「thinking」当成最终答案（用户会看到“任务理解/推理模板”而非直接回复）。
-                    # 一律走 chitchat 工具生成自然语言；若工具不可用再用 fallback。
-                    _ct = self.tools.get("chitchat")
                     _got_body = False
-                    if _ct is not None and callable(getattr(_ct, "stream_execute", None)):
-                        try:
-                            async for _delta in _ct.stream_execute(message=user_input):
-                                if isinstance(_delta, str) and _delta:
-                                    _stream_parts.append(_delta)
-                                    yield {"event": "summary_stream", "delta": _delta}
-                            _got_body = bool("".join(_stream_parts).strip())
-                        except Exception as _ce:
-                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
-                                print(f"[REACT-UNIFIED] chitchat 流式失败: {_ce}", flush=True)
+                    try:
+                        async for _delta in self._stream_direct_chat_reply(user_input):
+                            if isinstance(_delta, str) and _delta:
+                                _stream_parts.append(_delta)
+                                yield {"event": "summary_stream", "delta": _delta}
+                                if _sgap > 0:
+                                    await asyncio.sleep(_sgap)
+                        _got_body = bool("".join(_stream_parts).strip())
+                    except Exception as _ce:
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(f"[REACT-UNIFIED] direct_chat 流式失败: {_ce}", flush=True)
                     if not _got_body:
-                        _fallback = ""
-                        if _ct is not None:
-                            try:
-                                _obs = await _ct.execute(message=user_input)
-                                if isinstance(_obs, dict) and _obs.get("success"):
-                                    _fallback = (
-                                        (_obs.get("summary") or _obs.get("message") or "")
-                                        .strip()
-                                    )
-                            except Exception as _ce2:
-                                if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
-                                    print(f"[REACT-UNIFIED] chitchat 兜底失败: {_ce2}", flush=True)
-                        if not _fallback:
-                            _fallback = _unified_chitchat_fallback_summary(llm_response, "")
+                        _fallback = _unified_direct_chat_user_text(
+                            parsed, llm_response, user_input
+                        )
                         _stream_parts.clear()
                         for _delta in _iter_direct_chat_reply_stream_chunks(_fallback):
                             _stream_parts.append(_delta)
@@ -5658,6 +5995,61 @@ class SimplifiedReActEngine:
                 }
                 _reason_nl = str(decision.get("reason") or "").strip()
                 _step_id_ui = _plan_step_idx + 1 if unified_plan_steps else round_idx + 1
+                if tool_name == "grep":
+                    _grep_block, _grep_block_reason = _react_should_block_repeat_grep(
+                        prev_observation=prev_observation,
+                        prev_action=prev_action,
+                        grep_call_count=_grep_call_count,
+                    )
+                    if _grep_block:
+                        _stall_msg = react_unified_grep_no_repeat_message(
+                            getattr(self, "_ui_locale", None),
+                            reason=_grep_block_reason,
+                        )
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                f"[REACT-UNIFIED] block repeat grep reason={_grep_block_reason!r} "
+                                f"grep_calls={_grep_call_count}",
+                                flush=True,
+                            )
+                        yield {
+                            "event": "agent_thought",
+                            "delta": _stall_msg + "\n\n",
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                        findings_acc.append(_stall_msg)
+                        await self._wait_for_background_summary(running_summary_state)
+                        _append_running_summary_stop_note(running_summary_state, _stall_msg)
+                        yield {
+                            "event": "finished",
+                            "finished": True,
+                            "steps_count": _steps_done,
+                            "duration": time.time() - _t0,
+                            "thinking_time": _total_think_time,
+                        }
+                        _incr_stall = str(running_summary_state.get("text") or "").strip()
+                        if use_react_incremental_running_summary() and _incr_stall:
+                            _lsi_stall = max(0, (_steps_done if _steps_done > 0 else 1) - 1)
+                            async for _rs_ev in self._stream_running_summary_final_wire(
+                                running_summary_state,
+                                last_step_index=_lsi_stall,
+                            ):
+                                yield _rs_ev
+                        _sum_stall = _incr_stall or "\n".join(findings_acc).strip()
+                        yield {
+                            "event": "done",
+                            "status": "partial",
+                            "findings": findings_acc,
+                            "steps_count": _steps_done,
+                            "duration": time.time() - _t0,
+                            "thinking_time": _total_think_time,
+                            "summary": _sum_stall,
+                            "stop_reason": "grep_no_repeat",
+                        }
+                        _done_sent = True
+                        return
                 _sig = _tool_params_signature(tool_name, tool_params)
                 if (
                     len(_sig_history) == _dup_win
@@ -5740,6 +6132,12 @@ class SimplifiedReActEngine:
                         }
                     else:
                         tool_timeout = int(os.getenv("AGENT_TOOL_TIMEOUT", "120"))
+                        try:
+                            from agents.tool_run_context import attach_tool_run_ctx_to_params
+
+                            attach_tool_run_ctx_to_params(tool_params, result_ctx)
+                        except Exception as _atc_ex:
+                            print(f"[TOOL-RUN-CTX] attach before modify failed: {_atc_ex}")
                         fut, progress_q = self._spawn_modify_executor_future(
                             _tool_obj, tool_params
                         )
@@ -5829,7 +6227,7 @@ class SimplifiedReActEngine:
                                 f"已确认中的实体类型与 ID 必须与此一致；勿把 Bug 写成 BadCase，除非 target 为 badcase。）"
                             )
                         obs_summary = _fact + str(obs_summary)
-                yield {
+                _obs_ev: Dict[str, Any] = {
                     "event": "observation",
                     "tool": tool_name,
                     "index": round_idx,
@@ -5838,6 +6236,15 @@ class SimplifiedReActEngine:
                     "summary_nl": str(obs_summary),
                     "success": observation.get("success", False),
                 }
+                _tool_ms = observation.get("grep_perf_ms") if tool_name == "grep" else None
+                if _tool_ms is None and isinstance(observation, dict):
+                    _tool_ms = observation.get("tool_duration_ms")
+                if _tool_ms is not None:
+                    try:
+                        _obs_ev["tool_duration_ms"] = float(_tool_ms)
+                    except (TypeError, ValueError):
+                        pass
+                yield _obs_ev
                 _clr = observation.get("client_local_run")
                 if isinstance(_clr, dict) and _clr:
                     for _pkt in engine_dict_to_wire_packets({"event": "client_local_run", **_clr}):
@@ -5918,9 +6325,19 @@ class SimplifiedReActEngine:
                         background=True,  # 不阻塞主循环
                     )
                     if tool_name == "grep":
+                        _grep_call_count += 1
                         self._merge_grep_observation_into_context(
                             observation, tool_params, result_ctx
                         )
+                    elif tool_name == "modify":
+                        try:
+                            from agents.tool_run_context import (
+                                merge_tool_run_patch_from_observation,
+                            )
+
+                            merge_tool_run_patch_from_observation(result_ctx, observation)
+                        except Exception as _mrg_ex:
+                            print(f"[TOOL-RUN-CTX] merge modify patch failed: {_mrg_ex}")
                     else:
                         for key in (
                             "bug_list",
@@ -6617,6 +7034,15 @@ class SimplifiedReActEngine:
                     )
         except Exception as _e:
             print(f"[MODIFY-TRACE] merge_grep 附加日志失败: {_e}")
+        try:
+            from agents.tool_run_context import seed_tool_run_store_from_grep_context
+
+            seed_tool_run_store_from_grep_context(
+                result_context,
+                project_id=result_context.get("project_id"),
+            )
+        except Exception as _seed_ex:
+            print(f"[TOOL-RUN-CTX] seed from grep failed: {_seed_ex}")
 
     async def _enrich_modify_decision_for_main_loop(
         self,
@@ -6662,6 +7088,12 @@ class SimplifiedReActEngine:
         _card_rows_param = result_context.get("grep_modify_raw_card_list") or result_context.get("card_list")
         params["intent_card_rows"] = _card_rows_param if isinstance(_card_rows_param, list) else None
         params["intent_result_context"] = result_context
+        try:
+            from agents.tool_run_context import attach_tool_run_ctx_to_params
+
+            attach_tool_run_ctx_to_params(params, result_context)
+        except Exception as _atc_ex:
+            print(f"[TOOL-RUN-CTX] attach on enrich failed: {_atc_ex}")
         explicit = self._infer_modify_target_explicit(user_input, todo)
         user_infer = self._infer_modify_target(user_input, todo)
         if explicit:
@@ -7458,6 +7890,17 @@ class SimplifiedReActEngine:
             or 'test_case' in text
         ):
             return 'testcase'
+        # 改状态/负责人：源表字段；未明示卡片层时不应按 Card 表 grep（Card.title 常与 Bug.title 不同步）
+        if not user_text_implies_card_entity_type(text_raw):
+            import re as _re_exp
+
+            if _re_exp.search(
+                r"(?:状态|status).{0,24}(?:改|修改|变更|设为|改为|调整)"
+                r"|[改修改变更].{0,20}(?:状态|status)",
+                text_raw,
+                _re_exp.IGNORECASE,
+            ):
+                return "bug"
         if user_text_implies_card_entity_type(text_raw):
             return 'card'
         if user_text_implies_plan_entity_type(text_raw):
@@ -7530,6 +7973,13 @@ class SimplifiedReActEngine:
         if not isinstance(params, dict):
             return
         t = str(params.get('target') or '').strip().lower()
+        _raw = f"{user_input or ''} {todo or ''}"
+        if user_text_implies_bug_entity_type(_raw) and t in ("card", "badcase"):
+            print(
+                f"[REACT-execution] grep.params.target 用户明确 bug，纠正: {t!r} -> bug"
+            )
+            params["target"] = "bug"
+            return
         if t in ('all', exp):
             return
         if exp == 'testcase' and t not in ('testcase', 'all'):
@@ -7542,8 +7992,27 @@ class SimplifiedReActEngine:
             print(f"[REACT-execution] grep.params.target 按用户 BadCase 意图纠正: {t!r} -> badcase")
             params['target'] = 'badcase'
         elif exp == 'card' and t not in ('card', 'all'):
-            print(f"[REACT-execution] grep.params.target 按用户卡片意图纠正: {t!r} -> card")
-            params['target'] = 'card'
+            import re as _re_gc
+
+            _raw = f"{user_input or ''} {todo or ''}"
+            if (
+                not user_text_implies_card_entity_type(_raw)
+                and _re_gc.search(
+                    r"(?:状态|status).{0,24}(?:改|修改|变更|设为|改为)"
+                    r"|[改修改变更].{0,20}(?:状态|status)",
+                    _raw,
+                    _re_gc.IGNORECASE,
+                )
+            ):
+                print(
+                    f"[REACT-execution] grep.params.target 状态修改优先源表: {t!r} -> bug"
+                )
+                params["target"] = "bug"
+            else:
+                print(
+                    f"[REACT-execution] grep.params.target 按用户卡片意图纠正: {t!r} -> card"
+                )
+                params["target"] = "card"
         elif exp == 'plan' and t not in ('plan', 'all'):
             print(f"[REACT-execution] grep.params.target 按用户计划意图纠正: {t!r} -> plan")
             params['target'] = 'plan'
@@ -8618,6 +9087,14 @@ class SimplifiedReActEngine:
         except Exception as _se:
             print(f"[MODIFY] spawn_executor 入参日志失败: {_se}; keys={list(params.keys())}", flush=True)
         params["progress_queue"] = progress_q
+        _rc = getattr(self, "_unified_result_ctx", None)
+        if isinstance(_rc, dict):
+            try:
+                from agents.tool_run_context import attach_tool_run_ctx_to_params
+
+                attach_tool_run_ctx_to_params(params, _rc)
+            except Exception as _atc_ex:
+                print(f"[TOOL-RUN-CTX] attach in spawn failed: {_atc_ex}")
 
         def _progress_cb(msg: str):
             try:
@@ -8632,8 +9109,20 @@ class SimplifiedReActEngine:
                 params["progress_callback"] = _progress_cb
                 if "confirm" not in params:
                     params["confirm"] = False
-                return thread_loop.run_until_complete(tool.execute(**params))
+                raw = thread_loop.run_until_complete(tool.execute(**params))
+                try:
+                    from agents.tools.modify_tool import attach_tool_run_patch_to_result
+
+                    return attach_tool_run_patch_to_result(raw)
+                except Exception:
+                    return raw
             finally:
+                try:
+                    from agents.tools.modify_tool import _row_cache_reset_for_request
+
+                    _row_cache_reset_for_request()
+                except Exception:
+                    pass
                 thread_loop.close()
 
         fut = loop.run_in_executor(self._tool_executor, _run_modify_in_thread)
@@ -8771,6 +9260,8 @@ class SimplifiedReActEngine:
                 )
                 self._force_grep_card_layer_only_if_requested(params, _grep_ui, "")
                 self._normalize_grep_plan_scope(params)
+                if _grep_ui and not params.get("user_input"):
+                    params["user_input"] = _grep_ui
 
             if tool_name != "modify":
                 print(f"[REACT] 工具参数: {params}")
@@ -8812,6 +9303,14 @@ class SimplifiedReActEngine:
                     f"[REACT] modify 进入线程池执行（target_id={params.get('target_id')}, "
                     f"target_ids={params.get('target_ids')}, target={params.get('target')}）…"
                 )
+                _rc_exec = getattr(self, "_unified_result_ctx", None)
+                if isinstance(_rc_exec, dict):
+                    try:
+                        from agents.tool_run_context import attach_tool_run_ctx_to_params
+
+                        attach_tool_run_ctx_to_params(params, _rc_exec)
+                    except Exception as _atc_ex:
+                        print(f"[TOOL-RUN-CTX] attach before modify failed: {_atc_ex}")
                 fut, _progress_q = self._spawn_modify_executor_future(tool, params)
                 tool_timeout = int(os.getenv("AGENT_TOOL_TIMEOUT", "120"))
                 try:
@@ -8855,6 +9354,17 @@ class SimplifiedReActEngine:
                 self._grep_result_cache.clear()
                 if os.getenv("PERF_LOG") == "1":
                     print("[PERF][grep_cache] cleared after modify/create/delete success")
+            if tool_name == "modify" and isinstance(res, dict):
+                _rc_m = getattr(self, "_unified_result_ctx", None)
+                if isinstance(_rc_m, dict):
+                    try:
+                        from agents.tool_run_context import (
+                            merge_tool_run_patch_from_observation,
+                        )
+
+                        merge_tool_run_patch_from_observation(_rc_m, res)
+                    except Exception as _mrg_ex:
+                        print(f"[TOOL-RUN-CTX] merge modify patch failed: {_mrg_ex}")
             return res
         except Exception as e:
             print(f"[REACT] ❌ 工具执行异常: {str(e)}")

@@ -44,7 +44,7 @@ class ToolRegistry:
         """初始化工具注册表"""
         self.tools: Dict[str, BaseTool] = {}
     
-    def register(self, tool: BaseTool):
+    def register(self, tool: BaseTool, *, quiet: bool = False):
         """
         注册工具
         
@@ -55,7 +55,7 @@ class ToolRegistry:
             raise TypeError(f"tool 必须是 BaseTool 的实例，得到 {type(tool)}")
         
         self.tools[tool.name] = tool
-        if os.getenv("QUIET_LOG") != "1":
+        if not quiet and os.getenv("QUIET_LOG") != "1":
             print(f"[REGISTRY] ✅ 工具已注册: {tool.name}")
     
     def get(self, name: str) -> Optional[BaseTool]:

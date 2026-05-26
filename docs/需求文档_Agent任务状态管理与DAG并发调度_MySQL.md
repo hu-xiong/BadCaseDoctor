@@ -207,6 +207,22 @@
 - **推荐**：内存中 `asyncio` 与线程池协作，任务完成时由执行器写入队列/Event，流式生成器 `await` 就绪，**避免**同步阻塞事件循环。
 - **可接受兜底**：带超时与退避的轮询 DB（性能较差，仅作备选）。
 
+### 7.3.1 浏览器刷新 ≠ 服务端恢复（与 §6.5 区分）
+
+| 维度 | §6.5 服务端重启 | 用户 F5 / 关 Tab（前端） |
+|------|----------------|------------------------|
+| SSE | 不适用 | **连接断开**；续流靠 **`GET /api/agent/react/buffer`**（见 session 文档 §5.2.1），非原连接续订 |
+| `agent_tasks` | `running` → `pending` 可被调度器重领 | 表内可仍为 `running`；**续流主路径是 SSE buffer**，非仅轮询任务表 |
+| 前端应展示什么 | — | 刷新后 **buffer 重放 + `bcd:ss:agent` 快照**；终态仍以 **Chat Session 消息** 为准 |
+| 可选 API | — | `GET /api/agent/tasks?session_id={react_request_id}` 辅助摘要（需 `REACT_AGENT_TASK_DAG=1`） |
+
+**产品结论（与 session 文档 v0.8/v0.9 对齐）**：
+
+- **F5 / 断线**：**SSE buffer 续流**（同 `react_request_id` 拉事件）。
+- **停止 / 中断后换一轮说话**：**`react_agent_runs` 检查点续作**（`resume_run_id`，见 session 文档 §5.2.2）。
+- `agent_tasks`：工具级审计与 DAG；**不能**单独替代上述两层。
+- **中断续作 + 并发**：`react_agent_runs.checkpoint.agent_task_dag` 为 DAG **快照**（见 session 文档 §5.2.4）；**精确续跑 pending 层** 需在 `run_dag_async` / 调度器侧单独立项，不能假定仅拼 prompt 即可恢复并发拓扑。
+
 ### 7.4 集成示例（需求级伪代码，非最终实现）
 
 ```text

@@ -123,7 +123,7 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
   if (chunk.type === 'tool') {
     const p = chunk.payload || {}
     if (p.op === 'end') {
-      return {
+      const ev = {
         event: 'observation',
         data: p.body,
         tool: p.name,
@@ -132,6 +132,10 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
         summary_nl: p.summary_nl,
         react_phase: p.react_phase
       }
+      if (p.duration_ms != null && Number.isFinite(Number(p.duration_ms))) {
+        ev.tool_duration_ms = Number(p.duration_ms)
+      }
+      return ev
     }
     if (p.op === 'start') {
       return {

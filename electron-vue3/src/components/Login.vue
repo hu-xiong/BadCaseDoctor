@@ -173,7 +173,7 @@
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { login, register, sendVerificationCode, getProjects, createProject } from '../api.js'
+import { login, register, sendVerificationCode, getProjects, createProject, warmupAgent } from '../api.js'
 import { setUser } from '../store/user.js'
 
 export default {
@@ -216,7 +216,8 @@ export default {
         if (response.data.success) {
           // 登录成功，保存用户状态
           setUser(response.data.user)
-          
+          void warmupAgent().catch(() => {})
+
           // 获取项目列表
           const projectsResponse = await getProjects()
           let projectId = null
@@ -294,6 +295,7 @@ export default {
           if (loginResponse.data.success) {
             // 登录成功，保存用户状态
             setUser(loginResponse.data.user)
+            void warmupAgent().catch(() => {})
             
             // 创建默认项目
             const defaultProjectResponse = await createProject({

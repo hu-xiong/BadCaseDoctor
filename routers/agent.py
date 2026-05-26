@@ -107,6 +107,172 @@ agent_bp = Blueprint('agent', __name__, url_prefix='/api/agent')
 _REACT_AGENT_CACHE_LOCK = threading.Lock()
 _REACT_AGENT_CACHE: dict[str, IntelligentDevOpsAgent] = {}
 _REACT_LLM_CACHE: dict[str, object] = {}
+_WARMUP_IN_FLIGHT: set[str] = set()
+
+
+def _warmup_enabled() -> bool:
+    return (os.getenv("REACT_AGENT_WARMUP", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _startup_bootstrap_enabled() -> bool:
+    """进程启动时同步注册内置工具（默认开）。"""
+    return (os.getenv("AGENT_TOOLS_BOOTSTRAP_AT_START", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _startup_bootstrap_model_keys() -> list[str]:
+    """启动预热用的 model 列表；默认只预热一个主模型，避免重复注册日志。"""
+    raw = (os.getenv("AGENT_STARTUP_BOOTSTRAP_MODELS") or "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    keys = _warmup_model_keys()
+    return [keys[0]] if keys else [""]
+
+
+_BOOTSTRAP_SCHEDULED = False
+_BOOTSTRAP_SCHEDULE_LOCK = threading.Lock()
+
+
+def bootstrap_react_agent_at_startup(app) -> bool:
+    """
+    应用启动时仅注册内置工具到进程级 ToolRegistry（不 get_llm，通常 <200ms）。
+    首条 Agent 对话再补 LLM 类工具与 skill_executor。
+    """
+    if not _startup_bootstrap_enabled():
+        return False
+    t0 = time.perf_counter()
+    try:
+        with app.app_context():
+            from app import db
+            from agents.intelligent_devops_agent import bootstrap_shared_tool_registry
+
+            reg = bootstrap_shared_tool_registry(db.session)
+            n_tools = len(reg)
+            try:
+                db.session.remove()
+            except Exception:
+                pass
+        print(
+            f"[AGENT-BOOTSTRAP] 启动完成 tools={n_tools} "
+            f"ms={(time.perf_counter() - t0) * 1000.0:.0f}",
+            flush=True,
+        )
+        return True
+    except Exception as ex:
+        print(f"[AGENT-BOOTSTRAP] 启动失败: {ex}", flush=True)
+        logger.warning("[AGENT-BOOTSTRAP] failed: %s", ex)
+        return False
+
+
+def schedule_react_agent_bootstrap_at_startup(app) -> bool:
+    """进程内只执行一次；同步注册工具，不阻塞在远端 LLM 初始化。"""
+    global _BOOTSTRAP_SCHEDULED
+    if not _startup_bootstrap_enabled():
+        return False
+    with _BOOTSTRAP_SCHEDULE_LOCK:
+        if _BOOTSTRAP_SCHEDULED:
+            return False
+        _BOOTSTRAP_SCHEDULED = True
+    return bootstrap_react_agent_at_startup(app)
+
+
+def _warmup_model_keys(models=None) -> list[str]:
+    """登录/进项目页预热的 model 列表（去重、保序）。"""
+    keys: list[str] = []
+    raw_env = (os.getenv("REACT_WARMUP_MODELS") or "").strip()
+    if raw_env:
+        keys.extend(m.strip() for m in raw_env.split(",") if m.strip())
+    elif models:
+        keys.extend(str(m).strip() for m in models if str(m).strip())
+    else:
+        keys.extend(["deepseek-v4-flash", "deepseek-v4-pro"])
+    try:
+        auto_id = resolve_route(
+            "auto",
+            channel="react",
+            user_input="",
+            has_images=False,
+        )
+        if auto_id and str(auto_id).strip():
+            keys.insert(0, str(auto_id).strip())
+    except Exception:
+        pass
+    seen: set[str] = set()
+    out: list[str] = []
+    for k in keys:
+        nk = (k or "").strip() or "__default__"
+        if nk in seen:
+            continue
+        seen.add(nk)
+        out.append(nk if nk != "__default__" else "")
+    return out
+
+
+def schedule_react_agent_warmup(app, models=None) -> bool:
+    """
+    异步预热 ReAct Agent（LLM + 工具注册），避免首条对话在请求路径上冷启动。
+    已缓存的 model 会跳过；同一 model 并发只调度一次。
+    """
+    if not _warmup_enabled():
+        return False
+    model_keys = _warmup_model_keys(models)
+    to_run: list[str] = []
+    with _REACT_AGENT_CACHE_LOCK:
+        for mk in model_keys:
+            cache_key = mk or "__default__"
+            if cache_key in _REACT_AGENT_CACHE or cache_key in _WARMUP_IN_FLIGHT:
+                continue
+            _WARMUP_IN_FLIGHT.add(cache_key)
+            to_run.append(mk)
+    if not to_run:
+        return False
+
+    def _worker():
+        try:
+            with app.app_context():
+                from app import db
+
+                for model_name in to_run:
+                    cache_key = model_name or "__default__"
+                    t0 = time.perf_counter()
+                    try:
+                        _get_cached_react_agent(model_name, db.session)
+                        logger.info(
+                            "[AGENT-WARMUP] ok model=%s ms=%.1f",
+                            cache_key,
+                            (time.perf_counter() - t0) * 1000.0,
+                        )
+                    except Exception as ex:
+                        logger.warning(
+                            "[AGENT-WARMUP] failed model=%s: %s",
+                            cache_key,
+                            ex,
+                        )
+                    finally:
+                        try:
+                            db.session.remove()
+                        except Exception:
+                            pass
+        finally:
+            with _REACT_AGENT_CACHE_LOCK:
+                for model_name in to_run:
+                    _WARMUP_IN_FLIGHT.discard(model_name or "__default__")
+
+    threading.Thread(
+        target=_worker,
+        name="react-agent-warmup",
+        daemon=True,
+    ).start()
+    return True
 
 
 def _get_cached_llm(model_name: str):
@@ -138,6 +304,21 @@ def _get_cached_react_agent(model_name: str, db_session):
         agent2 = IntelligentDevOpsAgent(llm=llm, db_session=db_session)
         _REACT_AGENT_CACHE[key] = agent2
         return agent2
+
+
+@agent_bp.route('/warmup', methods=['POST'])
+@login_required
+def warmup_react_agent():
+    """登录后进项目页时异步预热 Agent，立即返回不阻塞。"""
+    from flask import current_app
+
+    data = request.get_json(silent=True) or {}
+    raw_models = data.get("models")
+    models = None
+    if isinstance(raw_models, list) and raw_models:
+        models = [str(m).strip() for m in raw_models if str(m).strip()]
+    scheduled = schedule_react_agent_warmup(current_app._get_current_object(), models=models)
+    return jsonify({"success": True, "scheduled": scheduled})
 
 
 @agent_bp.route('/execute', methods=['POST'])
@@ -487,20 +668,18 @@ def save_bugs():
             try:
                 print(f"[AGENT-SAVE] 正在保存 Bug {i+1}/{len(bugs_data)}: {bug_info.get('title')}")
                 
+                steps_raw = bug_info.get('steps_to_reproduce') or bug_info.get('description') or ''
                 new_bug = Bug(
                     title=bug_info.get('title', ''),
-                    description=bug_info.get('description', ''),
+                    steps_to_reproduce=str(steps_raw) if steps_raw is not None else '',
                     severity=bug_info.get('severity', 'medium'),
                     priority=bug_info.get('priority', 'medium'),
                     status='open',
                     project_id=project_id,
                     creator_id=current_user.id,
-                    source=bug_info.get('source', 'agent_test')
                 )
                 
-                # 保存复现步骤和预预期结果
-                if bug_info.get('steps_to_reproduce'):
-                    new_bug.reproduction_steps = bug_info.get('steps_to_reproduce')
+                # 保存预期/实际结果
                 if bug_info.get('expected'):
                     new_bug.expected_result = bug_info.get('expected')
                 if bug_info.get('actual'):
@@ -671,6 +850,33 @@ def react_agent():
         if not user_input.strip():
             return jsonify({'code': 400, 'message': '输入不能为空'}), 400
 
+        _resume_run_id = (data.get('resume_run_id') or data.get('resumeRunId') or '').strip()
+        _chat_session_id_raw = data.get('chat_session_id') or data.get('chatSessionId')
+        if _resume_run_id:
+            try:
+                from agents.react_run_store import (
+                    build_resume_user_input,
+                    load_run_for_resume,
+                    mark_run_resumed,
+                )
+
+                _uid = int(getattr(current_user, 'id', 0) or 0)
+                _run_row = load_run_for_resume(_resume_run_id, _uid)
+                if _run_row:
+                    _ck = _run_row.get('checkpoint') or {}
+                    user_input = build_resume_user_input(
+                        checkpoint=_ck,
+                        original_user_input=_run_row.get('user_input') or '',
+                        new_user_input=data.get('user_input', ''),
+                    )
+                    _pdc = _ck.get('pending_diff_context')
+                    if isinstance(_pdc, list) and _pdc:
+                        pending_diff_context = _pdc
+                    mark_run_resumed(_resume_run_id, _uid)
+                    logger.info("[REACT] resume_run_id=%s chat_session=%s", _resume_run_id, _run_row.get('chat_session_id'))
+            except Exception:
+                logger.exception("[REACT] resume_run_id load failed: %s", _resume_run_id)
+
         # 预热 Redis：避免首条 ReAct 在 asyncio.to_thread 里首次 get_redis_client 冷连拖慢 gather（数百 ms～数秒）
         try:
             from app import get_redis_client
@@ -749,6 +955,12 @@ def react_agent():
             return out
 
         def generate():
+            try:
+                from agents.react_sse_buffer import mark_run_started
+
+                mark_run_started(react_request_id)
+            except Exception:
+                pass
             t_first_yield0 = time.perf_counter()
             # 发送初始字节以"破解"代理缓冲 (2KB 空白)
             yield ":" + " " * 2048 + "\n\n"
@@ -762,6 +974,31 @@ def react_agent():
             
             q = queue.Queue()
             done = object()
+            _sse_seq = [0]
+
+            def _seq_and_buffer(payload: dict) -> dict:
+                o = _with_protocol_version(dict(payload))
+                _sse_seq[0] += 1
+                o["seq"] = _sse_seq[0]
+                try:
+                    from agents.react_sse_buffer import append_event
+
+                    append_event(react_request_id, o)
+                except Exception:
+                    pass
+                return o
+
+            _q_put_orig = q.put
+
+            def _q_put(item, block=True, timeout=None):
+                if item is done:
+                    return _q_put_orig(item, block, timeout)
+                if isinstance(item, dict):
+                    return _q_put_orig(_seq_and_buffer(item), block, timeout)
+                return _q_put_orig(item, block, timeout)
+
+            q.put = _q_put  # type: ignore[method-assign]
+
             # 关键：立刻推一个可见 JSON 首包，避免"只有注释首字节但 UI 无变化"造成的卡顿错觉
             # 前端 consumeAgentSseV1Chunk 会消费 hello 并确保 understanding 有值
             q.put({"type": "hello"})
@@ -1085,17 +1322,32 @@ def react_agent():
                 except Exception as e:
                     logger.exception("[REACT-execution] 事件循环异常: %s", str(e))
                 finally:
+                    try:
+                        from agents.react_sse_buffer import mark_run_finished
+
+                        mark_run_finished(
+                            react_request_id,
+                            "completed" if _task_ok else "failed",
+                        )
+                    except Exception:
+                        pass
                     loop.close()
 
             t = threading.Thread(target=run_async_loop)
             t.daemon = True
             t.start()
+            try:
+                from agents.react_sse_buffer import register_run_thread
 
-            _sse_seq = [0]
+                register_run_thread(react_request_id, t)
+            except Exception:
+                pass
 
             def _with_seq(d):
                 if not isinstance(d, dict):
                     return d
+                if d.get("seq") is not None:
+                    return _with_protocol_version(d)
                 o = _with_protocol_version(d)
                 _sse_seq[0] += 1
                 o['seq'] = _sse_seq[0]
@@ -1160,6 +1412,148 @@ def react_agent():
         import traceback
         logger.exception("[REACT] ❌ 错误: %s", str(e))
         return jsonify({'code': 500, 'message': str(e)}), 500
+
+
+@agent_bp.route('/react/checkpoint', methods=['POST'])
+@login_required
+def react_agent_save_checkpoint():
+    """保存中断的 ReAct 运行检查点（跨轮对话续作）。"""
+    try:
+        data = request.get_json() or {}
+        chat_session_id = data.get('chat_session_id') or data.get('chatSessionId')
+        if chat_session_id is None:
+            return jsonify({'success': False, 'error': '缺少 chat_session_id'}), 400
+        react_request_id = (
+            (data.get('react_request_id') or data.get('request_id') or '').strip() or str(uuid.uuid4())
+        )
+        checkpoint = data.get('checkpoint')
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        from agents.react_run_store import enrich_checkpoint_with_agent_dag, upsert_interrupted_run
+
+        checkpoint = enrich_checkpoint_with_agent_dag(checkpoint, react_request_id)
+
+        run_id = upsert_interrupted_run(
+            chat_session_id=int(chat_session_id),
+            project_id=data.get('project_id'),
+            user_id=int(getattr(current_user, 'id', 0) or 0),
+            react_request_id=react_request_id,
+            user_input=(data.get('user_input') or '')[:16000],
+            checkpoint=checkpoint,
+            model_name=data.get('model'),
+        )
+        if not run_id:
+            return jsonify(
+                {
+                    'success': True,
+                    'skipped': True,
+                    'reason': 'still_running',
+                    'react_request_id': react_request_id,
+                }
+            )
+        return jsonify({'success': True, 'run_id': run_id, 'react_request_id': react_request_id})
+    except Exception as e:
+        logger.exception('[REACT] checkpoint: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/react/checkpoint/complete', methods=['POST'])
+@login_required
+def react_agent_complete_checkpoint():
+    """本轮正常结束，清除 interrupted 检查点。"""
+    try:
+        data = request.get_json() or {}
+        rid = (data.get('react_request_id') or data.get('request_id') or '').strip()
+        if not rid:
+            return jsonify({'success': False, 'error': '缺少 react_request_id'}), 400
+        from agents.react_run_store import mark_run_completed_by_request
+
+        mark_run_completed_by_request(rid)
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.exception('[REACT] checkpoint complete: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/react/checkpoint/dismiss', methods=['POST'])
+@login_required
+def react_agent_dismiss_checkpoint():
+    """用户忽略可续作的中断任务。"""
+    try:
+        data = request.get_json() or {}
+        run_id = (data.get('run_id') or data.get('resume_run_id') or '').strip()
+        if not run_id:
+            return jsonify({'success': False, 'error': '缺少 run_id'}), 400
+        from agents.react_run_store import dismiss_interrupted_run
+
+        ok = dismiss_interrupted_run(run_id, int(getattr(current_user, 'id', 0) or 0))
+        return jsonify({'success': ok})
+    except Exception as e:
+        logger.exception('[REACT] checkpoint dismiss: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/react/resumable', methods=['GET'])
+@login_required
+def react_agent_resumable():
+    """查询当前 Chat Session 是否有可续作的中断任务。"""
+    try:
+        chat_session_id = request.args.get('chat_session_id') or request.args.get('chatSessionId')
+        if chat_session_id is None:
+            return jsonify({'success': False, 'error': '缺少 chat_session_id'}), 400
+        from agents.react_run_store import get_resumable_run
+
+        run = get_resumable_run(int(chat_session_id), int(getattr(current_user, 'id', 0) or 0))
+        return jsonify({'success': True, 'run': run})
+    except Exception as e:
+        logger.exception('[REACT] resumable: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/react/run-status', methods=['GET'])
+@login_required
+def react_agent_run_status():
+    """查询单次 ReAct 运行是否仍在进行（用于刷新后续流）。"""
+    try:
+        rid = (request.args.get('request_id') or request.args.get('react_request_id') or '').strip()
+        if not rid:
+            return jsonify({'success': False, 'error': '缺少 request_id'}), 400
+        from agents.react_sse_buffer import get_run_status
+
+        return jsonify({'success': True, **get_run_status(rid)})
+    except Exception as e:
+        logger.exception('[REACT] run-status: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/react/buffer', methods=['GET'])
+@login_required
+def react_agent_sse_buffer():
+    """拉取 since_seq 之后的已缓冲 SSE 包（断线续流）。"""
+    try:
+        rid = (request.args.get('request_id') or request.args.get('react_request_id') or '').strip()
+        if not rid:
+            return jsonify({'success': False, 'error': '缺少 request_id'}), 400
+        try:
+            since_seq = int(request.args.get('since_seq', 0))
+        except (TypeError, ValueError):
+            since_seq = 0
+        from agents.react_sse_buffer import get_events_since, get_run_status
+
+        events = get_events_since(rid, since_seq)
+        st = get_run_status(rid)
+        return jsonify(
+            {
+                'success': True,
+                'request_id': rid,
+                'since_seq': since_seq,
+                'events': events,
+                'run': st,
+            }
+        )
+    except Exception as e:
+        logger.exception('[REACT] buffer: %s', e)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @agent_bp.route('/modify_confirm', methods=['POST'])

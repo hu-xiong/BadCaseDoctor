@@ -18,7 +18,12 @@ from openai import OpenAI
 
 from config import Config
 
-from .prompt_log import maybe_log_llm_chat_kwargs
+from .prompt_log import (
+    maybe_log_llm_chat_kwargs,
+    maybe_log_llm_openai_completion,
+    maybe_log_llm_response_body,
+    maybe_log_llm_stream_assembled,
+)
 from .multimodal_content import openai_style_user_content
 
 
@@ -267,7 +272,15 @@ class DeepSeekLLM:
             kwargs,
             tag=f"_chat_create thinking={enable_thinking}",
         )
-        return self._get_client().chat.completions.create(**kwargs)
+        resp = self._get_client().chat.completions.create(**kwargs)
+        if not stream:
+            maybe_log_llm_openai_completion(
+                "deepseek",
+                resp,
+                tag=f"_chat_create thinking={enable_thinking}",
+                model=self.model,
+            )
+        return resp
 
     def chat_completion_with_tools(
         self,
@@ -308,6 +321,12 @@ class DeepSeekLLM:
             out["tool_calls"] = serialized
         else:
             out["tool_calls"] = None
+        maybe_log_llm_response_body(
+            "deepseek",
+            out,
+            tag="chat_completion_with_tools",
+            model=self.model,
+        )
         return out
 
     def chat_completion_with_tools_stream(
@@ -365,19 +384,33 @@ class DeepSeekLLM:
             stream = self._chat_create(
                 messages, stream=True, enable_thinking=thinking_on, max_tokens=max_tokens
             )
+            _acc_rc: List[str] = []
+            _acc_ct: List[str] = []
+            _last_usage = None
             for chunk in stream:
                 u = getattr(chunk, "usage", None)
                 if u is not None:
+                    _last_usage = u
                     _log_deepseek_prefix_cache_line(u, model=self.model, tag="stream_reasoning")
                 if not chunk.choices:
                     continue
                 d = chunk.choices[0].delta
                 rc = _delta_reasoning_content(d)
                 if rc and isinstance(rc, str):
+                    _acc_rc.append(rc)
                     yield {"type": "reasoning_delta", "delta": rc}
                 ct = _delta_content(d)
                 if ct and isinstance(ct, str):
+                    _acc_ct.append(ct)
                     yield {"type": "content_delta", "delta": ct}
+            maybe_log_llm_stream_assembled(
+                "deepseek",
+                tag="chat_stream_with_reasoning",
+                model=self.model,
+                content="".join(_acc_ct),
+                reasoning="".join(_acc_rc),
+                usage=_last_usage,
+            )
             yield {"type": "done"}
         except Exception as e:
             yield {"type": "content_delta", "delta": f"Error: {e}"}
@@ -406,6 +439,12 @@ class DeepSeekLLM:
                 messages, stream=False, enable_thinking=thinking_on, max_tokens=max_tokens
             )
             _log_deepseek_prefix_cache_line(getattr(resp, "usage", None), model=self.model, tag="fallback_chunks")
+            maybe_log_llm_openai_completion(
+                "deepseek",
+                resp,
+                tag="chat_stream_fallback_chunks",
+                model=self.model,
+            )
             msg = resp.choices[0].message
             rc = getattr(msg, "reasoning_content", None)
             if rc and isinstance(rc, str) and rc.strip():

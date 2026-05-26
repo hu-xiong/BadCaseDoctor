@@ -223,14 +223,12 @@ class UnifiedThinkStreamSanitizer:
     def _in_decision(self, work: str, out: List[Tuple[str, Optional[str]]], m: Dict[str, str]) -> str:
         t_task = _lower_find(work, "<task_plan", 0)
         close = _lower_find(work, "</decision>", 0)
-        # 嵌套 <task_plan>：须在 </decision> 之前处理；前文先出字
+        # 嵌套 <task_plan>：须在 </decision> 之前处理；decision 内 XML 不向用户 SSE 推送
         if t_task >= 0 and (close < 0 or t_task < close):
             if t_task > 0:
-                out.append((work[:t_task], None))
                 return work[t_task:]
             gt = _end_of_open_tag(work, 0, "task_plan")
             if gt < 0:
-                # 保留后缀等待更多输入
                 self.tail = work
                 return ""
             out.append((m["task_plan_start"], "task_plan_start"))

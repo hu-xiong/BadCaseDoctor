@@ -10,7 +10,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response, stream_with_context
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_mail import Mail, Message
@@ -73,6 +73,7 @@ import base64
 from urllib.parse import unquote, quote
 import subprocess
 import threading
+import queue
 import time
 import signal
 import os
@@ -680,22 +681,49 @@ def get_upload_image_cache_key(file_path: str) -> str:
 
 db = SQLAlchemy(app)
 
-# 预热数据库连接池（默认 8 条，避免对远端 MySQL 连续握手拖慢启动；可用 DB_WARMUP_CONNECTIONS 覆盖）
+# 预热数据库连接池。
+#
+# 默认不做同步预热：在脚本/工具首次 import app 时，8 条远端 MySQL 握手会把首次 grep
+# 卡住 2s+。线上如需要启动阶段预热，可显式设置 DB_WARMUP_CONNECTIONS=8。
 try:
     try:
-        _warmup_size = int((os.getenv("DB_WARMUP_CONNECTIONS") or "8").strip())
+        _warmup_size = int((os.getenv("DB_WARMUP_CONNECTIONS") or "0").strip())
     except Exception:
-        _warmup_size = 8
-    _warmup_size = max(1, min(_warmup_size, 50))
-    _pool_cap = app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_size', 100)
-    _warmup_size = min(_warmup_size, max(1, int(_pool_cap)))
-    with app.app_context():
-        for _ in range(_warmup_size):
-            db.session.execute(db.text('SELECT 1'))
-        db.session.remove()
-        print(f"[DB] 连接池预热完成，已建立 {_warmup_size} 个连接", flush=True)
+        _warmup_size = 0
+    _warmup_size = max(0, min(_warmup_size, 50))
+    if _warmup_size > 0:
+        _pool_cap = app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_size', 100)
+        _warmup_size = min(_warmup_size, max(1, int(_pool_cap)))
+        with app.app_context():
+            for _ in range(_warmup_size):
+                db.session.execute(db.text('SELECT 1'))
+            db.session.remove()
+            print(f"[DB] 连接池预热完成，已建立 {_warmup_size} 个连接", flush=True)
 except Exception as e:
     print(f"[DB] 连接池预热失败: {e}", flush=True)
+
+# Grep ES 客户端后台预热（避免首次 grep 在请求路径上建连 ~3s）
+try:
+    from config import Config as _GrepCfg
+
+    if _GrepCfg.GREP_ES_WARMUP and _GrepCfg.GREP_VECTOR_ENABLED:
+        import threading as _grep_es_th
+
+        def _grep_es_warmup_worker():
+            try:
+                from memory.es_work_item_store import build_work_item_store_from_config
+
+                _store = build_work_item_store_from_config(_GrepCfg)
+                _store.es.info(request_timeout=3)
+                print("[GREP-ES] 后台预热完成", flush=True)
+            except Exception as _gew:
+                print(f"[GREP-ES] 后台预热失败: {_gew}", flush=True)
+
+        _grep_es_th.Thread(
+            target=_grep_es_warmup_worker, name="grep-es-warmup", daemon=True
+        ).start()
+except Exception as _ges:
+    print(f"[GREP-ES] 跳过后台预热: {_ges}", flush=True)
 
 mail = Mail(app)
 login_manager = LoginManager()
@@ -1141,7 +1169,6 @@ class Bug(db.Model):
     __tablename__ = 'bug'
     id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
     title = db.Column(db.String(200), nullable=False)  # Bug标题
-    description = db.Column(db.Text)  # Bug描述，改为可选
     steps_to_reproduce = db.Column(db.Text)  # 复现步骤
     expected_result = db.Column(db.Text)  # 期望结果
     actual_result = db.Column(db.Text)  # 实际结果
@@ -1986,6 +2013,23 @@ class AgentTask(db.Model):
     finished_at = db.Column(db.DateTime, nullable=True)
 
 
+class ReactAgentRun(db.Model):
+    """ReAct 整轮运行检查点：中断后可跨轮对话续作（见 session 文档 §5.2.2）。"""
+    __tablename__ = 'react_agent_runs'
+
+    id = db.Column(db.String(36), primary_key=True)
+    chat_session_id = db.Column(db.Integer, nullable=False, index=True)
+    project_id = db.Column(db.Integer, nullable=True, index=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    react_request_id = db.Column(db.String(64), nullable=False, index=True)
+    status = db.Column(db.String(20), nullable=False, default='interrupted', index=True)
+    user_input = db.Column(db.Text, nullable=True)
+    model_name = db.Column(db.String(128), nullable=True)
+    checkpoint_json = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class TerminalAudit(db.Model):
     """嵌入式终端审计：会话开始、AI 建议等（不含逐键记录）。"""
     __tablename__ = 'terminal_audit'
@@ -2199,6 +2243,24 @@ def _persist_workflow_inapp_rows(payload):
         return
     db.session.add_all(rows)
     db.session.commit()
+
+
+def _schedule_grep_work_item_index(entity_type: str, record_id: int, *, sync: bool = False) -> None:
+    try:
+        from memory.work_item_indexer import schedule_work_item_index
+
+        schedule_work_item_index(entity_type, int(record_id), sync=sync)
+    except Exception as e:
+        print(f"[GREP-INDEX] API hook skip {entity_type}:{record_id}: {e}")
+
+
+def _schedule_grep_work_item_delete(entity_type: str, record_id: int) -> None:
+    try:
+        from memory.work_item_indexer import schedule_work_item_delete
+
+        schedule_work_item_delete(entity_type, int(record_id))
+    except Exception as e:
+        print(f"[GREP-INDEX] API delete hook skip {entity_type}:{record_id}: {e}")
 
 
 def _schedule_workflow_notify(
@@ -3190,7 +3252,7 @@ def api_agent_create_bug():
         data = request.get_json()
         project_id = data.get('project_id')
         title = data.get('title')
-        description = data.get('description', '')
+        steps_to_reproduce = data.get('steps_to_reproduce', '') or data.get('description', '')
         priority = data.get('priority', 'medium')
         assignee = data.get('assignee')
         
@@ -3200,7 +3262,7 @@ def api_agent_create_bug():
             action="create",
             project_id=project_id,
             title=title,
-            description=description,
+            steps_to_reproduce=steps_to_reproduce,
             priority=priority,
             assignee=assignee
         )
@@ -3456,6 +3518,80 @@ def _fingerprint_for_diff(target, target_id, modifications):
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
+def _diff_review_row_to_item(r, *, include_payload=True):
+    """SSE / 推送与 GET list 对齐的单条结构。"""
+    diff = []
+    mods = {}
+    if include_payload:
+        try:
+            diff = json.loads(r.diff_payload) if r.diff_payload else []
+        except Exception:
+            diff = []
+        try:
+            mods = json.loads(r.modifications_payload) if r.modifications_payload else {}
+        except Exception:
+            mods = {}
+    return {
+        'target': r.target,
+        'target_id': _json_snowflake_id(r.target_id),
+        'plan_id': _json_snowflake_id(r.plan_id),
+        'status': r.status,
+        'lifecycle_id': r.lifecycle_id,
+        'diff_fingerprint': r.diff_fingerprint,
+        'updated_at': r.updated_at.isoformat() if r.updated_at else None,
+        'diff': diff,
+        'modifications': mods,
+        'message_id': r.source_message_id,
+        'session_id': r.source_session_id,
+        'operator_id': r.operator_id,
+    }
+
+
+def _list_pending_diff_review_items_for_user(project_id, user_id):
+    """与 api_list_diff_reviews(status=pending) 可见性一致。"""
+    latest_subq = (
+        db.session.query(
+            DiffReviewState.target,
+            DiffReviewState.target_id,
+            db.func.max(DiffReviewState.updated_at).label('max_updated'),
+            db.func.max(DiffReviewState.id).label('max_id'),
+        )
+        .filter(DiffReviewState.project_id == project_id)
+        .group_by(DiffReviewState.target, DiffReviewState.target_id)
+        .subquery()
+    )
+    rows = (
+        DiffReviewState.query.join(
+            latest_subq,
+            db.and_(
+                DiffReviewState.target == latest_subq.c.target,
+                DiffReviewState.target_id == latest_subq.c.target_id,
+                DiffReviewState.updated_at == latest_subq.c.max_updated,
+                DiffReviewState.id == latest_subq.c.max_id,
+            ),
+        )
+        .filter(DiffReviewState.project_id == project_id)
+        .all()
+    )
+    out = []
+    for r in rows:
+        if r.status not in ('pending', 'rejected'):
+            continue
+        if r.operator_id is not None and r.operator_id != user_id:
+            continue
+        out.append(_diff_review_row_to_item(r))
+    return out
+
+
+def _broadcast_diff_review(project_id, event_type, payload):
+    try:
+        from memory.diff_review_hub import publish
+
+        publish(int(project_id), event_type, payload)
+    except Exception as ex:
+        print(f"[DIFF-PUSH] broadcast failed: {ex}", flush=True)
+
+
 def _delete_diff_review_state_rows(project_id, target, target_ids, operator_user_id=None):
     """采纳/拒绝后物理删除 pending 行；target_ids 为 int 列表。"""
     nt = _normalize_diff_target(target)
@@ -3485,7 +3621,25 @@ def _delete_diff_review_state_rows(project_id, target, target_ids, operator_user
         db.session.delete(r)
     if n:
         db.session.commit()
+        for tid in ids:
+            _broadcast_diff_review(
+                project_id,
+                'resolve',
+                {'target': nt, 'target_id': _json_snowflake_id(tid)},
+            )
     return n
+
+
+def _diff_review_version_token(row):
+    """与前端 buildRecordVersionToken 对齐：lifecycle_id + updated_at ISO。"""
+    if row is None:
+        return None
+    try:
+        lc = int(row.lifecycle_id or 1)
+    except (TypeError, ValueError):
+        lc = 1
+    ts = row.updated_at.isoformat() if getattr(row, "updated_at", None) else ""
+    return f"{lc}:{ts}"
 
 
 def _upsert_diff_review_state(
@@ -3505,13 +3659,24 @@ def _upsert_diff_review_state(
     canonical_mods = _canonical_modifications(modifications)
     fp = _fingerprint_for_diff(nt, tid, canonical_mods)
     now = datetime.utcnow()
-    all_rows = (
-        DiffReviewState.query
-        .filter_by(project_id=project_id, target=nt, target_id=tid)
-        .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
-        .all()
+    base_q = DiffReviewState.query.filter_by(
+        project_id=project_id, target=nt, target_id=tid
     )
-    row = all_rows[0] if all_rows else None
+    row = (
+        base_q.order_by(
+            DiffReviewState.updated_at.desc(), DiffReviewState.id.desc()
+        ).first()
+    )
+    all_rows = [row] if row else []
+    if row is not None:
+        try:
+            dup_n = base_q.count()
+        except Exception:
+            dup_n = 1
+        if dup_n > 1:
+            all_rows = base_q.order_by(
+                DiffReviewState.updated_at.desc(), DiffReviewState.id.desc()
+            ).all()
 
     if row is None:
         row = DiffReviewState(
@@ -3578,14 +3743,18 @@ def _upsert_diff_review_state(
 @app.route('/api/projects/<int:project_id>/diff-reviews/upsert', methods=['POST'])
 @login_required
 def api_upsert_diff_review(project_id):
+    t_req = time.perf_counter()
     try:
+        t_perm0 = time.perf_counter()
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        t_perm_ms = (time.perf_counter() - t_perm0) * 1000.0
         data = request.get_json() or {}
         target = data.get('target')
         target_id = data.get('target_id')
         if target is None or target_id is None:
             return jsonify({'success': False, 'error': '缺少 target/target_id'}), 400
+        t_up0 = time.perf_counter()
         row, suppressed = _upsert_diff_review_state(
             project_id=project_id,
             target=target,
@@ -3597,10 +3766,26 @@ def api_upsert_diff_review(project_id):
             source_session_id=_safe_mysql_int_fk_id(data.get('session_id')),
             operator_id=current_user.id,
         )
+        t_up_ms = (time.perf_counter() - t_up0) * 1000.0
+        t_commit0 = time.perf_counter()
         db.session.commit()
+        t_commit_ms = (time.perf_counter() - t_commit0) * 1000.0
+        t_total_ms = (time.perf_counter() - t_req) * 1000.0
+        if t_total_ms > 200.0 or os.getenv("PERF_LOG", "").strip() == "1":
+            print(
+                f"[PERF] POST diff-reviews/upsert project={project_id} "
+                f"total={t_total_ms:.0f}ms perm={t_perm_ms:.0f}ms upsert={t_up_ms:.0f}ms "
+                f"commit={t_commit_ms:.0f}ms target={target!r} id={target_id!r}",
+                flush=True,
+            )
+        ver = _diff_review_version_token(row)
+        item = _diff_review_row_to_item(row)
+        _broadcast_diff_review(project_id, 'upsert', item)
         return jsonify({
             'success': True,
             'suppressed': bool(suppressed),
+            'adopt_version': ver,
+            'item': item,
             'record': {
                 'id': row.id,
                 'project_id': row.project_id,
@@ -3610,6 +3795,7 @@ def api_upsert_diff_review(project_id):
                 'status': row.status,
                 'lifecycle_id': row.lifecycle_id,
                 'diff_fingerprint': row.diff_fingerprint,
+                'updated_at': row.updated_at.isoformat() if row.updated_at else None,
             }
         })
     except Exception as e:
@@ -3648,11 +3834,74 @@ def api_resolve_diff_review(project_id):
         for r in rows:
             db.session.delete(r)
         db.session.commit()
+        _broadcast_diff_review(
+            project_id,
+            'resolve',
+            {'target': target, 'target_id': _json_snowflake_id(int(str(target_id)))},
+        )
         return jsonify({'success': True, 'status': 'deleted'})
     except Exception as e:
         db.session.rollback()
         print(f"[DIFF-RESOLVE] 失败: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/projects/<int:project_id>/diff-reviews/stream', methods=['GET'])
+@login_required
+def api_diff_reviews_stream(project_id):
+    """SSE：后端在 upsert/resolve 后主动推送，前端勿轮询 GET pending。"""
+    if (os.getenv("DIFF_REVIEW_SSE_ENABLED", "0") or "0").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return jsonify({'success': False, 'error': 'diff review SSE disabled'}), 410
+    if not has_project_permission(current_user.id, project_id):
+        return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+
+    from memory.diff_review_hub import subscribe, unsubscribe
+
+    uid = int(current_user.id)
+    q = subscribe(project_id)
+
+    def generate():
+        try:
+            items = _list_pending_diff_review_items_for_user(project_id, uid)
+            yield (
+                'event: snapshot\n'
+                f'data: {json.dumps({"items": items}, ensure_ascii=False)}\n\n'
+            )
+            last_ping = time.time()
+            while True:
+                try:
+                    msg = q.get(timeout=1.0)
+                except queue.Empty:
+                    msg = None
+                now = time.time()
+                if msg:
+                    ev = msg.get('type') or 'message'
+                    payload = msg.get('payload')
+                    yield (
+                        f'event: {ev}\n'
+                        f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
+                    )
+                    last_ping = now
+                elif now - last_ping >= 25.0:
+                    yield ': keepalive\n\n'
+                    last_ping = now
+        except GeneratorExit:
+            pass
+        finally:
+            unsubscribe(project_id, q)
+
+    resp = Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+    )
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
 
 
 @app.route('/api/projects/<int:project_id>/diff-reviews', methods=['GET'])
@@ -3694,36 +3943,29 @@ def api_list_diff_reviews(project_id):
         t_sql1 = time.perf_counter()
         
         result = []
+        version_parts = []
         for r in rows:
             if status_filter and r.status not in status_filter:
                 continue
             if r.status in ('pending', 'rejected'):
                 if r.operator_id is not None and r.operator_id != current_user.id:
                     continue
-            try:
-                diff = json.loads(r.diff_payload) if r.diff_payload else []
-            except Exception:
-                diff = []
-            try:
-                mods = json.loads(r.modifications_payload) if r.modifications_payload else {}
-            except Exception:
-                mods = {}
-            result.append({
-                'target': r.target,
-                'target_id': _json_snowflake_id(r.target_id),
-                'plan_id': _json_snowflake_id(r.plan_id),
-                'status': r.status,
-                'lifecycle_id': r.lifecycle_id,
-                'diff_fingerprint': r.diff_fingerprint,
-                'diff': diff,
-                'modifications': mods,
-                'message_id': r.source_message_id,
-                'session_id': r.source_session_id,
-                'operator_id': r.operator_id,
-            })
+            version_parts.append(f"{r.target}:{r.target_id}:{r.status}:{_diff_review_version_token(r)}")
+            result.append(_diff_review_row_to_item(r))
+        version_raw = "|".join(sorted(version_parts))
+        version = hashlib.sha1(version_raw.encode("utf-8")).hexdigest()
+        inm = (request.headers.get("If-None-Match") or "").strip().strip('"')
+        if inm and inm == version:
+            resp = Response(status=304)
+            resp.headers["ETag"] = f'"{version}"'
+            resp.headers["Cache-Control"] = "private, max-age=3"
+            return resp
         t_total = (time.perf_counter() - t0) * 1000
         print(f"[PERF] GET /api/projects/{project_id}/diff-reviews sql={((t_sql1-t_sql0)*1000):.0f}ms total={t_total:.0f}ms rows={len(rows)}", flush=True)
-        return jsonify({'success': True, 'items': result})
+        resp = jsonify({'success': True, 'items': result, 'version': version})
+        resp.headers["ETag"] = f'"{version}"'
+        resp.headers["Cache-Control"] = "private, max-age=3"
+        return resp
     except Exception as e:
         print(f"[DIFF-LIST] 失败: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -4134,6 +4376,7 @@ def api_project_modify(project_id):
                 .order_by(DiffReviewState.updated_at.desc(), DiffReviewState.id.desc())
                 .first()
             )
+            adopt_ver_token = _diff_review_version_token(pend) if pend else None
             if pend and pend.status == 'pending':
                 if pend.operator_id is not None and pend.operator_id != current_user.id:
                     return jsonify({"success": False, "error": "无权采纳他人待确认的变更"}), 403
@@ -4164,41 +4407,118 @@ def api_project_modify(project_id):
                             target_id=int(target_id),
                             modifications=mods_dict,
                         )
+                    adopted_entity = result.get("after")
+                    if not isinstance(adopted_entity, dict):
+                        adopted_entity = None
                     return jsonify({
                         "success": True,
                         "message": "已保存",
                         "async": False,
-                        "before": None,
-                        "after": None,
-                        "diff": None,
+                        "before": result.get("before"),
+                        "after": adopted_entity,
+                        "diff": result.get("diff"),
+                        "target": nt,
+                        "target_id": _json_snowflake_id(tid),
+                        "adopted_entity": adopted_entity,
                     })
                 return jsonify({
                     "success": False,
                     "error": result.get("error") or "保存评论失败",
                 }), 500
 
-            # 其它字段：后台异步执行 ModifyTool，立即返回（diff 行已同步删除）
-            thread = threading.Thread(
-                target=_run_modify_in_background,
-                args=(
-                    project_id,
-                    target,
-                    target_id,
-                    mods_dict,
-                    message_id,
-                    db_uri,
-                    natural_query_top,
-                    current_user.id,
-                ),
-                daemon=True
+            # 其它字段：默认同步落库并返回 adopted_entity；MODIFY_ADOPT_ASYNC=1 时走后台线程
+            import os as _os
+            _adopt_async = _os.getenv("MODIFY_ADOPT_ASYNC", "").strip().lower() in (
+                "1", "true", "yes", "on",
             )
-            thread.start()
+            if _adopt_async:
+                thread = threading.Thread(
+                    target=_run_modify_in_background,
+                    args=(
+                        project_id,
+                        target,
+                        target_id,
+                        mods_dict,
+                        message_id,
+                        db_uri,
+                        natural_query_top,
+                        current_user.id,
+                    ),
+                    daemon=True,
+                )
+                thread.start()
+                etag_async = None
+                if adopt_ver_token:
+                    etag_async = f'W/"{nt}-{tid}-{adopt_ver_token}"'
+                return jsonify({
+                    "success": True,
+                    "message": "正在保存",
+                    "async": True,
+                    "target": nt,
+                    "target_id": _json_snowflake_id(tid),
+                    "before": None,
+                    "after": None,
+                    "diff": None,
+                    "adopted_entity": None,
+                    "adopted_fields": mods_dict,
+                    "adopt_version": adopt_ver_token,
+                    "etag": etag_async,
+                })
+
+            modify_tool = ModifyTool(db.session, database_uri=db_uri)
+
+            async def run_sync_adopt():
+                return await modify_tool.execute(
+                    target=target,
+                    target_id=int(target_id),
+                    modifications=mods_dict,
+                    project_id=project_id,
+                    confirm=True,
+                    natural_query=natural_query_top,
+                    message_id=message_id,
+                    operator_user_id=current_user.id,
+                )
+
+            result = asyncio.run(run_sync_adopt())
+            if result.get("success"):
+                if message_id:
+                    _finalize_chat_message_after_modify_adopt(
+                        message_id,
+                        target=target,
+                        target_id=int(target_id),
+                        modifications=mods_dict,
+                    )
+                adopted_entity = result.get("after")
+                if not isinstance(adopted_entity, dict):
+                    adopted_entity = None
+                adopt_ver_sync = _diff_review_version_token(pend) if pend else None
+                if adopted_entity and adopted_entity.get("updated_at"):
+                    adopt_ver_sync = (
+                        f"{int((adopted_entity.get('lifecycle_id') or 1))}:"
+                        f"{adopted_entity.get('updated_at')}"
+                    )
+                etag = None
+                if adopt_ver_sync:
+                    etag = f'W/"{nt}-{tid}-{adopt_ver_sync}"'
+                elif adopted_entity and adopted_entity.get("updated_at"):
+                    etag = f'W/"{nt}-{tid}-{adopted_entity.get("updated_at")}"'
+                return jsonify({
+                    "success": True,
+                    "message": result.get("message") or "已保存",
+                    "async": False,
+                    "before": result.get("before"),
+                    "after": adopted_entity,
+                    "diff": result.get("diff"),
+                    "target": nt,
+                    "target_id": _json_snowflake_id(tid),
+                    "adopted_entity": adopted_entity,
+                    "adopt_version": adopt_ver_sync,
+                    "etag": etag,
+                })
             return jsonify({
-                "success": True,
-                "message": "正在保存",
-                "async": True,
-                "before": None, "after": None, "diff": None
-            })
+                "success": False,
+                "error": result.get("error") or "保存失败",
+            }), 500
         
         # 沙箱预览：同步执行
         modify_tool = ModifyTool(db.session, database_uri=db_uri)
@@ -4915,7 +5235,7 @@ def api_login():
             if is_valid:
                 print(f"[LOGIN] 校验成功，正在执行 login_user(id={user.id})...")
                 login_user(user)
-                
+
                 print(f"[LOGIN] === 登录处理成功，总耗时: {time.time() - start_time:.4f}s ===\n")
                 return jsonify({
                     'success': True, 
@@ -4969,7 +5289,7 @@ def api_register():
     
     db.session.commit()
     login_user(user)
-    
+
     return jsonify({
         'success': True,
         'user': {
@@ -6108,7 +6428,9 @@ def api_create_badcase():
             )
         except Exception as _e:
             print(f"[workflow_notify] BadCase 创建通知调度失败: {_e}")
-        
+
+        _schedule_grep_work_item_index("badcase", badcase.id)
+
         return jsonify({
             'success': True,
             'badcase': {
@@ -6372,7 +6694,9 @@ def api_update_badcase(badcase_id):
                 )
             except Exception as _e:
                 print(f"[workflow_notify] BadCase 删除通知失败: {_e}")
-            
+
+            _schedule_grep_work_item_delete("badcase", badcase_id)
+
             return jsonify({'success': True, 'message': 'BadCase删除成功'})
         except Exception as e:
             db.session.rollback()
@@ -6488,7 +6812,9 @@ def api_update_badcase(badcase_id):
             )
         except Exception as _e:
             print(f"[workflow_notify] BadCase 更新通知失败: {_e}")
-        
+
+        _schedule_grep_work_item_index("badcase", badcase.id)
+
         return jsonify({'success': True, 'message': 'BadCase更新成功'})
         
     except Exception as e:
@@ -6526,7 +6852,9 @@ def api_close_badcase(badcase_id):
         )
     except Exception as _e:
         print(f"[workflow_notify] BadCase 关闭通知失败: {_e}")
-    
+
+    _schedule_grep_work_item_index("badcase", badcase.id)
+
     return jsonify({'success': True})
 
 # Card相关的API端点
@@ -6619,6 +6947,7 @@ def api_create_card():
         db.session.add(card)
         db.session.commit()
         _cache_invalidate_cards(project_id)
+        _schedule_grep_work_item_index("card", card.id)
         
         print(f"✅ 卡片创建成功: {card.id}")
         return jsonify({'success': True, 'data': card.to_dict()})
@@ -6652,6 +6981,33 @@ def _plan_subtree_ids_for_project(project_id: int, root_plan_id: int):
         for cid in children_map.get(pid, ()):
             stack.append(cid)
     return out
+
+
+def _detach_plan_work_items(plan_id: int) -> dict:
+    """
+    删除迭代前解绑仍挂在该 plan_id 上的工作项与卡片。
+    看板按 Card.plan_id 展示；源表 Bug/BadCase/TestCase 可能仍带 plan_id（卡片已删等），
+    不解绑会导致「列表为空却无法删计划」。
+    """
+    pid = int(plan_id)
+    n_bc = (
+        BadCase.query.filter_by(plan_id=pid)
+        .update({BadCase.plan_id: None}, synchronize_session=False)
+    )
+    n_bug = Bug.query.filter_by(plan_id=pid).update({Bug.plan_id: None}, synchronize_session=False)
+    n_tc = (
+        TestCase.query.filter_by(plan_id=pid)
+        .update({TestCase.plan_id: None}, synchronize_session=False)
+    )
+    n_card = Card.query.filter_by(plan_id=pid).update({Card.plan_id: None}, synchronize_session=False)
+    n_rel = CardPlanRelation.query.filter_by(plan_id=pid).delete(synchronize_session=False)
+    return {
+        'detached_badcases': int(n_bc or 0),
+        'detached_bugs': int(n_bug or 0),
+        'detached_testcases': int(n_tc or 0),
+        'detached_cards': int(n_card or 0),
+        'removed_card_plan_relations': int(n_rel or 0),
+    }
 
 
 @app.route('/api/projects/<int:project_id>/cards', methods=['GET'])
@@ -6891,6 +7247,7 @@ def api_update_card(card_id):
         card.updated_at = datetime.utcnow()
         db.session.commit()
         _cache_invalidate_cards(card.project_id)
+        _schedule_grep_work_item_index("card", card.id)
         
         print(f"✅ 卡片更新成功: {card.id}")
         return jsonify({'success': True, 'data': card.to_dict()})
@@ -7034,6 +7391,12 @@ def api_delete_card(card_id):
         if linked_testcases and confirm_cascade:
             ids = [int(tc.id) for tc in linked_testcases]
             try:
+                TestCaseComment.query.filter(TestCaseComment.test_case_id.in_(ids)).delete(
+                    synchronize_session=False
+                )
+            except Exception as _ce:
+                print(f"[DELETE-CARD] 清理 test_case_comment 失败（继续）: {_ce}", flush=True)
+            try:
                 _delete_diff_review_state_rows(_pid, 'testcase', ids, None)
             except Exception as _de:
                 print(f"[DELETE-CARD] 清理 diff_review_state(testcase) 失败（继续）: {_de}", flush=True)
@@ -7057,6 +7420,13 @@ def api_delete_card(card_id):
         db.session.commit()
         _cache_invalidate_cards(_pid)
         _cache_invalidate_plans(_pid)
+        _schedule_grep_work_item_delete("card", card_id)
+        for _bid in ([int(x.id) for x in linked_bugs] if linked_bugs else []):
+            _schedule_grep_work_item_delete("bug", _bid)
+        for _bcid in ([int(x.id) for x in linked_badcases] if linked_badcases else []):
+            _schedule_grep_work_item_delete("badcase", _bcid)
+        for _tcid in ([int(x.id) for x in linked_testcases] if linked_testcases else []):
+            _schedule_grep_work_item_delete("testcase", _tcid)
 
         print(f"✅ 卡片删除成功: {card.id}")
         return jsonify(
@@ -7188,7 +7558,7 @@ def api_project_global_search(project_id):
             .filter(
                 db.or_(
                     Bug.title.ilike(pattern),
-                    Bug.description.ilike(pattern),
+                    Bug.steps_to_reproduce.ilike(pattern),
                     Bug.bug_type.ilike(pattern),
                 )
             )
@@ -7707,6 +8077,45 @@ def _adapt_create_table_columns_for_dialect(columns):
     ]
 
 
+def drop_mysql_foreign_key_constraints():
+    """MySQL：移除库内所有外键（项目约定不使用 DB 级外键，引用由应用层维护）。"""
+    if (db.engine.dialect.name or "").lower() != "mysql":
+        return
+    try:
+        rows = db.session.execute(
+            text(
+                """
+                SELECT TABLE_NAME, CONSTRAINT_NAME
+                FROM information_schema.TABLE_CONSTRAINTS
+                WHERE CONSTRAINT_SCHEMA = DATABASE()
+                  AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+                """
+            )
+        ).fetchall()
+        if not rows:
+            return
+        dropped = 0
+        for table_name, constraint_name in rows:
+            try:
+                db.session.execute(
+                    text(f"ALTER TABLE `{table_name}` DROP FOREIGN KEY `{constraint_name}`")
+                )
+                dropped += 1
+                print(f"[DB] 已移除外键 {table_name}.{constraint_name}", flush=True)
+            except Exception as ex:
+                db.session.rollback()
+                print(f"[DB] 移除外键失败 {table_name}.{constraint_name}: {ex}", flush=True)
+        db.session.commit()
+        if dropped:
+            print(f"[DB] 共移除 {dropped} 个外键约束", flush=True)
+    except Exception as e:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        print(f"[DB] 扫描/移除外键失败: {e}", flush=True)
+
+
 def sync_database_schema():
     """同步数据库表结构，确保与代码中的模型完全一致"""
     try:
@@ -7770,6 +8179,54 @@ def sync_database_schema():
 
         _migrate_bad_case_answer_fields()
         _migrate_bug_plan_id_nullable()
+
+        def _migrate_bug_drop_description_column():
+            """复现步骤仅保留 steps_to_reproduce；合并 description 遗留数据后删列。"""
+            try:
+                insp = inspect(db.engine)
+                if not insp.has_table('bug'):
+                    return
+                cols = {c.get('name') for c in (insp.get_columns('bug') or [])}
+                if 'description' not in cols:
+                    return
+                dialect = (db.engine.dialect.name or '').lower()
+                print("[DB] 迁移: bug.description -> steps_to_reproduce 后删除 description 列")
+                if dialect == 'mysql':
+                    db.session.execute(
+                        text(
+                            "UPDATE bug SET steps_to_reproduce = description "
+                            "WHERE (steps_to_reproduce IS NULL OR TRIM(steps_to_reproduce) = '') "
+                            "AND description IS NOT NULL AND TRIM(description) <> ''"
+                        )
+                    )
+                    db.session.execute(text('ALTER TABLE bug DROP COLUMN description'))
+                elif dialect in ('postgresql', 'postgres'):
+                    db.session.execute(
+                        text(
+                            "UPDATE bug SET steps_to_reproduce = description "
+                            "WHERE (steps_to_reproduce IS NULL OR BTRIM(steps_to_reproduce) = '') "
+                            "AND description IS NOT NULL AND BTRIM(description) <> ''"
+                        )
+                    )
+                    db.session.execute(text('ALTER TABLE bug DROP COLUMN description'))
+                else:
+                    db.session.execute(
+                        text(
+                            "UPDATE bug SET steps_to_reproduce = description "
+                            "WHERE (steps_to_reproduce IS NULL OR TRIM(steps_to_reproduce) = '') "
+                            "AND description IS NOT NULL AND TRIM(description) <> ''"
+                        )
+                    )
+                    db.session.execute(text('ALTER TABLE bug DROP COLUMN description'))
+                db.session.commit()
+            except Exception as e:
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+                print(f"[DB] ⚠️ bug.description 列迁移失败(可手动处理): {e}")
+
+        _migrate_bug_drop_description_column()
 
         def _migrate_badcase_testcase_card_id_columns():
             """bad_case / test_case 增加 card_id，并从已有 Card.source_type/source_id 回填。"""
@@ -7975,7 +8432,6 @@ def sync_database_schema():
                     'login_configs TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'user_id INT NOT NULL',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'project_permission': {
@@ -7985,8 +8441,6 @@ def sync_database_schema():
                     'user_id INT NOT NULL',
                     'role VARCHAR(20) NOT NULL',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'bad_case': {
@@ -8015,9 +8469,6 @@ def sync_database_schema():
                     'assigned_users TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (plan_id) REFERENCES plan(id)',
-                    'FOREIGN KEY (creator_id) REFERENCES user(id)'
                 ]
             },
             'comment': {
@@ -8028,8 +8479,6 @@ def sync_database_schema():
                     'content TEXT NOT NULL',
                     'source_message_id INT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (badcase_id) REFERENCES bad_case(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'prompt_template': {
@@ -8039,7 +8488,6 @@ def sync_database_schema():
                     'content TEXT NOT NULL',
                     'project_id INT NOT NULL',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)'
                 ]
             },
             'team': {
@@ -8050,8 +8498,6 @@ def sync_database_schema():
                     'project_id INT NOT NULL',
                     'creator_id INT NOT NULL',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (creator_id) REFERENCES user(id)'
                 ]
             },
             'team_member': {
@@ -8062,8 +8508,6 @@ def sync_database_schema():
                     'role VARCHAR(20) DEFAULT "member"',
                     'permissions TEXT',
                     'joined_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (team_id) REFERENCES team(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'plan': {
@@ -8084,17 +8528,12 @@ def sync_database_schema():
                     'scope_notification BOOLEAN DEFAULT FALSE',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (parent_id) REFERENCES plan(id)',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (creator_id) REFERENCES user(id)',
-                    'FOREIGN KEY (assignee_id) REFERENCES user(id)'
                 ]
             },
             'bug': {
                 'columns': [
                     'id BIGINT PRIMARY KEY',
                     'title VARCHAR(200) NOT NULL',
-                    'description TEXT NOT NULL',
                     'steps_to_reproduce TEXT',
                     'expected_result TEXT',
                     'actual_result TEXT',
@@ -8112,10 +8551,6 @@ def sync_database_schema():
                     'attachments TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (plan_id) REFERENCES plan(id)',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (creator_id) REFERENCES user(id)',
-                    'FOREIGN KEY (assignee_id) REFERENCES user(id)'
                 ]
             },
             'bug_comment': {
@@ -8126,8 +8561,6 @@ def sync_database_schema():
                     'content TEXT NOT NULL',
                     'source_message_id INT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (bug_id) REFERENCES bug(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'test_case_comment': {
@@ -8138,8 +8571,6 @@ def sync_database_schema():
                     'content TEXT NOT NULL',
                     'source_message_id INT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (test_case_id) REFERENCES test_case(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'test_case': {
@@ -8169,10 +8600,6 @@ def sync_database_schema():
                     'assignee_id INT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (plan_id) REFERENCES plan(id)',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (creator_id) REFERENCES user(id)',
-                    'FOREIGN KEY (assignee_id) REFERENCES user(id)'
                 ]
             },
             'workflow_in_app_notification': {
@@ -8192,9 +8619,6 @@ def sync_database_schema():
                     'search_blob TEXT',
                     'read_at DATETIME',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)',
-                    'FOREIGN KEY (actor_id) REFERENCES user(id)',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
                 ]
             },
             'chat_session': {
@@ -8208,8 +8632,6 @@ def sync_database_schema():
                     'memory_data TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'chat_message': {
@@ -8233,8 +8655,6 @@ def sync_database_schema():
                     'llm_model VARCHAR(128)',
                     'images LONGTEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (session_id) REFERENCES chat_session(id)',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)'
                 ]
             },
             'diff_review_state': {
@@ -8256,8 +8676,6 @@ def sync_database_schema():
                     'adopted_at DATETIME',
                     'rejected_at DATETIME',
                     'operator_id INT',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
-                    'FOREIGN KEY (operator_id) REFERENCES user(id)'
                 ]
             },
             'agent_tasks': {
@@ -8275,6 +8693,21 @@ def sync_database_schema():
                     'finished_at DATETIME',
                 ]
             },
+            'react_agent_runs': {
+                'columns': [
+                    'id VARCHAR(36) PRIMARY KEY',
+                    'chat_session_id INT NOT NULL',
+                    'project_id INT',
+                    'user_id INT NOT NULL',
+                    'react_request_id VARCHAR(64) NOT NULL',
+                    'status VARCHAR(20) NOT NULL DEFAULT "interrupted"',
+                    'user_input TEXT',
+                    'model_name VARCHAR(128)',
+                    'checkpoint_json TEXT',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                ]
+            },
             'terminal_audit': {
                 'columns': [
                     'id INTEGER PRIMARY KEY AUTO_INCREMENT',
@@ -8284,8 +8717,6 @@ def sync_database_schema():
                     'client_session_id VARCHAR(64)',
                     'detail TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
-                    'FOREIGN KEY (user_id) REFERENCES user(id)',
-                    'FOREIGN KEY (project_id) REFERENCES project(id)',
                 ]
             },
         }
@@ -8323,6 +8754,8 @@ def sync_database_schema():
         
         db.session.commit()
         print("数据库表结构同步完成")
+
+        drop_mysql_foreign_key_constraints()
         
         # 先清理 diff_review_state 历史脏数据（同记录多条状态），再建索引
         cleanup_diff_review_duplicates()
@@ -8730,6 +9163,7 @@ def api_create_plan():
             
         db.session.add(plan)
         db.session.commit()
+        _schedule_grep_work_item_index("plan", plan.id)
             
         result = jsonify({
             'success': True,
@@ -8852,6 +9286,7 @@ def api_update_plan(plan_id):
         
         plan.updated_at = datetime.utcnow()
         db.session.commit()
+        _schedule_grep_work_item_index("plan", plan.id)
         
         return jsonify({
             'success': True,
@@ -8901,18 +9336,16 @@ def api_delete_plan(plan_id):
         # 检查是否有子计划（Plan 模型未定义 children 关系）
         if Plan.query.filter_by(parent_id=plan.id).first() is not None:
             return jsonify({'success': False, 'error': '无法删除包含子计划的计划'}), 400
-        
-        # 计划“类型”字段已移除：统一检查是否有关联工作项（任意类型都阻止删除）
-        if BadCase.query.filter_by(plan_id=plan.id).first() is not None:
-            return jsonify({'success': False, 'error': '无法删除包含BadCase的计划'}), 400
-        if Bug.query.filter_by(plan_id=plan.id).first() is not None:
-            return jsonify({'success': False, 'error': '无法删除包含Bug的计划'}), 400
-        if TestCase.query.filter_by(plan_id=plan.id).first() is not None:
-            return jsonify({'success': False, 'error': '无法删除包含测试用例的计划'}), 400
-        
+
+        detached = _detach_plan_work_items(plan.id)
+        if any(detached.values()):
+            print(f"[DELETE-PLAN] plan_id={plan.id} 解绑遗留关联: {detached}", flush=True)
+
+        _deleted_plan_project_id = plan.project_id
         db.session.delete(plan)
         db.session.commit()
-        _redis_cache_invalidate_project(plan.project_id)
+        _redis_cache_invalidate_project(_deleted_plan_project_id)
+        _schedule_grep_work_item_delete("plan", plan_id)
         
         return jsonify({'success': True, 'message': '计划删除成功'})
         
@@ -9685,7 +10118,6 @@ def api_create_bug():
 
         bug = Bug(
             title=title,
-            description=_truncate_db_str(data.get('description', ''), 65535, ''),
             steps_to_reproduce=steps_to_reproduce,
             expected_result=_truncate_db_str(data.get('expected_result', ''), 65535, ''),
             actual_result=_truncate_db_str(data.get('actual_result', ''), 65535, ''),
@@ -9719,7 +10151,7 @@ def api_create_bug():
                     project_id=project_id_val,
                     creator_id=bug.creator_id,
                     plan_id=bug.plan_id,
-                    description=bug.description,
+                    description=None,
                     source_type="bug",
                     source_id=int(bug.id),
                 )
@@ -9752,14 +10184,15 @@ def api_create_bug():
             )
         except Exception as _e:
             print(f"[workflow_notify] Bug 创建通知失败: {_e}")
-        
+
+        _schedule_grep_work_item_index("bug", bug.id)
+
         return jsonify({
             'success': True,
             'message': 'Bug创建成功',
             'bug': {
                 'id': _json_snowflake_id(bug.id),
                 'title': bug.title,
-                'description': bug.description,
                 'severity': bug.severity,
                 'priority': bug.priority,
                 'status': bug.status,
@@ -9847,7 +10280,6 @@ def api_get_project_bugs(project_id):
             bugs.append({
                 'id': _json_snowflake_id(bug.id),
                 'title': bug.title,
-                'description': bug.description,
                 'bug_type': bug.bug_type,
                 'priority': bug.priority,
                 'status': bug.status,
@@ -9916,7 +10348,6 @@ def api_bug_detail(bug_id):
                 'bug': {
                     'id': _json_snowflake_id(bug.id),
                     'title': bug.title,
-                    'description': bug.description,
                     'steps_to_reproduce': bug.steps_to_reproduce,
                     'expected_result': bug.expected_result,
                     'actual_result': bug.actual_result,
@@ -9960,8 +10391,6 @@ def api_bug_detail(bug_id):
             # 更新字段
             if 'title' in data:
                 bug.title = data['title']
-            if 'description' in data:
-                bug.description = data['description']
             if 'steps_to_reproduce' in data:
                 bug.steps_to_reproduce = data['steps_to_reproduce']
             if 'expected_result' in data:
@@ -10031,7 +10460,9 @@ def api_bug_detail(bug_id):
                 )
             except Exception as _e:
                 print(f"[workflow_notify] Bug 更新通知失败: {_e}")
-            
+
+            _schedule_grep_work_item_index("bug", bug.id)
+
             return jsonify({
                 'success': True,
                 'message': 'Bug更新成功',
@@ -10117,6 +10548,8 @@ def api_bug_detail(bug_id):
                 )
             except Exception as _e:
                 print(f"[workflow_notify] Bug 删除通知失败: {_e}")
+
+            _schedule_grep_work_item_delete("bug", bug_id)
 
             return jsonify({'success': True, 'message': 'Bug删除成功'})
         except Exception as e:
@@ -10231,6 +10664,7 @@ def api_create_testcase():
         db.session.add(testcase)
         db.session.commit()
         _cache_invalidate_plans(data['project_id'])
+        _schedule_grep_work_item_index("testcase", testcase.id)
         try:
             _rec = _workflow_merge_creator_if_empty(
                 _workflow_recipients_testcase(testcase), testcase.creator_id
@@ -10411,6 +10845,7 @@ def api_testcase_detail(testcase_id):
             testcase.updated_at = datetime.now()
             db.session.commit()
             _cache_invalidate_plans(testcase.project_id)
+            _schedule_grep_work_item_index("testcase", testcase.id)
             try:
                 _rec = _workflow_merge_creator_if_empty(
                     _workflow_recipients_testcase(testcase), testcase.creator_id
@@ -10490,6 +10925,7 @@ def api_testcase_detail(testcase_id):
                 print(f"[DELETE-TESTCASE] 清理 test_case_comment 失败（继续）: {_ce}")
             db.session.delete(testcase)
             db.session.commit()
+            _schedule_grep_work_item_delete("testcase", testcase_id)
             _redis_cache_delete(f'testcase-detail:{testcase_id}')
             _cache_invalidate_plans(pid)
             try:
@@ -10652,10 +11088,19 @@ def api_get_chat_sessions(project_id):
         if not has_project_permission(current_user.id, project_id):
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         
-        sessions = ChatSession.query.filter_by(
-            project_id=project_id,
-            user_id=current_user.id
-        ).order_by(ChatSession.updated_at.desc()).all()
+        try:
+            lim = min(max(int(request.args.get('limit', 120)), 1), 500)
+        except (TypeError, ValueError):
+            lim = 120
+        sessions = (
+            ChatSession.query.filter_by(
+                project_id=project_id,
+                user_id=current_user.id,
+            )
+            .order_by(ChatSession.updated_at.desc())
+            .limit(lim)
+            .all()
+        )
         
         return jsonify({
             'success': True,
@@ -11177,7 +11622,35 @@ if __name__ == '__main__':
             print("数据库初始化成功")
         else:
             print("数据库初始化失败，请检查错误信息")
-    
+        try:
+            from routers.agent import schedule_react_agent_bootstrap_at_startup
+
+            schedule_react_agent_bootstrap_at_startup(app)
+        except Exception as _agent_boot_ex:
+            print(f"[AGENT-BOOTSTRAP] 跳过: {_agent_boot_ex}", flush=True)
+
+        def _grep_es_warmup_bg():
+            try:
+                from config import Config as _GrepCfg
+
+                if not _GrepCfg.GREP_VECTOR_ENABLED:
+                    return
+                from memory.es_work_item_store import build_work_item_store_from_config
+
+                _store = build_work_item_store_from_config(_GrepCfg)
+                _store.es.info(request_timeout=3)
+            except Exception as _gew:
+                print(f"[GREP-ES] 后台预热失败: {_gew}", flush=True)
+
+        try:
+            import threading as _grep_warm_th
+
+            _grep_warm_th.Thread(
+                target=_grep_es_warmup_bg, name="grep-es-warmup", daemon=True
+            ).start()
+        except Exception:
+            pass
+
     # 初始化MinIO
     print("正在初始化MinIO...")
     ensure_bucket_exists()
@@ -11190,12 +11663,13 @@ if __name__ == '__main__':
     else:
         print("❌ Redis初始化失败，缓存功能将不可用")
 
-    # 热重载：显式 FLASK_DEBUG=1 时开启；未设置且 BADCASE_USE_WAITRESS=1 时默认 waitress（无 reload，支持 Keep-Alive）
-    _use_waitress = (os.getenv("BADCASE_USE_WAITRESS", "1") or "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    # 本地默认 Waitress 线程池（默认 200，对齐「单人也要扛 SSE + 大量 API」）；热重载请 FLASK_DEBUG=1（会回退 Flask 开发服）。
+    # 生产/压测：Linux 可用 gunicorn；Windows 继续 waitress 或设 WSGI_THREADS。
+    _use_waitress = (os.getenv("BADCASE_USE_WAITRESS", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
     _fd_raw = os.getenv("FLASK_DEBUG")
     if _fd_raw is None or str(_fd_raw).strip() == "":
@@ -11221,16 +11695,36 @@ if __name__ == '__main__':
         try:
             from waitress import serve
 
-            _threads = int((os.getenv("WSGI_THREADS") or "8").strip())
+            try:
+                _threads = int((os.getenv("WSGI_THREADS") or "200").strip())
+            except ValueError:
+                _threads = 200
+            _threads = max(8, min(_threads, 512))
             print(
-                f"🚀 使用 waitress（Keep-Alive / 多线程）：http://{_host}:{_port} threads={_threads}",
+                f"🚀 使用 waitress（Keep-Alive / 线程池）：http://{_host}:{_port} threads={_threads}",
+                flush=True,
+            )
+            print(
+                "   调线程：环境变量 WSGI_THREADS=200（默认已是 200）；关 waitress：BADCASE_USE_WAITRESS=0",
                 flush=True,
             )
             print(
                 "   首请求仍可能较慢（远端 MySQL 冷连）；进项目页会先打 /api/ping 预热",
                 flush=True,
             )
-            serve(app, host=_host, port=_port, threads=max(1, _threads))
+            try:
+                _conn_limit = int((os.getenv("WSGI_CONNECTION_LIMIT") or "1024").strip())
+            except ValueError:
+                _conn_limit = 1024
+            _conn_limit = max(_threads, min(_conn_limit, 4096))
+            serve(
+                app,
+                host=_host,
+                port=_port,
+                threads=_threads,
+                channel_timeout=300,
+                connection_limit=_conn_limit,
+            )
         except ImportError:
             print("⚠️ 未安装 waitress，回退 Flask 开发服务器（pip install waitress）", flush=True)
             app.run(
@@ -11243,13 +11737,24 @@ if __name__ == '__main__':
     else:
         if _use_reload and _use_waitress:
             print(
-                "ℹ️ 热重载与 waitress 不能同时开；当前用 Flask 开发服（响应头 Connection: close，首请求偏慢）",
+                "ℹ️ 热重载与 waitress 不能同时开；当前用 Flask 开发服（无固定 200 线程池，易与 SSE 抢资源）",
                 flush=True,
             )
             print(
-                "   若要 Keep-Alive：FLASK_DEBUG=0 BADCASE_USE_WAITRESS=1 python app.py",
+                "   要 200 线程：FLASK_DEBUG=0（或 FLASK_DEBUG=0 WSGI_THREADS=200 python app.py）",
                 flush=True,
             )
+        else:
+            print(
+                f"🚀 使用 Flask 开发服务器（threaded=True）：http://{_host}:{_port}"
+                + ("，热重载已开" if _use_reload else "，热重载已关"),
+                flush=True,
+            )
+            if not _use_reload:
+                print(
+                    "   提示：默认已改为 waitress 200 线程；若仍走本模式请设 BADCASE_USE_WAITRESS=0",
+                    flush=True,
+                )
         app.run(
             debug=_use_reload,
             use_reloader=_use_reload,

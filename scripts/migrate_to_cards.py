@@ -202,7 +202,7 @@ def migrate_bugs(project_id=None, dry_run=True):
             project_id=bug.project_id,
             creator_id=bug.creator_id,
             plan_id=bug.plan_id,
-            description=bug.description,
+            description=None,
             
             # Bug特有字段
             severity=bug.severity,

@@ -8,7 +8,8 @@ import json
 import os
 import time
 
-from sqlalchemy import or_
+from sqlalchemy import or_, and_, cast, String
+from sqlalchemy.types import JSON as SAJSON
 from agents.tool_registry import BaseTool
 from agents.locale_prompts import (
     normalize_locale,
@@ -41,6 +42,48 @@ def _grep_nav_json_id(value: Any) -> Optional[str]:
         return None
 
 
+# grep keywords 默认检索的字符串/文本列（不含 id/plan_id/project_id 等关联键，id 单独精确匹配）
+_GREP_SEARCH_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "bug": (
+        "title", "steps_to_reproduce", "expected_result", "actual_result",
+        "severity", "priority", "status", "bug_type", "environment", "browser", "os", "attachments",
+    ),
+    "badcase": (
+        "title", "case_category", "base_problem", "reproduction_steps", "badcase_result",
+        "answer", "correct_answer", "problem_reason", "solution", "priority", "status",
+        "assignee", "plan", "document_type", "attachments", "assigned_users",
+    ),
+    "testcase": (
+        "title", "case_type", "priority", "status", "test_type", "preconditions", "remark",
+        "baseline", "version", "steps", "related_defects",
+    ),
+    "card": (
+        "title", "priority", "severity", "steps_to_reproduce", "expected_result",
+        "actual_result", "bug_type", "environment", "browser", "os", "case_category", "base_problem",
+        "reproduction_steps", "badcase_result", "answer", "correct_answer", "problem_reason", "solution",
+        "case_type_test", "test_type", "preconditions", "remark", "baseline", "version",
+        "source_type", "type", "steps", "related_defects", "execution_result",
+    ),
+}
+
+_GREP_STATUS_ALIASES: Dict[str, Dict[str, str]] = {
+    "bug": {
+        "已关闭": "closed", "关闭": "closed", "新建": "new", "新": "new",
+        "已分配": "assigned", "分配": "assigned", "进行中": "in_progress", "处理中": "in_progress",
+        "已解决": "resolved", "解决": "resolved", "已重新打开": "reopened", "重新打开": "reopened",
+        "暂停": "hold", "hold": "hold",
+    },
+    "badcase": {
+        "已关闭": "closed", "关闭": "closed", "新建": "new", "新": "new",
+        "待处理": "pending", "已解决": "resolved", "已重新打开": "reopened", "重新打开": "reopened",
+        "暂停": "hold", "hold": "hold",
+    },
+    "testcase": {
+        "草稿": "draft", "评审": "review", "生效": "active", "归档": "archived",
+    },
+}
+
+
 class GrepTool(BaseTool):
     """
     缺陷定位工具
@@ -58,7 +101,9 @@ class GrepTool(BaseTool):
         super().__init__(
             name="grep",
             description="缺陷定位工具：模拟人类阅读习惯，先检索再阅读。精准定位 BadCase/Bug/测试用例/统一卡片(Card)的归属关系和业务场景。"
-                         "必须参数：project_id(项目ID)。可选：keywords(标题关键词，拆分后默认「任一词命中」OR；需全部命中可设环境变量 GREP_KEYWORDS_MATCH_MODE=and), "
+                         "必须参数：project_id(项目ID)。可选：keywords(全字段模糊检索：标题/描述/步骤/状态/优先级/负责人/类型/环境等；"
+                         "数字可匹配 id/card_id；拆分后默认 OR，全部命中设 GREP_KEYWORDS_MATCH_MODE=and), "
+                         "assignee(仅按负责人筛选，可与 keywords 并用；推荐传纯姓名如 hx，勿写 负责人:hx), "
                          "target(bug/badcase/testcase/card/plan/all；card=仅查 Card；plan=仅查迭代计划 Plan；all=多类)，status，plan_id(当前迭代)，card_id(可选)。"
                          "代码结构分析可选：code_paths（逗号/分号分隔的 .py 文件路径）、prefer_ast_structure=true 或 mode=code_ast 时优先 Python AST 解析，结果写入 data.code_ast。"
                          "返回 plan_tree、badcase_analysis、bug_location、testcase_location、card_location（Card 表）。建议先用 plan_id 限定迭代计划，再把候选记录交给大模型逐条阅读判断。"
@@ -81,7 +126,8 @@ class GrepTool(BaseTool):
         执行缺陷定位分析
         
         Args:
-            keywords: 搜索关键词（如"登录"、"商品"）
+            keywords: 搜索关键词（标题或负责人，如"登录"、"hx"）
+            assignee: 仅按负责人筛选（用户名/邮箱前缀，可与 keywords 并用）
             project_id: 项目ID
             plan_context: 计划上下文（当前查看的计划树结构）
             evidence: 执行证据（工具调用记录）
@@ -105,11 +151,37 @@ class GrepTool(BaseTool):
                 )
             else:
                 keywords = str(keywords).strip() or None
+        assignee = kwargs.get("assignee")
+        if assignee is not None and not isinstance(assignee, str):
+            assignee = str(assignee).strip() or None
+        elif isinstance(assignee, str):
+            assignee = assignee.strip() or None
         raw_target = (target or "all").strip().lower() if isinstance(target, str) else "all"
         if raw_target not in ("all", "bug", "badcase", "testcase", "card", "plan"):
             raw_target = "all"
+
+        from agents.tools.grep_query_parser import enrich_grep_params
+
+        _nl = kwargs.get("user_input") or kwargs.get("natural_query")
+        _t_parse0 = time.perf_counter()
+        _parsed = enrich_grep_params(
+            keywords=keywords,
+            assignee=assignee,
+            status=status,
+            user_input=_nl,
+            todo=kwargs.get("todo"),
+            target=raw_target,
+        )
+        _parse_ms = round((time.perf_counter() - _t_parse0) * 1000.0, 1)
+        keywords = _parsed.keywords
+        assignee = _parsed.assignee
+        if _parsed.status:
+            status = _parsed.status
+        _grep_record_id = _parsed.record_id
+
         print(
-            f"[GREP] 🔍 开始定位 (keywords={keywords}, target={raw_target}, status={status}, plan_id={plan_id})"
+            f"[GREP] 🔍 开始定位 (keywords={keywords}, assignee={assignee}, target={raw_target}, "
+            f"status={status}, plan_id={plan_id}) parse_ms={_parse_ms}"
         )
         
         progress_callback = kwargs.get("progress_callback")
@@ -124,6 +196,15 @@ class GrepTool(BaseTool):
                 pass
         
         _progress(grep_tool_progress("init", loc))
+        _grep_t0 = time.perf_counter()
+        _grep_seg: Dict[str, float] = {"query_parse": _parse_ms}
+        _grep_mark_t = _grep_t0
+
+        def _grep_mark(name: str) -> None:
+            nonlocal _grep_mark_t
+            now = time.perf_counter()
+            _grep_seg[name] = round((now - _grep_mark_t) * 1000.0, 1)
+            _grep_mark_t = now
 
         try:
             from app import app, db, BadCase, Bug, Plan
@@ -154,10 +235,28 @@ class GrepTool(BaseTool):
             
             with app.app_context():
                 if mode == "locate":
+                    _hybrid_meta: Dict[str, Any] = {}
+                    _card_light = raw_target == "card" and self._grep_card_light_enabled()
                     # 【阶段1】数据库查询（支持 plan_id 限定当前迭代，关键词拆分模糊匹配）
-                    _progress(grep_tool_progress("phase1_plan_tree", loc))
-                    plan_tree = await self._get_plan_tree(project_id)
-                    _progress(grep_tool_progress("phase1_plan_ready", loc))
+                    if _card_light:
+                        plan_tree = {"plan_map": {}, "root_plans": []}
+                        _grep_seg["plan_tree"] = 0.0
+                    elif self._grep_skip_plan_tree_on_keyword(keywords):
+                        _progress(grep_tool_progress("phase1_plan_tree", loc))
+                        plan_tree = await self._minimal_plan_tree_for_scope(
+                            project_id, plan_id
+                        )
+                        _grep_mark("plan_tree")
+                        print(
+                            "[GREP] 跳过全项目 plan_tree（关键词走 ES，GREP_SKIP_PLAN_TREE_ON_KEYWORD=1）",
+                            flush=True,
+                        )
+                        _progress(grep_tool_progress("phase1_plan_ready", loc))
+                    else:
+                        _progress(grep_tool_progress("phase1_plan_tree", loc))
+                        plan_tree = await self._get_plan_tree(project_id)
+                        _grep_mark("plan_tree")
+                        _progress(grep_tool_progress("phase1_plan_ready", loc))
 
                     if raw_target == "plan":
                         plan_records_tree = None
@@ -170,7 +269,34 @@ class GrepTool(BaseTool):
                                 ui_locale=loc,
                             )
                             _progress(grep_tool_progress("plan_material_ready", loc))
-                        plan_location = self._get_plan_entity_list(project_id, keywords, plan_id)
+                        plan_location = []
+                        _hybrid_meta_plan: Dict[str, Any] = {}
+                        try:
+                            import asyncio as _asyncio
+                            from agents.tools.grep_hybrid_search import hybrid_search_work_items
+
+                            def _run_plan_hybrid():
+                                return hybrid_search_work_items(
+                                    project_id=str(project_id),
+                                    keywords=keywords,
+                                    assignee=assignee,
+                                    status=status,
+                                    plan_id=plan_id,
+                                    raw_target="plan",
+                                    record_id=_grep_record_id,
+                                )
+
+                            _hp_bug, _hp_bc, _hybrid_meta_plan = await _asyncio.to_thread(_run_plan_hybrid)
+                            _extra_plan = (
+                                _hybrid_meta_plan.get("extra_lists")
+                                if isinstance(_hybrid_meta_plan, dict)
+                                else {}
+                            ) or {}
+                            plan_location = _extra_plan.get("plan_list") or []
+                        except Exception as _pex:
+                            print(f"[GREP-HYBRID] plan 跳过: {_pex}", flush=True)
+                        if not plan_location:
+                            plan_location = self._get_plan_entity_list(project_id, keywords, plan_id)
                         en = is_english_locale(loc)
                         if not plan_location:
                             summary_plan = (
@@ -221,10 +347,13 @@ class GrepTool(BaseTool):
                             "summary": summary_plan,
                             "navigation": navigation,
                         }
+                        if _hybrid_meta_plan:
+                            result["data"]["grep_search_meta"] = _hybrid_meta_plan
                     else:
                         # 人类阅读模式：如果指定了 plan_id，则返回该计划及其子计划的树形结构，并挂载各计划下的记录（从上到下、从外到里）
                         plan_records_tree = None
-                        if plan_id:
+                        _skip_plan_material = self._grep_skip_plan_records_on_keyword(keywords)
+                        if plan_id and not _card_light and not _skip_plan_material:
                             _progress(grep_tool_progress("plan_material_read", loc))
                             plan_records_tree = await self._build_plan_records_tree(
                                 project_id=project_id,
@@ -232,32 +361,244 @@ class GrepTool(BaseTool):
                                 progress_callback=progress_callback,
                                 ui_locale=loc,
                             )
+                            _grep_mark("plan_records_tree")
                             _progress(grep_tool_progress("plan_material_ready", loc))
+                        elif _skip_plan_material and plan_id:
+                            _grep_seg["plan_records_tree"] = 0.0
+                            print(
+                                "[GREP] 跳过 plan_records_tree（关键词检索走 ES，GREP_PLAN_RECORDS_ON_KEYWORD=0）",
+                                flush=True,
+                            )
                     
                         badcase_list = []
                         bug_list = []
                         testcase_list = []
                         card_list: List[Dict[str, Any]] = []
-                        if raw_target in ['all', 'badcase']:
+                        _hybrid_bug = False
+                        _hybrid_bc = False
+                        _hybrid_tc = False
+                        _hybrid_card = False
+                        try:
+                            import asyncio as _asyncio
+                            from agents.tools.grep_hybrid_search import hybrid_search_work_items
+
+                            def _run_hybrid():
+                                return hybrid_search_work_items(
+                                    project_id=str(project_id),
+                                    keywords=keywords,
+                                    assignee=assignee,
+                                    status=status,
+                                    plan_id=plan_id,
+                                    raw_target=raw_target,
+                                    record_id=_grep_record_id,
+                                )
+
+                            _t_hybrid0 = time.perf_counter()
+                            hb, hbc, _hybrid_meta = await _asyncio.to_thread(_run_hybrid)
+                            _grep_seg["hybrid_total"] = round(
+                                (time.perf_counter() - _t_hybrid0) * 1000.0, 1
+                            )
+                            _grep_mark("hybrid_block")
+                            _hp = _hybrid_meta.get("perf_ms") if isinstance(_hybrid_meta, dict) else None
+                            if isinstance(_hp, dict):
+                                for _hk, _hv in _hp.items():
+                                    _grep_seg[f"hybrid_{_hk}"] = float(_hv)
+                            if hb is not None:
+                                bug_list = hb
+                                _hybrid_bug = True
+                            if hbc is not None:
+                                badcase_list = hbc
+                                _hybrid_bc = True
+                            _extra_lists = (
+                                _hybrid_meta.get("extra_lists")
+                                if isinstance(_hybrid_meta, dict)
+                                else {}
+                            ) or {}
+                            if _extra_lists.get("testcase_list") is not None:
+                                testcase_list = _extra_lists.get("testcase_list") or []
+                                _hybrid_tc = True
+                            if _extra_lists.get("card_list") is not None:
+                                card_list = _extra_lists.get("card_list") or []
+                                _hybrid_card = True
+                        except Exception as _hex:
+                            print(f"[GREP-HYBRID] 跳过: {_hex}", flush=True)
+
+                        if _hybrid_meta.get("es_ran") and (bug_list or badcase_list):
+                            _ui_post = (
+                                kwargs.get("user_input")
+                                or kwargs.get("natural_query")
+                                or kwargs.get("todo")
+                            )
+                            try:
+                                from agents.tools.grep_es_rerank import apply_es_rerank
+
+                                _t_rr0 = time.perf_counter()
+                                bug_list, badcase_list, _rerank_meta = await apply_es_rerank(
+                                    bug_list=bug_list,
+                                    badcase_list=badcase_list,
+                                    user_input=_ui_post,
+                                    keywords=keywords,
+                                    assignee=assignee,
+                                    status=status,
+                                )
+                                _grep_seg["rerank_total"] = round(
+                                    (time.perf_counter() - _t_rr0) * 1000.0, 1
+                                )
+                                _rp = _rerank_meta.get("perf_ms") if isinstance(_rerank_meta, dict) else None
+                                if isinstance(_rp, dict) and _rp.get("rerank_api") is not None:
+                                    _grep_seg["rerank_api"] = float(_rp["rerank_api"])
+                                _hybrid_meta["rerank"] = _rerank_meta
+                            except Exception as _rex:
+                                print(f"[GREP-RERANK] 跳过: {_rex}", flush=True)
+
+                            try:
+                                from agents.tools.grep_es_llm_judge import apply_es_llm_judge
+
+                                _t_j0 = time.perf_counter()
+                                bug_list, badcase_list, _judge_meta = await apply_es_llm_judge(
+                                    bug_list=bug_list,
+                                    badcase_list=badcase_list,
+                                    user_input=_ui_post,
+                                    keywords=keywords,
+                                    assignee=assignee,
+                                    status=status,
+                                    rerank_meta=_rerank_meta if isinstance(_rerank_meta, dict) else None,
+                                )
+                                _grep_seg["llm_judge_total"] = round(
+                                    (time.perf_counter() - _t_j0) * 1000.0, 1
+                                )
+                                _jp = _judge_meta.get("perf_ms") if isinstance(_judge_meta, dict) else None
+                                if isinstance(_jp, dict) and _jp.get("llm_judge_api") is not None:
+                                    _grep_seg["llm_judge_api"] = float(_jp["llm_judge_api"])
+                                _hybrid_meta["llm_judge"] = _judge_meta
+                            except Exception as _jex:
+                                print(f"[GREP-LLM-JUDGE] 跳过: {_jex}", flush=True)
+
+                        _tool_run_ctx = kwargs.get("tool_run_ctx")
+                        if (_hybrid_bug or _hybrid_bc) and isinstance(_tool_run_ctx, dict):
+                            try:
+                                from agents.tools.grep_recent_fallback import (
+                                    merge_recent_created_sql_fallback,
+                                )
+
+                                bug_list, badcase_list, _fb_meta = (
+                                    await merge_recent_created_sql_fallback(
+                                        self,
+                                        project_id=str(project_id),
+                                        bug_list=bug_list,
+                                        badcase_list=badcase_list,
+                                        hybrid_bug=_hybrid_bug,
+                                        hybrid_bc=_hybrid_bc,
+                                        raw_target=raw_target,
+                                        keywords=keywords,
+                                        assignee=assignee,
+                                        status=status,
+                                        plan_id=plan_id,
+                                        tool_run_ctx=_tool_run_ctx,
+                                    )
+                                )
+                                if _fb_meta.get("sql_fallback"):
+                                    _hybrid_meta.setdefault("sql_fallback", _fb_meta["sql_fallback"])
+                            except Exception as _fb_ex:
+                                print(f"[GREP-FALLBACK] 跳过: {_fb_ex}", flush=True)
+
+                        if raw_target in ['all', 'badcase'] and not _hybrid_bc:
                             _progress(grep_tool_progress("phase1_badcase", loc))
-                            badcase_list = await self._get_badcase_list(project_id, keywords, status, plan_id=plan_id)
+                            badcase_list = await self._get_badcase_list(
+                                project_id, keywords, status, plan_id=plan_id, assignee=assignee
+                            )
                             _progress(grep_tool_progress("phase1_badcase_done", loc, n=len(badcase_list)))
-                        if raw_target in ['all', 'bug']:
+                        if raw_target in ['all', 'bug'] and not _hybrid_bug:
                             _progress(grep_tool_progress("phase1_bug", loc))
-                            bug_list = await self._get_bug_list(project_id, keywords, status, plan_id=plan_id)
+                            bug_list = await self._get_bug_list(
+                                project_id, keywords, status, plan_id=plan_id, assignee=assignee
+                            )
                             _progress(grep_tool_progress("phase1_bug_done", loc, n=len(bug_list)))
-                        if raw_target in ['all', 'testcase']:
+                        if raw_target in ['all', 'testcase'] and not _hybrid_tc:
                             _progress(grep_tool_progress("phase1_tc", loc))
-                            testcase_list = await self._get_testcase_list(project_id, keywords, status, plan_id=plan_id)
+                            testcase_list = await self._get_testcase_list(
+                                project_id, keywords, status, plan_id=plan_id, assignee=assignee
+                            )
                             _progress(grep_tool_progress("phase1_tc_done", loc, n=len(testcase_list)))
                         # 卡片层：target=all|card 照常拉取；单独查 bug/badcase/testcase 时也拉取，
                         # 否则 navigation 无法合并为「统一卡片」跳转，迭代下列表里卡片命中也不会出现。
                         if raw_target in ('all', 'card', 'bug', 'badcase', 'testcase'):
-                            _progress(grep_tool_progress("phase1_card", loc))
-                            card_list = await self._get_card_list(project_id, keywords, plan_id=plan_id)
+                            _skip_card_sql = self._grep_should_skip_card_full_scan(
+                                raw_target=raw_target,
+                                hybrid_bug=_hybrid_bug,
+                                hybrid_bc=_hybrid_bc,
+                                bug_list=bug_list,
+                                badcase_list=badcase_list,
+                            )
+                            if _hybrid_card:
+                                _grep_seg["card_query"] = 0.0
+                            elif _skip_card_sql:
+                                card_list = []
+                                _grep_seg["card_query"] = 0.0
+                                print(
+                                    f"[GREP] target={raw_target} 且 ES 已命中，跳过 Card 全表 SQL",
+                                    flush=True,
+                                )
+                            else:
+                                _progress(grep_tool_progress("phase1_card", loc))
+                                card_list = await self._get_card_list(
+                                    project_id, keywords, plan_id=plan_id, assignee=assignee
+                                )
+                                _grep_mark("card_query")
                             _progress(grep_tool_progress("phase1_card_done", loc, n=len(card_list)))
 
+                        # Card 表 title 常与源表 title 不同步；target=card 无命中时回退源表检索
+                        _nav_grep_target = raw_target
+                        if raw_target == "card" and not card_list:
+                            if bug_list:
+                                _nav_grep_target = "bug"
+                            elif badcase_list:
+                                _nav_grep_target = "badcase"
+                            elif testcase_list:
+                                _nav_grep_target = "testcase"
+                        if (
+                            raw_target == "card"
+                            and (keywords or (assignee and str(assignee).strip()))
+                            and not card_list
+                            and not bug_list
+                            and not badcase_list
+                            and not testcase_list
+                            and self._grep_card_source_fallback_enabled()
+                        ):
+                            if not badcase_list:
+                                _progress(grep_tool_progress("phase1_badcase", loc))
+                                badcase_list = await self._get_badcase_list(
+                                    project_id, keywords, status, plan_id=plan_id, assignee=assignee
+                                )
+                                _grep_mark("card_fallback_badcase")
+                            if not bug_list:
+                                _progress(grep_tool_progress("phase1_bug", loc))
+                                bug_list = await self._get_bug_list(
+                                    project_id, keywords, status, plan_id=plan_id, assignee=assignee
+                                )
+                                _grep_mark("card_fallback_bug")
+                            if not testcase_list:
+                                _progress(grep_tool_progress("phase1_tc", loc))
+                                testcase_list = await self._get_testcase_list(
+                                    project_id, keywords, status, plan_id=plan_id, assignee=assignee
+                                )
+                                _grep_mark("card_fallback_tc")
+                            if bug_list:
+                                _nav_grep_target = "bug"
+                            elif badcase_list:
+                                _nav_grep_target = "badcase"
+                            elif testcase_list:
+                                _nav_grep_target = "testcase"
+                            if bug_list or badcase_list or testcase_list:
+                                print(
+                                    f"[GREP] Card 无命中，回退源表: bug={len(bug_list)} "
+                                    f"badcase={len(badcase_list)} testcase={len(testcase_list)} "
+                                    f"nav_as={_nav_grep_target!r}",
+                                    flush=True,
+                                )
+
                         # 卡片层适配：为导航补充 card_id（优先按 Card.source_type/source_id 映射）
+                        _t_attach0 = time.perf_counter()
                         try:
                             from app import db as _db, Card as _Card
 
@@ -266,6 +607,8 @@ class GrepTool(BaseTool):
                                     return
                                 ids = []
                                 for it in items:
+                                    if it.get("card_id") is not None:
+                                        continue
                                     try:
                                         iid = int(it.get("id"))
                                         ids.append(iid)
@@ -313,32 +656,57 @@ class GrepTool(BaseTool):
                             _attach_card_ids(testcase_list, "testcase")
                         except Exception:
                             pass
+                        _grep_seg["attach_card_ids"] = round(
+                            (time.perf_counter() - _t_attach0) * 1000.0, 1
+                        )
                     
                         # 【阶段2】分析关联
                         _progress(grep_tool_progress("phase2_assoc", loc))
-                        analysis_result = await self._analyze_associations(
-                            keywords=keywords,
-                            plan_tree=plan_tree,
-                            badcase_list=badcase_list,
-                            bug_list=bug_list,
-                            testcase_list=testcase_list,
-                            card_list=card_list,
-                            evidence=evidence,
-                            ui_locale=loc,
-                            plan_records_tree=plan_records_tree,
-                        )
+                        if _card_light and not card_list and not bug_list and not badcase_list and not testcase_list:
+                            en0 = is_english_locale(loc)
+                            analysis_result = {
+                                "badcase_analysis": [],
+                                "bug_location": [],
+                                "testcase_location": [],
+                                "card_location": [],
+                                "plan_attribution": [],
+                                "summary": (
+                                    "No matching cards."
+                                    if en0
+                                    else "未找到匹配的卡片。"
+                                ),
+                            }
+                            _grep_seg["phase2_assoc"] = 0.0
+                        else:
+                            analysis_result = await self._analyze_associations(
+                                keywords=keywords,
+                                plan_tree=plan_tree,
+                                badcase_list=badcase_list,
+                                bug_list=bug_list,
+                                testcase_list=testcase_list,
+                                card_list=card_list,
+                                evidence=evidence,
+                                ui_locale=loc,
+                                plan_records_tree=plan_records_tree,
+                            )
+                            _grep_mark("phase2_assoc")
                         _progress(grep_tool_progress("phase2_done", loc))
                     
-                        # 【阶段3】生成对比报告
-                        _progress(grep_tool_progress("phase3_compare", loc))
-                        comparison = await self._generate_comparison(project_id, keywords)
-                        _progress(grep_tool_progress("phase3_done", loc))
+                        # 【阶段3】对比报告：locate 默认跳过（曾全表扫 BadCase，拖慢 ~数百 ms）
+                        if self._grep_locate_comparison_enabled():
+                            _progress(grep_tool_progress("phase3_compare", loc))
+                            comparison = await self._generate_comparison(project_id, keywords)
+                            _grep_mark("phase3_compare")
+                            _progress(grep_tool_progress("phase3_done", loc))
+                        else:
+                            comparison = {"markdown": "", "changes": [], "timestamp": ""}
+                            _grep_seg["phase3_compare"] = 0.0
                     
                         # 生成导航指令（Bug / BadCase / TestCase，随 grep target 过滤；all 时合并多类）
                         navigation = None
                         navigation_list = self._build_grep_navigation_items(
                             plan_tree,
-                            raw_target,
+                            _nav_grep_target,
                             badcase_list,
                             bug_list,
                             testcase_list,
@@ -371,8 +739,16 @@ class GrepTool(BaseTool):
                             'plan_attribution': analysis_result['plan_attribution'],
                             'comparison_report': comparison['markdown'],
                             'summary': analysis_result['summary'],
-                            'navigation': navigation
+                            'navigation': navigation,
                         }
+                        if _hybrid_meta:
+                            if (
+                                _hybrid_meta.get("es_ran")
+                                and not bug_list
+                                and not badcase_list
+                            ):
+                                _hybrid_meta["low_relevance_empty"] = True
+                            result['data']['grep_search_meta'] = _hybrid_meta
                     
 
                 elif mode == "associate":
@@ -398,6 +774,23 @@ class GrepTool(BaseTool):
                         'summary': grep_compare_summary(len(comparison['changes']), loc),
                     }
                 
+                if mode == "locate":
+                    _grep_seg["total"] = round((time.perf_counter() - _grep_t0) * 1000.0, 1)
+                    result["grep_perf_ms"] = float(_grep_seg["total"])
+                    if isinstance(result.get("data"), dict):
+                        result["data"]["grep_perf_ms"] = result["grep_perf_ms"]
+                        result["data"]["grep_perf_detail_ms"] = dict(_grep_seg)
+                    parts = " ".join(
+                        f"{k}={v}ms"
+                        for k, v in sorted(_grep_seg.items(), key=lambda x: -x[1])
+                        if k != "total"
+                    )
+                    print(
+                        f"[GREP-PERF] target={raw_target!r} total={_grep_seg['total']}ms "
+                        f"keywords_len={len(str(keywords or ''))} hybrid={_hybrid_meta.get('es_ran') if isinstance(_hybrid_meta, dict) else False} "
+                        f"{parts}",
+                        flush=True,
+                    )
                 return result
                 
         except Exception as e:
@@ -607,6 +1000,134 @@ class GrepTool(BaseTool):
         _p("计划材料：树结构组装完成")
         return tree
     
+    @staticmethod
+    def _grep_card_light_enabled() -> bool:
+        """target=card 时跳过计划树/计划物料/空结果重分析，默认开。"""
+        return (os.getenv("GREP_CARD_LIGHT", "1") or "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    @staticmethod
+    def _grep_skip_plan_records_on_keyword(keywords: Optional[str]) -> bool:
+        """有关键词时默认不拉整棵计划下全量 Bug/BadCase（极慢），检索改走 ES。"""
+        if (os.getenv("GREP_PLAN_RECORDS_ON_KEYWORD", "false") or "false").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return False
+        kw = (keywords or "").strip()
+        return bool(kw and kw not in ("*",))
+
+    @staticmethod
+    def _grep_locate_comparison_enabled() -> bool:
+        """locate 是否生成全项目对比 Markdown（默认关，避免扫全表 BadCase）。"""
+        return (os.getenv("GREP_LOCATE_COMPARISON", "0") or "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    @staticmethod
+    def _grep_card_skip_sql_if_es_enabled() -> bool:
+        """ES 混合检索已有命中时跳过 Card 表全字段 SQL（默认开）。"""
+        return (os.getenv("GREP_CARD_SKIP_SQL_IF_ES", "true") or "true").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _grep_should_skip_card_full_scan(
+        self,
+        *,
+        raw_target: str,
+        hybrid_bug: bool,
+        hybrid_bc: bool,
+        bug_list: List[Dict[str, Any]],
+        badcase_list: List[Dict[str, Any]],
+    ) -> bool:
+        """
+        已有 bug/badcase 命中时不必再扫 Card 全字段（常 2~5s）。
+        含 ES 或 SQL 回落路径；导航用 attach_card_ids 按 source_id 补 card_id。
+        """
+        if not self._grep_card_skip_sql_if_es_enabled():
+            return False
+        t = (raw_target or "all").strip().lower()
+        if t == "card":
+            return bool((hybrid_bug or hybrid_bc or bug_list or badcase_list))
+        if t == "bug":
+            return bool(bug_list)
+        if t == "badcase":
+            return bool(badcase_list)
+        return False
+
+    @staticmethod
+    def _grep_card_source_fallback_enabled() -> bool:
+        """target=card 无命中时是否回退查 Bug/BadCase/TestCase 源表（默认开）。"""
+        return (os.getenv("GREP_CARD_SOURCE_FALLBACK", "1") or "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    @staticmethod
+    def _grep_skip_plan_tree_on_keyword(keywords: Optional[str]) -> bool:
+        if not (keywords or "").strip() or str(keywords).strip() in ("*",):
+            return False
+        try:
+            from config import Config as cfg
+
+            if not getattr(cfg, "GREP_SKIP_PLAN_TREE_ON_KEYWORD", True):
+                return False
+            if not getattr(cfg, "GREP_VECTOR_ENABLED", False):
+                return False
+        except Exception:
+            return False
+        return True
+
+    async def _minimal_plan_tree_for_scope(
+        self, project_id: str, plan_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """关键词+ES 路径：只加载当前 plan（若有），避免扫全项目计划树。"""
+        plan_map: Dict[Any, Dict[str, Any]] = {}
+        if plan_id is not None and str(plan_id).strip() not in ("", "0", "None", "null"):
+            try:
+                from app import Plan, db
+
+                pid_int = int(plan_id)
+                proj_int = int(project_id)
+                row = db.session.get(Plan, pid_int)
+                if row is not None and int(row.project_id) == proj_int:
+                    plan_map[pid_int] = {
+                        "id": row.id,
+                        "name": row.name,
+                        "status": row.status,
+                        "parent_id": row.parent_id,
+                        "description": getattr(row, "description", ""),
+                        "children": [],
+                        "keywords": self._extract_keywords(row.name),
+                        "business_domain": self._infer_business_domain(row.name),
+                    }
+            except Exception:
+                pass
+        plans = list(plan_map.values())
+        return {
+            "total_plans": len(plans),
+            "root_plans": [p for p in plans if not p.get("parent_id")],
+            "plans": plans,
+            "plan_map": plan_map,
+            "business_domains": list(
+                {p["business_domain"] for p in plans if p.get("business_domain")}
+            ),
+        }
+
     async def _get_plan_tree(self, project_id: str) -> Dict[str, Any]:
         """
         计划阅读器：解析迭代计划结构（优化版）
@@ -1152,21 +1673,216 @@ class GrepTool(BaseTool):
             query = query.filter(or_(*[column.ilike(f"%{kw}%") for kw in keyword_list]))
         return query
 
-    def _apply_card_title_desc_ilike(self, query, card_model, keyword_list: List[str]):
-        """Card.title / Card.description：默认 OR；AND 时每词须在标题或描述其一命中。"""
-        if not keyword_list:
+    def _find_user_ids_by_assignee_hint(self, hint: str) -> List[int]:
+        """按用户名精确/邮箱前缀/模糊匹配解析负责人 user id（返回全部匹配，支持重名）。"""
+        hint = (hint or "").strip()
+        if not hint:
+            return []
+        try:
+            from agents.tools.grep_assignee import resolve_assignee_user_ids
+
+            res = resolve_assignee_user_ids(hint, fuzzy_prefix=True)
+            return list(res.user_ids or [])
+        except Exception as e:
+            print(f"[GREP] 负责人解析失败: {e}")
+            return []
+
+    def _collect_assignee_hints(
+        self,
+        assignee: Optional[str],
+        keywords: Optional[str],
+        keyword_list: List[str],
+    ) -> List[str]:
+        hints: List[str] = []
+        if assignee and str(assignee).strip():
+            hints.append(str(assignee).strip())
+        if keyword_list:
+            hints.extend(keyword_list)
+        elif keywords and str(keywords).strip() and str(keywords).strip() != "*":
+            hints.append(str(keywords).strip())
+        out: List[str] = []
+        seen = set()
+        for h in hints:
+            if h and h not in seen:
+                seen.add(h)
+                out.append(h)
+        return out
+
+    def _build_assignee_match_conditions(
+        self,
+        hints: List[str],
+        *,
+        assignee_id_col=None,
+        assignee_str_col=None,
+    ) -> List[Any]:
+        conditions: List[Any] = []
+        user_ids: List[int] = []
+        seen_uid = set()
+        for h in hints:
+            for uid in self._find_user_ids_by_assignee_hint(h):
+                if uid not in seen_uid:
+                    seen_uid.add(uid)
+                    user_ids.append(uid)
+        if assignee_id_col is not None and user_ids:
+            conditions.append(assignee_id_col.in_(user_ids))
+        if assignee_str_col is not None:
+            if user_ids:
+                conditions.append(assignee_str_col.in_([str(i) for i in user_ids]))
+            for h in hints:
+                conditions.append(assignee_str_col.ilike(f"%{h}%"))
+        return conditions
+
+    def _col_ilike_expr(self, col, pattern: str):
+        """字符串/文本/JSON/枚举列统一 ILIKE。"""
+        col_type = getattr(col, "type", None)
+        if col_type is not None and isinstance(col_type, SAJSON):
+            return cast(col, String).ilike(pattern)
+        try:
+            from sqlalchemy import Enum as SAEnum
+
+            if col_type is not None and isinstance(col_type, SAEnum):
+                return cast(col, String).ilike(pattern)
+        except Exception:
+            pass
+        return col.ilike(pattern)
+
+    def _status_variants_for_kw(self, entity_key: str, kw: str) -> List[str]:
+        kw_l = (kw or "").strip().lower()
+        if not kw_l:
+            return []
+        variants = {kw, kw_l}
+        aliases = _GREP_STATUS_ALIASES.get(entity_key, {})
+        for label, code in aliases.items():
+            lab_l = label.lower()
+            code_l = (code or "").lower()
+            if kw_l in lab_l or lab_l in kw_l or kw_l in code_l or code_l in kw_l:
+                variants.add(label)
+                variants.add(code)
+        return [v for v in variants if v]
+
+    def _build_single_kw_entity_conditions(
+        self,
+        model,
+        entity_key: str,
+        kw: str,
+        *,
+        assignee_id_col=None,
+        assignee_str_col=None,
+        assignee_hints: Optional[List[str]] = None,
+    ) -> List[Any]:
+        kw = (kw or "").strip()
+        if not kw:
+            return []
+        pattern = f"%{kw}%"
+        conds: List[Any] = []
+        for fname in _GREP_SEARCH_FIELDS.get(entity_key, ()):
+            col = getattr(model, fname, None)
+            if col is None:
+                continue
+            try:
+                conds.append(self._col_ilike_expr(col, pattern))
+            except Exception:
+                continue
+
+        id_col = getattr(model, "id", None)
+        if id_col is not None and kw.isdigit():
+            try:
+                kid = int(kw)
+                conds.append(id_col == kid)
+            except (TypeError, ValueError):
+                pass
+        card_id_col = getattr(model, "card_id", None)
+        if card_id_col is not None and kw.isdigit():
+            try:
+                conds.append(card_id_col == int(kw))
+            except (TypeError, ValueError):
+                pass
+        source_id_col = getattr(model, "source_id", None)
+        if source_id_col is not None and kw.isdigit():
+            try:
+                conds.append(source_id_col == int(kw))
+            except (TypeError, ValueError):
+                pass
+
+        status_col = getattr(model, "status", None)
+        if status_col is not None:
+            for variant in self._status_variants_for_kw(entity_key, kw):
+                conds.append(self._col_ilike_expr(status_col, f"%{variant}%"))
+
+        hints = assignee_hints or []
+        if kw not in hints:
+            hints = hints + [kw]
+        assignee_conds = self._build_assignee_match_conditions(
+            hints,
+            assignee_id_col=assignee_id_col,
+            assignee_str_col=assignee_str_col,
+        )
+        conds.extend(assignee_conds)
+        return conds
+
+    def _apply_entity_keyword_filter(
+        self,
+        query,
+        model,
+        entity_key: str,
+        keywords: Optional[str],
+        keyword_list: List[str],
+        *,
+        assignee: Optional[str] = None,
+        assignee_id_col=None,
+        assignee_str_col=None,
+    ):
+        """全字段 + 负责人 + id 精确匹配；多词 OR/AND 由 GREP_KEYWORDS_MATCH_MODE 控制。"""
+        hints = self._collect_assignee_hints(assignee, keywords, keyword_list)
+        assignee_only_conds = self._build_assignee_match_conditions(
+            hints,
+            assignee_id_col=assignee_id_col,
+            assignee_str_col=assignee_str_col,
+        ) if (assignee and str(assignee).strip()) else []
+
+        kws: List[str] = list(keyword_list) if keyword_list else []
+        if not kws and keywords and str(keywords).strip() and str(keywords).strip() != "*":
+            kws = [str(keywords).strip()]
+
+        has_kw = bool(kws)
+        if not has_kw and not assignee_only_conds:
             return query
-        title_c = card_model.title
-        desc_c = card_model.description
+        if not has_kw and assignee_only_conds:
+            return query.filter(or_(*assignee_only_conds))
+
         mode = self._grep_keyword_match_mode()
         if mode == "and":
-            for kw in keyword_list:
-                query = query.filter(or_(title_c.ilike(f"%{kw}%"), desc_c.ilike(f"%{kw}%")))
-        else:
-            query = query.filter(
-                or_(*[or_(title_c.ilike(f"%{kw}%"), desc_c.ilike(f"%{kw}%")) for kw in keyword_list])
+            for kw in kws:
+                per_kw = self._build_single_kw_entity_conditions(
+                    model,
+                    entity_key,
+                    kw,
+                    assignee_id_col=assignee_id_col,
+                    assignee_str_col=assignee_str_col,
+                    assignee_hints=hints,
+                )
+                if per_kw:
+                    query = query.filter(or_(*per_kw))
+            return query
+
+        per_kw_groups: List[Any] = []
+        for kw in kws:
+            per_kw = self._build_single_kw_entity_conditions(
+                model,
+                entity_key,
+                kw,
+                assignee_id_col=assignee_id_col,
+                assignee_str_col=assignee_str_col,
+                assignee_hints=hints,
             )
-        return query
+            if per_kw:
+                per_kw_groups.append(or_(*per_kw))
+        combined = per_kw_groups + assignee_only_conds
+        if not combined:
+            return query
+        if len(combined) == 1:
+            return query.filter(combined[0])
+        return query.filter(or_(*combined))
 
     def _resolve_plan_scope_ids(
         self, project_id: str, plan_id: Optional[str]
@@ -1229,7 +1945,14 @@ class GrepTool(BaseTool):
             return all(kw.lower() in hay for kw in kw_list)
         return any(kw.lower() in hay for kw in kw_list)
     
-    async def _get_badcase_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
+    async def _get_badcase_list(
+        self,
+        project_id: str,
+        keywords: str = None,
+        status: str = None,
+        plan_id: str = None,
+        assignee: str = None,
+    ) -> List[Dict[str, Any]]:
         """逐行定位引擎（优化版）"""
         from app import db, BadCase, BadCaseStatus
         
@@ -1258,16 +1981,26 @@ class GrepTool(BaseTool):
             except ValueError:
                 print(f"[GREP] 无效的 status 值: {status}")
         
-        # 关键词：拆分后默认 OR（任一词命中 title）；GREP_KEYWORDS_MATCH_MODE=and 时逐词 AND
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
-        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
-        if not is_query_all and keyword_list:
-            query = self._apply_title_ilike_keywords(query, BadCase.title, keyword_list)
-            print(f"[GREP] BadCase 关键词 mode={self._grep_keyword_match_mode()}: {keyword_list} (原: {keywords})")
-        elif not is_query_all and keywords and not keyword_list:
-            # 拆分后为空（全是停用字）则整句匹配
-            query = query.filter(BadCase.title.ilike(f'%{keywords.strip()}%'))
-            print(f"[GREP] 单关键词搜索: {keywords}")
+        is_query_all = (
+            not keyword_list
+            and (not keywords or keywords.strip() == '' or keywords == '*')
+            and not (assignee and str(assignee).strip())
+        )
+        if not is_query_all:
+            query = self._apply_entity_keyword_filter(
+                query,
+                BadCase,
+                "badcase",
+                keywords,
+                keyword_list,
+                assignee=assignee,
+                assignee_str_col=BadCase.assignee,
+            )
+            print(
+                f"[GREP] BadCase 全字段检索 mode={self._grep_keyword_match_mode()}: "
+                f"{keyword_list or keywords} assignee={assignee}"
+            )
         
         # 查询全部时不限制数量，否则限制20条
         if is_query_all:
@@ -1294,7 +2027,102 @@ class GrepTool(BaseTool):
         
         return result
     
-    async def _get_bug_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
+    async def _get_badcase_list_by_ids(
+        self,
+        project_id: str,
+        record_ids: List[int],
+        keywords: str = None,
+        status: str = None,
+        plan_id: str = None,
+        assignee: str = None,
+        *,
+        skip_keyword_filter: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """按 id 小集合查询 BadCase（recent_created SQL 兜底，默认跳过 keywords 约束）。"""
+        from app import db, BadCase, BadCaseStatus
+
+        ids = [int(i) for i in (record_ids or []) if i is not None]
+        if not ids:
+            return []
+        query = db.session.query(BadCase).filter(
+            BadCase.project_id == int(project_id),
+            BadCase.id.in_(ids),
+        )
+        query, _plan_scope = self._apply_entity_plan_scope_filter(
+            query, BadCase, project_id, plan_id
+        )
+        if status:
+            status_map = {
+                '已关闭': 'closed', '关闭': 'closed', 'closed': 'closed',
+                '新建': 'new', '新': 'new', 'new': 'new',
+                '待处理': 'pending', 'pending': 'pending',
+                '已解决': 'resolved', '解决': 'resolved', 'resolved': 'resolved',
+                '已重新打开': 'reopened', '重新打开': 'reopened', 'reopened': 'reopened',
+            }
+            normalized_status = status_map.get(status.lower(), status.lower())
+            try:
+                query = query.filter(BadCase.status == BadCaseStatus(normalized_status).value)
+            except ValueError:
+                pass
+        if not skip_keyword_filter:
+            keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
+            is_query_all = (
+                not keyword_list
+                and (not keywords or keywords.strip() == '' or keywords == '*')
+                and not (assignee and str(assignee).strip())
+            )
+            if not is_query_all:
+                query = self._apply_entity_keyword_filter(
+                    query,
+                    BadCase,
+                    "badcase",
+                    keywords,
+                    keyword_list,
+                    assignee=assignee,
+                    assignee_str_col=BadCase.assignee,
+                )
+        elif assignee and str(assignee).strip():
+            query = self._apply_entity_keyword_filter(
+                query,
+                BadCase,
+                "badcase",
+                None,
+                [],
+                assignee=assignee,
+                assignee_str_col=BadCase.assignee,
+            )
+        rows = query.all()
+        by_id = {int(r.id): r for r in rows}
+        result: List[Dict[str, Any]] = []
+        for rid in ids:
+            bc = by_id.get(int(rid))
+            if not bc:
+                continue
+            result.append({
+                'id': bc.id,
+                'title': bc.title,
+                'status': bc.status.value if hasattr(bc.status, 'value') else bc.status,
+                'priority': bc.priority,
+                'assignee': bc.assignee,
+                'plan_id': bc.plan_id,
+                'card_id': getattr(bc, 'card_id', None),
+                'created_at': bc.created_at.isoformat() if bc.created_at else None,
+                'business_scenario': self._infer_business_scenario(bc.title, keywords),
+                'extracted_keywords': self._extract_keywords(bc.title),
+                'keyword_match': bool(keywords and keywords in (bc.title or '')),
+                '_search_backend': 'sql_fallback',
+                'source': 'sql_fallback',
+            })
+        return result
+
+    async def _get_bug_list(
+        self,
+        project_id: str,
+        keywords: str = None,
+        status: str = None,
+        plan_id: str = None,
+        assignee: str = None,
+    ) -> List[Dict[str, Any]]:
         """Bug定位引擎（优化版），支持 plan_id 与关键词拆分模糊匹配"""
         from app import db, Bug, BugStatus
         
@@ -1303,7 +2131,10 @@ class GrepTool(BaseTool):
         except (ValueError, TypeError):
             project_id_int = 1
         
-        print(f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}, status={status}, plan_id={plan_id}")
+        print(
+            f"[GREP] 搜索 Bug: project_id={project_id_int}, keywords={keywords}, "
+            f"assignee={assignee}, status={status}, plan_id={plan_id}"
+        )
         
         query = db.session.query(Bug).filter_by(project_id=project_id_int)
         
@@ -1332,13 +2163,26 @@ class GrepTool(BaseTool):
                 print(f"[GREP] 无效的 status 值: {status}")
         
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
-        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
-        if not is_query_all and keyword_list:
-            query = self._apply_title_ilike_keywords(query, Bug.title, keyword_list)
-            print(f"[GREP] Bug 关键词 mode={self._grep_keyword_match_mode()}: {keyword_list}")
-        elif not is_query_all and keywords and not keyword_list:
-            query = query.filter(Bug.title.ilike(f'%{keywords.strip()}%'))
-        
+        is_query_all = (
+            not keyword_list
+            and (not keywords or keywords.strip() == '' or keywords == '*')
+            and not (assignee and str(assignee).strip())
+        )
+        if not is_query_all:
+            query = self._apply_entity_keyword_filter(
+                query,
+                Bug,
+                "bug",
+                keywords,
+                keyword_list,
+                assignee=assignee,
+                assignee_id_col=Bug.assignee_id,
+            )
+            print(
+                f"[GREP] Bug 全字段检索 mode={self._grep_keyword_match_mode()}: "
+                f"{keyword_list or keywords} assignee={assignee}"
+            )
+
         if is_query_all:
             print(f"[GREP] 查询所有 Bug，project_id={project_id_int}")
             bugs = query.order_by(Bug.created_at.desc()).limit(100).all()
@@ -1348,14 +2192,22 @@ class GrepTool(BaseTool):
         if (
             not bugs
             and _plan_scope
-            and keyword_list
+            and (keyword_list or (assignee and str(assignee).strip()))
             and not status
         ):
             print(
-                "[GREP] 计划子树内无 Bug 命中，回退为全项目按关键词检索"
+                "[GREP] 计划子树内无 Bug 命中，回退为全项目按关键词/负责人检索"
             )
             query = db.session.query(Bug).filter_by(project_id=project_id_int)
-            query = self._apply_title_ilike_keywords(query, Bug.title, keyword_list)
+            query = self._apply_entity_keyword_filter(
+                query,
+                Bug,
+                "bug",
+                keywords,
+                keyword_list,
+                assignee=assignee,
+                assignee_id_col=Bug.assignee_id,
+            )
             bugs = query.order_by(Bug.created_at.desc()).limit(20).all()
 
         print(f"[GREP] 找到 {len(bugs)} 个 Bug")
@@ -1378,8 +2230,109 @@ class GrepTool(BaseTool):
             })
         
         return result
+
+    async def _get_bug_list_by_ids(
+        self,
+        project_id: str,
+        record_ids: List[int],
+        keywords: str = None,
+        status: str = None,
+        plan_id: str = None,
+        assignee: str = None,
+        *,
+        skip_keyword_filter: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """按 id 小集合查询 Bug（recent_created SQL 兜底，默认跳过 keywords 约束）。"""
+        from app import db, Bug, BugStatus
+
+        try:
+            project_id_int = int(project_id)
+        except (ValueError, TypeError):
+            project_id_int = 1
+        ids = [int(i) for i in (record_ids or []) if i is not None]
+        if not ids:
+            return []
+        query = db.session.query(Bug).filter(
+            Bug.project_id == project_id_int,
+            Bug.id.in_(ids),
+        )
+        query, _plan_scope = self._apply_entity_plan_scope_filter(
+            query, Bug, project_id, plan_id
+        )
+        if status:
+            status_map = {
+                '已关闭': 'closed', '关闭': 'closed', 'closed': 'closed',
+                '新建': 'new', '新': 'new', 'new': 'new',
+                '已分配': 'assigned', '分配': 'assigned', 'assigned': 'assigned',
+                '进行中': 'in_progress', '处理中': 'in_progress', 'in_progress': 'in_progress',
+                '已解决': 'resolved', '解决': 'resolved', 'resolved': 'resolved',
+                '已重新打开': 'reopened', '重新打开': 'reopened', 'reopened': 'reopened',
+            }
+            normalized_status = status_map.get(status.lower(), status.lower())
+            try:
+                query = query.filter(Bug.status == BugStatus(normalized_status).value)
+            except ValueError:
+                pass
+        if not skip_keyword_filter:
+            keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
+            is_query_all = (
+                not keyword_list
+                and (not keywords or keywords.strip() == '' or keywords == '*')
+                and not (assignee and str(assignee).strip())
+            )
+            if not is_query_all:
+                query = self._apply_entity_keyword_filter(
+                    query,
+                    Bug,
+                    "bug",
+                    keywords,
+                    keyword_list,
+                    assignee=assignee,
+                    assignee_id_col=Bug.assignee_id,
+                )
+        elif assignee and str(assignee).strip():
+            query = self._apply_entity_keyword_filter(
+                query,
+                Bug,
+                "bug",
+                None,
+                [],
+                assignee=assignee,
+                assignee_id_col=Bug.assignee_id,
+            )
+        rows = query.all()
+        by_id = {int(r.id): r for r in rows}
+        result: List[Dict[str, Any]] = []
+        for rid in ids:
+            bug = by_id.get(int(rid))
+            if not bug:
+                continue
+            result.append({
+                'id': bug.id,
+                'title': bug.title,
+                'status': bug.status.value if hasattr(bug.status, 'value') else bug.status,
+                'severity': bug.severity,
+                'priority': getattr(bug, 'priority', 'medium'),
+                'assignee_id': bug.assignee_id,
+                'plan_id': bug.plan_id,
+                'card_id': getattr(bug, 'card_id', None),
+                'created_at': bug.created_at.isoformat() if bug.created_at else None,
+                'business_scenario': self._infer_business_scenario(bug.title, keywords),
+                'extracted_keywords': self._extract_keywords(bug.title),
+                'keyword_match': bool(keywords and keywords in (bug.title or '')),
+                '_search_backend': 'sql_fallback',
+                'source': 'sql_fallback',
+            })
+        return result
     
-    async def _get_testcase_list(self, project_id: str, keywords: str = None, status: str = None, plan_id: str = None) -> List[Dict[str, Any]]:
+    async def _get_testcase_list(
+        self,
+        project_id: str,
+        keywords: str = None,
+        status: str = None,
+        plan_id: str = None,
+        assignee: str = None,
+    ) -> List[Dict[str, Any]]:
         """测试用例定位，支持 plan_id 与关键词拆分模糊匹配"""
         from app import db, TestCase
         try:
@@ -1400,11 +2353,21 @@ class GrepTool(BaseTool):
             except (ValueError, TypeError):
                 query = query.filter(TestCase.status == norm)
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
-        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
-        if not is_query_all and keyword_list:
-            query = self._apply_title_ilike_keywords(query, TestCase.title, keyword_list)
-        elif not is_query_all and keywords and not keyword_list:
-            query = query.filter(TestCase.title.ilike(f'%{keywords.strip()}%'))
+        is_query_all = (
+            not keyword_list
+            and (not keywords or keywords.strip() == '' or keywords == '*')
+            and not (assignee and str(assignee).strip())
+        )
+        if not is_query_all:
+            query = self._apply_entity_keyword_filter(
+                query,
+                TestCase,
+                "testcase",
+                keywords,
+                keyword_list,
+                assignee=assignee,
+                assignee_id_col=TestCase.assignee_id,
+            )
         testcases = query.order_by(TestCase.created_at.desc()).limit(100 if is_query_all else 20).all()
         result = []
         for tc in testcases:
@@ -1419,9 +2382,13 @@ class GrepTool(BaseTool):
         return result
 
     async def _get_card_list(
-        self, project_id: str, keywords: str = None, plan_id: str = None
+        self,
+        project_id: str,
+        keywords: str = None,
+        plan_id: str = None,
+        assignee: str = None,
     ) -> List[Dict[str, Any]]:
-        """统一卡片层 Card：按 title / description 检索（多词默认 OR）。"""
+        """统一卡片层 Card：全字段模糊检索。"""
         from app import db, Card
 
         try:
@@ -1435,13 +2402,25 @@ class GrepTool(BaseTool):
         )
 
         keyword_list = self._normalize_keywords_for_match(keywords) if keywords else []
-        is_query_all = not keyword_list and (not keywords or keywords.strip() == '' or keywords == '*')
-        if not is_query_all and keyword_list:
-            query = self._apply_card_title_desc_ilike(query, Card, keyword_list)
-            print(f"[GREP] Card 关键词 mode={self._grep_keyword_match_mode()}: {keyword_list}")
-        elif not is_query_all and keywords and not keyword_list:
-            k = keywords.strip()
-            query = query.filter(or_(Card.title.ilike(f"%{k}%"), Card.description.ilike(f"%{k}%")))
+        is_query_all = (
+            not keyword_list
+            and (not keywords or keywords.strip() == '' or keywords == '*')
+            and not (assignee and str(assignee).strip())
+        )
+        if not is_query_all:
+            query = self._apply_entity_keyword_filter(
+                query,
+                Card,
+                "card",
+                keywords,
+                keyword_list,
+                assignee=assignee,
+                assignee_id_col=Card.assignee_id,
+            )
+            print(
+                f"[GREP] Card 全字段检索 mode={self._grep_keyword_match_mode()}: "
+                f"{keyword_list or keywords} assignee={assignee}"
+            )
 
         limit_n = 100 if is_query_all else 20
         cards = query.order_by(Card.updated_at.desc()).limit(limit_n).all()

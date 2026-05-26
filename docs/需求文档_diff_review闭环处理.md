@@ -25,10 +25,10 @@
 
 ## 3. 业务目标
 
-对每个 `target + target_id`，系统在任意时刻只维护一份“最新且有效”的 Diff Review 语义：
+对每个 `project_id + target + target_id`（**不按 ChatSession 分版**），系统在任意时刻只维护一份“最新且有效”的 Diff Review 语义：
 
 1. **首次生成**：对话第一次修改该记录时，生成 Diff Review，列表与详情均可查看。
-2. **未采纳再次修改**：如果还未采纳，后续对话再次修改该记录，应基于未采纳内容合并并产出新的“最新 Diff”。
+2. **未采纳再次修改**：如果还未采纳，后续对话（**含不同 ChatSession**）再次修改该记录，应合并并产出新的“最新 Diff”；**同一字段**只保留最新一次修改。
 3. **采纳后无新改动**：若最新 Diff 已采纳，且没有新改动，则该 Diff 不再展示于列表/详情。
 4. **采纳后再次修改**：后续若再改同一记录，应重新产生新 Diff Review（新一轮生命周期）。
 
@@ -282,7 +282,7 @@ Diff Review 不允许仅存于前端内存。以下状态必须落库（或持�
 
 - 仅加载 `status = pending` 且为“当前有效版本”的 Diff；
 - `adopted/rejected/superseded` 不得进入待确认展示集合；
-- 前端 `pendingModifications`、`sessionStorage` 等临时缓存必须以持久化状态为准重建，而不是反向覆盖数据库状态。
+- 前端 `pendingModifications`、Tab 本地缓存（`bcd:ss` / `pendingModifyDiff`）等必须以 **L0（`diff_review_state` + Chat Session 消息）** 为准重建，而不是反向覆盖数据库状态。
 - Tab 恢复时同样遵循上述约束：即使历史上打开过某详情 Tab，若该记录 Diff 已 `adopted/rejected/superseded` 且无新改动，恢复后不得再显示旧 Diff。
 
 ### 8.3 采纳后的不可复现约束（你当前问题的核心）
@@ -290,7 +290,7 @@ Diff Review 不允许仅存于前端内存。以下状态必须落库（或持�
 当某条 Diff 已采纳后：
 
 1. 持久化状态必须从 `pending` 原子切换为 `adopted`；
-2. 前端本地缓存（内存 + sessionStorage）必须同步清理；
+2. 前端本地缓存（内存 + 浏览器 `bcd:ss`，**非** 后端 Chat Session）必须同步清理；
 3. 刷新后若无新改动，绝不允许再次出现这条 Diff；
 4. 若再次出现，只能是“新生命周期 + 新 fingerprint”的新 Diff。
 5. “历史沙箱预览卡片”允许保留为只读回看入口，但其状态必须与 `adopted` 一致，且不得重新进入待确认集合。
@@ -311,7 +311,7 @@ Diff Review 不允许仅存于前端内存。以下状态必须落库（或持�
 
 ### 8.5 前端缓存治理
 
-- `sessionStorage.pendingModifyDiff` 仅作临时加速，不得作为真实来源；
+- `pendingModifyDiff` / `bcd:ss:diff`（Tab 本地缓存）仅作详情桥接加速，不得作为 Diff 真实来源；口头「sessionStorage」指 **Chat Session API** 时，以消息与 `diff-reviews` 为准（见 `需求文档_sessionStorage会话与任务状态管理.md` 术语表）。
 - 每次进入页面后先拉持久化状态，再决定是否恢复本地 pending；
 - 若持久化状态显示 `adopted/rejected`，必须立即清空对应本地缓存。
 - Tab 级缓存（如 `activeWorkbenchTabId`、`workbenchTabs`、详情页本地 diff 缓存）恢复后必须二次校验持久化状态；校验不通过时只保留 Tab 结构，不恢复旧 Diff 展示。

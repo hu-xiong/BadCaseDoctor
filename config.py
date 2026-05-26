@@ -166,11 +166,103 @@ class Config:
     _es_lm = os.getenv("ES_LONG_MEMORY_INDEX", "").strip()
     ES_LONG_MEMORY_INDEX = _es_lm or f"{ES_INDEX_PREFIX}long_memory"
 
-    # Embedding（用于写入/检索 query 向量）
-    # 走 OpenAI SDK：可兼容 DashScope compatible-mode（base_url + api_key）
-    EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "").strip()  # 为空则走默认（OpenAI 官方）
+    EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "").strip() or DASHSCOPE_COMPAT_BASE_URL
     EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "").strip() or OPENAI_API_KEY or DASHSCOPE_API_KEY or QWEN_API_KEY
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "tongyi-embedding-vision-plus-2026-03-06").strip()
+    # 多模态向量模型可选维度（如 tongyi-embedding-vision-plus 默认 1152）；空则使用模型默认
+    _emb_dim_raw = os.getenv("EMBEDDING_DIMENSION", "").strip()
+    EMBEDDING_DIMENSION = int(_emb_dim_raw) if _emb_dim_raw.isdigit() else None
+    EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "remote").strip().lower()  # remote | local
+    EMBEDDING_LOCAL_MODEL = os.getenv("EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5").strip()
+
+    # Grep 检索专用向量 / rerank（默认千帆 BGE，比 DashScope 多模态+VL-rerank 快）
+    GREP_EMBEDDING_BACKEND = os.getenv("GREP_EMBEDDING_BACKEND", "qianfan").strip().lower()
+    GREP_EMBEDDING_MODEL = os.getenv("GREP_EMBEDDING_MODEL", "bge-large-zh").strip()
+    GREP_EMBEDDING_BASE_URL = os.getenv(
+        "GREP_EMBEDDING_BASE_URL", "https://qianfan.baidubce.com/v2"
+    ).strip()
+    GREP_EMBEDDING_API_KEY = (
+        os.getenv("GREP_EMBEDDING_API_KEY", "").strip() or QIANFAN_API_KEY
+    )
+    _grep_emb_dim = os.getenv("GREP_EMBEDDING_DIMENSION", "").strip()
+    GREP_EMBEDDING_DIMENSION = int(_grep_emb_dim) if _grep_emb_dim.isdigit() else None
+    GREP_EMBEDDING_LOCAL_MODEL = os.getenv(
+        "GREP_EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5"
+    ).strip()
+
+    # Grep 向量检索（Work Item ES 索引）
+    GREP_VECTOR_ENABLED = os.getenv("GREP_VECTOR_ENABLED", "true").lower() == "true"
+    GREP_WORK_ITEM_ALIAS = os.getenv("GREP_WORK_ITEM_ALIAS", "").strip() or f"{ES_INDEX_PREFIX}work_item"
+    _grep_wi = os.getenv("GREP_WORK_ITEM_INDEX", "").strip()
+    GREP_WORK_ITEM_INDEX = _grep_wi  # 空则运行时按 model+dims 生成物理索引名
+    GREP_VECTOR_TOP_K = int(os.getenv("GREP_VECTOR_TOP_K", "8"))
+    # auto：短关键词仅 BM25（不调 embedding）；长句(>=GREP_QUERY_EMBED_MIN_CHARS)才 KNN
+    GREP_QUERY_EMBED_MODE = os.getenv("GREP_QUERY_EMBED_MODE", "auto").strip().lower()
+    GREP_QUERY_EMBED_MIN_CHARS = int(os.getenv("GREP_QUERY_EMBED_MIN_CHARS", "80"))
+    # 有关键词时是否仍加载整棵计划材料树（极慢）；默认关，检索走 ES
+    GREP_PLAN_RECORDS_ON_KEYWORD = os.getenv("GREP_PLAN_RECORDS_ON_KEYWORD", "false").lower() == "true"
+    GREP_VECTOR_MIN_SCORE = float(os.getenv("GREP_VECTOR_MIN_SCORE", "0.0"))
+    GREP_HYBRID_RRF_K = int(os.getenv("GREP_HYBRID_RRF_K", "60"))
+    GREP_INDEX_ASYNC = os.getenv("GREP_INDEX_ASYNC", "true").lower() == "true"
+    GREP_EMBED_BATCH_SIZE = int(os.getenv("GREP_EMBED_BATCH_SIZE", "16"))
+    GREP_EMBED_BATCH_FLUSH_MS = int(os.getenv("GREP_EMBED_BATCH_FLUSH_MS", "300"))
+    GREP_SEARCH_LOG_ENABLED = os.getenv("GREP_SEARCH_LOG_ENABLED", "true").lower() == "true"
+    GREP_ASSIGNEE_FUZZY_PREFIX = os.getenv("GREP_ASSIGNEE_FUZZY_PREFIX", "true").lower() == "true"
+    GREP_RECENT_CREATED_FALLBACK = os.getenv("GREP_RECENT_CREATED_FALLBACK", "true").lower() == "true"
+    GREP_RECENT_CREATED_MAX = int(os.getenv("GREP_RECENT_CREATED_MAX", "30"))
+    GREP_RECENT_CREATED_TTL_S = int(os.getenv("GREP_RECENT_CREATED_TTL_S", "900"))
+    GREP_ES_LLM_JUDGE = os.getenv("GREP_ES_LLM_JUDGE", "false").lower() == "true"
+    # rerank 已成功时跳过 LLM 二审（默认开，可省 ~1s+）
+    GREP_SKIP_LLM_JUDGE_IF_RERANKED = os.getenv("GREP_SKIP_LLM_JUDGE_IF_RERANKED", "true").lower() == "true"
+    GREP_RERANK_QUERY_MAX_CHARS = int(os.getenv("GREP_RERANK_QUERY_MAX_CHARS", "400"))
+    GREP_ES_LLM_JUDGE_MODEL = os.getenv("GREP_ES_LLM_JUDGE_MODEL", "").strip()
+    GREP_ES_LLM_JUDGE_TIMEOUT = float(os.getenv("GREP_ES_LLM_JUDGE_TIMEOUT", "12"))
+    GREP_ES_LLM_JUDGE_MAX_CANDIDATES = int(os.getenv("GREP_ES_LLM_JUDGE_MAX_CANDIDATES", "30"))
+    GREP_ES_LLM_JUDGE_MAX_TOKENS = int(os.getenv("GREP_ES_LLM_JUDGE_MAX_TOKENS", "512"))
+    GREP_RERANK_ENABLED = os.getenv("GREP_RERANK_ENABLED", "true").lower() == "true"
+    GREP_RERANK_BACKEND = os.getenv("GREP_RERANK_BACKEND", "qianfan").strip().lower()
+    GREP_RERANK_MODEL = os.getenv("GREP_RERANK_MODEL", "bce-reranker-base").strip()
+    GREP_RERANK_BASE_URL = os.getenv(
+        "GREP_RERANK_BASE_URL", "https://qianfan.baidubce.com/v2"
+    ).strip()
+    # rerank 是 grep 的可选精排，不应长时间阻塞主检索；超时后保留 ES 原序。
+    GREP_RERANK_HTTP_TIMEOUT = float(os.getenv("GREP_RERANK_HTTP_TIMEOUT", "2.5"))
+    GREP_RERANK_MIN_SCORE = float(os.getenv("GREP_RERANK_MIN_SCORE", "0.48"))
+    GREP_RERANK_TOP_N = int(os.getenv("GREP_RERANK_TOP_N", "5"))
+    GREP_RERANK_FALLBACK_MIN_SCORE = float(os.getenv("GREP_RERANK_FALLBACK_MIN_SCORE", "0.35"))
+    # 项目创建即建 work_item 索引，grep 默认不再打 indices.exists
+    GREP_ES_SKIP_ALIAS_EXISTS = os.getenv("GREP_ES_SKIP_ALIAS_EXISTS", "true").lower() == "true"
+    GREP_ES_ALIAS_CACHE_OK_TTL_S = float(os.getenv("GREP_ES_ALIAS_CACHE_OK_TTL_S", "86400"))
+    GREP_ES_ALIAS_CACHE_MISS_TTL_S = float(os.getenv("GREP_ES_ALIAS_CACHE_MISS_TTL_S", "120"))
+    # 命中 ES 后直接用 _source 字段组装列表，默认不再打 MySQL IN 查询
+    GREP_ES_HYDRATE_FROM_SOURCE = os.getenv("GREP_ES_HYDRATE_FROM_SOURCE", "true").lower() == "true"
+    GREP_CARD_SKIP_SQL_IF_ES = os.getenv("GREP_CARD_SKIP_SQL_IF_ES", "true").lower() == "true"
+    # ES 召回条数 <= 该值时跳过远端 rerank（省 ~1s+ API）
+    GREP_RERANK_SKIP_IF_LE = int(os.getenv("GREP_RERANK_SKIP_IF_LE", "8"))
+    GREP_RERANK_MAX_DOCS = int(os.getenv("GREP_RERANK_MAX_DOCS", "12"))
+    # 首条标题已覆盖全部关键词时跳过 rerank，改本地按标题/token 排序
+    GREP_RERANK_SKIP_IF_ES_CONFIDENT = os.getenv(
+        "GREP_RERANK_SKIP_IF_ES_CONFIDENT", "true"
+    ).lower() == "true"
+    # 短关键词 BM25 只查 title（比扫 search_text 快）
+    GREP_ES_BM25_TITLE_ONLY_MAX_CHARS = int(os.getenv("GREP_ES_BM25_TITLE_ONLY_MAX_CHARS", "64"))
+    GREP_ES_SEARCH_TIMEOUT_S = float(os.getenv("GREP_ES_SEARCH_TIMEOUT_S", "2"))
+    # 有关键词且走 ES 时跳过全项目 plan_tree 查询（省 ~100ms+ MySQL）
+    GREP_SKIP_PLAN_TREE_ON_KEYWORD = os.getenv(
+        "GREP_SKIP_PLAN_TREE_ON_KEYWORD", "true"
+    ).lower() == "true"
+    GREP_HYBRID_CACHE_TTL_S = float(os.getenv("GREP_HYBRID_CACHE_TTL_S", "45"))
+    # 勿在首次 grep 同步 warmup（会阻塞 ~3s）；需要时可 app 启动后后台预热
+    GREP_ES_WARMUP = os.getenv("GREP_ES_WARMUP", "false").lower() == "true"
+    # 未走远端 rerank（skipped_small_set 等）时跳过 LLM 二审
+    GREP_SKIP_LLM_JUDGE_IF_NO_RERANK_API = os.getenv(
+        "GREP_SKIP_LLM_JUDGE_IF_NO_RERANK_API", "true"
+    ).lower() == "true"
+    GREP_RERANK_API_KEY = os.getenv("GREP_RERANK_API_KEY", "").strip() or QIANFAN_API_KEY
+    GREP_RERANK_INSTRUCT = os.getenv(
+        "GREP_RERANK_INSTRUCT",
+        "Given a web search query, retrieve relevant passages that answer the query.",
+    ).strip()
 
     # 检索策略
     LONG_MEMORY_TOP_K = int(os.getenv("LONG_MEMORY_TOP_K", "10"))

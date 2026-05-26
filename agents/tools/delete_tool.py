@@ -139,18 +139,12 @@ class DeleteTool(BaseTool):
         return None
 
     def _plan_delete_block_reason(self, plan) -> Optional[str]:
-        from app import BadCase, Bug, Plan, TestCase
+        from app import Plan
 
         if getattr(plan, "is_default", False):
             return "默认迭代不能删除"
         if Plan.query.filter_by(parent_id=plan.id).first() is not None:
             return "无法删除包含子计划的计划"
-        if BadCase.query.filter_by(plan_id=plan.id).first() is not None:
-            return "无法删除包含 BadCase 的计划"
-        if Bug.query.filter_by(plan_id=plan.id).first() is not None:
-            return "无法删除包含 Bug 的计划"
-        if TestCase.query.filter_by(plan_id=plan.id).first() is not None:
-            return "无法删除包含测试用例的计划"
         return None
 
     def _preview_row(self, target: str, row: Any) -> Dict[str, Any]:
@@ -402,6 +396,11 @@ class DeleteTool(BaseTool):
                     }
 
                 # plan
+                from app import _detach_plan_work_items
+
+                detached = _detach_plan_work_items(row.id)
+                if any(detached.values()):
+                    print(f"[DELETE-PLAN] plan_id={row.id} 解绑遗留关联: {detached}", flush=True)
                 self.db.session.delete(row)
                 self.db.session.commit()
                 return {

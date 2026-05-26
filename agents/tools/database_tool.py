@@ -229,7 +229,7 @@ class DatabaseTool(BaseTool):
                 bugs_data.append({
                     'id': bug.id,
                     'title': bug.title,
-                    'description': bug.description,
+                    'steps_to_reproduce': bug.steps_to_reproduce,
                     'severity': bug.severity,
                     'status': bug.status,
                     'project_id': bug.project_id,
@@ -380,14 +380,14 @@ class DatabaseTool(BaseTool):
             
             bugs = db.session.query(Bug).filter(
                 (Bug.title.ilike(f'%{search_term}%')) |
-                (Bug.description.ilike(f'%{search_term}%'))
+                (Bug.steps_to_reproduce.ilike(f'%{search_term}%'))
             ).limit(limit).all()
             
             bugs_data = [
                 {
                     'id': bug.id,
                     'title': bug.title,
-                    'description': bug.description[:100] if bug.description else '',
+                    'steps_to_reproduce': (bug.steps_to_reproduce or '')[:100],
                     'severity': bug.severity
                 }
                 for bug in bugs

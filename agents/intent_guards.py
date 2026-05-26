@@ -730,10 +730,19 @@ def user_text_implies_bug_entity_type(text: Optional[str]) -> bool:
     zh = text
     if "缺陷" in zh:
         return True
-    # 「登录bug的标题」「修改bug xxx」等
-    if re.search(r"(?i)bug的标题|bug的名称|bug的\s*标题", zh):
+    # 「登录bug的标题」「bug标题」「修改bug xxx」等
+    if re.search(r"(?i)bug\s*(?:的)?\s*(?:标题|名称)", zh):
+        return True
+    if re.search(r"(?:缺陷|问题)\s*(?:的)?\s*(?:标题|名称)", zh):
         return True
     if re.search(r"(?i)(修改|更改|变更|改|更新|编辑)\s*bug(?=\s|[\u4e00-\u9fff]|$)", zh):
+        return True
+    if re.search(r"(?i)(这个|该|此)\s*bug", zh):
+        return True
+    # 「hx的bug」「所有 bug」等中文口语（\b 在中文邻接处不可靠）
+    if re.search(r"(?i)的\s*bug", zh):
+        return True
+    if re.search(r"(?i)(?:检索|查找|搜索|列出|获取|查|搜).{0,24}bug", zh):
         return True
     return bool(_BUG_ENTITY_WORD_RE.search(text))
 

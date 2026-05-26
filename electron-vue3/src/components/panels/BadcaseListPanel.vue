@@ -417,10 +417,13 @@ export default {
       }
       return bidStr || String(badcase.id ?? '')
     },
-    /** pending 里旧状态为空时，用当前行列表数据兜底，避免误显示「未设置」而库内实为 closed 等 */
+    /** pending 旧状态：优先沙箱 before 快照，与右侧沙箱预览 delete 侧一致；勿直接用列表当前行（可能已是 new） */
     pendingStatusOldForRow(badcase) {
-      const p = this.modifyPendingOverlay(badcase)?.status
+      const overlay = this.modifyPendingOverlay(badcase)
+      const p = overlay?.status
       if (!p) return ''
+      const fromPreview = overlay?._previewBefore?.status
+      if (fromPreview != null && String(fromPreview).trim() !== '') return fromPreview
       if (p.old != null && String(p.old).trim() !== '') return p.old
       return badcase.status
     },

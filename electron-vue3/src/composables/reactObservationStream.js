@@ -105,7 +105,6 @@ export const DETAIL_FIELDS = [
   'badcase_result',
   'solution',
   'problem_reason',
-  'description',
   'steps_to_reproduce',
   'expected_result',
   'actual_result',
@@ -360,6 +359,7 @@ export function ensureReactStepsForStreamIndex(aiMessage, raw, buildReactStepsFr
  * @param {function} ctx.appendStepDetailLine
  * @param {function} [ctx.nextTick] 默认使用 vue.nextTick
  * @param {function} ctx.handleShowGroupInList
+ * @param {function} [ctx.handleShowModifyInList]
  * @param {number|null|undefined} ctx.projectId
  * @param {function} ctx.handleNavigation
  * @param {function} [ctx.buildReactStepsFromTodoStrings]
@@ -370,6 +370,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   const buildReactStepsFromTodoStrings = ctx.buildReactStepsFromTodoStrings
   const tick = ctx.nextTick || nextTick
   const handleShowGroupInList = ctx.handleShowGroupInList
+  const handleShowModifyInList = ctx.handleShowModifyInList
   const projectId = ctx.projectId
   const handleNavigation = ctx.handleNavigation
 
@@ -444,6 +445,32 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     }
   }
 
+  if (runningStep.thoughtPhaseEndAtMs == null) {
+    if (runningStep.thoughtTiming?.durationMs != null && runningStep.stepStartedAt != null) {
+      runningStep.thoughtPhaseEndAtMs =
+        runningStep.stepStartedAt + Number(runningStep.thoughtTiming.durationMs)
+    } else if (runningStep.stepStartedAt != null) {
+      runningStep.thoughtPhaseEndAtMs = Date.now()
+    }
+  }
+  if (stepEvent.tool_duration_ms != null && Number.isFinite(Number(stepEvent.tool_duration_ms))) {
+    runningStep.toolExecDurationMs = Math.max(0, Number(stepEvent.tool_duration_ms))
+  } else if (runningStep.toolExecStartedAt != null) {
+    runningStep.toolExecDurationMs = Math.max(0, Date.now() - runningStep.toolExecStartedAt)
+  } else {
+    const flat =
+      outputData && typeof outputData === 'object' && outputData.data && typeof outputData.data === 'object'
+        ? outputData.data
+        : outputData
+    const perf = flat && (flat.grep_perf_ms ?? flat.tool_duration_ms)
+    if (perf != null && Number.isFinite(Number(perf))) {
+      runningStep.toolExecDurationMs = Math.max(0, Number(perf))
+    }
+  }
+  if (runningStep.stepStartedAt != null) {
+    runningStep.stepDurationMs = Date.now() - runningStep.stepStartedAt
+  }
+
   freezeThoughtSnapshotForStep(runningStep)
   const od = typeof outputData === 'object' && outputData !== null ? outputData : {}
   runningStep.status = od.success === false ? 'failed' : 'completed'
@@ -466,9 +493,6 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   }
 
   if (!isSearchResult) {
-    if (runningStep.stepStartedAt != null) {
-      runningStep.stepDurationMs = Date.now() - runningStep.stepStartedAt
-    }
     let resolvedTool =
       observationTool || (outputData && outputData.tool) || extractToolName(runningStep.title)
     if (!resolvedTool && outputData && typeof outputData === 'object') {
@@ -485,12 +509,22 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     }
     if (!resolvedTool && outputData && typeof outputData === 'object') {
       const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
+      const looksModifySummary =
+        flat &&
+        (flat.batch_modify === true ||
+          (Array.isArray(flat.batch_results) && flat.batch_results.length > 0) ||
+          (snowflakeIdStr(flat.target_id) &&
+            Array.isArray(flat.diff) &&
+            flat.diff.length > 0 &&
+            (flat.before != null || flat.after != null || flat.confirmation_required === true)))
       if (
         flat &&
+        !looksModifySummary &&
         !flat.created_id &&
         flat.preview &&
         typeof flat.preview === 'object' &&
-        ['testcase', 'bug', 'badcase', 'plan'].includes(flat.target)
+        Object.keys(flat.preview).length > 0 &&
+        ['testcase', 'bug', 'badcase', 'plan', 'card'].includes(String(flat.target || '').toLowerCase())
       ) {
         resolvedTool = 'create'
       }
@@ -534,12 +568,23 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     }
     if (!toolName && outputData && typeof outputData === 'object') {
       const flat = outputData.data && typeof outputData.data === 'object' ? outputData.data : outputData
+      const looksModify =
+        flat &&
+        (flat.batch_modify === true ||
+          (Array.isArray(flat.batch_results) && flat.batch_results.length > 0) ||
+          (snowflakeIdStr(flat.target_id) &&
+            flat.target_id !== 'new' &&
+            Array.isArray(flat.diff) &&
+            flat.diff.length > 0 &&
+            (flat.before != null || flat.after != null || flat.confirmation_required === true)))
       if (
         flat &&
+        !looksModify &&
         !flat.created_id &&
         flat.preview &&
         typeof flat.preview === 'object' &&
-        ['testcase', 'bug', 'badcase', 'plan'].includes(flat.target)
+        Object.keys(flat.preview).length > 0 &&
+        ['testcase', 'bug', 'badcase', 'plan', 'card'].includes(String(flat.target || '').toLowerCase())
       ) {
         toolName = 'create'
       }
@@ -808,6 +853,13 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         }
         console.log('[MODIFY] 存储单个修改导航:', aiMessage.modifyNavigation)
       }
+      if (toolData.confirmation_required || aiMessage.modifyNavigation) {
+        aiMessage.understanding = ''
+        const hint = toolData.message || toolData.summary
+        if (hint && String(hint).trim() && !String(aiMessage.finalResponse || '').trim()) {
+          aiMessage.finalResponse = String(hint).trim()
+        }
+      }
     }
 
     if (toolName === 'create' && toolData && typeof toolData === 'object') {
@@ -887,6 +939,17 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           }
         }
         console.log('[CREATE] 存储新建预览（modifyNavigation）:', aiMessage.modifyNavigation)
+        const navCreate = aiMessage.modifyNavigation
+        if (
+          handleShowModifyInList &&
+          navCreate?.is_create === true &&
+          navCreate.confirmation_required !== false &&
+          !navCreate.navigate_to_existing
+        ) {
+          tick(() => {
+            handleShowModifyInList(navCreate, aiMessage.id)
+          })
+        }
       } else if (toolData.success === false || toolData.error) {
         const errText = toolData.error || toolData.message || '新建预览失败'
         aiMessage.executionResults.push({

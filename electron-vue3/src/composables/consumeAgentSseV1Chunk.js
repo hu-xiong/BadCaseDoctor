@@ -80,7 +80,7 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
 
   if (ctx.verboseChunkLog) {
     log('[CHAT-STREAM] 收到 Chunk:', chunk.type, chunk)
-  } else {
+  } else if (chunk.type !== 'stream' && chunk.type !== 'heartbeat') {
     log('[CHAT-STREAM] 收到 Chunk:', chunk.type)
   }
   logProtocolVersionOnce(aiMessage, chunk, log)

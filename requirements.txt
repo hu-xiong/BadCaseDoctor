@@ -22,9 +22,10 @@ Jinja2
 boto3
 Pillow
 prometheus-client
+waitress
 
 # Long-term Memory（ES 向量检索）
-elasticsearch
+elasticsearch>=8.12.0,<9.0.0
 
 # Text2SQL 依赖
 langchain-experimental

@@ -181,6 +181,27 @@ def react_think_prelude_merge_intent(locale: Optional[str]) -> str:
     return "正在分析意图并生成规划…\n"
 
 
+def react_unified_grep_no_repeat_message(locale: Optional[str], *, reason: str) -> str:
+    r = (reason or "").strip()
+    if is_english_locale(locale):
+        if r == "empty":
+            return (
+                "Search returned no relevant matches; skipping repeated grep "
+                "(low relevance)."
+            )
+        if r == "has_hits":
+            return (
+                "Search already returned results; skipping repeated grep with "
+                "rephrased keywords."
+            )
+        return "Skipping repeated grep."
+    if r == "empty":
+        return "检索无相关命中，相关度偏低，不再重复检索。"
+    if r == "has_hits":
+        return "已有检索结果，不再换词重复检索。"
+    return "不再重复检索。"
+
+
 def react_unified_duplicate_action_stall_message(
     locale: Optional[str],
     *,
@@ -490,7 +511,6 @@ def modify_modifiable_fields_rows(target: str, locale: Optional[str]) -> List[Di
     d = _EN_FIELD_LABELS if is_english_locale(locale) else _ZH_FIELD_LABELS
     bug_keys = [
         "title",
-        "description",
         "status",
         "priority",
         "severity",
@@ -1235,6 +1255,85 @@ Output only the new summary."""
 
 只输出新总览。"""
     return wrap_react_user_prompt(body, locale)
+
+
+def incremental_summary_rule_fast_enabled() -> bool:
+    import os
+
+    v = (os.getenv("REACT_INCREMENTAL_SUMMARY_RULE_FAST", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def try_rule_based_incremental_running_summary(
+    locale: Optional[str],
+    prev_running_summary: str,
+    step_index: int,
+    tool: str,
+    todo_text: str,
+    nl_observation: str,
+) -> Optional[str]:
+    """
+    单步、观察摘要较短时本地拼运行总览，跳过增量总结 LLM（省 ~1–2s）。
+    已有较长总览时返回 None，仍走 LLM 合并。
+    """
+    if not incremental_summary_rule_fast_enabled():
+        return None
+    obs = (nl_observation or "").strip()
+    if not obs or len(obs) > 1500:
+        return None
+    prev = (prev_running_summary or "").strip()
+    if prev and len(prev) > 800:
+        return None
+    tool_s = (tool or "").strip().lower() or "tool"
+    todo = (todo_text or "").strip()[:200]
+    step_n = int(step_index) + 1
+    obs_line = obs.replace("\n", " ").strip()[:700]
+    need_confirm = any(
+        k in obs
+        for k in (
+            "待确认",
+            "确认",
+            "预览",
+            "preview",
+            "confirmation",
+            "confirm",
+        )
+    )
+    if is_english_locale(locale):
+        confirmed = f"- Round {step_n}: ran `{tool_s}`"
+        if todo:
+            confirmed += f" ({todo})"
+        confirmed += f". {obs_line}"
+        next_sec = (
+            "- Review sandbox preview in the UI (confirm or reject)."
+            if need_confirm
+            else "- None"
+        )
+        return (
+            "## Confirmed\n"
+            f"{confirmed}\n"
+            "## Next steps\n"
+            f"{next_sec}\n"
+            "## Risks and blockers\n"
+            "- None"
+        )
+    confirmed = f"- 第 {step_n} 轮已执行 {tool_s}"
+    if todo:
+        confirmed += f"（{todo}）"
+    confirmed += f"：{obs_line}"
+    next_sec = (
+        "- 请在界面确认或拒绝沙箱预览后再继续。"
+        if need_confirm
+        else "- 无"
+    )
+    return (
+        "## 已确认\n"
+        f"{confirmed}\n"
+        "## 待办与建议下一步\n"
+        f"{next_sec}\n"
+        "## 风险与阻塞\n"
+        "- 无"
+    )
 
 
 def enrich_grep_observation_nl_with_plan_names(

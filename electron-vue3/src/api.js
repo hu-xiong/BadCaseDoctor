@@ -46,6 +46,11 @@ export function getCurrentUser() {
 export function pingBackend() {
   return api.get('/api/ping', { timeout: 20000 })
 }
+/** 登录后进项目页时异步预热 ReAct Agent（工具注册），勿 await 阻塞 UI */
+export function warmupAgent(models) {
+  const body = Array.isArray(models) && models.length > 0 ? { models } : {}
+  return api.post('/api/agent/warmup', body, { timeout: 8000 })
+}
 // 发送邮箱验证码
 export function sendVerificationCode(data) {
   return api.post('/api/send_verification_code', data)
@@ -225,9 +230,14 @@ export function importDatabase(data) {
 
 // ==================== Chat Session API ====================
 
-// 获取项目的所有会话
-export function getChatSessions(projectId) {
-  return api.get(`/api/projects/${projectId}/chat-sessions`)
+// 获取项目的所有会话（列表接口应很快；略长超时 + 避免与 Agent 长请求共用默认 30s 易误杀）
+export function getChatSessions(projectId, opts = {}) {
+  const params = {}
+  if (opts.limit != null) params.limit = opts.limit
+  return api.get(`/api/projects/${apiPathId(projectId)}/chat-sessions`, {
+    params,
+    timeout: opts.timeout != null ? opts.timeout : 45000
+  })
 }
 
 // 创建新会话

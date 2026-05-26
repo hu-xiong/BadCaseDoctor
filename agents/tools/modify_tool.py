@@ -2,7 +2,8 @@
 对话修改Bug/BadCase工具
 支持行级别对比显示修改内容，集成Text2SQL智能查询
 """
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
+from contextvars import ContextVar
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, Union
 from agents.tool_registry import BaseTool
 from agents.locale_prompts import (
     normalize_locale,
@@ -49,6 +50,166 @@ except ImportError:
 
 # 批量预览流式事件：经 progress_queue 透传到 SSE（前缀 + JSON）
 MODIFY_BATCH_ROW_PREFIX = "__MODIFY_BATCH_ROW__"
+
+# 同一次 ReAct 请求 / asyncio Task 内复用已读行（类似 Java ThreadLocal）
+_modify_run_row_cache: ContextVar[Optional[Dict[Tuple[str, int, int], Dict[str, Any]]]] = (
+    ContextVar("bcd_modify_run_row_cache", default=None)
+)
+_modify_exists_cache: ContextVar[Optional[Dict[Tuple[str, int, int], bool]]] = (
+    ContextVar("bcd_modify_exists_cache", default=None)
+)
+
+_MODIFY_APPEND_COMMENT_KEYS = frozenset({"append_comment", "comment"})
+_MODIFY_ASSIGNEE_KEYS = frozenset({"assignee_id", "assignee", "owner"})
+
+
+def _row_cache_key(target: str, target_id: int, project_id: int) -> Tuple[str, int, int]:
+    return (str(target or "").strip().lower(), int(target_id), int(project_id))
+
+
+def _row_cache_get(target: str, target_id: int, project_id: int) -> Optional[Dict[str, Any]]:
+    store = _modify_run_row_cache.get()
+    if not store:
+        return None
+    return store.get(_row_cache_key(target, target_id, project_id))
+
+
+def _row_cache_put(target: str, target_id: int, project_id: int, row: Dict[str, Any]) -> None:
+    if not row or not isinstance(row, dict):
+        return
+    store = _modify_run_row_cache.get()
+    if store is None:
+        store = {}
+        _modify_run_row_cache.set(store)
+    store[_row_cache_key(target, target_id, project_id)] = dict(row)
+
+
+def _row_cache_reset_for_request() -> None:
+    """
+    每次 modify.execute 开始时清空：工具在线程池 worker 中运行，worker 会复用；
+    不清空则上一请求残留行可能命中错误缓存（脏读）。
+    """
+    _modify_run_row_cache.set({})
+    _modify_exists_cache.set({})
+
+
+def _hydrate_row_cache_from_tool_run_ctx(tool_run_ctx: Any) -> None:
+    """主线程经 params 传入的 tool_run_ctx 快照 → worker 内 ContextVar 行缓存。"""
+    if not isinstance(tool_run_ctx, dict):
+        return
+    rows = tool_run_ctx.get("rows")
+    if not isinstance(rows, dict):
+        return
+    from agents.tool_run_context import parse_row_cache_key
+
+    for key, row in rows.items():
+        if not isinstance(row, dict):
+            continue
+        parsed = parse_row_cache_key(str(key))
+        if not parsed:
+            continue
+        target, target_id, project_id = parsed
+        _row_cache_put(target, target_id, project_id, row)
+
+
+def export_tool_run_ctx_patch() -> Optional[Dict[str, Any]]:
+    """worker 内已读行导出，供主线程 merge 回 ToolRunStore。"""
+    store = _modify_run_row_cache.get()
+    if not store:
+        return None
+    from agents.tool_run_context import row_cache_key
+
+    rows: Dict[str, Dict[str, Any]] = {}
+    for (target, target_id, project_id), row in store.items():
+        if isinstance(row, dict):
+            rows[row_cache_key(target, target_id, project_id)] = dict(row)
+    if not rows:
+        return None
+    return {"v": 1, "rows": rows}
+
+
+def attach_tool_run_patch_to_result(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+    patch = export_tool_run_ctx_patch()
+    if not patch:
+        return result
+    out = dict(result)
+    out["tool_run_ctx_patch"] = patch
+    return out
+
+
+def _modify_perf_detail_enabled() -> bool:
+    """PERF_LOG=1 或 MODIFY_PERF=1：打印分段明细。"""
+    if os.getenv("PERF_LOG", "").strip() == "1":
+        return True
+    raw = os.getenv("MODIFY_PERF", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _modify_perf_summary_enabled() -> bool:
+    """默认打印单行汇总；MODIFY_PERF=0 可关。"""
+    raw = os.getenv("MODIFY_PERF", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "disable", "disabled")
+
+
+class _ModifyWallTimer:
+    """modify execute 墙钟分段（仅诊断，不改变业务逻辑）。"""
+
+    __slots__ = ("_t0", "_last", "segments", "extra")
+
+    def __init__(self) -> None:
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+        self.segments: Dict[str, float] = {}
+        self.extra: Dict[str, Any] = {}
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.segments[name] = round((now - self._last) * 1000.0, 1)
+        self._last = now
+
+    def total_ms(self) -> float:
+        return round((time.perf_counter() - self._t0) * 1000.0, 1)
+
+    def flush(
+        self,
+        *,
+        target: str,
+        target_id: Any,
+        modifications: Optional[Dict[str, Any]] = None,
+        sandbox_mode: str = "",
+    ) -> None:
+        if not _modify_perf_summary_enabled() and not _modify_perf_detail_enabled():
+            return
+        total = self.total_ms()
+        keys = list((modifications or {}).keys())
+        seg = self.segments
+        # 按耗时降序，便于一眼看到瓶颈
+        ordered = sorted(seg.items(), key=lambda x: -x[1])
+        top = ", ".join(f"{k}={v:.0f}ms" for k, v in ordered[:8])
+        print(
+            f"[MODIFY-PERF] total={total:.0f}ms target={target!r} id={target_id} "
+            f"mods={keys!r} sandbox_mode={sandbox_mode or '-'} | {top}",
+            flush=True,
+        )
+        if _modify_perf_detail_enabled():
+            fetch_sub = self.extra.get("fetch_sub")
+            if isinstance(fetch_sub, dict) and fetch_sub:
+                sub = ", ".join(
+                    f"{k}={float(v):.1f}ms"
+                    for k, v in sorted(fetch_sub.items(), key=lambda x: -x[1])
+                )
+                print(f"[MODIFY-PERF]   fetch_sub: {sub}", flush=True)
+            sb_sub = self.extra.get("sandbox_sub")
+            if isinstance(sb_sub, dict) and sb_sub:
+                sub = ", ".join(
+                    f"{k}={float(v):.1f}ms"
+                    for k, v in sorted(sb_sub.items(), key=lambda x: -x[1])
+                )
+                print(f"[MODIFY-PERF]   sandbox_sub: {sub}", flush=True)
+            rest = ", ".join(f"{k}={v:.1f}ms" for k, v in ordered)
+            print(f"[MODIFY-PERF]   all_segments: {rest}", flush=True)
 
 
 def _json_safe_id(value: Any) -> Any:
@@ -306,7 +467,6 @@ class ModifyTool(BaseTool):
             "expected_result",
             "actual_result",
             "severity",
-            "description",
             "assignee",
             "assignee_id",
             "append_comment",
@@ -966,6 +1126,7 @@ class ModifyTool(BaseTool):
             "标题改为",
             "改标题",
             "标题改成",
+            "标题修改",
             "重命名",
             "改名为",
             "改成叫",
@@ -1035,18 +1196,24 @@ class ModifyTool(BaseTool):
         return "instance/badcase_doctor.db"
 
     def _perf_modify_trace_context(self, tag: str) -> None:
-        """PERF_LOG=1 时打印 ORM 数据源与 subset 所 ATTACH 的 SQLite 路径，便于排查「MySQL 读行 + 本地 db 沙箱」耗时与一致性。"""
+        """PERF_LOG=1：打印 ORM 实际方言与本次沙箱模式（mysql_temp 不走 SQLite）。"""
         if os.getenv("PERF_LOG", "").strip() != "1":
             return
         uri = (self._database_uri or "").strip()
-        if uri.startswith("mysql"):
-            orm_kind = "mysql"
-        elif uri.startswith("sqlite"):
-            orm_kind = "sqlite"
-        elif not uri:
-            orm_kind = "unset"
-        else:
-            orm_kind = "other"
+        orm_kind = "unset"
+        try:
+            bind = self._sqlalchemy_orm_session().get_bind()
+            orm_kind = str(getattr(bind.dialect, "name", "") or "") or orm_kind
+        except Exception:
+            pass
+        if orm_kind == "unset":
+            if uri.startswith("mysql"):
+                orm_kind = "mysql"
+            elif uri.startswith("sqlite"):
+                orm_kind = "sqlite"
+            elif uri:
+                orm_kind = "other"
+        sb_mode = self._sandbox_preview_mode()
         sp = self._sqlite_path_for_sandbox()
         sz_txt = "?"
         try:
@@ -1055,14 +1222,15 @@ class ModifyTool(BaseTool):
         except OSError:
             pass
         note = ""
-        if orm_kind == "mysql":
+        if sb_mode == "mysql_temp" and orm_kind == "mysql":
+            note = " | 本次沙箱=mysql_temp（MySQL 临时表），未使用下方 SQLite 文件"
+        elif orm_kind == "mysql" and sb_mode in ("subset", "full_copy"):
             note = (
-                " | NOTE: subset 仍 ATTACH 此 SQLite；文件过大或磁盘慢会拉高 subset_prepare_ms；"
-                "若与 MySQL 不同步则写验证语义偏离生产"
+                " | subset/full_copy 才会 ATTACH 下方 SQLite；文件过大或不同步会拖慢/偏离生产"
             )
         print(
-            f"[PERF][modify_trace] {tag} orm_db_kind={orm_kind} "
-            f"sandbox_attach_sqlite={sp} sqlite_size_mb={sz_txt}{note}",
+            f"[PERF][modify_trace] {tag} orm_db_kind={orm_kind} sandbox_mode={sb_mode} "
+            f"subset_sqlite_fallback_path={sp} sqlite_size_mb={sz_txt}{note}",
             flush=True,
         )
 
@@ -1155,7 +1323,7 @@ class ModifyTool(BaseTool):
             '已关闭': 'closed', '关闭': 'closed', 'close': 'closed',
         }
         
-        bug_valid_status = ['new', 'assigned', 'in_progress', 'resolved', 'closed', 'reopened']
+        bug_valid_status = ['new', 'assigned', 'in_progress', 'resolved', 'closed', 'reopened', 'hold']
         badcase_valid_status = ['new', 'pending', 'resolved', 'hold', 'reopened', 'closed', 'not_badcase']
         
         if target == 'bug':
@@ -1388,6 +1556,129 @@ class ModifyTool(BaseTool):
             return keys <= {"assignee", "status"}
         return False
 
+    def _light_prep_skip_full_reconcile(
+        self,
+        target: str,
+        target_id: Any,
+        project_id: Any,
+        modifications: Dict[str, Any],
+    ) -> bool:
+        """
+        grep/主循环已给出源表主键且仅改低风险字段时，跳过 _reconcile_modify_target_from_db 的多次往返查询。
+        """
+        if not self._env_flag_enabled("MODIFY_LIGHT_PREP", "1"):
+            return False
+        if target_id is None or project_id is None or not modifications:
+            return False
+        tl = (str(target or "")).strip().lower()
+        if tl not in ("bug", "badcase", "testcase"):
+            return False
+        if not self._modifications_eligible_for_fast_apply(tl, modifications):
+            return False
+        try:
+            return self._modify_source_row_exists_cached(
+                tl, int(target_id), int(project_id)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _modify_source_row_exists_cached(
+        self, target: str, target_id: Any, project_id: Any
+    ) -> bool:
+        """同一次 execute 内缓存源表存在性探测。"""
+        try:
+            key = _row_cache_key(target, int(target_id), int(project_id))
+        except (TypeError, ValueError):
+            return self._modify_source_row_exists(target, target_id, project_id)
+        store = _modify_exists_cache.get()
+        if store is None:
+            store = {}
+            _modify_exists_cache.set(store)
+        if key in store:
+            return bool(store[key])
+        ok = self._modify_source_row_exists(target, target_id, project_id)
+        store[key] = ok
+        return ok
+
+    def _known_card_id_for_fetch(
+        self,
+        target: str,
+        target_id: Any,
+        project_id: Any,
+        card_id: Any,
+    ) -> Any:
+        if card_id is not None and str(card_id).strip() != "":
+            return card_id
+        try:
+            row = _row_cache_get(target, int(target_id), int(project_id))
+        except (TypeError, ValueError):
+            return None
+        if isinstance(row, dict):
+            return row.get("card_id") or row.get("cardId")
+        return None
+
+    @staticmethod
+    def _preview_fetch_flags(
+        target: str,
+        modifications: Dict[str, Any],
+        *,
+        known_card_id: Any = None,
+    ) -> Dict[str, bool]:
+        """
+        按本次 modifications 决定预览读行要加载哪些关联数据（改什么查什么）。
+        """
+        tl = (str(target or "")).strip().lower().replace("-", "_")
+        keys: Set[str] = set()
+        for k in modifications or {}:
+            if k is None:
+                continue
+            keys.add(str(k).strip())
+            if isinstance(modifications.get(k), dict) and "new" in modifications[k]:
+                pass
+        load_comments = bool(keys & _MODIFY_APPEND_COMMENT_KEYS)
+        load_assignee = bool(keys & _MODIFY_ASSIGNEE_KEYS)
+        if tl == "badcase":
+            load_assignee = load_assignee or bool(keys & {"assignee"})
+        skip_nav_env = (os.getenv("MODIFY_SKIP_NAV_CARD", "1") or "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        _fast_mod = False
+        if tl in ("bug", "testcase"):
+            _fast_mod = keys <= {"assignee_id", "status"}
+        elif tl == "badcase":
+            _fast_mod = keys <= {"assignee", "status"}
+        load_nav_card = (known_card_id is None or str(known_card_id).strip() == "") and not (
+            skip_nav_env and _fast_mod
+        )
+        load_long_text = bool(
+            keys
+            & {
+                "steps_to_reproduce",
+                "expected_result",
+                "expected",
+                "actual_result",
+                "remark",
+                "preconditions",
+                "reproduction_steps",
+                "reproduce_steps",
+                "repro_steps",
+                "steps",
+                "answer",
+                "correct_answer",
+                "预期结果",
+                "期望结果",
+            }
+        )
+        return {
+            "load_comments": load_comments,
+            "load_assignee": load_assignee,
+            "load_nav_card": load_nav_card,
+            "load_long_text": load_long_text,
+        }
+
     def _fetch_original_rows_batch_orm(
         self, target: str, ids: List[int], project_id: int
     ) -> Dict[int, Dict[str, Any]]:
@@ -1423,7 +1714,6 @@ class ModifyTool(BaseTool):
                 out[bug.id] = {
                     "id": bug.id,
                     "title": bug.title,
-                    "description": bug.description or "",
                     "status": status_snap,
                     "priority": bug.priority,
                     "severity": bug.severity or "",
@@ -1573,19 +1863,38 @@ class ModifyTool(BaseTool):
                 pass
 
         _progress(modify_tool_progress("init", loc))
+        _row_cache_reset_for_request()
+        _hydrate_row_cache_from_tool_run_ctx(kwargs.get("tool_run_ctx"))
+        _wall = _ModifyWallTimer()
+        _wall.mark("prep_early")
         from agents.intent.resolution import remap_card_layer_modification_keys
 
         # 卡片层适配：优先支持 card_id（推荐）；若传入 card_id 且未显式传 target_id，则在源表中反查主键
         card_id = kwargs.get("card_id") or kwargs.get("cardId")
+        _mods0 = {
+            k: v
+            for k, v in (modifications or {}).items()
+            if not str(k).startswith("_")
+        }
+        modifications = _mods0
+        _located_fast = False
+        _tl_fast = str(target or "").strip().lower()
+        if target_id is not None and project_id is not None and _mods0:
+            try:
+                _located_fast = self._light_prep_skip_full_reconcile(
+                    _tl_fast, int(target_id), int(project_id), _mods0
+                )
+            except (TypeError, ValueError):
+                _located_fast = False
         # 仅传 target_id 但该数字实为 Card 主键时，转为 card_id 并按 Card.source_type 校正 target
         # 注意：Bug/BadCase/TestCase 与 Card 各自自增主键，极易同号；若上游已声明源表且该行存在，禁止覆盖为 card。
-        if not card_id and target_id and project_id:
+        if not _located_fast and not card_id and target_id and project_id:
             tl_amb = (str(target or "")).strip().lower()
             skip_card_id_collision = tl_amb in (
                 "bug",
                 "badcase",
                 "testcase",
-            ) and self._modify_source_row_exists(tl_amb, target_id, project_id)
+            ) and self._modify_source_row_exists_cached(tl_amb, target_id, project_id)
             if not skip_card_id_collision:
                 amb = self._disambiguate_numeric_id_as_card_id(target_id, project_id)
                 if amb is not None:
@@ -1747,20 +2056,45 @@ class ModifyTool(BaseTool):
                     'error': modify_error_target_id_bad(target_id, loc),
                 }
 
+        _wall.mark("prep_card_lookup")
+
         # 已定位源表主键：按 Card / 源表实际类型校正 target，避免 summary 出现「预览修改 BadCase」实为 Bug 行
         db_reconciled_for_resolve = None
+        _mods_early = dict(modifications or {})
         if target_id is not None and project_id is not None:
             tl0 = str(target or "").strip().lower()
             if tl0 not in ("card", "plan"):
-                target = self._reconcile_modify_target_from_db(
-                    target, target_id, project_id, dict(modifications or {})
-                )
-                db_reconciled_for_resolve = str(target).strip().lower()
+                if self._light_prep_skip_full_reconcile(
+                    tl0, target_id, project_id, _mods_early
+                ):
+                    db_reconciled_for_resolve = tl0
+                    if _modify_perf_detail_enabled():
+                        print(
+                            "[MODIFY] light_prep: 跳过 reconcile（已定位源表 + 仅低风险字段）",
+                            flush=True,
+                        )
+                else:
+                    target = self._reconcile_modify_target_from_db(
+                        target, target_id, project_id, _mods_early
+                    )
+                    db_reconciled_for_resolve = str(target).strip().lower()
+        _wall.mark("prep_reconcile")
         target = str(target or "bug").strip().lower()
         
         modifications = dict(modifications or {})
         modifications = remap_card_layer_modification_keys(modifications)
-        if modifications and len(batch_target_ids) <= 1:
+        _skip_intent_resolve = bool(
+            _located_fast
+            and db_reconciled_for_resolve
+            and db_reconciled_for_resolve in ("bug", "badcase", "testcase")
+            and target_id is not None
+        )
+        if _skip_intent_resolve and _modify_perf_detail_enabled():
+            print(
+                "[MODIFY] fast_path: 跳过 resolve_modify_target_and_id（已定位 + 仅 status/负责人）",
+                flush=True,
+            )
+        if modifications and len(batch_target_ids) <= 1 and not _skip_intent_resolve:
             try:
                 from agents.intent.resolution import (
                     ModifyResolutionContext,
@@ -1866,6 +2200,8 @@ class ModifyTool(BaseTool):
                 flush=True,
             )
             target = db_reconciled_for_resolve
+
+        _wall.mark("prep_intent_resolve")
 
         _progress(modify_tool_progress("located_validate", loc, target_id=target_id))
         
@@ -2036,7 +2372,13 @@ class ModifyTool(BaseTool):
             self._coerce_remark_to_append_comment(
                 modifications, _intent_text, target
             )
-            if _intent_text and target_id:
+            _may_append = bool(
+                _MODIFY_APPEND_COMMENT_KEYS & set(modifications.keys())
+            ) or any(
+                k in (_intent_text or "")
+                for k in ("评论", "备注", "comment", "remark", "note")
+            )
+            if _intent_text and target_id and _may_append:
                 try:
                     from agents.intent.comment_intent import (
                         apply_append_comment_intent_fallback,
@@ -2083,7 +2425,8 @@ class ModifyTool(BaseTool):
                 flush=True,
             )
         effective_confirm = bool(confirm) or force_fast_commit
-        
+        _wall.mark("prep_field_norm")
+
         try:
             with self._get_app_context():
                 if not effective_confirm:
@@ -2106,16 +2449,10 @@ class ModifyTool(BaseTool):
                         )
                     # confirm=False: 沙箱副本预览（默认 ORM 读行 + 直拼 UPDATE，可按需 Text2SQL）
                     print(f"[MODIFY] 沙箱预览模式，获取原始数据…", flush=True)
-                    _perf_single = os.getenv("PERF_LOG", "").strip() == "1"
-                    _wall_single0 = time.perf_counter()
-
-                    def _cum_single_ms() -> float:
-                        return (time.perf_counter() - _wall_single0) * 1000.0
+                    if _modify_perf_detail_enabled():
+                        self._perf_modify_trace_context("single_preview_enter")
 
                     _progress(modify_tool_progress("sandbox_enter", loc))
-                    if _perf_single:
-                        self._perf_modify_trace_context("single_preview_enter")
-                    _t_gate = time.perf_counter()
                     self._ensure_text2sql_if_needed_for_preview(
                         prefer_orm_read,
                         use_direct_sandbox,
@@ -2123,34 +2460,33 @@ class ModifyTool(BaseTool):
                         target_id=target_id,
                         project_id=project_id,
                     )
-                    _gate_ms = (time.perf_counter() - _t_gate) * 1000.0
-                    if _perf_single:
-                        print(
-                            f"[PERF][modify_single_preview] after_text2sql_gate "
-                            f"text2sql_gate_ms={_gate_ms:.1f} "
-                            f"text2sql_loaded={int(self.text2sql is not None)} "
-                            f"prefer_orm_read={int(prefer_orm_read)} direct_sandbox_sql={int(use_direct_sandbox)} "
-                            f"cumulative_ms={_cum_single_ms():.1f}",
-                            flush=True,
-                        )
+                    _wall.mark("text2sql_gate")
+                    _fetch_sub: Dict[str, float] = {}
                     _progress(modify_tool_progress("db_fetch", loc))
-                    _t_fetch = time.perf_counter()
                     original_data = await self._get_original_data(
-                        target, target_id, project_id, progress_callback=_progress, ui_locale=loc
+                        target,
+                        target_id,
+                        project_id,
+                        progress_callback=_progress,
+                        ui_locale=loc,
+                        perf_sink=_fetch_sub,
+                        modifications=modifications,
+                        known_card_id=self._known_card_id_for_fetch(
+                            target,
+                            target_id,
+                            project_id,
+                            card_id or kwargs.get("cardId"),
+                        ),
                     )
-                    _fetch_wall_ms = (time.perf_counter() - _t_fetch) * 1000.0
-                    if _perf_single:
-                        print(
-                            f"[PERF][modify_single_preview] after_original_fetch "
-                            f"original_fetch_wall_ms={_fetch_wall_ms:.1f} "
-                            f"cumulative_ms={_cum_single_ms():.1f}",
-                            flush=True,
-                        )
+                    _wall.mark("original_fetch")
+                    if _fetch_sub:
+                        _wall.extra["fetch_sub"] = _fetch_sub
                     if not original_data:
                         return {'success': False, 'error': modify_error_row_not_found(target, target_id, loc)}
                     modifications = self._sanitize_title_modifications(
                         target, modifications, original_data, natural_query, batch_mode=False
                     )
+                    _wall.mark("sanitize_title")
                     _progress(modify_tool_progress("sandbox_diff", loc))
                     from app import db as flask_db
 
@@ -2168,12 +2504,10 @@ class ModifyTool(BaseTool):
                     if "append_comment" in preview_mods:
                         modified_data.setdefault("append_comment", "")
                     modified_data.update(preview_mods)
-                    _t_enrich = time.perf_counter()
                     self._enrich_modified_data_for_preview(
                         target, modified_data, preview_mods, project_id
                     )
-                    _enrich_ms = (time.perf_counter() - _t_enrich) * 1000.0
-                    _t_ld = time.perf_counter()
+                    _wall.mark("enrich")
                     diff_result = self._generate_line_diff(
                         original_data,
                         modified_data,
@@ -2183,27 +2517,31 @@ class ModifyTool(BaseTool):
                         project_id=project_id,
                         flask_db=flask_db,
                     )
-                    _line_diff_ms = (time.perf_counter() - _t_ld) * 1000.0
-                    if _perf_single:
-                        print(
-                            f"[PERF][modify_single_preview] after_diff "
-                            f"enrich_ms={_enrich_ms:.1f} line_diff_ms={_line_diff_ms:.1f} "
-                            f"cumulative_ms={_cum_single_ms():.1f}",
-                            flush=True,
-                        )
+                    _wall.mark("line_diff")
                     _progress(modify_tool_progress("sandbox_sql", loc))
-                    _t_sbx = time.perf_counter()
-                    sandbox_result = await self._preview_in_sandbox(target, target_id, modifications, project_id)
-                    _sandbox_ms = (time.perf_counter() - _t_sbx) * 1000.0
-                    if _perf_single:
-                        print(
-                            f"[PERF][modify_single_preview] done "
-                            f"sandbox_preview_ms={_sandbox_ms:.1f} "
-                            f"sandbox_ok={int(bool(sandbox_result.get('success')))} "
-                            f"mode={self._sandbox_preview_mode()} "
-                            f"total_wall_ms={_cum_single_ms():.1f}",
-                            flush=True,
-                        )
+                    _sandbox_sub: Dict[str, float] = {}
+                    sandbox_result = await self._preview_in_sandbox(
+                        target,
+                        target_id,
+                        modifications,
+                        project_id,
+                        perf_sink=_sandbox_sub,
+                    )
+                    _wall.mark("sandbox")
+                    if _sandbox_sub:
+                        _wall.extra["sandbox_sub"] = _sandbox_sub
+                    if sandbox_result.get("sandbox_mysql_temp"):
+                        _sb_mode = "mysql_temp"
+                    elif sandbox_result.get("sandbox_skipped"):
+                        _sb_mode = "skip_update"
+                    else:
+                        _sb_mode = self._sandbox_preview_mode()
+                    _wall.flush(
+                        target=target,
+                        target_id=target_id,
+                        modifications=modifications,
+                        sandbox_mode=_sb_mode,
+                    )
                     _progress(modify_tool_progress("sandbox_wait_confirm", loc))
                     mod_summary = modify_modifications_kv_summary(modifications, loc)
                     out_preview = {
@@ -2214,8 +2552,11 @@ class ModifyTool(BaseTool):
                         'before': _json_safe_row(original_data), 'after': _json_safe_row(modified_data), 'diff': diff_result,
                         'modifications': modifications, 'sandbox_preview': sandbox_result
                     }
-                    if isinstance(original_data, dict) and original_data.get("card_id") is not None:
-                        out_preview["card_id"] = _json_safe_id(original_data.get("card_id"))
+                    cid_out = original_data.get("card_id") if isinstance(original_data, dict) else None
+                    if cid_out is None and card_id:
+                        cid_out = card_id
+                    if cid_out is not None:
+                        out_preview["card_id"] = _json_safe_id(cid_out)
                     return out_preview
                 
                 # confirm=True: 采纳即落库，快速路径（跳过 Text2SQL 和原始数据获取）
@@ -2265,6 +2606,24 @@ class ModifyTool(BaseTool):
                     'target_count': len(batch_target_ids),
                     'before': None, 'after': None, 'diff': None
                 }
+                if success and str(target or "").strip().lower() in ("bug", "badcase"):
+                    try:
+                        from agents.tools.grep_recent_fallback import touch_work_items_after_write
+
+                        _ids_touch = (
+                            [int(x) for x in batch_target_ids]
+                            if len(batch_target_ids) > 1
+                            else [int(target_id)]
+                        )
+                        _touch = touch_work_items_after_write(
+                            str(target).strip().lower(),
+                            _ids_touch,
+                            int(project_id),
+                        )
+                        if _touch:
+                            out_apply.update(_touch)
+                    except Exception as _touch_ex:
+                        print(f"[MODIFY] grep touch 失败: {_touch_ex}", flush=True)
                 if force_fast_commit:
                     out_apply['fast_apply'] = True
                     out_apply['sandbox_skipped'] = True
@@ -2380,9 +2739,26 @@ class ModifyTool(BaseTool):
         project_id: int,
         progress_callback=None,
         ui_locale: Optional[str] = None,
+        perf_sink: Optional[Dict[str, float]] = None,
+        modifications: Optional[Dict[str, Any]] = None,
+        known_card_id: Any = None,
     ) -> Dict[str, Any]:
-        """获取原始数据。progress_callback(msg) 用于流式上报进度。"""
+        """获取原始数据。按 modifications 按需加载；同 Task 内走 ContextVar 行缓存。"""
         loc = normalize_locale(ui_locale)
+        cached = _row_cache_get(target, target_id, project_id)
+        if cached is not None:
+            if perf_sink is not None:
+                perf_sink["row_cache_hit"] = 0.0
+            if _modify_perf_detail_enabled():
+                print(
+                    f"[MODIFY] row_cache hit target={target!r} id={target_id}",
+                    flush=True,
+                )
+            return dict(cached)
+
+        def _perf_mark(sub: str, t0: float) -> None:
+            if perf_sink is not None:
+                perf_sink[sub] = round((time.perf_counter() - t0) * 1000.0, 1)
 
         def _prog(msg: str):
             if callable(progress_callback):
@@ -2498,11 +2874,42 @@ class ModifyTool(BaseTool):
         if target == 'bug':
             _prog(modify_tool_progress("querying_bug", loc))
             from app import Bug, User
-            bug = flask_db.session.query(Bug).filter(
+            from sqlalchemy.orm import load_only
+
+            flags = self._preview_fetch_flags(
+                target, modifications or {}, known_card_id=known_card_id
+            )
+            if perf_sink is not None:
+                perf_sink["fetch_profile"] = 0.0
+            if _modify_perf_detail_enabled():
+                print(
+                    f"[MODIFY] preview_fetch_flags bug keys={list((modifications or {}).keys())} "
+                    f"load_comments={flags['load_comments']} load_assignee={flags['load_assignee']} "
+                    f"load_nav_card={flags['load_nav_card']} load_long_text={flags['load_long_text']}",
+                    flush=True,
+                )
+
+            _t_bug = time.perf_counter()
+            q = flask_db.session.query(Bug).filter(
                 Bug.id == target_id,
-                Bug.project_id == project_id
-            ).first()
-            
+                Bug.project_id == project_id,
+            )
+            if not flags["load_long_text"] and not flags["load_assignee"]:
+                q = q.options(
+                    load_only(
+                        Bug.id,
+                        Bug.title,
+                        Bug.status,
+                        Bug.priority,
+                        Bug.severity,
+                        Bug.assignee_id,
+                        Bug.plan_id,
+                        Bug.project_id,
+                    )
+                )
+            bug = q.first()
+            _perf_mark("orm_bug_query", _t_bug)
+
             if not bug:
                 if perf_fetch:
                     print(
@@ -2511,43 +2918,66 @@ class ModifyTool(BaseTool):
                         flush=True,
                     )
                 return None
-            
-            # 获取负责人用户名
+
             assignee_name = ''
-            if bug.assignee_id:
+            if flags["load_assignee"] and bug.assignee_id:
+                _t_u = time.perf_counter()
                 user = flask_db.session.query(User).get(bug.assignee_id)
+                _perf_mark("orm_assignee_user", _t_u)
                 if user:
                     assignee_name = user.name
-            
+            elif perf_sink is not None:
+                perf_sink["orm_assignee_user_skipped"] = 0.0
+
             if perf_fetch:
                 print(
                     f"[PERF][modify_original_fetch] path=orm_bug hit=1 "
                     f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
                     flush=True,
                 )
+            _t_st = time.perf_counter()
             status_snap = self._snapshot_status_string(getattr(bug, "status", None))
             if not status_snap:
                 status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
-            nav_card_id = self._nav_card_pk_for_source_orm_row(
-                flask_db.session, "bug", bug, project_id
-            )
-            _bug_comments = self._load_comment_records("bug", bug.id)
-            return {
+            _perf_mark("status_snap", _t_st)
+            nav_card_id = None
+            if known_card_id not in (None, ""):
+                try:
+                    nav_card_id = int(known_card_id)
+                except (TypeError, ValueError):
+                    nav_card_id = None
+            if flags["load_nav_card"]:
+                _t_nav = time.perf_counter()
+                nav_card_id = self._nav_card_pk_for_source_orm_row(
+                    flask_db.session, "bug", bug, project_id
+                )
+                _perf_mark("nav_card_lookup", _t_nav)
+            elif perf_sink is not None:
+                perf_sink["nav_card_lookup_skipped"] = 0.0
+            _bug_comments: List[Dict[str, Any]] = []
+            if flags["load_comments"]:
+                _t_cmt = time.perf_counter()
+                _bug_comments = self._load_comment_records("bug", bug.id)
+                _perf_mark("comment_records", _t_cmt)
+            elif perf_sink is not None:
+                perf_sink["comment_records_skipped"] = 0.0
+            row = {
                 'id': bug.id,
                 'title': bug.title,
-                'description': bug.description or '',
                 'status': status_snap,
                 'priority': bug.priority,
-                'severity': bug.severity or '',
+                'severity': (bug.severity or '') if flags["load_long_text"] else '',
                 'assignee_id': bug.assignee_id,
-                'assignee': assignee_name,  # 添加用户名字段用于显示
+                'assignee': assignee_name,
                 'plan_id': bug.plan_id,
                 'card_id': nav_card_id,
-                'steps_to_reproduce': bug.steps_to_reproduce or '',
-                'expected_result': bug.expected_result or '',
-                'actual_result': bug.actual_result or '',
+                'steps_to_reproduce': (bug.steps_to_reproduce or '') if flags["load_long_text"] else '',
+                'expected_result': (bug.expected_result or '') if flags["load_long_text"] else '',
+                'actual_result': (bug.actual_result or '') if flags["load_long_text"] else '',
                 'comment_records': _bug_comments,
             }
+            _row_cache_put(target, target_id, project_id, row)
+            return row
         
         elif target == 'badcase':
             _prog(modify_tool_progress("querying_badcase", loc))
@@ -2708,6 +3138,9 @@ class ModifyTool(BaseTool):
                                 status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
                             if status_snap:
                                 row["status"] = status_snap
+                            row["steps_to_reproduce"] = bug.steps_to_reproduce or ""
+                            row["expected_result"] = bug.expected_result or ""
+                            row["actual_result"] = bug.actual_result or ""
                     elif st in ("bad_case", "badcase"):
                         from app import BadCase
 
@@ -2756,6 +3189,12 @@ class ModifyTool(BaseTool):
                         status_snap = self._bug_status_sql_fallback(flask_db, bug_linked.id, project_id)
                     if status_snap:
                         row["status"] = status_snap
+                    row["steps_to_reproduce"] = bug_linked.steps_to_reproduce or ""
+                    row["expected_result"] = bug_linked.expected_result or ""
+                    row["actual_result"] = bug_linked.actual_result or ""
+                    if not row.get("source_id"):
+                        row["source_type"] = "bug"
+                        row["source_id"] = bug_linked.id
             return row
 
         elif target == "plan":
@@ -3288,6 +3727,76 @@ class ModifyTool(BaseTool):
             lines.append(t if t else f"Bug-{bid}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _coalesce_bug_repro_from_row(row: Any) -> str:
+        """Bug 复现步骤：仅 steps_to_reproduce 列。"""
+        if not row or not isinstance(row, dict):
+            return ""
+        return str(row.get("steps_to_reproduce") or "").strip() or row.get("steps_to_reproduce") or ""
+
+    def _fetch_bug_detail_field_for_card_row(
+        self, card_row: Dict, field: str, project_id: int, flask_db
+    ) -> str:
+        """Card 快照缺 Bug 长文本时，按 source_id / card_id 反查源缺陷列。"""
+        if not card_row or not isinstance(card_row, dict) or not flask_db:
+            return ""
+        from app import Bug
+
+        pid = int(project_id or 0)
+        bug = None
+        st = (card_row.get("source_type") or "").strip().lower().replace("-", "_")
+        sid = card_row.get("source_id")
+        if st == "bug" and sid is not None:
+            try:
+                bug = (
+                    flask_db.session.query(Bug)
+                    .filter(Bug.id == int(sid), Bug.project_id == pid)
+                    .first()
+                )
+            except (TypeError, ValueError):
+                bug = None
+        if bug is None:
+            try:
+                bug = (
+                    flask_db.session.query(Bug)
+                    .filter(Bug.card_id == int(card_row.get("id")), Bug.project_id == pid)
+                    .order_by(Bug.id.asc())
+                    .first()
+                )
+            except (TypeError, ValueError):
+                bug = None
+        if not bug:
+            return ""
+        if field == "steps_to_reproduce":
+            return bug.steps_to_reproduce or ""
+        if field == "expected_result":
+            return bug.expected_result or ""
+        if field == "actual_result":
+            return bug.actual_result or ""
+        return ""
+
+    def _coalesce_bug_detail_pair_from_card_row(
+        self,
+        before: Dict,
+        after: Dict,
+        field: str,
+        project_id: int,
+        flask_db,
+        before_raw: Any,
+        after_raw: Any,
+    ) -> Tuple[Any, Any]:
+        br = before_raw
+        ar = after_raw
+        if not str(br or "").strip():
+            br = before.get(field) or self._fetch_bug_detail_field_for_card_row(
+                before, field, project_id, flask_db
+            )
+        if not str(ar or "").strip():
+            ar = after.get(field) or self._fetch_bug_detail_field_for_card_row(
+                after, field, project_id, flask_db
+            )
+        return br, ar
+
     def _diff_field_display_value(
         self, field: str, value: Any, project_id: int = None, flask_db=None
     ) -> str:
@@ -3301,7 +3810,15 @@ class ModifyTool(BaseTool):
             return self._format_plan_id_diff_display(value, project_id, flask_db)
         if field == "project_id":
             return self._format_project_id_diff_display(value, flask_db)
-        if field in ('preconditions', 'remark', 'steps_to_reproduce', 'reproduction_steps', 'reproduce_steps'):
+        if field in (
+            'preconditions',
+            'remark',
+            'steps_to_reproduce',
+            'reproduction_steps',
+            'reproduce_steps',
+            'expected_result',
+            'actual_result',
+        ):
             return self._strip_html_for_diff_display(value)
         if isinstance(value, (list, tuple)):
             try:
@@ -3342,11 +3859,34 @@ class ModifyTool(BaseTool):
                 after_value = str(after.get('assignee_display') or after.get('assignee') or '')
                 out_field = 'assignee'
             else:
+                tgt = (target or "").strip().lower().replace("-", "_")
+                if field in (
+                    "steps_to_reproduce",
+                    "expected_result",
+                    "actual_result",
+                ) and tgt in ("bug", "card"):
+                    before_raw = before.get(field, "")
+                    after_raw = after.get(field, "")
+                    if tgt == "card" and (
+                        not str(before_raw or "").strip() or not str(after_raw or "").strip()
+                    ):
+                        before_raw, after_raw = self._coalesce_bug_detail_pair_from_card_row(
+                            before,
+                            after,
+                            field,
+                            project_id,
+                            flask_db,
+                            before_raw,
+                            after_raw,
+                        )
+                else:
+                    before_raw = before.get(field, "")
+                    after_raw = after.get(field, "")
                 before_value = self._diff_field_display_value(
-                    field, before.get(field, ''), project_id, flask_db
+                    field, before_raw, project_id, flask_db
                 )
                 after_value = self._diff_field_display_value(
-                    field, after.get(field, ''), project_id, flask_db
+                    field, after_raw, project_id, flask_db
                 )
                 out_field = field
             
@@ -3491,6 +4031,7 @@ class ModifyTool(BaseTool):
         project_id: int,
         set_clauses: List[str],
         combined_sql_shown: str,
+        perf_sink: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         """
         在同一 MySQL 连接内：CREATE TEMPORARY TABLE AS SELECT 目标行 → UPDATE 临时表 → DROP。
@@ -3597,8 +4138,15 @@ class ModifyTool(BaseTool):
                 except Exception:
                     pass
             update_ms = (time.perf_counter() - _tu) * 1000.0
+            wall = (time.perf_counter() - t_wall0) * 1000.0
+            if perf_sink is not None:
+                perf_sink["mt_get_bind"] = round(get_bind_ms, 1)
+                perf_sink["mt_dbapi_acquire"] = round(raw_conn_ms, 1)
+                perf_sink["mt_create_temp"] = round(create_temp_ms, 1)
+                perf_sink["mt_count"] = round(count_ms, 1)
+                perf_sink["mt_update"] = round(update_ms, 1)
+                perf_sink["mt_wall"] = round(wall, 1)
             if perf:
-                wall = (time.perf_counter() - t_wall0) * 1000.0
                 print(
                     f"[PERF][modify_sandbox] mysql_temp_segments "
                     f"get_bind_ms={get_bind_ms:.1f} dbapi_acquire_ms={raw_conn_ms:.1f} "
@@ -4337,7 +4885,14 @@ class ModifyTool(BaseTool):
             print(f"[MODIFY-SANDBOX] card 沙箱拆分失败（保持 card 路径）: {e}", flush=True)
             return None
 
-    async def _preview_in_sandbox(self, target: str, target_id: int, modifications: Dict, project_id: int) -> Dict[str, Any]:
+    async def _preview_in_sandbox(
+        self,
+        target: str,
+        target_id: int,
+        modifications: Dict,
+        project_id: int,
+        perf_sink: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
         """
         在沙箱副本上预览修改效果
         
@@ -4439,7 +4994,12 @@ class ModifyTool(BaseTool):
                 }
             if use_direct_sql and self._resolve_use_mysql_temp(mode):
                 return self._mysql_temp_write_validate(
-                    target, [int(target_id)], project_id, list(set_clauses), sql.strip()
+                    target,
+                    [int(target_id)],
+                    project_id,
+                    list(set_clauses),
+                    sql.strip(),
+                    perf_sink=perf_sink,
                 )
             if mode == "subset" or (mode == "mysql_temp" and not self._is_mysql_bind()):
                 subset_path, err2 = self._prepare_subset_db_sqlite(target, [int(target_id)], project_id)
@@ -4748,6 +5308,7 @@ class ModifyTool(BaseTool):
         }
         # 详情字段中文 -> 英文（保证 before/after 用同一 key，diff 能取到真实旧值）
         label_to_field = {
+            'expected': 'expected_result',
             '期望结果': 'expected_result',
             '预期结果': 'expected_result',
             '实际结果': 'actual_result',
@@ -4849,6 +5410,18 @@ class ModifyTool(BaseTool):
         if field in field_mapping:
             return field_mapping[field]
         tgt = (target or "").strip().lower().replace("-", "_")
+        if tgt == "bug":
+            fl = (field or "").strip().lower().replace("-", "_")
+            if fl in (
+                "reproduction_steps",
+                "reproduce_steps",
+                "repro_steps",
+                "steps",
+                "description",
+            ):
+                return "steps_to_reproduce"
+            if fl == "expected":
+                return "expected_result"
         if tgt in ("testcase", "test_case"):
             fl = (field or "").strip().lower().replace("-", "_")
             if fl in ("precondition", "pre_conditions"):

@@ -35,6 +35,16 @@ export function mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps, nextSt
   if (p0.agentThoughtDraft && !n0.agentThoughtDraft) n0.agentThoughtDraft = p0.agentThoughtDraft
 }
 
+/** plan / plan_init 用正式步骤替换占位 steps 时，保留占位 step0 的思考墙钟与草稿 */
+function replacePlanTodoStepsPreservingThinkClock(aiMessage, todoStrings, buildReactStepsFromTodoStrings) {
+  const hadPh = !!aiMessage._placeholderSteps
+  const prevSteps = aiMessage.steps
+  aiMessage.steps = buildReactStepsFromTodoStrings(todoStrings)
+  aiMessage._placeholderSteps = false
+  mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps, aiMessage.steps, hadPh)
+  mergeMessageThinkDraftsIntoReactStepZero(aiMessage)
+}
+
 export function applyPlanPayloadV1(aiMessage, payload, buildReactStepsFromTodoStrings) {
   const pl = payload || {}
   // 无 steps = 未下发计划：不写入 reactPlanSteps，规划备忘不出现（不靠 suppress 硬藏）
@@ -82,9 +92,7 @@ export function applyPlanPayloadV1(aiMessage, payload, buildReactStepsFromTodoSt
     if (pl.reason != null && pl.reason !== '') aiMessage.planUpdateReason = pl.reason
     if (pl.react_phase) aiMessage.lastReactPhase = pl.react_phase
     if (aiMessage._placeholderSteps || todoStrings.length > (aiMessage.steps || []).length) {
-      aiMessage.steps = buildReactStepsFromTodoStrings(todoStrings)
-      aiMessage._placeholderSteps = false
-      mergeMessageThinkDraftsIntoReactStepZero(aiMessage)
+      replacePlanTodoStepsPreservingThinkClock(aiMessage, todoStrings, buildReactStepsFromTodoStrings)
     }
     maybeRevealPlanMemoAfterThink(aiMessage)
     return
@@ -97,9 +105,7 @@ export function applyPlanPayloadV1(aiMessage, payload, buildReactStepsFromTodoSt
   if (pl.reason != null && pl.reason !== '') aiMessage.planUpdateReason = pl.reason
   if (pl.react_phase) aiMessage.lastReactPhase = pl.react_phase
   if (aiMessage._placeholderSteps || todoStrings.length > (aiMessage.steps || []).length) {
-    aiMessage.steps = buildReactStepsFromTodoStrings(todoStrings)
-    aiMessage._placeholderSteps = false
-    mergeMessageThinkDraftsIntoReactStepZero(aiMessage)
+    replacePlanTodoStepsPreservingThinkClock(aiMessage, todoStrings, buildReactStepsFromTodoStrings)
   }
   maybeRevealPlanMemoAfterThink(aiMessage)
   if (!aiMessage._planMemoRevealReady && !aiMessage._deferPlanMemoUntilThink) {

@@ -393,7 +393,7 @@ class ReactPromptTemplates:
 
 规则：有 project_name/plan_name 用自然语言，勿写 project_id=；勿编造名称。技能匹配则跟技能流（阈值约 0.3）。
 查询→一步 grep。仅**查看**详情（未要求修改）→一步 grep 或基于已有 grep 结果直接回答，**禁止**为展示而调用 modify。修改→两步 grep 再 modify（禁止只 modify）。**零起新建**→一步 create。**按已有记录复制新建**（copy_record 技能）→三步 **grep → copy（属性合并/不落库）→ create（预览与落库）**；若合并链稳定也可一步 **create**，fields 含 **copy_from_bug_id / copy_from_badcase_id / copy_from_testcase_id / copy_from_card_id**（与 copy→create **等价**，并非只能用卡片）。**copy 工具支持 bug、badcase、testcase、card**。browser_test→一步。本机命令→一步 terminal（command 必填）。
-grep：keywords 可按记录标题原文；**多词默认 OR**（任一词命中）；须全部词命中时由环境 GREP_KEYWORDS_MATCH_MODE=and（一般不写）。**主界面迭代列表即 Card 表**；泛查、不确定类型时用 **target=all**（同时检索 Card + 各源表）；**用户明确说「查卡片/查询卡片/卡片列表/迭代卡片」等时，必须用 target=card（只查 Card 表标题与描述），禁止用 bug/badcase/testcase/all**，否则会混入源表口径。**勿**在无明确用户意图时填 target=bug/badcase/testcase（会跳过 Card 表导致「无卡片命中」）。勿把「期望结果/步骤」等字段名当 keywords；target∈bug/badcase/testcase/card/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
+grep：keywords 在 Bug/BadCase/TestCase/Card 的**主要文本字段**中模糊匹配（标题、描述、步骤、状态、优先级、类型、环境、负责人等；纯数字可匹配 id）；**多词默认 OR**；须全部词命中时 GREP_KEYWORDS_MATCH_MODE=and。按负责人筛可传 assignee=姓名。**主界面迭代列表即 Card 表**；泛查用 target=all；用户明确「查卡片/卡片列表」时用 target=card。target∈bug/badcase/testcase/card/all；查全用 "" 或 *。「测试用例/用例」→ testcase。
 modify：按 **要改的字段** 选 bug/badcase/testcase（**grep 用 card 与 modify 用 card 无必然关系**；改状态/复现等缺陷字段时 target 必须是 bug 等源表，勿 target=card）。不可改 type/id/project_id/plan_id。批量：一条 grep 全量 + 一条 modify。复制用例：fields 可含 copy_from_testcase_id。
 </system>
 
@@ -1270,7 +1270,7 @@ search 引擎：中文关键词优先 baidu；纯英文国际资料用 google。
 2. create/modify/delete 预览用 confirm=false，禁止直接落库
 3. **多步串行**：按 `task_plan` **一轮一个工具**执行，直到计划中**每一步都至少调用过一次**（各步可为沙箱预览）。**同一条 SSE 内**若仍有未执行步骤，**禁止** `execute=false`。**服务端**在「沙箱/创建待用户确认」或「计划步数已跑完」时会**自动结束本条流**；待确认时用户会在 UI 操作后再发新消息继续，你不必在同一连接里假定已落库。**若流仍在继续**且还有未调用步骤（常见：尚未 `create`），**下一轮必须** `execute=true`。
 4. 用户要求的操作已在工具层面全部执行完毕（无遗漏步骤）、或确属闲聊/与项目无关、或客观无法继续时：`execute=false`，tool 留空
-5. 纯聊天/问候/与项目无关的泛泛问答：优先 execute=false、tool 留空；若需以工具形式收口可 execute=true、tool=chitchat、params 含 message=用户原话或问题摘要
+5. 纯聊天/问候/与项目无关的泛泛问答：execute=false、tool 留空，在 thinking 或自然语言中直接友好回复，勿调用任何工具
 6. 涉及搜索、查询、测试、修改时 execute 必须为 true（闲聊除外）
 7. 不确定参数时可简写，服务端会补全
 8. **terminal 工具（本机 Shell）**：若 `<current_context>` 含 `client_os: windows`（或用户环境为 Windows），命令须用 **cmd.exe 可用语法**（查看当前目录用 `cd` 或 `echo %CD%`，**禁止**单独使用 Linux 的 `pwd`）；macOS/Linux 可用 `pwd`。若上一轮 terminal 已失败且 stderr 含「not recognized」「不是内部或外部命令」等，须在 observation 中判定为环境/命令不匹配，并在下一轮 **改用语境匹配的命令** 重试，勿只向用户泛泛解释而不继续执行。

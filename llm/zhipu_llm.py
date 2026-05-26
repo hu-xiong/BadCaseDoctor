@@ -11,6 +11,11 @@ import requests
 import os
 from config import Config
 from .http_session import get_session
+from .prompt_log import (
+    maybe_log_llm_chat_kwargs,
+    maybe_log_llm_response_body,
+    maybe_log_llm_stream_assembled,
+)
 
 
 class ZhipuLLM:
@@ -71,6 +76,8 @@ class ZhipuLLM:
             'Authorization': f'Bearer {self.api_key}'
         }
 
+        maybe_log_llm_chat_kwargs("zhipu", payload, tag="chat")
+
         def _do_request():
             # 连接池 + keep-alive
             timeout = (
@@ -84,12 +91,24 @@ class ZhipuLLM:
         
         if response.status_code == 200:
             res_json = response.json()
+            maybe_log_llm_response_body(
+                "zhipu",
+                res_json,
+                tag="chat",
+                model=self.model,
+            )
             if "choices" in res_json and len(res_json["choices"]) > 0:
                 return res_json["choices"][0]["message"]["content"]
             return ""
         else:
             error_msg = f"[ZhipuLLM] Error {response.status_code}: {response.text}"
             print(error_msg)
+            maybe_log_llm_response_body(
+                "zhipu",
+                {"error": error_msg, "status_code": response.status_code},
+                tag="chat_error",
+                model=self.model,
+            )
             return error_msg
 
     def chat_stream(self, prompt: str, history: list = None, locale: Optional[str] = None):
@@ -119,6 +138,8 @@ class ZhipuLLM:
             'Authorization': f'Bearer {self.api_key}'
         }
 
+        maybe_log_llm_chat_kwargs("zhipu", payload, tag="chat_stream")
+
         try:
             timeout = (
                 float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
@@ -132,6 +153,7 @@ class ZhipuLLM:
                 timeout=timeout
             )
 
+            _acc_ct: List[str] = []
             for line in response.iter_lines():
                 if line:
                     line = line.decode('utf-8')
@@ -145,9 +167,16 @@ class ZhipuLLM:
                                 delta = chunk['choices'][0].get('delta', {})
                                 content = delta.get('content', '')
                                 if content:
+                                    _acc_ct.append(content)
                                     yield content
                         except json.JSONDecodeError:
                             continue
+            maybe_log_llm_stream_assembled(
+                "zhipu",
+                tag="chat_stream",
+                model=self.model,
+                content="".join(_acc_ct),
+            )
         except Exception as e:
             yield f"[Error] {str(e)}"
 
@@ -192,11 +221,19 @@ class ZhipuLLM:
             float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
             float(os.getenv("LLM_HTTP_TIMEOUT_READ", "120")),
         )
+        maybe_log_llm_chat_kwargs("zhipu", payload, tag="chat_stream_fallback_chunks")
+
         text = ""
         try:
             response = get_session().post(self.base_url, headers=headers, json=payload, timeout=timeout)
             if response.status_code == 200:
                 res_json = response.json()
+                maybe_log_llm_response_body(
+                    "zhipu",
+                    res_json,
+                    tag="chat_stream_fallback_chunks",
+                    model=self.model,
+                )
                 if "choices" in res_json and len(res_json["choices"]) > 0:
                     text = res_json["choices"][0]["message"]["content"] or ""
             else:

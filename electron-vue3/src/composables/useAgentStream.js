@@ -49,10 +49,109 @@ export function foldAgentSseText(buffer, chunkText) {
 }
 
 /**
- * 每消费一条解析后的 SSE JSON 后调用：先 flush Vue，再等一帧，保证与网卡流式一致的可视更新（避免同 tick 内多包攒批）。
+ * 每消费一条解析后的 SSE JSON 后调用：先 flush Vue，再等一帧（续流批量回放等低频场景）。
  * @param {typeof import('vue').nextTick} nextTickFn
  */
 export async function yieldAgentSseUiFrame(nextTickFn) {
   await nextTickFn()
   await new Promise((resolve) => requestAnimationFrame(resolve))
+}
+
+/**
+ * 在线 SSE：think/summary 等 stream 增量只改数据、不每包 paint；工具/阶段/tail 等立即刷。
+ * @param {object} chunk 已解析 SSE JSON
+ */
+export function sseChunkNeedsImmediatePaint(chunk) {
+  if (!chunk || typeof chunk !== 'object') return false
+  const t = chunk.type
+  if (t === 'heartbeat') return false
+  if (t === 'stream') {
+    const lane = String(chunk.payload?.lane || '')
+    return lane === 'batch_preview' || lane === 'tool_error'
+  }
+  return true
+}
+
+/**
+ * 在线 SSE UI 合并调度：同一事件循环内 N 个 JSON 只触发一次 nextTick+rAF，且限制最高刷新率。
+ * @param {typeof import('vue').nextTick} nextTickFn
+ * @param {{ minIntervalMs?: number }} [opts] 默认 ~30fps
+ */
+export function createSseUiPaintScheduler(nextTickFn, opts = {}) {
+  const minIntervalMs = Math.max(16, Number(opts.minIntervalMs) || 32)
+  let dirty = false
+  let rafId = null
+  let timerId = null
+  let lastPaintAt = 0
+  /** @type {Promise<void>|null} */
+  let inflight = null
+
+  const runPaint = async () => {
+    rafId = null
+    timerId = null
+    if (!dirty) return
+    dirty = false
+    lastPaintAt = performance.now()
+    await nextTickFn()
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+  }
+
+  const schedule = () => {
+    dirty = true
+    if (rafId != null || timerId != null || inflight) return
+    const elapsed = performance.now() - lastPaintAt
+    const wait = Math.max(0, minIntervalMs - elapsed)
+    const armRaf = () => {
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        inflight = runPaint().finally(() => {
+          inflight = null
+        })
+      })
+    }
+    if (wait <= 2) {
+      armRaf()
+    } else {
+      timerId = setTimeout(() => {
+        timerId = null
+        armRaf()
+      }, wait)
+    }
+  }
+
+  const flushNow = async () => {
+    if (timerId != null) {
+      clearTimeout(timerId)
+      timerId = null
+    }
+    if (rafId != null) {
+      cancelAnimationFrame(rafId)
+      rafId = null
+    }
+    dirty = true
+    if (inflight) {
+      await inflight
+      if (!dirty) return
+    }
+    inflight = runPaint().finally(() => {
+      inflight = null
+    })
+    await inflight
+  }
+
+  const drain = async () => {
+    if (inflight) await inflight
+    else if (dirty) await flushNow()
+  }
+
+  const dispose = () => {
+    if (timerId != null) clearTimeout(timerId)
+    if (rafId != null) cancelAnimationFrame(rafId)
+    timerId = null
+    rafId = null
+    dirty = false
+    inflight = null
+  }
+
+  return { schedule, flushNow, drain, dispose }
 }

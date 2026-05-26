@@ -42,7 +42,10 @@ def _mk_es_client(cfg: ESConfig):
         host = (cfg.host or "").strip()
         if not host:
             raise RuntimeError("ES 未配置：请设置 ES_URL 或 ES_HOST。")
-        kwargs = {"hosts": [{"host": host, "port": int(cfg.port)}], "verify_certs": bool(cfg.verify_certs)}
+        kwargs = {
+            "hosts": [{"scheme": "http", "host": host, "port": int(cfg.port)}],
+            "verify_certs": bool(cfg.verify_certs),
+        }
 
     if cfg.api_key:
         kwargs["api_key"] = cfg.api_key
@@ -123,6 +126,7 @@ class ESLongMemoryStore:
         memory_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not embedding:
+            raise RuntimeError("embedding 为空，无法写入长期记忆。")
             raise RuntimeError("embedding 为空，无法写入长期记忆。")
         self.ensure_index(len(embedding))
         mid = memory_id or str(uuid.uuid4())
@@ -234,20 +238,12 @@ class ESLongMemoryStore:
                 "project_id",
                 "plan_id",
             ],
-            "query": {
-                "bool": {
-                    "filter": flt,
-                    "must": [
-                        {
-                            "knn": {
-                                "field": "embedding",
-                                "query_vector": query_embedding,
-                                "k": k,
-                                "num_candidates": max(50, k * 10),
-                            }
-                        }
-                    ],
-                }
+            "knn": {
+                "field": "embedding",
+                "query_vector": query_embedding,
+                "k": k,
+                "num_candidates": max(50, k * 10),
+                "filter": {"bool": {"filter": flt}},
             },
         }
 

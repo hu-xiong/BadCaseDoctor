@@ -459,7 +459,7 @@ class CreateTool(BaseTool):
                     created_id = await self._create_record(target, validated_fields, project_id)
                     if created_id:
                         _progress("落库成功")
-                        return {
+                        _out: Dict[str, Any] = {
                             'success': True,
                             'message': f'已成功创建{self._get_target_label(target)}',
                             'target': target,
@@ -467,6 +467,19 @@ class CreateTool(BaseTool):
                             'fields': validated_fields,
                             'similar_records': similar_records if similar_records else None
                         }
+                        try:
+                            from agents.tools.grep_recent_fallback import touch_work_items_after_write
+
+                            _touch = touch_work_items_after_write(
+                                (target or "").strip().lower(),
+                                [int(created_id)],
+                                int(project_id),
+                            )
+                            if _touch:
+                                _out.update(_touch)
+                        except Exception as _touch_ex:
+                            print(f"[CREATE] grep touch 失败: {_touch_ex}")
+                        return _out
                     else:
                         _progress("落库失败")
                         return {
@@ -853,9 +866,12 @@ class CreateTool(BaseTool):
         if not merged.get('title'):
             raise ValueError('Bug 标题不能为空')
 
-        # ORM 列为 steps_to_reproduce；兼容 LLM 输出 reproduce_steps
+        # ORM 列为 steps_to_reproduce；兼容 LLM 输出 reproduce_steps / 历史 description
         if merged.get('reproduce_steps') not in (None, '') and not merged.get('steps_to_reproduce'):
             merged['steps_to_reproduce'] = merged['reproduce_steps']
+        if merged.get('description') not in (None, '') and not merged.get('steps_to_reproduce'):
+            merged['steps_to_reproduce'] = merged['description']
+        merged.pop('description', None)
 
         # 与 ORM / 列表展示一致的缺省，避免预览里只剩标题+项目（复制合并后仍可能缺 status 等）
         if not merged.get('status'):
@@ -1147,7 +1163,7 @@ class CreateTool(BaseTool):
                             project_id=int(project_id),
                             creator_id=getattr(bug, "creator_id", None) or int(fields.get("creator_id") or 0) or 0,
                             plan_id=getattr(bug, "plan_id", None),
-                            description=getattr(bug, "description", None) or fields.get("description"),
+                            description=None,
                             source_type="bug",
                             source_id=int(bug.id),
                         )
@@ -1321,7 +1337,6 @@ class CreateTool(BaseTool):
             'environment',
             'browser',
             'os',
-            'description',
             'steps_to_reproduce',
             'expected_result',
             'actual_result',

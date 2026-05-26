@@ -796,6 +796,10 @@ import { ensureEditorHtmlContent } from '../utils/uploadImageUrl.js'
 import { htmlToPlainText } from '../utils/richTextContent.js'
 import { defineAsyncComponent } from 'vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
+import {
+  getPendingModifyDiffForDetail,
+  clearPendingModifyDiffForDetail
+} from '../utils/bcdSessionStore.js'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.vue'))
 
@@ -1937,7 +1941,9 @@ export default {
         
         // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
         if (Object.keys(pendingDiff.value?.modifications || {}).filter(k => !k.startsWith('_')).length === 0) {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+          )
           // 通知对话区修改已确认
           const event = new CustomEvent('modify-confirmed', {
             detail: {
@@ -1961,7 +1967,9 @@ export default {
         
         // 如果所有字段都已处理，清除 sessionStorage
         if (Object.keys(pendingDiff.value?.modifications || {}).filter(k => !k.startsWith('_')).length === 0) {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+          )
           pendingDiff.value = null
         }
       }
@@ -2158,20 +2166,24 @@ export default {
       const showDiffMode = props.show_diff || route.query.show_diff === 'true'
       if (!showDiffMode) {
         try {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+          )
         } catch (_e) {
           /* ignore */
         }
         pendingDiff.value = null
         return
       }
-      const raw = sessionStorage.getItem('pendingModifyDiff')
-      if (!raw) {
+      const pd = getPendingModifyDiffForDetail(
+        snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+      )
+      if (!pd) {
         pendingDiff.value = null
         return
       }
       try {
-        const pd = JSON.parse(raw)
+        const pdCopy = { ...pd }
         const tid = pd?.targetId != null ? String(pd.targetId).trim() : ''
         const cur = testcaseId ? String(testcaseId).trim() : ''
         const tgt = String(pd?.target || '').toLowerCase().replace(/-/g, '_')
@@ -2180,10 +2192,10 @@ export default {
           pendingDiff.value = null
           return
         }
-        pendingDiff.value = pd
+        pendingDiff.value = pdCopy
         const mods = pendingDiff.value?.modifications
         const commentIntent = String(
-          pd?._naturalQuery || pd?.naturalQuery || ''
+          pdCopy?._naturalQuery || pdCopy?.naturalQuery || ''
         ).trim()
         if (mods && coerceTestcaseRemarkToAppendComment(mods, commentIntent)) {
           if (Array.isArray(pendingDiff.value.diff)) {
@@ -2233,7 +2245,9 @@ export default {
             if (newVal && curVal === newVal) delete mods[field]
           }
           if (Object.keys(mods).filter((k) => !String(k).startsWith('_')).length === 0) {
-            sessionStorage.removeItem('pendingModifyDiff')
+            clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+          )
             pendingDiff.value = null
             return
           }
@@ -2304,17 +2318,21 @@ export default {
         const query = route.query
         const showDiffMode = props.show_diff || query.show_diff === 'true'
         if (showDiffMode) {
-          const diffDataStrEarly = sessionStorage.getItem('pendingModifyDiff')
-          if (diffDataStrEarly) {
+          const diffEarly = getPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+          )
+          if (diffEarly) {
             try {
-              pendingDiff.value = JSON.parse(diffDataStrEarly)
+              pendingDiff.value = diffEarly
               console.log('[DIFF] 预读取到 diff 数据:', pendingDiff.value)
             } catch (e) {
               console.error('[DIFF] 预读取 diff 失败:', e)
             }
           }
         } else {
-          sessionStorage.removeItem('pendingModifyDiff')
+          clearPendingModifyDiffForDetail(
+            snowflakeIdStr(props.project_id) || snowflakeIdStr(testcase.project_id)
+          )
           pendingDiff.value = null
         }
 

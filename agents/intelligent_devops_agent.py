@@ -6,7 +6,8 @@
 
 import time
 import os
-from typing import Any, Dict
+import threading
+from typing import Any, Dict, Optional
 
 from .react_simplified import SimplifiedReActEngine
 from .tool_registry import ToolRegistry
@@ -49,6 +50,116 @@ class ConversationMemory:
         return '\n'.join(context)
 
 
+_SHARED_TOOL_REGISTRY: Optional["ToolRegistry"] = None
+_SHARED_TOOL_REGISTRY_LOCK = threading.Lock()
+_TOOL_BOOTSTRAP_DONE = False
+_TOOL_BOOTSTRAP_LOCK = threading.Lock()
+
+
+def register_core_builtin_tools(
+    registry: "ToolRegistry",
+    *,
+    llm=None,
+    db_session=None,
+    react_engine=None,
+    quiet: bool = False,
+) -> int:
+    """
+    注册内置工具（不含 skill_executor，需 react_engine）。
+    llm=None 时跳过依赖 LLM 实例化的业务工具，供应用启动快路径使用。
+    """
+    def _reg(tool):
+        registry.register(tool, quiet=quiet)
+
+    if llm is not None:
+        if BrowserTestTool is not None:
+            _reg(BrowserTestTool(llm))
+        _reg(LogAnalyzerTool(llm))
+        _reg(AccuracyTesterTool(llm))
+        _reg(SearchTool(llm))
+    _reg(LoginStateTool())
+
+    from agents.tools.grep_tool import GrepTool
+
+    _reg(GrepTool())
+
+    from agents.tools.client_local_bridge_tool import ClientLocalBridgeTool
+
+    _reg(ClientLocalBridgeTool())
+
+    from agents.tools.terminal_tool import TerminalTool
+
+    _reg(TerminalTool())
+
+    from agents.tools.modify_tool import ModifyTool
+
+    _reg(ModifyTool(db_session))
+
+    from agents.tools.create_tool import CreateTool
+
+    _reg(CreateTool(db_session))
+    from agents.tools.copy_tool import CopyTool
+
+    _reg(CopyTool(db_session))
+    from agents.tools.delete_tool import DeleteTool
+
+    _reg(DeleteTool(db_session))
+
+    layered_tools = LayeredToolFactory.create_all_tools()
+    for _tool_name, tool in layered_tools.items():
+        _reg(tool)
+
+    if react_engine is not None:
+        from agents.tools.skill_tool import SkillExecutorTool
+        from agents.tools.get_tool_description_tool import GetToolDescriptionTool
+
+        registry.tools["skill_executor"] = SkillExecutorTool(
+            skill_loader=react_engine.skill_loader,
+            skill_registry=react_engine.skill_registry,
+            tool_registry=registry,
+        )
+        if not registry.has_tool("get_tool_description"):
+            registry.register(GetToolDescriptionTool(registry), quiet=quiet)
+
+    return len(registry)
+
+
+def bootstrap_shared_tool_registry(db_session=None) -> "ToolRegistry":
+    """应用启动时仅注册工具，不拉 LLM / 不建 ReAct 引擎（毫秒级）。"""
+    global _SHARED_TOOL_REGISTRY, _TOOL_BOOTSTRAP_DONE
+    with _TOOL_BOOTSTRAP_LOCK:
+        if _TOOL_BOOTSTRAP_DONE and _SHARED_TOOL_REGISTRY is not None:
+            _patch_db_on_registry(_SHARED_TOOL_REGISTRY, db_session)
+            return _SHARED_TOOL_REGISTRY
+        reg = ToolRegistry()
+        register_core_builtin_tools(
+            reg, llm=None, db_session=db_session, react_engine=None, quiet=True
+        )
+        with _SHARED_TOOL_REGISTRY_LOCK:
+            _SHARED_TOOL_REGISTRY = reg
+        _TOOL_BOOTSTRAP_DONE = True
+        if os.getenv("QUIET_LOG") != "1":
+            for _tn in sorted(reg.tools.keys()):
+                print(f"[REGISTRY] ✅ 工具已注册: {_tn}", flush=True)
+            print(
+                f"[AGENT-BOOTSTRAP] 核心工具已注册 n={len(reg)}（未拉 LLM；首条对话再补 search 等）",
+                flush=True,
+            )
+        return reg
+
+
+def _patch_db_on_registry(registry: "ToolRegistry", db_session) -> None:
+    if registry is None or db_session is None:
+        return
+    try:
+        for tool_name in ("modify", "create", "copy", "delete"):
+            tool = registry.get(tool_name)
+            if tool is not None and hasattr(tool, "db"):
+                setattr(tool, "db", db_session)
+    except Exception:
+        pass
+
+
 class IntelligentDevOpsAgent:
     """
     综合型 AI 运维 Agent
@@ -73,9 +184,19 @@ class IntelligentDevOpsAgent:
         self.llm = llm
         self.db = db_session
         
-        # 初始化工具注册表
-        self.tool_registry = ToolRegistry()
-        
+        global _SHARED_TOOL_REGISTRY
+        with _SHARED_TOOL_REGISTRY_LOCK:
+            if _SHARED_TOOL_REGISTRY is not None and len(_SHARED_TOOL_REGISTRY) > 0:
+                self.tool_registry = _SHARED_TOOL_REGISTRY
+                _patch_db_on_registry(self.tool_registry, db_session)
+                if perf:
+                    print(
+                        f"[PERF][agent] reuse_shared_tool_registry tools={len(self.tool_registry)}",
+                        flush=True,
+                    )
+            else:
+                self.tool_registry = ToolRegistry()
+
         # 初始化 ReAct 引擎（极简设计）- 必须在 _register_tools 之前
         t_engine0 = time.perf_counter()
         self.react_engine = SimplifiedReActEngine(
@@ -84,10 +205,13 @@ class IntelligentDevOpsAgent:
         )
         if perf:
             print(f"[PERF][agent] react_engine_init_ms={(time.perf_counter()-t_engine0)*1000:.1f}")
-        
+
         # 注册工具（在 react_engine 之后，因为 skill_tool 需要 react_engine）
         t_reg0 = time.perf_counter()
         self._register_tools()
+        with _SHARED_TOOL_REGISTRY_LOCK:
+            if _SHARED_TOOL_REGISTRY is None and len(self.tool_registry) > 0:
+                _SHARED_TOOL_REGISTRY = self.tool_registry
         if perf:
             print(f"[PERF][agent] register_tools_ms={(time.perf_counter()-t_reg0)*1000:.1f} tools={len(self.tool_registry)}")
         
@@ -96,70 +220,54 @@ class IntelligentDevOpsAgent:
         if perf:
             print(f"[PERF][agent] agent_init_total_ms={(time.perf_counter()-t0)*1000:.1f}")
     
-    def _register_tools(self):
-        """注册所有工具 - 包含分层工具和Skill工具"""
-        # 注册业务工具（BrowserTestTool 依赖 playwright，可能未安装）
+    def _ensure_llm_tools_if_missing(self) -> None:
+        """启动快路径未拉 LLM 时，首条对话补注册 search 等工具。"""
+        if self.llm is None:
+            return
+        if self.tool_registry.has_tool("search"):
+            return
         if BrowserTestTool is not None:
             self.tool_registry.register(BrowserTestTool(self.llm))
         self.tool_registry.register(LogAnalyzerTool(self.llm))
         self.tool_registry.register(AccuracyTesterTool(self.llm))
         self.tool_registry.register(SearchTool(self.llm))
-        self.tool_registry.register(LoginStateTool())  # 登录状态管理工具
-            
-        # 注册grep工具
-        from agents.tools.grep_tool import GrepTool
-        self.tool_registry.register(GrepTool())
 
-        from agents.tools.chitchat_tool import ChitchatTool
+    def _register_tools(self):
+        """注册所有工具 - 包含分层工具和Skill工具"""
+        if len(self.tool_registry) > 0 and self.tool_registry.has_tool("grep"):
+            _patch_db_on_registry(self.tool_registry, self.db)
+            self._ensure_llm_tools_if_missing()
+            self._register_skill_tools_only()
+            if os.getenv("QUIET_LOG") != "1":
+                print(
+                    f"[AGENT] 复用启动已注册工具 n={len(self.tool_registry)}"
+                    f"（跳过重复 [REGISTRY]）",
+                    flush=True,
+                )
+            return
 
-        self.tool_registry.register(ChitchatTool(self.llm))
-
-        from agents.tools.client_local_bridge_tool import ClientLocalBridgeTool
-
-        self.tool_registry.register(ClientLocalBridgeTool())
-
-        from agents.tools.terminal_tool import TerminalTool
-
-        self.tool_registry.register(TerminalTool())
-
-        # 注册modify工具
-        from agents.tools.modify_tool import ModifyTool
-        self.tool_registry.register(ModifyTool(self.db))
-            
-        # 注册create工具
-        from agents.tools.create_tool import CreateTool
-        self.tool_registry.register(CreateTool(self.db))
-        from agents.tools.copy_tool import CopyTool
-        self.tool_registry.register(CopyTool(self.db))
-        from agents.tools.delete_tool import DeleteTool
-        self.tool_registry.register(DeleteTool(self.db))
-            
-        # 注册分层工具（L1/L2/L3）
-        layered_tools = LayeredToolFactory.create_all_tools()
-        for tool_name, tool in layered_tools.items():
-            self.tool_registry.register(tool)
-            
-        #🎯 注册Skill工具
-        from agents.tools.skill_tool import SkillExecutorTool
-        skill_tool = SkillExecutorTool(
-            skill_loader=self.react_engine.skill_loader,
-            skill_registry=self.react_engine.skill_registry,
-            tool_registry=self.tool_registry  #传递工具注册表引用
+        register_core_builtin_tools(
+            self.tool_registry,
+            llm=self.llm,
+            db_session=self.db,
+            react_engine=self.react_engine,
         )
-        self.tool_registry.register(skill_tool)
 
-        from agents.tools.get_tool_description_tool import GetToolDescriptionTool
-
-        self.tool_registry.register(GetToolDescriptionTool(self.tool_registry))
-            
         if os.getenv("QUIET_LOG") != "1":
             print(f"[AGENT]工具注册完成，共 {len(self.tool_registry)} 个工具")
-            print(f"[AGENT]   - 业务工具: 5 (browser_test, log_analyzer, accuracy_tester, search, grep)")
-            print(f"[AGENT]   - 分层工具: {len(layered_tools)}")
-            print(f"[AGENT]      - L1 (原子操作): 4 个")
-            print(f"[AGENT]      - L2 (复合操作): 2 个") 
-            print(f"[AGENT]      - L3 (完整流程): 2 个")
-            print(f"[AGENT]   - 🎯 Skill工具: 1 个 (skill_executor)")
+
+    def _register_skill_tools_only(self):
+        """Skill / get_tool_description 依赖 react_engine，每实例刷新 skill_executor。"""
+        from agents.tools.skill_tool import SkillExecutorTool
+        from agents.tools.get_tool_description_tool import GetToolDescriptionTool
+
+        self.tool_registry.tools["skill_executor"] = SkillExecutorTool(
+            skill_loader=self.react_engine.skill_loader,
+            skill_registry=self.react_engine.skill_registry,
+            tool_registry=self.tool_registry,
+        )
+        if not self.tool_registry.has_tool("get_tool_description"):
+            self.tool_registry.register(GetToolDescriptionTool(self.tool_registry))
 
     def set_db_session(self, db_session):
         """允许复用 Agent 实例时更新 db session 引用。"""

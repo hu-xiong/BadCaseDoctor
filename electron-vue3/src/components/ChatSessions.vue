@@ -122,6 +122,12 @@ import { useRouter, useRoute } from 'vue-router'
 import SimpleChatPanel from './SimpleChatPanel.vue'
 import { getChatSessions, createChatSession, deleteChatSession } from '../api.js'
 import user, { logout } from '../store/user.js'
+import {
+  removeSessionFromProjectCache,
+  clearCreateHold,
+  clearAgentRun,
+  clearDiffSlotsForSession
+} from '../utils/bcdSessionStore.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -193,6 +199,13 @@ const deleteSession = async (sessionId) => {
   try {
     const response = await deleteChatSession(sessionId)
     if (response.data.success) {
+      const pid = selectedProject.value
+      if (pid) {
+        removeSessionFromProjectCache(pid, sessionId)
+        clearCreateHold(pid, sessionId)
+        clearAgentRun(pid, sessionId)
+        clearDiffSlotsForSession(pid, sessionId)
+      }
       // 从列表中移除
       sessions.value = sessions.value.filter(s => s.id !== sessionId)
       // 如果删除的是当前会话，选择下一个会话或置空

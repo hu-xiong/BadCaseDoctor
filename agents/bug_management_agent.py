@@ -122,7 +122,7 @@ class BugManagementAgent(BaseAgent):
         
         project_id = kwargs.get('project_id')
         title = kwargs.get('title')
-        description = kwargs.get('description', '')
+        steps_to_reproduce = kwargs.get('steps_to_reproduce', '') or kwargs.get('description', '')
         priority = kwargs.get('priority', 'medium')
         assignee_id = kwargs.get('assignee_id')
         plan_id = kwargs.get('plan_id')
@@ -137,7 +137,7 @@ class BugManagementAgent(BaseAgent):
         try:
             bug = Bug(
                 title=title,
-                description=description,
+                steps_to_reproduce=steps_to_reproduce or '',
                 status='new',
                 priority=priority,
                 project_id=project_id,
@@ -192,8 +192,10 @@ class BugManagementAgent(BaseAgent):
             # 更新字段
             if 'title' in updates:
                 bug.title = updates['title']
-            if 'description' in updates:
-                bug.description = updates['description']
+            if 'steps_to_reproduce' in updates:
+                bug.steps_to_reproduce = updates['steps_to_reproduce']
+            elif 'description' in updates:
+                bug.steps_to_reproduce = updates['description']
             if 'priority' in updates:
                 bug.priority = updates['priority']
             if 'assignee_id' in updates:
@@ -371,7 +373,7 @@ class BugManagementAgent(BaseAgent):
                 query = query.filter(
                     db.or_(
                         Bug.title.ilike(f'%{keyword}%'),
-                        Bug.description.ilike(f'%{keyword}%')
+                        Bug.steps_to_reproduce.ilike(f'%{keyword}%')
                     )
                 )
             

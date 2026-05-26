@@ -725,19 +725,30 @@ const toolFoldDisplayName = (s) => {
 
 const toolFoldDuration = (s) => {
   if (!s || toolExecRunning(s)) return ''
+  const serverMs =
+    typeof s.toolExecDurationMs === 'number' && Number.isFinite(s.toolExecDurationMs)
+      ? s.toolExecDurationMs
+      : null
+  if (serverMs != null && serverMs >= 0) {
+    return `${(serverMs / 1000).toFixed(2)}s`
+  }
+
   const total = typeof s.stepDurationMs === 'number' ? s.stepDurationMs : null
   if (total == null || !Number.isFinite(total) || total < 0) return ''
 
-  // 只统计工具执行阶段耗时：从 thoughtPhaseEndAtMs（进入 executing 时写入）起算，到本步结束为止
   const stepStartedAt = typeof s.stepStartedAt === 'number' ? s.stepStartedAt : null
   const thoughtEnd = typeof s.thoughtPhaseEndAtMs === 'number' ? s.thoughtPhaseEndAtMs : null
+  const toolStart = typeof s.toolExecStartedAt === 'number' ? s.toolExecStartedAt : null
   const stepEndAt = stepStartedAt != null ? stepStartedAt + total : null
-  if (thoughtEnd != null && stepEndAt != null && Number.isFinite(stepEndAt)) {
-    const toolMs = Math.max(0, stepEndAt - thoughtEnd)
+  if (toolStart != null && stepEndAt != null && Number.isFinite(stepEndAt)) {
+    const toolMs = Math.max(0, stepEndAt - toolStart)
     return `${(toolMs / 1000).toFixed(2)}s`
   }
+  if (thoughtEnd != null && stepEndAt != null && Number.isFinite(stepEndAt)) {
+    const toolMs = Math.max(0, stepEndAt - thoughtEnd)
+    if (toolMs >= 0) return `${(toolMs / 1000).toFixed(2)}s`
+  }
 
-  // 兜底：没有 thoughtEnd（旧流/缺字段）时继续展示总耗时
   return `${(total / 1000).toFixed(2)}s`
 }
 

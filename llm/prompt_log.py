@@ -1,22 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-调试：打印发往 LLM 的完整请求体（messages / tools 等）。
+调试：打印 LLM 请求（输入）与响应（输出）。
 
-启用方式 A — 控制台打印整段 JSON（体积大）：
-  项目根 .env：LLM_LOG_PROMPTS=1  （改完后必须重启 python app.py）
-  PowerShell：$env:LLM_LOG_PROMPTS='1'
-  别名：LLM_DEBUG_PROMPTS=1 / LLM_PROMPT_DEBUG=1
+启用（改 .env 后须重启 python app.py）：
+  LLM_LOG_PROMPTS=1          # 请求：messages / tools / payload
+  LLM_LOG_RESPONSE=1         # 响应；未设置时随 LLM_LOG_PROMPTS=1 一并开启
+  PowerShell：$env:LLM_LOG_PROMPTS='1'; $env:LLM_LOG_RESPONSE='1'
 
-启用方式 B — 推荐：只写文件，终端仍有一行确认（不易刷屏、不依赖控制台缓冲）：
-  LLM_PROMPT_LOG_PATH=logs/llm_prompt.jsonl
-  或 LLM_LOG_PROMPTS_FILE=logs/llm_prompt.jsonl
-  路径相对项目启动时的当前工作目录；可先 mkdir logs
+别名：LLM_DEBUG_PROMPTS / LLM_PROMPT_DEBUG
+
+写文件（推荐，少刷屏）：
+  LLM_PROMPT_LOG_PATH=logs/llm_io.jsonl
+  或 LLM_LOG_PROMPTS_FILE=logs/llm_io.jsonl
 
 可选：
-  LLM_LOG_PROMPTS_MAX_CHARS=200000   # 整段 JSON 最大字符，0 表示不截断
-  LLM_LOG_PROMPTS_INCLUDE_TOOLS=1    # 默认省略 tools 定义（太长）；设为 1 则打印完整 tools
+  LLM_LOG_PROMPTS_MAX_CHARS=200000
+  LLM_LOG_PROMPTS_INCLUDE_TOOLS=1    # 请求里打印完整 tools 定义
+  LLM_LOG_STREAM_OUTPUT=1            # 流式结束后打印拼接正文（默认随 LLM_LOG_RESPONSE）
 
-说明：输出同时使用 logging.warning 与 print；写文件时用线程锁追加。
+标签：[LLM_PROMPT] 输入  [LLM_RESPONSE] 输出
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 _logger = logging.getLogger("badcase.llm_prompt")
 _file_lock = threading.Lock()
@@ -69,6 +71,202 @@ def llm_prompt_log_include_tools_full() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def llm_response_log_enabled() -> bool:
+    v = (os.getenv("LLM_LOG_RESPONSE") or "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    return llm_prompt_log_enabled()
+
+
+def llm_stream_output_log_enabled() -> bool:
+    v = (os.getenv("LLM_LOG_STREAM_OUTPUT") or "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    return llm_response_log_enabled()
+
+
+def _truncate_json_text(raw: str) -> str:
+    mc = llm_prompt_log_max_chars()
+    if mc > 0 and len(raw) > mc:
+        return (
+            raw[:mc]
+            + f"\n... [LLM_IO truncated] LLM_LOG_PROMPTS_MAX_CHARS={mc} json_len={len(raw)}"
+        )
+    return raw
+
+
+def _emit_llm_block(
+    header: str,
+    body: str,
+    *,
+    to_console: bool = True,
+    to_file_path: Optional[str] = None,
+) -> None:
+    to_file = to_file_path or llm_prompt_log_file_path()
+    if not to_console and not to_file:
+        return
+    if to_console:
+        _logger.warning(header)
+        print(header, flush=True)
+        if body:
+            _logger.warning("%s", body)
+            print(body, flush=True)
+    if to_file:
+        block = "\n---\n" + header + "\n" + (body or "") + "\n"
+        try:
+            os.makedirs(os.path.dirname(to_file) or ".", exist_ok=True)
+        except Exception:
+            pass
+        with _file_lock:
+            with open(to_file, "a", encoding="utf-8") as fp:
+                fp.write(block)
+        print(f"[LLM_IO] appended -> {to_file}", flush=True)
+
+
+def _usage_to_dict(usage: Any) -> Optional[Dict[str, Any]]:
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return dict(usage)
+    keys = (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+    )
+    out: Dict[str, Any] = {}
+    for k in keys:
+        v = getattr(usage, k, None)
+        if v is not None:
+            out[k] = v
+    return out or None
+
+
+def _openai_message_to_dict(msg: Any) -> Dict[str, Any]:
+    if msg is None:
+        return {}
+    if isinstance(msg, dict):
+        return dict(msg)
+    content = getattr(msg, "content", None) or ""
+    reasoning = getattr(msg, "reasoning_content", None)
+    tcs = getattr(msg, "tool_calls", None)
+    out: Dict[str, Any] = {
+        "content": content,
+        "content_len": len(content) if isinstance(content, str) else 0,
+    }
+    if reasoning:
+        out["reasoning_content"] = reasoning
+        if isinstance(reasoning, str):
+            out["reasoning_len"] = len(reasoning)
+    if tcs:
+        tc_rows: List[Dict[str, Any]] = []
+        if not isinstance(tcs, (list, tuple)):
+            tcs = [tcs]
+        for tc in tcs:
+            fn = getattr(tc, "function", None)
+            if fn is None and isinstance(tc, dict):
+                fn = tc.get("function")
+            if isinstance(fn, dict):
+                name = fn.get("name") or ""
+                args = fn.get("arguments")
+            else:
+                name = getattr(fn, "name", "") if fn else ""
+                args = getattr(fn, "arguments", "") if fn else ""
+            if not isinstance(args, str):
+                try:
+                    args = json.dumps(args, ensure_ascii=False)
+                except Exception:
+                    args = str(args)
+            tc_rows.append({"name": name, "arguments": args})
+        out["tool_calls"] = tc_rows
+    return out
+
+
+def maybe_log_llm_response_body(
+    provider: str,
+    body: Dict[str, Any],
+    *,
+    tag: str = "",
+    model: Optional[str] = None,
+) -> None:
+    """打印 LLM 响应快照（非流式整包或流式拼接结果）。"""
+    if not llm_response_log_enabled() and not llm_prompt_log_file_path():
+        return
+    try:
+        snap = dict(body)
+        if model:
+            snap.setdefault("model", model)
+        raw = _truncate_json_text(json.dumps(snap, ensure_ascii=False, default=str))
+        header = (
+            f"[LLM_RESPONSE] provider={provider} tag={tag or '-'} "
+            f"model={snap.get('model')!r}"
+        )
+        _emit_llm_block(
+            header,
+            raw,
+            to_console=llm_response_log_enabled(),
+            to_file_path=llm_prompt_log_file_path(),
+        )
+    except Exception as e:
+        print(f"[LLM_RESPONSE] log_failed: {e}", flush=True)
+
+
+def maybe_log_llm_openai_completion(
+    provider: str,
+    resp: Any,
+    *,
+    tag: str = "",
+    model: Optional[str] = None,
+) -> None:
+    if not llm_response_log_enabled() and not llm_prompt_log_file_path():
+        return
+    try:
+        choices_out: List[Dict[str, Any]] = []
+        for ch in getattr(resp, "choices", None) or []:
+            msg = getattr(ch, "message", None)
+            choices_out.append(_openai_message_to_dict(msg))
+        body: Dict[str, Any] = {
+            "choices": choices_out,
+            "usage": _usage_to_dict(getattr(resp, "usage", None)),
+        }
+        if model:
+            body["model"] = model
+        maybe_log_llm_response_body(provider, body, tag=tag, model=model)
+    except Exception as e:
+        print(f"[LLM_RESPONSE] openai_completion log_failed: {e}", flush=True)
+
+
+def maybe_log_llm_stream_assembled(
+    provider: str,
+    *,
+    tag: str = "",
+    model: Optional[str] = None,
+    content: str = "",
+    reasoning: str = "",
+    usage: Any = None,
+) -> None:
+    """流式结束后打印拼接的正文（便于看完整输出体积）。"""
+    if not llm_stream_output_log_enabled() and not llm_prompt_log_file_path():
+        return
+    body: Dict[str, Any] = {
+        "stream_assembled": True,
+        "content": content,
+        "content_len": len(content or ""),
+    }
+    if reasoning:
+        body["reasoning_content"] = reasoning
+        body["reasoning_len"] = len(reasoning)
+    u = _usage_to_dict(usage)
+    if u:
+        body["usage"] = u
+    maybe_log_llm_response_body(provider, body, tag=tag, model=model)
+
+
 def maybe_log_llm_chat_kwargs(
     provider: str,
     kwargs: Dict[str, Any],
@@ -91,36 +289,17 @@ def maybe_log_llm_chat_kwargs(
                     )
                 else:
                     snap["tools"] = "<omitted>"
-        # stream_options / extra_body 等保留，便于对齐官方文档
-        raw = json.dumps(snap, ensure_ascii=False, default=str)
-        mc = llm_prompt_log_max_chars()
-        if mc > 0 and len(raw) > mc:
-            total_len = len(raw)
-            raw = (
-                raw[:mc]
-                + f"\n... [LLM_PROMPT truncated] LLM_LOG_PROMPTS_MAX_CHARS={mc} json_len={total_len}"
-            )
+        raw = _truncate_json_text(json.dumps(snap, ensure_ascii=False, default=str))
         header = (
             f"[LLM_PROMPT] provider={provider} tag={tag or '-'} "
             f"model={snap.get('model')!r} stream={snap.get('stream', False)!r}"
         )
-        if to_console:
-            _logger.warning(header)
-            print(header, flush=True)
-            _logger.warning("%s", raw)
-            print(raw, flush=True)
-        if to_file:
-            block = "\n---\n" + header + "\n" + raw + "\n"
-            try:
-                os.makedirs(os.path.dirname(to_file) or ".", exist_ok=True)
-            except Exception:
-                pass
-            with _file_lock:
-                with open(to_file, "a", encoding="utf-8") as fp:
-                    fp.write(block)
-            msg = f"[LLM_PROMPT] appended {len(raw)} chars -> {to_file}"
-            _logger.warning(msg)
-            print(msg, flush=True)
+        _emit_llm_block(
+            header,
+            raw,
+            to_console=to_console,
+            to_file_path=to_file,
+        )
     except Exception as e:
         _logger.warning("[LLM_PROMPT] log_failed: %s", e)
         print(f"[LLM_PROMPT] log_failed: {e}", flush=True)

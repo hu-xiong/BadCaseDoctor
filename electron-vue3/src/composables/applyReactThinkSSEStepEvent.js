@@ -111,8 +111,12 @@ function syncPlaceholderStepThought(aiMessage) {
     mergeThoughtReasoningDraft(tr)
     if (tc) st.thoughtContentDraft = tc
     if (!tr && !tc && rc) mergeThoughtReasoningDraft(rc)
-  } else if ((aiMessage.lastReactPhase === 'think' || aiMessage.lastReactPhase === 'observe' || aiMessage.lastReactPhase === 'decide') && !multiStep) {
-    // 修复：统一流的所有思考阶段（think/observe/decide）都同步到 steps[0]
+  } else if (
+    aiMessage.lastReactPhase === 'think' ||
+    aiMessage.lastReactPhase === 'observe' ||
+    aiMessage.lastReactPhase === 'decide'
+  ) {
+    // 统一流：计划到达后 multiStep 为 true，仍须把 message 级 THINK 草稿同步到 steps[0]（首轮 grep 绑 step0）
     mergeThoughtReasoningDraft(tr)
     if (tc) st.thoughtContentDraft = tc
     if (!String(tr).trim() && !String(tc).trim() && String(rc).trim()) mergeThoughtReasoningDraft(rc)
@@ -141,10 +145,38 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
   switch (stepEvent.event) {
     case 'reasoning_timing': {
       const seg = stepEvent.segment
+      const durationMs =
+        stepEvent.duration_ms != null ? Number(stepEvent.duration_ms) : null
+      const briefThr =
+        stepEvent.brief_threshold_ms != null ? Number(stepEvent.brief_threshold_ms) : 800
+
+      const applyThoughtTimingToStep = (st, segment) => {
+        if (!st || durationMs == null || !Number.isFinite(durationMs)) return
+        st.thoughtTiming = {
+          durationMs,
+          kind: stepEvent.kind || null,
+          segment: segment || 'think',
+          briefThresholdMs: briefThr
+        }
+        if (st.thoughtPhaseEndAtMs == null) {
+          if (st.stepStartedAt != null) {
+            st.thoughtPhaseEndAtMs = st.stepStartedAt + durationMs
+          } else {
+            st.thoughtPhaseEndAtMs = Date.now()
+          }
+        }
+      }
+
       if (seg === 'think') {
-        if (stepEvent.duration_ms != null) aiMessage.reasoningUiDurationMs = Number(stepEvent.duration_ms)
+        if (durationMs != null) aiMessage.reasoningUiDurationMs = durationMs
         if (stepEvent.kind) aiMessage.reasoningUiKind = stepEvent.kind
-        if (stepEvent.brief_threshold_ms != null) aiMessage.reasoningBriefThresholdMs = Number(stepEvent.brief_threshold_ms)
+        if (stepEvent.brief_threshold_ms != null) {
+          aiMessage.reasoningBriefThresholdMs = briefThr
+        }
+        let j =
+          stepEvent.index != null ? resolveStreamStepIndex(stepEvent.index, aiMessage.steps) : null
+        if (j == null && Array.isArray(aiMessage.steps) && aiMessage.steps.length) j = 0
+        if (j != null && aiMessage.steps[j]) applyThoughtTimingToStep(aiMessage.steps[j], 'think')
       } else if ((seg === 'decide' || seg === 'observe') && stepEvent.index != null) {
         const j = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
         if (j != null && aiMessage.steps[j]) {
@@ -261,7 +293,18 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
         } else {
           st.phaseWait = null
           if (kind === 'unified_round_think') {
-            st.thoughtPhaseEndAtMs = Date.now()
+            const endMs = Date.now()
+            const briefThr = 800
+            st.thoughtPhaseEndAtMs = endMs
+            if (st.stepStartedAt != null && !st.thoughtTiming) {
+              const durationMs = Math.max(0, endMs - st.stepStartedAt)
+              st.thoughtTiming = {
+                durationMs,
+                kind: durationMs < briefThr ? 'brief' : 'normal',
+                segment: 'think',
+                briefThresholdMs: briefThr
+              }
+            }
           }
         }
       }
@@ -384,5 +427,16 @@ export function mergeMessageThinkDraftsIntoReactStepZero(aiMessage) {
   const pwk0 = String(s0.phaseWait?.kind || '')
   if (merged.length > 0 && pwk0 !== 'unified_action_xml' && pwk0 !== 'plan_xml_stream') {
     s0.phaseWait = null
+  }
+  if (aiMessage.reasoningUiDurationMs != null && !s0.thoughtTiming) {
+    s0.thoughtTiming = {
+      durationMs: Number(aiMessage.reasoningUiDurationMs),
+      kind: aiMessage.reasoningUiKind || null,
+      segment: 'think',
+      briefThresholdMs: aiMessage.reasoningBriefThresholdMs ?? 800
+    }
+    if (s0.thoughtPhaseEndAtMs == null && s0.stepStartedAt != null) {
+      s0.thoughtPhaseEndAtMs = s0.stepStartedAt + Number(aiMessage.reasoningUiDurationMs)
+    }
   }
 }

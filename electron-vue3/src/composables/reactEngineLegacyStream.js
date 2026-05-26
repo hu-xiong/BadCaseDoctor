@@ -13,6 +13,10 @@ import {
 } from './reactObservationStream.js'
 import { i18n } from '../i18n/index.js'
 import { freezeThoughtSnapshotForStep } from './thoughtSnapshot.js'
+import {
+  looksLikeUnifiedProtocolText,
+  stripUnifiedProtocolForDisplay
+} from '../utils/stripUnifiedProtocolDisplay.js'
 
 const toolExecutingLabel = () => i18n.global.t('chat.toolExecuting')
 
@@ -25,6 +29,7 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
   const appendStepDetailLine = ctx.appendStepDetailLine
   const scrollAgentStepLogIntoView = ctx.scrollAgentStepLogIntoView
   const handleShowGroupInList = ctx.handleShowGroupInList
+  const handleShowModifyInList = ctx.handleShowModifyInList
   const projectId = ctx.projectId
   const handleNavigation = ctx.handleNavigation
   const nextTick = ctx.nextTick
@@ -91,6 +96,16 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
       aiMessage.reactDirectChatReply = true
       aiMessage.finalResponse = ''
       aiMessage.summaryStreamDraft = ''
+      aiMessage.thinkReasoningDraft = ''
+      aiMessage.thinkContentDraft = ''
+      aiMessage.reasoningContent = ''
+      aiMessage.understanding = ''
+      aiMessage.hadAgentThinkPhase = false
+      aiMessage._reasoningPhaseLive = false
+      aiMessage.steps = []
+      aiMessage._placeholderSteps = false
+      aiMessage.reactPlanPanelSuppressed = true
+      aiMessage.thoughtCollapsed = true
     }
     return {}
   }
@@ -381,6 +396,7 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
       if (runningStep.thoughtPhaseEndAtMs == null) {
         runningStep.thoughtPhaseEndAtMs = Date.now()
       }
+      runningStep.toolExecStartedAt = Date.now()
       if (!runningStep.progressLog) runningStep.progressLog = []
       if (!runningStep.inputParams && (stepEvent.params || stepEvent.tool || stepEvent.reason)) {
         runningStep.inputParams = {
@@ -431,6 +447,7 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
       appendStepDetailLine,
       nextTick,
       handleShowGroupInList,
+      handleShowModifyInList: ctx.handleShowModifyInList,
       projectId,
       handleNavigation,
       buildReactStepsFromTodoStrings
@@ -498,6 +515,8 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
   }
   if (stepEvent.event === 'finished') {
     aiMessage.reactMainLoopFinished = true
+    aiMessage.unifiedSummaryLoading = false
+    clearReactStepsPhaseWait(aiMessage)
     if (aiMessage.understanding === '...') {
       aiMessage.understanding = ''
     }
@@ -578,6 +597,57 @@ function _isSandboxWaitSummaryStub(txt) {
   )
 }
 
+function clearReactStepsPhaseWait(aiMessage) {
+  if (!aiMessage || !Array.isArray(aiMessage.steps)) return
+  aiMessage.steps.forEach((step) => {
+    if (step?.phaseWait) step.phaseWait = null
+  })
+}
+
+/**
+ * HTTP SSE 已结束但未见 done/failed/cancelled 时收口，避免 understanding='...' 与 phaseWait 永久转圈。
+ */
+export function reconcileReactMessageAfterSseClose(aiMessage) {
+  if (!aiMessage?.agentResult) return
+  const st = aiMessage.agentResult.status
+  if (st && st !== 'running') return
+
+  aiMessage.reactMainLoopFinished = true
+  aiMessage.unifiedSummaryLoading = false
+  clearReactStepsPhaseWait(aiMessage)
+
+  if (Array.isArray(aiMessage.steps)) {
+    aiMessage.steps.forEach((step) => {
+      if (step?.status === 'running') {
+        freezeThoughtSnapshotForStep(step)
+        step.status = 'completed'
+        step.description = '已完成'
+      }
+    })
+  }
+
+  if (aiMessage.understanding === '...') {
+    aiMessage.understanding = ''
+  }
+
+  const rs = String(aiMessage.runningSummaryDraft || '').trim()
+  const ss = String(aiMessage.summaryStreamDraft || '').trim()
+  const fr = String(aiMessage.finalResponse || '').trim()
+  if (!fr && (rs || ss)) {
+    aiMessage.finalResponse = rs || ss
+  } else if (!fr && !rs && !ss) {
+    const findings = aiMessage.agentResult.findings || []
+    if (findings.length > 0) {
+      aiMessage.finalResponse = findings
+        .map((f) => '- ' + (typeof f === 'string' ? f : String(f)))
+        .join('\n')
+    }
+  }
+
+  aiMessage.agentResult.status = 'success'
+  aiMessage.thoughtCollapsed = true
+}
+
 function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypewriter) {
   flushReasoningTypewriter(aiMessage)
   aiMessage.unifiedSummaryLoading = false
@@ -608,9 +678,15 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
     }
     aiMessage.agentResult.findings = []
     aiMessage.agentResult.summaryText = ''
-    const streamed = String(aiMessage.finalResponse || '').trim()
-    const summary =
+    let streamed = String(aiMessage.finalResponse || '').trim()
+    let summary =
       typeof stepEvent.summary === 'string' ? String(stepEvent.summary).trim() : ''
+    if (looksLikeUnifiedProtocolText(streamed)) {
+      streamed = stripUnifiedProtocolForDisplay(streamed)
+    }
+    if (looksLikeUnifiedProtocolText(summary)) {
+      summary = stripUnifiedProtocolForDisplay(summary)
+    }
     aiMessage.finalResponse = streamed || summary
     aiMessage.summaryStreamDraft = ''
     aiMessage.thoughtCollapsed = true
@@ -646,6 +722,7 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
   aiMessage.thoughtCollapsed = true
 
   aiMessage.steps.forEach((step) => {
+    if (step?.phaseWait) step.phaseWait = null
     if (step.status === 'failed' || step.status === 'error') return
     if (step.status !== 'completed') {
       freezeThoughtSnapshotForStep(step)
@@ -653,6 +730,9 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
       step.description = '已完成'
     }
   })
+  if (aiMessage.understanding === '...') {
+    aiMessage.understanding = ''
+  }
 
   const allFindings =
     stepEvent.findings && stepEvent.findings.length > 0

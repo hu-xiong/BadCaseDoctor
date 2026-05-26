@@ -18,7 +18,11 @@ from sqlalchemy import Result
 
 from config import Config
 from .dashscope_compat import get_dashscope_compat_client
-from .prompt_log import maybe_log_llm_chat_kwargs
+from .prompt_log import (
+    maybe_log_llm_chat_kwargs,
+    maybe_log_llm_openai_completion,
+    maybe_log_llm_stream_assembled,
+)
 from .multimodal_content import openai_style_user_content
 
 
@@ -287,7 +291,15 @@ class QwenLLM:
             kwargs,
             tag=f"_chat_create thinking={enable_thinking}",
         )
-        return self._get_client().chat.completions.create(**kwargs)
+        resp = self._get_client().chat.completions.create(**kwargs)
+        if not stream:
+            maybe_log_llm_openai_completion(
+                "qwen",
+                resp,
+                tag=f"_chat_create thinking={enable_thinking}",
+                model=self.model,
+            )
+        return resp
 
     def chat_completion_with_tools(
         self,
@@ -314,7 +326,11 @@ class QwenLLM:
             kwargs["max_tokens"] = max_tokens
         self._apply_qwen_thinking_extra_body(kwargs, enable_thinking=False)
         maybe_log_llm_chat_kwargs("qwen", kwargs, tag="chat_completion_with_tools")
-        return self._get_client().chat.completions.create(**kwargs)
+        resp = self._get_client().chat.completions.create(**kwargs)
+        maybe_log_llm_openai_completion(
+            "qwen", resp, tag="chat_completion_with_tools", model=self.model
+        )
+        return resp
 
     def chat_completion_with_tools_stream(
         self,
@@ -513,6 +529,9 @@ class QwenLLM:
             _first_content_s: Optional[float] = None
             _n_rc = 0
             _n_ct = 0
+            _acc_rc: List[str] = []
+            _acc_ct: List[str] = []
+            _last_usage = None
             for chunk in stream:
                 _log_compat_stream_first(
                     "chat_stream_with_reasoning",
@@ -522,21 +541,34 @@ class QwenLLM:
                     first=_first,
                 )
                 _first = False
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    _last_usage = u
                 if not chunk.choices:
                     continue
                 d = chunk.choices[0].delta
                 rc = _delta_reasoning_content(d)
                 if rc and isinstance(rc, str):
                     _n_rc += 1
+                    _acc_rc.append(rc)
                     if _first_reasoning_s is None:
                         _first_reasoning_s = time.monotonic() - _t0
                     yield {"type": "reasoning_delta", "delta": rc}
                 ct = _delta_content(d)
                 if ct and isinstance(ct, str):
                     _n_ct += 1
+                    _acc_ct.append(ct)
                     if _first_content_s is None:
                         _first_content_s = time.monotonic() - _t0
                     yield {"type": "content_delta", "delta": ct}
+            maybe_log_llm_stream_assembled(
+                "qwen",
+                tag="chat_stream_with_reasoning",
+                model=self.model,
+                content="".join(_acc_ct),
+                reasoning="".join(_acc_rc),
+                usage=_last_usage,
+            )
             if _qwen_first_token_log_enabled():
                 _gap = (
                     None
