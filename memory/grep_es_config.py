@@ -13,14 +13,14 @@ def _slug_model(name: str) -> str:
 
 def _grep_embedding_backend(cfg) -> str:
     return (
-        str(getattr(cfg, "GREP_EMBEDDING_BACKEND", "qianfan") or "qianfan")
+        str(getattr(cfg, "GREP_EMBEDDING_BACKEND", "dashscope") or "dashscope")
         .strip()
         .lower()
     )
 
 
 def build_embedding_client_from_config(cfg=None) -> EmbeddingClient:
-    """Grep / work_item 索引用 embedding；默认千帆 BGE（快），可改 dashscope 多模态或 local。"""
+    """Grep / work_item 索引用 embedding；默认豆包 doubao-embedding-vision，可改 dashscope / qianfan / local。"""
     if cfg is None:
         try:
             from config import Config as cfg
@@ -45,10 +45,43 @@ def build_embedding_client_from_config(cfg=None) -> EmbeddingClient:
             )
         )
 
+    if backend in ("doubao", "ark", "volcengine"):
+        api_key = (
+            getattr(cfg, "GREP_EMBEDDING_API_KEY", "") or ""
+            or getattr(cfg, "DOUBAO_API_KEY", "") or ""
+        )
+        model = (
+            getattr(cfg, "GREP_EMBEDDING_MODEL", "") or ""
+            or getattr(cfg, "DOUBAO_EMBEDDING_MODEL", "") or "doubao-embedding-vision-251215"
+        )
+        base_url = (
+            getattr(cfg, "GREP_EMBEDDING_BASE_URL", "") or ""
+            or getattr(cfg, "DOUBAO_EMBEDDING_BASE_URL", "") or ""
+            or getattr(cfg, "DOUBAO_API_BASE_URL", "") or None
+        )
+        return EmbeddingClient(
+            EmbeddingConfig(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                provider="remote",
+                dimension=dimension,
+            )
+        )
+
     if backend in ("dashscope", "qwen", "aliyun", "tongyi"):
-        api_key = getattr(cfg, "EMBEDDING_API_KEY", "") or ""
-        model = getattr(cfg, "EMBEDDING_MODEL", "") or "tongyi-embedding-vision-plus-2026-03-06"
-        base_url = getattr(cfg, "EMBEDDING_BASE_URL", "") or None
+        api_key = (
+            getattr(cfg, "GREP_EMBEDDING_API_KEY", "") or ""
+            or getattr(cfg, "EMBEDDING_API_KEY", "") or ""
+        )
+        model = (
+            getattr(cfg, "GREP_EMBEDDING_MODEL", "") or ""
+            or getattr(cfg, "EMBEDDING_MODEL", "") or "tongyi-embedding-vision-plus-2026-03-06"
+        )
+        base_url = (
+            getattr(cfg, "GREP_EMBEDDING_BASE_URL", "") or ""
+            or getattr(cfg, "EMBEDDING_BASE_URL", "") or None
+        )
         return EmbeddingClient(
             EmbeddingConfig(
                 api_key=api_key,

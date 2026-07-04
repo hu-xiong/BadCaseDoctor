@@ -41,6 +41,7 @@ class CreateTool(BaseTool):
 参数：
 - target: 创建目标类型，'bug'、'badcase'、'plan'、'testcase' 或 'card'（仅迭代卡片表 Card，不落 Bug/BadCase 源表）
 - fields: 字段内容字典；复制时需 copy_from_*_id 或可推断的自然语言。
+  target=plan 时必填 **name**（计划名称；也接受 title 别名）；缺 start_date/end_date 时服务端补默认日期。
   target=card 时推荐 copy_from_card_id（或 source_card_id）：复制迭代列表里的另一条 Card，仅用标题/计划/类型等列表层字段；
   若要从底层 Bug/BadCase/TestCase 复制仍可用 copy_from_bug_id 等。
 - project_id: 项目ID（必需）
@@ -998,23 +999,42 @@ class CreateTool(BaseTool):
         return validated
     
     def _validate_plan_fields(self, fields: Dict, project_id: int) -> Dict:
-        """验证迭代计划字段"""
+        """验证迭代计划字段（缺省起止日期，与 /api/plans POST 必填一致）。"""
+        from datetime import date, timedelta
+
+        def _parse_date(v: Any):
+            if v is None or v == "":
+                return None
+            if isinstance(v, date):
+                return v
+            s = str(v).strip()[:10]
+            try:
+                return date.fromisoformat(s)
+            except ValueError:
+                return None
+
+        today = date.today()
+        start_d = _parse_date(fields.get("start_date")) or today
+        end_d = _parse_date(fields.get("end_date")) or (today + timedelta(days=14))
+
+        # LLM/技能常误用 title（与 bug 一致）；plan 表字段为 name
+        plan_name = fields.get("name") or fields.get("title") or ""
+        plan_name = str(plan_name).strip()
+
         validated = {
-            'name': fields.get('name', ''),
-            'description': fields.get('description', ''),
-            'status': fields.get('status', 'active'),
-            'project_id': project_id,
-            'parent_id': fields.get('parent_id'),
-            'assignee_id': fields.get('assignee_id'),
-            'start_date': fields.get('start_date'),
-            'end_date': fields.get('end_date')
+            "name": plan_name,
+            "description": fields.get("description", ""),
+            "status": fields.get("status", "active"),
+            "project_id": project_id,
+            "parent_id": fields.get("parent_id"),
+            "assignee_id": fields.get("assignee_id"),
+            "start_date": start_d,
+            "end_date": end_d,
         }
 
-        # 计划表字段已收敛：不再接收/使用“类型”字段。
-        
-        if not validated['name']:
-            raise ValueError('计划名称不能为空')
-        
+        if not validated["name"]:
+            raise ValueError("计划名称不能为空")
+
         return validated
     
     def _validate_testcase_fields(self, fields: Dict, project_id: int) -> Dict:

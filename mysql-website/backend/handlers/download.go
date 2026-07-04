@@ -29,12 +29,23 @@ func (h *DownloadHandler) List(c *gin.Context) {
 
 	offset := (page - 1) * pageSize
 
+	edition := c.Query("edition")
+	osName := c.Query("os")
+
+	query := models.DB.Model(&models.Download{})
+	if edition != "" {
+		query = query.Where("edition = ?", edition)
+	}
+	if osName != "" {
+		query = query.Where("os = ?", osName)
+	}
+
 	// 查询总数
 	var total int64
-	models.DB.Model(&models.Download{}).Count(&total)
+	query.Count(&total)
 
 	// 查询列表
-	if err := models.DB.Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&downloads).Error; err != nil {
+	if err := query.Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&downloads).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to fetch downloads",

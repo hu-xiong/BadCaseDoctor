@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 import json
 
-from agents.react_function_call import FcStreamAccumulator, decision_from_assistant_message
+from agents.react_function_call import (
+    FcStreamAccumulator,
+    decision_from_assistant_message,
+    decision_from_fc_tool_call,
+    UNIFIED_ROUND_CONTROL_TOOL,
+)
 
 
 class _Delta:
@@ -78,6 +83,64 @@ def test_accumulator_tool_calls_chunks():
     assert d is not None
     assert d["tool"] == "grep"
     assert d["params"]["keywords"] == "x"
+
+
+def test_try_build_decision_incremental():
+    acc = FcStreamAccumulator()
+    ch = type(
+        "C",
+        (),
+        {
+            "choices": [
+                type(
+                    "Ch",
+                    (),
+                    {
+                        "delta": _Delta(
+                            tool_calls=[
+                                _Tc(0, "c1", _Fn("grep", '{"keywords":')),
+                            ]
+                        )
+                    },
+                )
+            ]
+        },
+    )()
+    assert acc.try_build_decision() is None
+    acc.feed(ch)
+    assert acc.try_build_decision() is None
+    ch2 = type(
+        "C",
+        (),
+        {
+            "choices": [
+                type(
+                    "Ch",
+                    (),
+                    {
+                        "delta": _Delta(
+                            tool_calls=[_Tc(0, None, _Fn(None, '"登录"}'))]
+                        )
+                    },
+                )
+            ]
+        },
+    )()
+    acc.feed(ch2)
+    d = acc.try_build_decision()
+    assert d is not None
+    assert d["tool"] == "grep"
+    assert d["params"]["keywords"] == "登录"
+
+
+def test_submit_unified_round_control():
+    d = decision_from_fc_tool_call(
+        UNIFIED_ROUND_CONTROL_TOOL,
+        '{"goal_done": true, "execute": false, "reason": "done"}',
+    )
+    assert d is not None
+    assert d.get("execute") is False
+    assert d.get("_goal_done") is True
 
 
 def test_accumulator_dict_chunk():

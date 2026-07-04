@@ -20,7 +20,7 @@ export function stripUnifiedProtocolForDisplay(t) {
   s = s.replace(/<observation[\s\S]*?<\/observation>/gi, '')
   s = s.replace(/<thinking[\s\S]*?<\/thinking>/gi, '')
   s = s.replace(
-    /<\/?(?:observation|thinking|decision|decide|task_plan|step|goal_done|execute|tool|params|reason)\b[^>]*>/gi,
+    /<\/?(?:observation|thinking|think_summary|decision|decide|task_plan|step|goal_done|execute|tool|params|reason)\b[^>]*>/gi,
     ''
   )
   s = s.replace(/<[^>]+>/g, '')

@@ -847,8 +847,24 @@ export function readTestcaseRowField(row, fieldKey, opts = {}) {
   return ''
 }
 
+/** 本次沙箱预览涉及的字段：后端 diff 行 + modifications（不扫全表详情字段） */
+function collectTestcaseSandboxPreviewFieldKeys(rows, mods) {
+  const keys = new Set()
+  for (const r of rows || []) {
+    const fk = normalizeTestcaseModifyFieldKey(r?.field, r?.field_label)
+    if (fk) keys.add(fk)
+  }
+  if (mods && typeof mods === 'object') {
+    for (const rawKey of Object.keys(mods)) {
+      const fk = normalizeTestcaseModifyFieldKey(rawKey)
+      if (fk) keys.add(fk)
+    }
+  }
+  return keys
+}
+
 /**
- * 测例沙箱/详情：合并 diff 行、before/after、modifications，输出可展示行。
+ * 测例沙箱：只展示本次 diff/modifications 中的字段；对已有行补全 delete 为空时的旧值。
  * @param {object} nav - { target, before, after, modifications }
  * @param {Array} baseRows - 后端 diff 行（可先 normalizeTestcaseSandboxDiffRow）
  * @param {function} t - vue-i18n t
@@ -903,7 +919,7 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t, opts = {}) {
 
   const upsertRow = (fk, bo, ao) => {
     if (testcaseDetailFieldValuesEqual(fk, bo, ao) && !formatSide(fk, ao)) {
-      return
+      return false
     }
     const oldD = formatSide(fk, bo)
     const newD = formatSide(fk, ao)
@@ -921,54 +937,18 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t, opts = {}) {
     if (existingIdx >= 0) rows[existingIdx] = entry
     else rows.push(entry)
     seen.add(fk)
+    return true
   }
 
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const fk = normalizeTestcaseModifyFieldKey(rows[i]?.field, rows[i]?.field_label)
-    if (testcaseSandboxDiffLinesShowChange(rows[i])) continue
-    const bo = readTestcaseEffectiveBefore(nav, fk)
-    const ao = readTestcaseEffectiveAfter(nav, fk)
-    if (testcaseDetailFieldValuesEqual(fk, bo, ao)) {
-      rows.splice(i, 1)
-      seen.delete(fk)
-    }
-  }
+  const previewFields = collectTestcaseSandboxPreviewFieldKeys(rows, mods)
 
-  const allDetailFields = [
-    ...TESTCASE_DETAIL_FIELDS,
-    ...TESTCASE_LIST_FIELDS.filter((f) => f !== 'title' && f !== 'status' && f !== 'assignee')
-  ]
-  const fieldsToScan = [...new Set([...allDetailFields, ...seen])]
-
-  for (const fk of fieldsToScan) {
-    if (!TESTCASE_DETAIL_FIELDS.includes(fk)) {
-      continue
-    }
+  for (const fk of previewFields) {
     const bo = readTestcaseEffectiveBefore(nav, fk)
-    const ao = readTestcaseEffectiveAfter(nav, fk)
-    if (ao === undefined && bo === undefined) continue
-    if (seen.has(fk) && !testcaseSandboxDiffLinesShowChange(rows.find(
-      (r) => normalizeTestcaseModifyFieldKey(r?.field, r?.field_label) === fk
-    ))) {
-      const row = rows.find((r) => normalizeTestcaseModifyFieldKey(r?.field, r?.field_label) === fk)
-      if (row && testcaseSandboxDiffLinesShowChange(row)) continue
-      if (testcaseDetailFieldValuesEqual(fk, bo, ao)) continue
-    }
+    let ao = readTestcaseEffectiveAfter(nav, fk)
+    if (ao === undefined) ao = readTestcaseModifyNewValue(mods, fk)
+    if (bo === undefined && ao === undefined) continue
     if (testcaseDetailFieldValuesEqual(fk, bo, ao)) continue
     upsertRow(fk, bo, ao)
-  }
-
-  if (mods && typeof mods === 'object') {
-    for (const rawKey of Object.keys(mods)) {
-      const fk = normalizeTestcaseModifyFieldKey(rawKey)
-      if (!TESTCASE_DETAIL_FIELDS.includes(fk)) continue
-      if (seen.has(fk)) continue
-      const bo = readTestcaseEffectiveBefore(nav, fk)
-      const ao = readTestcaseModifyNewValue(mods, fk)
-      if (ao === undefined) continue
-      if (testcaseDetailFieldValuesEqual(fk, bo, ao)) continue
-      upsertRow(fk, bo, ao)
-    }
   }
 
   for (let i = 0; i < rows.length; i++) {
@@ -987,7 +967,24 @@ export function enrichTestcaseSandboxDiffRows(nav, baseRows, t, opts = {}) {
     }
   }
 
-  return rows.filter((r) => !shouldSuppressMislabeledTestcaseStatusSandboxRow(r, nav))
+  return rows.filter((r) => {
+    if (shouldSuppressMislabeledTestcaseStatusSandboxRow(r, nav)) return false
+    if (testcaseSandboxDiffLinesShowChange(r)) return true
+    const fk = normalizeTestcaseModifyFieldKey(r?.field, r?.field_label)
+    if (!fk) return true
+    const bo = readTestcaseEffectiveBefore(nav, fk)
+    const ao = readTestcaseEffectiveAfter(nav, fk)
+    if (bo === undefined && ao === undefined) {
+      const del = r?.lines?.find((l) => l.type === 'delete')?.content
+      const add = r?.lines?.find((l) => l.type === 'add')?.content
+      return (
+        (del != null && String(del).trim() !== '') ||
+        (add != null && String(add).trim() !== '') ||
+        r?.lines?.some((l) => l.type === 'unchanged')
+      )
+    }
+    return !testcaseDetailFieldValuesEqual(fk, bo, ao)
+  })
 }
 
 export function readTestcaseModifySideValue(

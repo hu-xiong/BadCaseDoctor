@@ -1,28 +1,21 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { login, register, logout, getCurrentUser } from '@/api/auth'
+import { login, register, logout, getCurrentUser, type AuthUser } from '@/api/auth'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('token'))
-  const user = ref<User | null>(null)
+  const user = ref<AuthUser | null>(null)
   const loading = ref(false)
 
   const isAuthenticated = computed(() => !!token.value)
 
-  interface User {
-    id: number
-    username: string
-    email: string
-    avatar?: string
-  }
-
-  async function loginAction(credentials: { username: string; password: string }) {
+  async function loginAction(credentials: { email: string; password: string }) {
     loading.value = true
     try {
-      const response = await login(credentials)
-      token.value = response.data.token
-      user.value = response.data.user
-      localStorage.setItem('token', response.data.token)
+      const payload = await login(credentials)
+      token.value = payload.token
+      user.value = payload.user
+      localStorage.setItem('token', payload.token)
       return { success: true }
     } catch (error: any) {
       return { success: false, message: error.response?.data?.message || 'Login failed' }
@@ -34,10 +27,10 @@ export const useAuthStore = defineStore('auth', () => {
   async function registerAction(userData: { username: string; email: string; password: string }) {
     loading.value = true
     try {
-      const response = await register(userData)
-      token.value = response.data.token
-      user.value = response.data.user
-      localStorage.setItem('token', response.data.token)
+      const payload = await register(userData)
+      token.value = payload.token
+      user.value = payload.user
+      localStorage.setItem('token', payload.token)
       return { success: true }
     } catch (error: any) {
       return { success: false, message: error.response?.data?.message || 'Registration failed' }
@@ -59,8 +52,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function fetchCurrentUser() {
     if (!token.value) return
     try {
-      const response = await getCurrentUser()
-      user.value = response.data
+      user.value = await getCurrentUser()
     } catch {
       logoutAction()
     }

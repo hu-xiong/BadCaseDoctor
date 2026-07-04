@@ -52,4 +52,6 @@ export function freezeThoughtSnapshotForStep(s) {
   const c = snapshotThoughtContentFromStep(s)
   if (r) s.thoughtReasoningSnapshot = r
   if (c) s.thoughtContentSnapshot = c
+  const sum = String(s.thoughtSummaryDraft || '').replace(/\s+/g, ' ').trim()
+  if (sum && !/^frozen_macro_step_\d+$/i.test(sum)) s.thoughtSummarySnapshot = sum
 }

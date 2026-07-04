@@ -66,5 +66,7 @@ frontend/
 The API base URL is configured in `src/api/axios.ts`:
 
 ```
-http://localhost:8080/api/v1
+开发：`http://localhost:5180`（Vite 代理 `/api` → 后端 `8090`）
+
+生产直连 API：`http://localhost:8090/api/v1`
 ```

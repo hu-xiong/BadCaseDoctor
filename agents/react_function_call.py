@@ -82,6 +82,118 @@ def _tool_call_first_function(tc: Any) -> Optional[tuple]:
     return name.strip(), args
 
 
+UNIFIED_ROUND_CONTROL_TOOL = "submit_unified_round"
+
+
+def use_react_unified_fc_decide() -> bool:
+    """REACT_UNIFIED_FC_DECIDE=1（默认）：统一流单请求 observation/thinking XML + FC 决策（方案 C）。"""
+    return (os.getenv("REACT_UNIFIED_FC_DECIDE", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def use_react_unified_fc_early_execute() -> bool:
+    """REACT_UNIFIED_FC_EARLY_EXECUTE=1（默认）：tool_calls.arguments JSON 凑齐即中断收流并执行工具。"""
+    return (os.getenv("REACT_UNIFIED_FC_EARLY_EXECUTE", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def build_unified_fc_tools_from_registry(tool_registry: Any) -> List[Dict[str, Any]]:
+    """方案 C：业务工具 + submit_unified_round（收尾/闲聊，不执行 grep/modify）。"""
+    tools = build_react_decision_tools_from_registry(tool_registry)
+    tools.append(
+        {
+            "type": "function",
+            "function": {
+                "name": UNIFIED_ROUND_CONTROL_TOOL,
+                "description": (
+                    "本回合不调用业务工具时使用：目标已达成、纯闲聊、或无需 execute。"
+                    "execute=false 且 tool 留空；goal_done 与 observation 完成度一致。"
+                    "复杂多步可在 task_plan 列出后续步骤（仅备忘，实际仍每轮调一个业务工具）。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "goal_done": {
+                            "type": "boolean",
+                            "description": "用户目标是否已达成或可直接回复",
+                        },
+                        "execute": {
+                            "type": "boolean",
+                            "description": "本回合是否还要执行业务工具；收尾/闲聊须 false",
+                        },
+                        "reason": {"type": "string"},
+                        "task_plan": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "可选，2～12 条后续步骤中文短句",
+                        },
+                    },
+                    "required": ["goal_done", "execute"],
+                },
+            },
+        }
+    )
+    return tools
+
+
+def decision_from_fc_tool_call(name: str, arg_str: str) -> Optional[Dict[str, Any]]:
+    """将单条 FC 工具名 + arguments 转为与 parse_xml_decision 一致的 decision dict。"""
+    name = (name or "").strip().lower()
+    if not name:
+        return None
+    try:
+        params = json.loads(arg_str) if (arg_str or "").strip() else {}
+    except json.JSONDecodeError as e:
+        print(f"[REACT-FC] arguments JSON 解析失败: {e} raw={(arg_str or '')[:200]!r}")
+        return {
+            "execute": False,
+            "tool": "",
+            "params": {},
+            "reason": f"function_call_arguments_invalid:{e}",
+        }
+    if not isinstance(params, dict):
+        params = {"value": params}
+
+    if name == UNIFIED_ROUND_CONTROL_TOOL:
+        execute = bool(params.get("execute", False))
+        goal_done = bool(params.get("goal_done", False))
+        reason = str(params.get("reason") or "").strip() or "submit_unified_round"
+        out: Dict[str, Any] = {
+            "execute": execute,
+            "tool": "",
+            "params": {},
+            "reason": reason,
+            "_fc_control": True,
+            "_goal_done": goal_done,
+        }
+        tp = params.get("task_plan")
+        if isinstance(tp, list) and tp:
+            out["_task_plan"] = [str(x).strip() for x in tp if str(x).strip()]
+        return out
+
+    out = {
+        "execute": True,
+        "tool": name,
+        "params": params,
+        "reason": f"function_call:{name}",
+    }
+    if name == "modify" and "confirm" not in out["params"]:
+        out["params"]["confirm"] = False
+    if name == "create" and "confirm" not in out["params"]:
+        out["params"]["confirm"] = False
+    if name == "delete" and "confirm" not in out["params"]:
+        out["params"]["confirm"] = False
+    return out
+
+
 def decision_from_assistant_message(msg: Any) -> Optional[Dict[str, Any]]:
     """
     若存在 tool_calls，解析为与 parse_xml_decision 一致的核心字段；
@@ -105,34 +217,7 @@ def decision_from_assistant_message(msg: Any) -> Optional[Dict[str, Any]]:
     if not pair:
         return None
     name, arg_str = pair
-    name = (name or "").strip().lower()
-    try:
-        params = json.loads(arg_str) if arg_str.strip() else {}
-    except json.JSONDecodeError as e:
-        print(f"[REACT-FC] arguments JSON 解析失败: {e} raw={arg_str[:200]!r}")
-        return {
-            "execute": False,
-            "tool": "",
-            "params": {},
-            "reason": f"function_call_arguments_invalid:{e}",
-        }
-
-    if not isinstance(params, dict):
-        params = {"value": params}
-
-    out = {
-        "execute": True,
-        "tool": name,
-        "params": params,
-        "reason": f"function_call:{name}",
-    }
-    if name == "modify" and "confirm" not in out["params"]:
-        out["params"]["confirm"] = False
-    if name == "create" and "confirm" not in out["params"]:
-        out["params"]["confirm"] = False
-    if name == "delete" and "confirm" not in out["params"]:
-        out["params"]["confirm"] = False
-    return out
+    return decision_from_fc_tool_call(name, arg_str)
 
 
 def use_react_decide_function_call() -> bool:
@@ -255,6 +340,34 @@ class FcStreamAccumulator:
             )
         return {"role": "assistant", "content": content, "tool_calls": tool_calls}
 
+    def _first_tool_slot(self) -> Optional[Dict[str, Any]]:
+        if not self._tc_slots:
+            return None
+        idx = min(self._tc_slots.keys())
+        return self._tc_slots.get(idx)
+
+    def try_build_decision(self) -> Optional[Dict[str, Any]]:
+        """
+        流式 FC：当首条 tool_call 的 name 已齐且 arguments 为合法 JSON 时返回 decision。
+        供统一流方案 C 边收边执行；未就绪返回 None。
+        """
+        slot = self._first_tool_slot()
+        if not slot:
+            return None
+        name = (slot.get("name") or "").strip()
+        if not name:
+            return None
+        arg_str = slot.get("arguments")
+        if not isinstance(arg_str, str):
+            return None
+        if not (arg_str or "").strip():
+            return None
+        try:
+            json.loads(arg_str)
+        except json.JSONDecodeError:
+            return None
+        return decision_from_fc_tool_call(name, arg_str)
+
 
 THINK_FC_TOOL = "submit_react_think"
 OBSERVE_FC_TOOL = "submit_observe_analysis"
@@ -328,7 +441,7 @@ def build_react_think_fc_tools() -> List[Dict[str, Any]]:
                 "name": THINK_FC_TOOL,
                 "description": (
                     "提交本轮 THINK 推断结果（三选一）："
-                    "(1) 单步可直驱工具：need_tools=true, need_todo_list=false, todo_items=[]；"
+                    "(1) 单步可直驱工具（仅 grep 等，禁止首轮 modify/delete）：need_tools=true, need_todo_list=false, todo_items=[]；"
                     "(2) 多步或需展示计划：need_tools=true, need_todo_list=true 且填写 todo_items；"
                     "(3) 闲聊/无需查改项目数据：need_tools=false 且填写 message。"
                     "必须调用且仅调用本函数一次。"
@@ -368,7 +481,7 @@ def build_react_think_fc_tools() -> List[Dict[str, Any]]:
                             "type": "string",
                             "description": (
                                 "need_tools=true 且已明确首步时填写：即将调用的工具名（如 grep、modify、create、"
-                                "database_query、browser_test、search 等），与决策步 FC 一致；未就绪可省略，系统再用首条 Todo 补决策。"
+                                "database_query、cdp、search 等），与决策步 FC 一致；未就绪可省略，系统再用首条 Todo 补决策。"
                             ),
                         },
                         # 部分网关不接受 additionalProperties: true；用无 properties 的空 object 表示「任意键值」。

@@ -646,17 +646,36 @@
             </div>
           </div>
           <div v-if="testcaseComments.length" class="comment-timeline">
-            <div v-for="c in testcaseComments" :key="c.id" class="comment-item">
+            <div
+              v-for="c in testcaseComments"
+              :key="c.id"
+              class="comment-item"
+              :class="{ 'is-reply': c.parent_id, 'is-pending': c.pending }"
+            >
               <div class="comment-item-meta">
                 <span class="comment-author">{{ c.user_name || '—' }}</span>
+                <span v-if="c.parent_id" class="comment-reply-tag">{{ t('testcaseComment.replyTo', { name: c.parent_user_name || '—' }) }}</span>
                 <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
                 <span v-if="c.source_message_id" class="comment-op-tag">{{ t('testcaseComment.linkedOp') }}</span>
+                <span v-if="c.pending" class="comment-pending-tag">{{ t('testcaseComment.pending') }}</span>
+                <button
+                  v-if="isEdit && testcaseId && !c.pending"
+                  type="button"
+                  class="comment-reply-btn"
+                  @click="startReplyToComment(c)"
+                >
+                  {{ t('testcaseComment.reply') }}
+                </button>
               </div>
               <div class="comment-item-body" v-html="c.content"></div>
             </div>
           </div>
           <div v-else class="comment-empty">{{ t('testcaseComment.empty') }}</div>
-          <h4 class="comment-input-subtitle">{{ t('testcaseComment.inputTitle') }}</h4>
+          <div v-if="replyingTo" class="comment-reply-hint">
+            {{ t('testcaseComment.replying', { name: replyingTo.user_name || '—' }) }}
+            <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">{{ t('common.cancel') }}</button>
+          </div>
+          <h4 class="comment-input-subtitle">{{ replyingTo ? t('testcaseComment.inputReplyTitle') : t('testcaseComment.inputTitle') }}</h4>
           <div ref="commentInputContainerRef" class="comment-input-container">
             <template v-if="!commentEditorActive">
               <textarea
@@ -837,6 +856,10 @@ export default {
     show_diff: {
       type: Boolean,
       default: false
+    },
+    pending_diff_seq: {
+      type: Number,
+      default: 0
     },
     /** 嵌入详情：沙箱跳转时默认 Tab（basic | defects | execution） */
     initial_tab: {
@@ -1056,6 +1079,7 @@ export default {
     const testcaseComments = ref([])
     const commentDraft = ref('')
     const commentSubmitting = ref(false)
+    const replyingTo = ref(null)
     const commentEditorActive = ref(false)
     const commentInputContainerRef = ref(null)
     const activateCommentEditor = () => {
@@ -1722,6 +1746,25 @@ export default {
       ]
     }
 
+    const resolveCommentParentId = (comment) => {
+      if (!comment || comment.pending) return null
+      const id = comment.id
+      if (id == null || String(id).startsWith('pending-')) return null
+      return id
+    }
+
+    const startReplyToComment = (comment) => {
+      replyingTo.value = comment
+      commentEditorActive.value = true
+      nextTick(() => {
+        commentInputContainerRef.value?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+      })
+    }
+
+    const cancelReplyToComment = () => {
+      replyingTo.value = null
+    }
+
     const loadTestcaseComments = async () => {
       if (!testcaseId) return
       try {
@@ -1744,20 +1787,53 @@ export default {
       }
     }
 
+    const reloadTestcaseCommentsAfterSubmit = async (tempId) => {
+      const delays = [400, 1200, 3000]
+      for (const ms of delays) {
+        await new Promise((resolve) => setTimeout(resolve, ms))
+        await loadTestcaseComments()
+        if (!tempId || !testcaseComments.value.some((c) => c.id === tempId && c.pending)) return
+      }
+    }
+
     const submitCommentDraft = async () => {
       if (!isEdit || !testcaseId || !richTextHtmlHasContent(commentDraft.value)) return
+      const parentId = replyingTo.value ? resolveCommentParentId(replyingTo.value) : null
+      const author = currentUser.value ? personPrimaryLabel(currentUser.value) : '—'
+      const tempId = `pending-${Date.now()}`
+      const optimistic = {
+        id: tempId,
+        content: commentDraft.value,
+        user_name: author,
+        user_id: currentUser.value?.id ?? null,
+        parent_id: parentId,
+        parent_user_name: replyingTo.value?.user_name || '',
+        created_at: new Date().toISOString(),
+        pending: true
+      }
+      testcaseComments.value = [...testcaseComments.value, optimistic]
+      const draftSnapshot = commentDraft.value
+      commentDraft.value = ''
+      commentEditorActive.value = false
+      replyingTo.value = null
       commentSubmitting.value = true
       try {
-        const resp = await addTestCaseComment(testcaseId, commentDraft.value)
+        const resp = await addTestCaseComment(testcaseId, draftSnapshot, null, parentId)
         const res = resp?.data || resp
         if (res?.success && res.comment) {
-          testcaseComments.value = [...testcaseComments.value, res.comment]
-          commentDraft.value = ''
-          commentEditorActive.value = false
+          if (res.async) {
+            reloadTestcaseCommentsAfterSubmit(tempId)
+          } else {
+            testcaseComments.value = testcaseComments.value.map((c) =>
+              c.id === tempId ? res.comment : c
+            )
+          }
         } else {
+          testcaseComments.value = testcaseComments.value.filter((c) => c.id !== tempId)
           alert(res?.error || '发表评论失败')
         }
       } catch (e) {
+        testcaseComments.value = testcaseComments.value.filter((c) => c.id !== tempId)
         console.error('[TestCase] 发表评论失败:', e)
         alert('发表评论失败')
       } finally {
@@ -2036,7 +2112,7 @@ export default {
     }
 
     /** 详情内单字段采纳且 pending 已清空：通知工作区 Tab 退出 show_diff 并刷新 */
-    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue) => {
+    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue, serverResult = null) => {
       if (pendingDiff.value) return
       const tid = resolveEditorTestcaseId()
       if (!tid) return
@@ -2046,11 +2122,36 @@ export default {
             targetId: tid,
             targetType: 'testcase',
             adoptedField,
-            adoptedValue
+            adoptedValue,
+            serverResult: serverResult ?? null
           },
           bubbles: true
         })
       )
+    }
+
+    const rollbackOptimisticTestcaseField = async (field, nk, modSnapshot, pendingMeta) => {
+      if (nk === 'append_comment') {
+        testcaseComments.value = (testcaseComments.value || []).filter(
+          (c) => !String(c?.id || '').startsWith('pending-')
+        )
+      } else if (modSnapshot?.old !== undefined) {
+        applyDetailFieldToTestcase(nk, modSnapshot.old)
+        await nextTick()
+        if (nk === 'preconditions') {
+          preconditionsEditorRef.value?.syncFromModel?.()
+        }
+      }
+      const pd = pendingDiff.value || {
+        targetId: pendingMeta.targetId,
+        target: pendingMeta.target,
+        messageId: pendingMeta.messageId,
+        modifications: {}
+      }
+      for (const k of getTestcaseModifyModKeys(field, nk)) {
+        pd.modifications[k] = { ...modSnapshot }
+      }
+      pendingDiff.value = pd
     }
 
     const applyFieldChange = async (field) => {
@@ -2062,12 +2163,28 @@ export default {
       const targetId = pendingDiff.value?.targetId || testcaseId
       const target = pendingDiff.value?.target || 'testcase'
       const newValue = mod.new
+      const modSnapshot = { ...mod }
+      const pendingMeta = {
+        targetId,
+        target,
+        messageId: pendingDiff.value?.messageId ?? null
+      }
 
       const pid = currentProjectId.value || testcase.project_id
       if (!pid || !targetId) {
         console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId: pid, targetId })
         return
       }
+
+      if (nk === 'append_comment') {
+        optimisticAppendTestcaseComment(plainCommentFromDiffValue(newValue))
+        commentDraft.value = ''
+      } else {
+        applyDetailFieldToTestcase(nk, newValue)
+        await nextTick()
+        preconditionsEditorRef.value?.syncFromModel?.()
+      }
+      confirmFieldChange(field)
 
       try {
         const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${pid}/modify`, {
@@ -2084,11 +2201,12 @@ export default {
                   : newValue
             },
             confirm: true,
-            message_id: pendingDiff.value?.messageId
+            message_id: pendingMeta.messageId
           })
         })
         const result = await resp.json()
         if (!result.success) {
+          await rollbackOptimisticTestcaseField(field, nk, modSnapshot, pendingMeta)
           console.error('[DIFF] 采纳失败:', result.error)
           alert(result.error || '采纳失败')
           return
@@ -2096,20 +2214,15 @@ export default {
 
         if (nk === 'append_comment') {
           const plain = plainCommentFromDiffValue(newValue)
-          optimisticAppendTestcaseComment(plain)
           if (result.async === true) {
             await new Promise((resolve) => setTimeout(resolve, 420))
           }
           await reloadTestcaseCommentsAfterAdopt(plain)
-          commentDraft.value = ''
-        } else {
-          applyDetailFieldToTestcase(nk, newValue)
-          await nextTick()
-          preconditionsEditorRef.value?.syncFromModel?.()
         }
-        confirmFieldChange(field)
-        notifyDetailAdoptCompleteIfDone(nk, newValue)
+
+        notifyDetailAdoptCompleteIfDone(nk, newValue, result)
       } catch (e) {
+        await rollbackOptimisticTestcaseField(field, nk, modSnapshot, pendingMeta)
         console.error('[DIFF] 采纳字段异常:', e)
       }
     }
@@ -2286,6 +2399,13 @@ export default {
       const cur = resolveEditorTestcaseId()
       if (!tid || !cur || tid !== cur) return
 
+      if (event?.detail?.reloadPendingDiff === true) {
+        await reloadPendingDiffFromSession()
+        await nextTick()
+        preconditionsEditorRef.value?.syncFromModel?.()
+        return
+      }
+
       const fieldUpdates = event?.detail?.fieldUpdates
       if (fieldUpdates && typeof fieldUpdates === 'object') {
         for (const [field, val] of Object.entries(fieldUpdates)) {
@@ -2421,7 +2541,7 @@ export default {
     })
 
     watch(
-      () => [props.show_diff, props.id],
+      () => [props.show_diff, props.id, props.pending_diff_seq],
       () => {
         void reloadPendingDiffFromSession()
       },
@@ -2573,6 +2693,9 @@ export default {
       commentDraftText,
       commentDraftLength,
       commentSubmitting,
+      replyingTo,
+      startReplyToComment,
+      cancelReplyToComment,
       commentEditorActive,
       commentInputContainerRef,
       activateCommentEditor,
@@ -3017,6 +3140,61 @@ export default {
   background: #f8f9fa;
   border-radius: 6px;
   border: 1px solid #e9ecef;
+}
+
+.comment-item.is-reply {
+  margin-left: 16px;
+  border-left: 3px solid #dee2e6;
+}
+
+.comment-item.is-pending {
+  opacity: 0.85;
+}
+
+.comment-reply-btn {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #0d6efd;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comment-reply-btn:hover {
+  text-decoration: underline;
+}
+
+.comment-reply-tag,
+.comment-pending-tag {
+  font-size: 11px;
+  color: #6c757d;
+}
+
+.comment-pending-tag {
+  color: #fd7e14;
+}
+
+.comment-reply-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #495057;
+  background: #eef5ff;
+  border-radius: 4px;
+}
+
+.comment-reply-cancel {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #6c757d;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .comment-item-meta {

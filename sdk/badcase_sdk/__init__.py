@@ -8,6 +8,13 @@ from .collector import BadCaseCollector
 from .context import TraceContext, get_trace_context, set_trace_context, context_manager
 from .decorators import llm_observe, llm_span, _LlMSpanContext
 from .stream import observe_stream, observe_stream_sync
+from .text_export import (
+    collect_metric_samples,
+    format_samples_summary,
+    write_snapshot,
+    start_periodic_export,
+    stop_periodic_export,
+)
 from .labels import (
     bucket_temperature,
     bucket_top_p,
@@ -81,4 +88,9 @@ __all__ = [
     "set_trace_context",
     "context_manager",
     "set_badcase_label",
+    "collect_metric_samples",
+    "format_samples_summary",
+    "write_snapshot",
+    "start_periodic_export",
+    "stop_periodic_export",
 ]

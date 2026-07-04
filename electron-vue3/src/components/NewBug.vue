@@ -394,30 +394,21 @@
         
         <!-- 期望结果输入框 -->
         <div class="answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.expected_result }">
-          <!-- diff 显示区域 -->
-          <div v-if="pendingDiff?.modifications?.expected_result" class="field-diff-panel">
-            <div class="diff-header">
-              <span class="diff-label">期望结果修改预览:</span>
-              <div class="diff-actions">
-                <button @click="applyFieldChange('expected_result')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button @click="cancelFieldChange('expected_result')" class="btn-cancel" title="取消">✗</button>
-              </div>
-            </div>
-            <div class="diff-content">
-              <div class="diff-row">
-                <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ bugExpectedResultOldDisplay || '未设置' }}</span>
-              </div>
-              <div class="diff-row">
-                <span class="diff-tag new">新值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.expected_result?.new }}</span>
-              </div>
-            </div>
-          </div>
           <h3 class="answer-title">期望结果:</h3>
-          <textarea 
-            v-model="bug.expected_result" 
-            class="answer-textarea" 
+          <InlineFieldDiffBox
+            v-if="pendingDiff?.modifications?.expected_result"
+            :original="String(bugExpectedResultOldDisplay || pendingDiff.modifications.expected_result?.old || '')"
+            :modified="String(pendingDiff.modifications.expected_result?.new ?? '')"
+            empty-original-label="未设置"
+            label="期望结果修改预览"
+            height="120px"
+            @apply="applyFieldChange('expected_result')"
+            @cancel="cancelFieldChange('expected_result')"
+          />
+          <textarea
+            v-else
+            v-model="bug.expected_result"
+            class="answer-textarea"
             placeholder="请输入期望结果..."
             maxlength="1000"
           ></textarea>
@@ -426,30 +417,21 @@
         
         <!-- 实际结果输入框 -->
         <div class="correct-answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.actual_result }">
-          <!-- diff 显示区域 -->
-          <div v-if="pendingDiff?.modifications?.actual_result" class="field-diff-panel">
-            <div class="diff-header">
-              <span class="diff-label">实际结果修改预览:</span>
-              <div class="diff-actions">
-                <button @click="applyFieldChange('actual_result')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button @click="cancelFieldChange('actual_result')" class="btn-cancel" title="取消">✗</button>
-              </div>
-            </div>
-            <div class="diff-content">
-              <div class="diff-row">
-                <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.actual_result?.old || '未设置' }}</span>
-              </div>
-              <div class="diff-row">
-                <span class="diff-tag new">新值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.actual_result?.new }}</span>
-              </div>
-            </div>
-          </div>
           <h3 class="correct-answer-title">实际结果:</h3>
-          <textarea 
-            v-model="bug.actual_result" 
-            class="correct-answer-textarea" 
+          <InlineFieldDiffBox
+            v-if="pendingDiff?.modifications?.actual_result"
+            :original="String(pendingDiff.modifications.actual_result?.old ?? '')"
+            :modified="String(pendingDiff.modifications.actual_result?.new ?? '')"
+            empty-original-label="未设置"
+            label="实际结果修改预览"
+            height="120px"
+            @apply="applyFieldChange('actual_result')"
+            @cancel="cancelFieldChange('actual_result')"
+          />
+          <textarea
+            v-else
+            v-model="bug.actual_result"
+            class="correct-answer-textarea"
             placeholder="请输入实际结果..."
             maxlength="1000"
           ></textarea>
@@ -660,17 +642,36 @@
              </div>
            </div>
            <div v-if="entityComments.length" class="comment-timeline">
-             <div v-for="c in entityComments" :key="c.id" class="comment-item">
+             <div
+               v-for="c in entityComments"
+               :key="c.id"
+               class="comment-item"
+               :class="{ 'is-reply': c.parent_id, 'is-pending': c.pending }"
+             >
                <div class="comment-item-meta">
                  <span class="comment-author">{{ c.user_name || '—' }}</span>
+                 <span v-if="c.parent_id" class="comment-reply-tag">回复 @{{ c.parent_user_name || '—' }}</span>
                  <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
                  <span v-if="c.source_message_id" class="comment-op-tag">来自对话操作</span>
+                 <span v-if="c.pending" class="comment-pending-tag">提交中</span>
+                 <button
+                   v-if="isEdit && bugId && !c.pending"
+                   type="button"
+                   class="comment-reply-btn"
+                   @click="startReplyToComment(c)"
+                 >
+                   回复
+                 </button>
                </div>
                <div class="comment-item-body" v-html="c.content"></div>
              </div>
            </div>
            <div v-else class="comment-empty">暂无评论</div>
-           <h4 class="comment-input-subtitle">输入评论</h4>
+           <div v-if="replyingTo" class="comment-reply-hint">
+             正在回复 <strong>{{ replyingTo.user_name || '—' }}</strong>
+             <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">取消</button>
+           </div>
+           <h4 class="comment-input-subtitle">{{ replyingTo ? '输入回复' : '输入评论' }}</h4>
            <div ref="commentInputContainerRef" class="comment-input-container">
              <template v-if="!commentEditorActive">
                <textarea
@@ -733,6 +734,7 @@ import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/rich
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import user from '../store/user.js'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
+import InlineFieldDiffBox from './InlineFieldDiffBox.vue'
 import {
   getPendingModifyDiffForDetail,
   clearPendingModifyDiffForDetail
@@ -742,7 +744,7 @@ const MonacoDiffEditor = defineAsyncComponent(() => import('./MonacoDiffEditor.v
 
 export default {
   name: 'NewBug',
-  components: { MonacoDiffEditor, RichTextHtmlEditor },
+  components: { MonacoDiffEditor, RichTextHtmlEditor, InlineFieldDiffBox },
   props: {
     id: {
       type: [String, Number],
@@ -768,6 +770,11 @@ export default {
     show_diff: {
       type: Boolean,
       default: false
+    },
+    /** 沙箱 pending diff 版本号：变时仅 reload session，不 remount 详情 */
+    pending_diff_seq: {
+      type: Number,
+      default: 0
     },
     embedded: {
       type: Boolean,
@@ -1882,6 +1889,26 @@ export default {
     const entityComments = ref([])
     const commentDraft = ref('')
     const commentSubmitting = ref(false)
+    const replyingTo = ref(null)
+
+    const resolveCommentParentId = (comment) => {
+      if (!comment || comment.pending) return null
+      const id = comment.id
+      if (id == null || String(id).startsWith('pending-')) return null
+      return id
+    }
+
+    const startReplyToComment = (comment) => {
+      replyingTo.value = comment
+      commentEditorActive.value = true
+      nextTick(() => {
+        commentInputContainerRef.value?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+      })
+    }
+
+    const cancelReplyToComment = () => {
+      replyingTo.value = null
+    }
 
     const commentDraftText = computed(() => {
       if (!commentDraft.value) return ''
@@ -2004,14 +2031,22 @@ export default {
       const cur = resolveEditorBugId()
       if (!tid || !cur || tid !== cur) return
 
+      if (event?.detail?.reloadPendingDiff === true) {
+        await reloadPendingDiffFromSession()
+        return
+      }
+
       const fieldUpdates = event?.detail?.fieldUpdates
+      const skipCommentReload = event?.detail?.skipCommentReload === true
       if (fieldUpdates && typeof fieldUpdates === 'object') {
         for (const [field, val] of Object.entries(fieldUpdates)) {
           const f = String(field)
           if (f === 'append_comment' || f === 'comment' || f === 'remark') {
             const plain = plainCommentFromDiffValue(val)
             optimisticAppendEntityComment(plain)
-            await reloadEntityCommentsAfterAdopt(plain)
+            if (!skipCommentReload) {
+              await reloadEntityCommentsAfterAdopt(plain)
+            }
             clearCommentPendingDiffKeys()
           } else {
             applyDetailFieldToBug(f, val)
@@ -2028,20 +2063,53 @@ export default {
       }
     }
 
+    const reloadEntityCommentsAfterSubmit = async (tempId) => {
+      const delays = [400, 1200, 3000]
+      for (const ms of delays) {
+        await new Promise((resolve) => setTimeout(resolve, ms))
+        await loadEntityComments()
+        if (!tempId || !entityComments.value.some((c) => c.id === tempId && c.pending)) return
+      }
+    }
+
     const submitCommentDraft = async () => {
       if (!isEdit || !bugId.value || !richTextHtmlHasContent(commentDraft.value)) return
+      const parentId = replyingTo.value ? resolveCommentParentId(replyingTo.value) : null
+      const author = currentUser.value ? personPrimaryLabel(currentUser.value) : '—'
+      const tempId = `pending-${Date.now()}`
+      const optimistic = {
+        id: tempId,
+        content: commentDraft.value,
+        user_name: author,
+        user_id: currentUser.value?.id ?? null,
+        parent_id: parentId,
+        parent_user_name: replyingTo.value?.user_name || '',
+        created_at: new Date().toISOString(),
+        pending: true
+      }
+      entityComments.value = [...entityComments.value, optimistic]
+      const draftSnapshot = commentDraft.value
+      commentDraft.value = ''
+      commentEditorActive.value = false
+      replyingTo.value = null
       commentSubmitting.value = true
       try {
-        const resp = await addBugComment(bugId.value, commentDraft.value)
+        const resp = await addBugComment(bugId.value, draftSnapshot, null, parentId)
         const res = resp?.data || resp
         if (res?.success && res.comment) {
-          entityComments.value = [...entityComments.value, res.comment]
-          commentDraft.value = ''
-          commentEditorActive.value = false
+          if (res.async) {
+            reloadEntityCommentsAfterSubmit(tempId)
+          } else {
+            entityComments.value = entityComments.value.map((c) =>
+              c.id === tempId ? res.comment : c
+            )
+          }
         } else {
+          entityComments.value = entityComments.value.filter((c) => c.id !== tempId)
           alert(res?.error || res?.message || '发表评论失败')
         }
       } catch (e) {
+        entityComments.value = entityComments.value.filter((c) => c.id !== tempId)
         console.error('[Bug] 发表评论失败:', e)
         alert('发表评论失败')
       } finally {
@@ -2259,7 +2327,7 @@ export default {
     }
 
     watch(
-      () => [props.show_diff, props.id],
+      () => [props.show_diff, props.id, props.pending_diff_seq],
       () => {
         reloadPendingDiffFromSession()
       },
@@ -2304,7 +2372,7 @@ export default {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
 
-    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue) => {
+    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue, serverResult = null) => {
       if (pendingDiff.value) return
       const tid =
         props.id != null && props.id !== ''
@@ -2319,11 +2387,56 @@ export default {
             targetId: tid,
             targetType: 'bug',
             adoptedField,
-            adoptedValue
+            adoptedValue,
+            serverResult: serverResult ?? null
           },
           bubbles: true
         })
       )
+    }
+
+    const applyOptimisticFieldToBug = (storeKey, apiField, newValue, target) => {
+      if (storeKey === 'append_comment' || apiField === 'append_comment') {
+        optimisticAppendEntityComment(plainCommentFromDiffValue(newValue))
+        commentDraft.value = ''
+        return
+      }
+      if (apiField === 'plan_id') {
+        bug.plan = normalizePlanId(newValue) || ''
+      } else if (apiField === 'project_id') {
+        bug.project_id = String(newValue)
+        bug.associate_project = true
+      } else if (target === 'bug' && apiField === 'steps_to_reproduce') {
+        bug.reproduction_steps = newValue
+      } else if (Object.prototype.hasOwnProperty.call(bug, apiField)) {
+        bug[apiField] = newValue
+      }
+    }
+
+    const rollbackOptimisticBugField = (storeKey, apiField, modSnapshot, pendingMeta) => {
+      const oldValue = modSnapshot?.old
+      if (storeKey === 'append_comment' || apiField === 'append_comment') {
+        entityComments.value = entityComments.value.filter(
+          (c) => !String(c?.id || '').startsWith('pending-')
+        )
+      } else if (apiField === 'plan_id') {
+        bug.plan = normalizePlanId(oldValue) || ''
+      } else if (apiField === 'project_id') {
+        bug.project_id = oldValue ? String(oldValue) : ''
+        bug.associate_project = !!bug.project_id
+      } else if (pendingMeta.target === 'bug' && apiField === 'steps_to_reproduce') {
+        bug.reproduction_steps = oldValue || ''
+      } else if (Object.prototype.hasOwnProperty.call(bug, apiField)) {
+        bug[apiField] = oldValue ?? ''
+      }
+      const pd = pendingDiff.value || {
+        targetId: pendingMeta.targetId,
+        target: pendingMeta.target,
+        messageId: pendingMeta.messageId,
+        modifications: {}
+      }
+      pd.modifications[storeKey] = { ...modSnapshot }
+      pendingDiff.value = pd
     }
 
     const applyFieldChange = async (requestedField) => {
@@ -2335,11 +2448,20 @@ export default {
       const target = pendingDiff.value?.target || 'bug'
       const newValue = pendingDiff.value.modifications[storeKey]?.new
       const apiField = target === 'bug' ? mapBugModifyApiField(storeKey) : storeKey
+      const modSnapshot = { ...pendingDiff.value.modifications[storeKey] }
+      const pendingMeta = {
+        targetId,
+        target,
+        messageId: pendingDiff.value?.messageId ?? null
+      }
 
       if (!projectId || !targetId) {
         console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId, targetId })
         return
       }
+
+      applyOptimisticFieldToBug(storeKey, apiField, newValue, target)
+      confirmFieldChange(storeKey)
 
       try {
         const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
@@ -2351,37 +2473,28 @@ export default {
             target_id: targetId,
             modifications: { [apiField]: newValue },
             confirm: true,
-            message_id: pendingDiff.value?.messageId
+            message_id: pendingMeta.messageId
           })
         })
         const result = await resp.json()
         if (!result.success) {
+          rollbackOptimisticBugField(storeKey, apiField, modSnapshot, pendingMeta)
           console.error('[DIFF] 采纳失败:', result.error)
+          alert(result.error || '采纳失败')
           return
         }
 
         if (storeKey === 'append_comment' || apiField === 'append_comment') {
           const plain = plainCommentFromDiffValue(newValue)
-          optimisticAppendEntityComment(plain)
           if (result.async === true) {
             await new Promise((resolve) => setTimeout(resolve, 420))
           }
           await reloadEntityCommentsAfterAdopt(plain)
-          commentDraft.value = ''
-        } else if (apiField === 'plan_id') {
-          bug.plan = normalizePlanId(newValue) || ''
-        } else if (apiField === 'project_id') {
-          bug.project_id = String(newValue)
-          bug.associate_project = true
-        } else if (target === 'bug' && apiField === 'steps_to_reproduce') {
-          bug.reproduction_steps = newValue
-        } else if (Object.prototype.hasOwnProperty.call(bug, apiField)) {
-          bug[apiField] = newValue
         }
 
-        confirmFieldChange(storeKey)
-        notifyDetailAdoptCompleteIfDone(storeKey, newValue)
+        notifyDetailAdoptCompleteIfDone(apiField, newValue, result)
       } catch (e) {
+        rollbackOptimisticBugField(storeKey, apiField, modSnapshot, pendingMeta)
         console.error('[DIFF] 采纳字段异常:', e)
       }
     }
@@ -2677,6 +2790,9 @@ export default {
       commentDraftText,
       commentDraftLength,
       commentSubmitting,
+      replyingTo,
+      startReplyToComment,
+      cancelReplyToComment,
       entityFieldDiff,
       hasEntityFieldDiff,
       formatEntityDiffValue,
@@ -4202,6 +4318,61 @@ export default {
   background: #f8f9fa;
   border-radius: 6px;
   border: 1px solid #e9ecef;
+}
+
+.comment-item.is-reply {
+  margin-left: 16px;
+  border-left: 3px solid #dee2e6;
+}
+
+.comment-item.is-pending {
+  opacity: 0.85;
+}
+
+.comment-reply-btn {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #0d6efd;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comment-reply-btn:hover {
+  text-decoration: underline;
+}
+
+.comment-reply-tag,
+.comment-pending-tag {
+  font-size: 11px;
+  color: #6c757d;
+}
+
+.comment-pending-tag {
+  color: #fd7e14;
+}
+
+.comment-reply-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #495057;
+  background: #eef5ff;
+  border-radius: 4px;
+}
+
+.comment-reply-cancel {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #6c757d;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .comment-item-meta {

@@ -11,6 +11,7 @@ import time
 from sqlalchemy import or_, and_, cast, String
 from sqlalchemy.types import JSON as SAJSON
 from agents.tool_registry import BaseTool
+from agents.tools.grep_es_rerank import grep_user_query_text
 from agents.locale_prompts import (
     normalize_locale,
     is_english_locale,
@@ -162,13 +163,17 @@ class GrepTool(BaseTool):
 
         from agents.tools.grep_query_parser import enrich_grep_params
 
-        _nl = kwargs.get("user_input") or kwargs.get("natural_query")
+        _user_q = grep_user_query_text(
+            raw_user_input=kwargs.get("raw_user_input"),
+            user_input=kwargs.get("user_input"),
+            natural_query=kwargs.get("natural_query"),
+        )
         _t_parse0 = time.perf_counter()
         _parsed = enrich_grep_params(
             keywords=keywords,
             assignee=assignee,
             status=status,
-            user_input=_nl,
+            user_input=_user_q or None,
             todo=kwargs.get("todo"),
             target=raw_target,
         )
@@ -177,10 +182,21 @@ class GrepTool(BaseTool):
         assignee = _parsed.assignee
         if _parsed.status:
             status = _parsed.status
-        _grep_record_id = _parsed.record_id
+        _ui_ctx = kwargs.get("ui_context")
+        if isinstance(_ui_ctx, dict):
+            kwargs.setdefault("ui_context", _ui_ctx)
+
+        _es_keywords = (keywords or "").strip() or None
+        if _es_keywords and _es_keywords.isdigit():
+            _es_keywords = None
+        if _user_q:
+            _es_keywords = _user_q
+        elif _es_keywords and _es_keywords.isdigit():
+            _es_keywords = None
 
         print(
-            f"[GREP] 🔍 开始定位 (keywords={keywords}, assignee={assignee}, target={raw_target}, "
+            f"[GREP] 🔍 开始定位 (keywords={keywords}, es_keywords={_es_keywords!r}, "
+            f"assignee={assignee}, target={raw_target}, "
             f"status={status}, plan_id={plan_id}) parse_ms={_parse_ms}"
         )
         
@@ -236,17 +252,71 @@ class GrepTool(BaseTool):
             with app.app_context():
                 if mode == "locate":
                     _hybrid_meta: Dict[str, Any] = {}
+                    _hybrid_prefetch_task = None
+                    _hybrid_prefetch_result: Optional[
+                        Tuple[Optional[List], Optional[List], Dict[str, Any]]
+                    ] = None
                     _card_light = raw_target == "card" and self._grep_card_light_enabled()
                     # 【阶段1】数据库查询（支持 plan_id 限定当前迭代，关键词拆分模糊匹配）
                     if _card_light:
                         plan_tree = {"plan_map": {}, "root_plans": []}
                         _grep_seg["plan_tree"] = 0.0
                     elif self._grep_skip_plan_tree_on_keyword(keywords):
+                        import asyncio as _asyncio_pf
+                        from agents.tools.grep_hybrid_search import hybrid_search_work_items
+
+                        def _run_hybrid_prefetch():
+                            return hybrid_search_work_items(
+                                project_id=str(project_id),
+                                keywords=_es_keywords,
+                                assignee=assignee,
+                                status=status,
+                                plan_id=plan_id,
+                                raw_target=raw_target,
+                            )
+
                         _progress(grep_tool_progress("phase1_plan_tree", loc))
-                        plan_tree = await self._minimal_plan_tree_for_scope(
-                            project_id, plan_id
-                        )
-                        _grep_mark("plan_tree")
+                        _t_phase1 = time.perf_counter()
+                        if self._grep_parallel_es_with_plan_tree():
+
+                            def _run_plan_in_thread() -> Tuple[Dict[str, Any], float]:
+                                t0 = time.perf_counter()
+                                with app.app_context():
+                                    out = self._minimal_plan_tree_sync(project_id, plan_id)
+                                return out, round((time.perf_counter() - t0) * 1000.0, 1)
+
+                            def _run_hybrid_in_thread() -> Tuple[Any, float]:
+                                t0 = time.perf_counter()
+                                out = _run_hybrid_prefetch()
+                                return out, round((time.perf_counter() - t0) * 1000.0, 1)
+
+                            print(
+                                "[GREP] plan_tree 与 ES(embed→检索) 并行（gather+双线程）",
+                                flush=True,
+                            )
+                            (plan_tree, _plan_ms), (_hybrid_pack, _hybrid_wall) = (
+                                await _asyncio_pf.gather(
+                                    _asyncio_pf.to_thread(_run_plan_in_thread),
+                                    _asyncio_pf.to_thread(_run_hybrid_in_thread),
+                                )
+                            )
+                            _hybrid_prefetch_result = _hybrid_pack
+                            _p1_wall = round((time.perf_counter() - _t_phase1) * 1000.0, 1)
+                            _grep_seg["plan_tree"] = float(_plan_ms)
+                            _grep_seg["hybrid_prefetch_wall"] = float(_hybrid_wall)
+                            _grep_seg["phase1_parallel_wall"] = float(_p1_wall)
+                            _saved = round(max(0.0, float(_plan_ms) + float(_hybrid_wall) - _p1_wall), 1)
+                            if _saved > 1.0:
+                                _grep_seg["phase1_parallel_saved_ms"] = _saved
+                            _grep_mark_t = time.perf_counter()
+                        else:
+
+                            def _run_plan_only() -> Dict[str, Any]:
+                                with app.app_context():
+                                    return self._minimal_plan_tree_sync(project_id, plan_id)
+
+                            plan_tree = await _asyncio_pf.to_thread(_run_plan_only)
+                            _grep_mark("plan_tree")
                         print(
                             "[GREP] 跳过全项目 plan_tree（关键词走 ES，GREP_SKIP_PLAN_TREE_ON_KEYWORD=1）",
                             flush=True,
@@ -278,12 +348,11 @@ class GrepTool(BaseTool):
                             def _run_plan_hybrid():
                                 return hybrid_search_work_items(
                                     project_id=str(project_id),
-                                    keywords=keywords,
+                                    keywords=_es_keywords,
                                     assignee=assignee,
                                     status=status,
                                     plan_id=plan_id,
                                     raw_target="plan",
-                                    record_id=_grep_record_id,
                                 )
 
                             _hp_bug, _hp_bc, _hybrid_meta_plan = await _asyncio.to_thread(_run_plan_hybrid)
@@ -385,19 +454,33 @@ class GrepTool(BaseTool):
                             def _run_hybrid():
                                 return hybrid_search_work_items(
                                     project_id=str(project_id),
-                                    keywords=keywords,
+                                    keywords=_es_keywords,
                                     assignee=assignee,
                                     status=status,
                                     plan_id=plan_id,
                                     raw_target=raw_target,
-                                    record_id=_grep_record_id,
                                 )
 
                             _t_hybrid0 = time.perf_counter()
-                            hb, hbc, _hybrid_meta = await _asyncio.to_thread(_run_hybrid)
-                            _grep_seg["hybrid_total"] = round(
-                                (time.perf_counter() - _t_hybrid0) * 1000.0, 1
-                            )
+                            if _hybrid_prefetch_result is not None:
+                                hb, hbc, _hybrid_meta = _hybrid_prefetch_result
+                                _grep_seg["hybrid_await_ms"] = 0.0
+                                _grep_seg["hybrid_total"] = float(
+                                    _grep_seg.get("hybrid_prefetch_wall") or 0.0
+                                )
+                            elif _hybrid_prefetch_task is not None:
+                                hb, hbc, _hybrid_meta = await _hybrid_prefetch_task
+                                _hybrid_prefetch_task = None
+                                _grep_seg["hybrid_await_ms"] = round(
+                                    (time.perf_counter() - _t_hybrid0) * 1000.0, 1
+                                )
+                                _grep_seg["hybrid_total"] = float(_grep_seg["hybrid_await_ms"])
+                            else:
+                                hb, hbc, _hybrid_meta = await _asyncio.to_thread(_run_hybrid)
+                                _grep_seg["hybrid_await_ms"] = round(
+                                    (time.perf_counter() - _t_hybrid0) * 1000.0, 1
+                                )
+                                _grep_seg["hybrid_total"] = float(_grep_seg["hybrid_await_ms"])
                             _grep_mark("hybrid_block")
                             _hp = _hybrid_meta.get("perf_ms") if isinstance(_hybrid_meta, dict) else None
                             if isinstance(_hp, dict):
@@ -405,6 +488,7 @@ class GrepTool(BaseTool):
                                     _grep_seg[f"hybrid_{_hk}"] = float(_hv)
                             if hb is not None:
                                 bug_list = hb
+                                # ES 已跑（含 0 命中）则不再走全字段 SQL 全表扫
                                 _hybrid_bug = True
                             if hbc is not None:
                                 badcase_list = hbc
@@ -423,12 +507,31 @@ class GrepTool(BaseTool):
                         except Exception as _hex:
                             print(f"[GREP-HYBRID] 跳过: {_hex}", flush=True)
 
+                        if _hybrid_meta.get("es_ran"):
+                            _es_hits_n = int(_hybrid_meta.get("hits_n") or 0)
+                            _pre_rr_bug = len(bug_list or [])
+                            _pre_rr_bc = len(badcase_list or [])
+                            if not bug_list and not badcase_list:
+                                print(
+                                    f"[GREP-PIPELINE] 阶段=es_recall 结果为空 hits_n={_es_hits_n} "
+                                    f"mode={_hybrid_meta.get('grep_search_mode')} "
+                                    "— 未到 rerank（向量/ES 未召回或 hydrate 为空）",
+                                    flush=True,
+                                )
+                            elif _pre_rr_bug or _pre_rr_bc:
+                                print(
+                                    f"[GREP-PIPELINE] 阶段=es_recall 完成 hits_n={_es_hits_n} "
+                                    f"bug={_pre_rr_bug} badcase={_pre_rr_bc} → 进入 rerank",
+                                    flush=True,
+                                )
                         if _hybrid_meta.get("es_ran") and (bug_list or badcase_list):
-                            _ui_post = (
-                                kwargs.get("user_input")
-                                or kwargs.get("natural_query")
-                                or kwargs.get("todo")
-                            )
+                            _ui_post = grep_user_query_text(
+                                raw_user_input=kwargs.get("raw_user_input"),
+                                user_input=kwargs.get("user_input"),
+                                natural_query=kwargs.get("natural_query"),
+                            ) or kwargs.get("todo")
+                            _pre_rr_bug = len(bug_list or [])
+                            _pre_rr_bc = len(badcase_list or [])
                             try:
                                 from agents.tools.grep_es_rerank import apply_es_rerank
 
@@ -448,6 +551,20 @@ class GrepTool(BaseTool):
                                 if isinstance(_rp, dict) and _rp.get("rerank_api") is not None:
                                     _grep_seg["rerank_api"] = float(_rp["rerank_api"])
                                 _hybrid_meta["rerank"] = _rerank_meta
+                                _post_bug = len(bug_list or [])
+                                _post_bc = len(badcase_list or [])
+                                _rr_verdict = "ok"
+                                if _post_bug == 0 and _post_bc == 0 and (_pre_rr_bug or _pre_rr_bc):
+                                    _rr_verdict = "rerank_filtered_all"
+                                elif _post_bug < _pre_rr_bug or _post_bc < _pre_rr_bc:
+                                    _rr_verdict = "rerank_partial_filter"
+                                print(
+                                    f"[GREP-PIPELINE] 阶段=after_rerank "
+                                    f"bug {_pre_rr_bug}→{_post_bug} badcase {_pre_rr_bc}→{_post_bc} "
+                                    f"verdict={_rr_verdict} rerank={(_rerank_meta or {}).get('rerank')} "
+                                    f"min_score={(_rerank_meta or {}).get('min_score')}",
+                                    flush=True,
+                                )
                             except Exception as _rex:
                                 print(f"[GREP-RERANK] 跳过: {_rex}", flush=True)
 
@@ -502,24 +619,7 @@ class GrepTool(BaseTool):
                             except Exception as _fb_ex:
                                 print(f"[GREP-FALLBACK] 跳过: {_fb_ex}", flush=True)
 
-                        if raw_target in ['all', 'badcase'] and not _hybrid_bc:
-                            _progress(grep_tool_progress("phase1_badcase", loc))
-                            badcase_list = await self._get_badcase_list(
-                                project_id, keywords, status, plan_id=plan_id, assignee=assignee
-                            )
-                            _progress(grep_tool_progress("phase1_badcase_done", loc, n=len(badcase_list)))
-                        if raw_target in ['all', 'bug'] and not _hybrid_bug:
-                            _progress(grep_tool_progress("phase1_bug", loc))
-                            bug_list = await self._get_bug_list(
-                                project_id, keywords, status, plan_id=plan_id, assignee=assignee
-                            )
-                            _progress(grep_tool_progress("phase1_bug_done", loc, n=len(bug_list)))
-                        if raw_target in ['all', 'testcase'] and not _hybrid_tc:
-                            _progress(grep_tool_progress("phase1_tc", loc))
-                            testcase_list = await self._get_testcase_list(
-                                project_id, keywords, status, plan_id=plan_id, assignee=assignee
-                            )
-                            _progress(grep_tool_progress("phase1_tc_done", loc, n=len(testcase_list)))
+                        # 全字段 SQL 全表扫已移除：检索仅 ES hybrid + recent_created 兜底
                         # 卡片层：target=all|card 照常拉取；单独查 bug/badcase/testcase 时也拉取，
                         # 否则 navigation 无法合并为「统一卡片」跳转，迭代下列表里卡片命中也不会出现。
                         if raw_target in ('all', 'card', 'bug', 'badcase', 'testcase'):
@@ -547,7 +647,7 @@ class GrepTool(BaseTool):
                                 _grep_mark("card_query")
                             _progress(grep_tool_progress("phase1_card_done", loc, n=len(card_list)))
 
-                        # Card 表 title 常与源表 title 不同步；target=card 无命中时回退源表检索
+                        # Card 表 title 常与源表 title 不同步；无 card 命中时 navigation 仍按已有源表列表推断
                         _nav_grep_target = raw_target
                         if raw_target == "card" and not card_list:
                             if bug_list:
@@ -556,46 +656,6 @@ class GrepTool(BaseTool):
                                 _nav_grep_target = "badcase"
                             elif testcase_list:
                                 _nav_grep_target = "testcase"
-                        if (
-                            raw_target == "card"
-                            and (keywords or (assignee and str(assignee).strip()))
-                            and not card_list
-                            and not bug_list
-                            and not badcase_list
-                            and not testcase_list
-                            and self._grep_card_source_fallback_enabled()
-                        ):
-                            if not badcase_list:
-                                _progress(grep_tool_progress("phase1_badcase", loc))
-                                badcase_list = await self._get_badcase_list(
-                                    project_id, keywords, status, plan_id=plan_id, assignee=assignee
-                                )
-                                _grep_mark("card_fallback_badcase")
-                            if not bug_list:
-                                _progress(grep_tool_progress("phase1_bug", loc))
-                                bug_list = await self._get_bug_list(
-                                    project_id, keywords, status, plan_id=plan_id, assignee=assignee
-                                )
-                                _grep_mark("card_fallback_bug")
-                            if not testcase_list:
-                                _progress(grep_tool_progress("phase1_tc", loc))
-                                testcase_list = await self._get_testcase_list(
-                                    project_id, keywords, status, plan_id=plan_id, assignee=assignee
-                                )
-                                _grep_mark("card_fallback_tc")
-                            if bug_list:
-                                _nav_grep_target = "bug"
-                            elif badcase_list:
-                                _nav_grep_target = "badcase"
-                            elif testcase_list:
-                                _nav_grep_target = "testcase"
-                            if bug_list or badcase_list or testcase_list:
-                                print(
-                                    f"[GREP] Card 无命中，回退源表: bug={len(bug_list)} "
-                                    f"badcase={len(badcase_list)} testcase={len(testcase_list)} "
-                                    f"nav_as={_nav_grep_target!r}",
-                                    flush=True,
-                                )
 
                         # 卡片层适配：为导航补充 card_id（优先按 Card.source_type/source_id 映射）
                         _t_attach0 = time.perf_counter()
@@ -785,10 +845,16 @@ class GrepTool(BaseTool):
                         for k, v in sorted(_grep_seg.items(), key=lambda x: -x[1])
                         if k != "total"
                     )
+                    _p1_wall = _grep_seg.get("phase1_parallel_wall")
+                    _p1_hint = (
+                        f" phase1_critical≈{_p1_wall}ms"
+                        if _p1_wall is not None
+                        else ""
+                    )
                     print(
                         f"[GREP-PERF] target={raw_target!r} total={_grep_seg['total']}ms "
-                        f"keywords_len={len(str(keywords or ''))} hybrid={_hybrid_meta.get('es_ran') if isinstance(_hybrid_meta, dict) else False} "
-                        f"{parts}",
+                        f"keywords_len={len(str(keywords or ''))} hybrid={_hybrid_meta.get('es_ran') if isinstance(_hybrid_meta, dict) else False}"
+                        f"{_p1_hint} {parts}",
                         flush=True,
                     )
                 return result
@@ -1078,6 +1144,15 @@ class GrepTool(BaseTool):
         )
 
     @staticmethod
+    def _grep_parallel_es_with_plan_tree() -> bool:
+        try:
+            from config import Config as cfg
+
+            return bool(getattr(cfg, "GREP_PARALLEL_ES_PLAN_TREE", True))
+        except Exception:
+            return True
+
+    @staticmethod
     def _grep_skip_plan_tree_on_keyword(keywords: Optional[str]) -> bool:
         if not (keywords or "").strip() or str(keywords).strip() in ("*",):
             return False
@@ -1092,10 +1167,10 @@ class GrepTool(BaseTool):
             return False
         return True
 
-    async def _minimal_plan_tree_for_scope(
+    def _minimal_plan_tree_sync(
         self, project_id: str, plan_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """关键词+ES 路径：只加载当前 plan（若有），避免扫全项目计划树。"""
+        """关键词+ES 路径：只加载当前 plan（若有），避免扫全项目计划树（同步，供线程池并行）。"""
         plan_map: Dict[Any, Dict[str, Any]] = {}
         if plan_id is not None and str(plan_id).strip() not in ("", "0", "None", "null"):
             try:
@@ -1127,6 +1202,11 @@ class GrepTool(BaseTool):
                 {p["business_domain"] for p in plans if p.get("business_domain")}
             ),
         }
+
+    async def _minimal_plan_tree_for_scope(
+        self, project_id: str, plan_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self._minimal_plan_tree_sync(project_id, plan_id)
 
     async def _get_plan_tree(self, project_id: str) -> Dict[str, Any]:
         """

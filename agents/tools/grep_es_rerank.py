@@ -24,6 +24,37 @@ def _grep_rerank_enabled(cfg=None) -> bool:
     return bool(getattr(cfg, "GREP_VECTOR_ENABLED", False))
 
 
+def grep_user_query_text(
+    *,
+    raw_user_input: Optional[str] = None,
+    user_input: Optional[str] = None,
+    natural_query: Optional[str] = None,
+    max_chars: int = 400,
+) -> str:
+    """Grep ES/embed 仅用用户对话原话；界面上下文走 ui_context 字段，不进 embedding。"""
+    raw = (raw_user_input or "").strip()
+    if raw and "[界面上下文]" not in raw:
+        return raw[:max_chars]
+    if raw:
+        cleaned = _user_question_without_ui_context(raw, max_chars=max_chars)
+        if cleaned:
+            return cleaned
+    for src in (user_input, natural_query):
+        cleaned = _user_question_without_ui_context(src, max_chars=max_chars)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def semantic_text_for_grep_embed(
+    text: Optional[str],
+    *,
+    max_chars: int = 400,
+) -> str:
+    """兼容旧调用：单参时仍剥离 [界面上下文]。"""
+    return _user_question_without_ui_context(text, max_chars=max_chars)
+
+
 def _user_question_without_ui_context(user_input: Optional[str], *, max_chars: int = 400) -> str:
     """从 user_input 去掉 [界面上下文] 元数据，只保留用户原话。"""
     raw = (user_input or "").strip()
@@ -240,6 +271,57 @@ def _build_rerank_score_rows(
     return rows
 
 
+def _log_rerank_diagnosis(
+    *,
+    entries: List[Tuple[str, Dict[str, Any], int]],
+    hits: List[RerankHit],
+    min_score: float,
+    kept_bug: List[Dict[str, Any]],
+    kept_bc: List[Dict[str, Any]],
+    meta: Dict[str, Any],
+) -> None:
+    """始终打印：区分 rerank 阈值过滤 vs ES 本身无召回（rerank 仅在 in_n>0 时进入）。"""
+    in_n = len(entries)
+    out_n = len(kept_bug) + len(kept_bc)
+    best_score = max((float(h.score) for h in hits), default=None) if hits else None
+    rerank_status = meta.get("rerank") or "-"
+    if in_n == 0:
+        print("[GREP-RERANK] 诊断: 未进入 rerank（ES 召回列表为空）", flush=True)
+        return
+    if out_n > 0:
+        print(
+            f"[GREP-RERANK] 诊断: ES 送入 rerank {in_n} 条 → 通过 {out_n} 条 "
+            f"(min_score>={min_score}, rerank={rerank_status})",
+            flush=True,
+        )
+        return
+    verdict = "rerank_filtered_all"
+    if rerank_status == "fallback":
+        verdict = "rerank_api_fail_kept_es_order"
+    elif rerank_status in ("ok_fallback_floor", "ok_fallback_top1"):
+        verdict = f"rerank_floor_rescue({rerank_status})"
+    elif not hits:
+        verdict = "rerank_api_no_hits"
+    print(
+        f"[GREP-RERANK] 诊断: ES 送入 rerank {in_n} 条 → 阈值后 0 条 | "
+        f"verdict={verdict} min_score={min_score} best_rerank_score={best_score} "
+        f"rerank={rerank_status}",
+        flush=True,
+    )
+    if hits:
+        for h in sorted(hits, key=lambda x: -float(x.score))[:8]:
+            if h.index < 0 or h.index >= len(entries):
+                continue
+            et, row, _ = entries[h.index]
+            passed = float(h.score) >= min_score
+            print(
+                f"[GREP-RERANK] 打分 {_entry_key(et, row)} score={float(h.score):.4f} "
+                f"{'PASS' if passed else f'FILTER(<{min_score})'} "
+                f"title={(str(row.get('title') or '')[:50])!r}",
+                flush=True,
+            )
+
+
 def _log_rerank_score_rows(
     *,
     min_score: float,
@@ -416,7 +498,13 @@ def rerank_es_candidates_sync(
         ob, obc = _lists_from_sorted_entries(sorted_entries)
         meta["rerank"] = skip_reason
         meta["in_n"] = len(entries)
+        meta["out_n"] = len(ob) + len(obc)
         meta["local_sort"] = True
+        print(
+            f"[GREP-RERANK] 诊断: 跳过远端 rerank ({skip_reason})，保留 ES 原序 "
+            f"in={len(entries)} out={meta['out_n']}",
+            flush=True,
+        )
         if _grep_search_log_enabled(cfg):
             print(
                 f"[GREP-RERANK] skip api reason={skip_reason} n={len(entries)} "
@@ -451,7 +539,7 @@ def rerank_es_candidates_sync(
 
     documents = [_row_doc_text(row, et) for et, row, _ in entries]
     log_docs = _grep_search_log_enabled(cfg)
-    backend = str(getattr(cfg, "GREP_RERANK_BACKEND", "qianfan") or "qianfan").strip().lower()
+    backend = str(getattr(cfg, "GREP_RERANK_BACKEND", "dashscope") or "dashscope").strip().lower()
     default_model = "bce-reranker-base" if backend == "qianfan" else "qwen3-vl-rerank"
     model = str(getattr(cfg, "GREP_RERANK_MODEL", default_model) or default_model).strip()
     try:
@@ -497,6 +585,15 @@ def rerank_es_candidates_sync(
             flush=True,
         )
         meta["rerank"] = "fallback"
+        meta["out_n"] = len(bug_list) + len(badcase_list)
+        _log_rerank_diagnosis(
+            entries=entries,
+            hits=hits or [],
+            min_score=min_score,
+            kept_bug=bug_list,
+            kept_bc=badcase_list,
+            meta=meta,
+        )
         return bug_list, badcase_list, meta
 
     score_rows = _build_rerank_score_rows(entries, documents, hits, min_score=min_score)
@@ -552,6 +649,14 @@ def rerank_es_candidates_sync(
         meta["low_relevance_empty"] = True
     meta["audit"] = audit[:50]
     meta["score_rows"] = score_rows[:50]
+    _log_rerank_diagnosis(
+        entries=entries,
+        hits=hits,
+        min_score=min_score,
+        kept_bug=kept_bug,
+        kept_bc=kept_bc,
+        meta=meta,
+    )
     if log_docs:
         _log_rerank_score_rows(
             min_score=min_score,

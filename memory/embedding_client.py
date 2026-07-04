@@ -271,6 +271,19 @@ class EmbeddingClient:
 
             raise RuntimeError("Embedding model 未配置")
 
+        from memory.ark_embedding import (
+            embed_texts_ark_multimodal,
+            is_doubao_ark_multimodal_embedding_model,
+        )
+
+        if is_doubao_ark_multimodal_embedding_model(self.cfg.model):
+            return embed_texts_ark_multimodal(
+                cleaned,
+                api_key=self.cfg.api_key,
+                model=self.cfg.model,
+                base_url=self.cfg.base_url,
+            )
+
         if is_dashscope_multimodal_embedding_model(self.cfg.model):
 
             return self._embed_dashscope_multimodal(cleaned)

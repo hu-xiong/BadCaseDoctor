@@ -148,30 +148,32 @@ class DeleteTool(BaseTool):
         return None
 
     def _preview_row(self, target: str, row: Any) -> Dict[str, Any]:
+        from app import _json_snowflake_id
+
         t = self._norm_target(target)
         if t == "bug":
             return {
-                "id": row.id,
+                "id": _json_snowflake_id(row.id),
                 "title": getattr(row, "title", None),
                 "project_id": row.project_id,
-                "plan_id": getattr(row, "plan_id", None),
+                "plan_id": _json_snowflake_id(getattr(row, "plan_id", None)),
             }
         if t == "badcase":
             return {
-                "id": row.id,
+                "id": _json_snowflake_id(row.id),
                 "title": getattr(row, "title", None),
                 "project_id": row.project_id,
-                "plan_id": getattr(row, "plan_id", None),
+                "plan_id": _json_snowflake_id(getattr(row, "plan_id", None)),
             }
         if t == "testcase":
             st = getattr(row, "status", None)
             if hasattr(st, "value"):
                 st = st.value
             return {
-                "id": row.id,
+                "id": _json_snowflake_id(row.id),
                 "title": getattr(row, "title", None),
                 "project_id": row.project_id,
-                "plan_id": getattr(row, "plan_id", None),
+                "plan_id": _json_snowflake_id(getattr(row, "plan_id", None)),
                 "status": st,
             }
         if t == "card":
@@ -179,17 +181,17 @@ class DeleteTool(BaseTool):
             if hasattr(ct, "value"):
                 ct = ct.value
             return {
-                "id": row.id,
+                "id": _json_snowflake_id(row.id),
                 "title": getattr(row, "title", None),
                 "type": ct,
                 "project_id": row.project_id,
-                "plan_id": getattr(row, "plan_id", None),
+                "plan_id": _json_snowflake_id(getattr(row, "plan_id", None)),
                 "source_type": getattr(row, "source_type", None),
-                "source_id": getattr(row, "source_id", None),
+                "source_id": _json_snowflake_id(getattr(row, "source_id", None)),
             }
         if t == "plan":
             return {
-                "id": row.id,
+                "id": _json_snowflake_id(row.id),
                 "name": getattr(row, "name", None),
                 "project_id": row.project_id,
                 "is_default": getattr(row, "is_default", False),
@@ -233,6 +235,7 @@ class DeleteTool(BaseTool):
                 TestCase,
                 _badcase_status_str,
                 _cache_invalidate_plans,
+                _json_snowflake_id,
                 _schedule_workflow_notify,
                 _testcase_status_str,
                 _workflow_merge_creator_if_empty,
@@ -272,14 +275,20 @@ class DeleteTool(BaseTool):
                     return {"success": False, "error": reason}
 
             preview = {"target": t, "record": self._preview_row(t, row)}
+            sid = _json_snowflake_id(rid)
 
             if not confirm:
-                return {
+                payload = {
                     "success": True,
+                    "target": t,
+                    "target_id": sid,
                     "confirmation_required": True,
                     "preview": preview,
                     "message": f"将删除{label} #{rid}，请确认后使用 confirm=true",
                 }
+                if t == "plan":
+                    payload["plan_id"] = sid
+                return payload
 
             # ---- 执行删除（与 app.py DELETE 路由对齐）----
             try:

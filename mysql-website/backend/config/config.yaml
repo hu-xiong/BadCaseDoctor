@@ -1,6 +1,6 @@
 # MySQL Website Backend Configuration
 server:
-  port: 8080
+  port: 8090
   mode: debug  # debug, release, test
 
 database:

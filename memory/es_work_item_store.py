@@ -199,34 +199,9 @@ class ESWorkItemStore:
         except Exception as e:
             print(f"[GREP-ES] delete {eid} 失败: {e}", flush=True)
 
-    def _base_filters(
-        self,
-        *,
-        project_id: int,
-        entity_types: Optional[List[str]] = None,
-        plan_id: Optional[int] = None,
-        assignee_ids: Optional[List[int]] = None,
-        assignee_display: Optional[str] = None,
-        status: Optional[str] = None,
-        record_id: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        flt: List[Dict[str, Any]] = [{"term": {"project_id": int(project_id)}}]
-        if entity_types:
-            flt.append({"terms": {"entity_type": [str(x) for x in entity_types]}})
-        if plan_id is not None:
-            try:
-                flt.append({"term": {"plan_id": int(plan_id)}})
-            except (TypeError, ValueError):
-                pass
-        if assignee_ids:
-            flt.append({"terms": {"assignee_id": [int(x) for x in assignee_ids]}})
-        elif assignee_display:
-            flt.append({"term": {"assignee_display": str(assignee_display)}})
-        if status:
-            flt.append({"term": {"status": str(status).lower()}})
-        if record_id is not None:
-            flt.append({"term": {"record_id": str(record_id)}})
-        return flt
+    def _base_filters(self, *, project_id: int) -> List[Dict[str, Any]]:
+        """ES bool.filter 仅按项目收窄；其余条件由 BM25/KNN/rerank 处理。"""
+        return [{"term": {"project_id": int(project_id)}}]
 
     @staticmethod
     def _work_item_source_includes() -> List[str]:
@@ -267,7 +242,6 @@ class ESWorkItemStore:
         assignee_ids: Optional[List[int]] = None,
         assignee_display: Optional[str] = None,
         status: Optional[str] = None,
-        record_id: Optional[int] = None,
         top_k: Optional[int] = None,
         alias_checked: bool = False,
         bm25_title_only: bool = False,
@@ -277,15 +251,8 @@ class ESWorkItemStore:
         if not alias_checked and not self.alias_exists(alias):
             return []
         k = int(top_k or self.search_cfg.top_k or 30)
-        flt = self._base_filters(
-            project_id=project_id,
-            entity_types=entity_types,
-            plan_id=plan_id,
-            assignee_ids=assignee_ids,
-            assignee_display=assignee_display,
-            status=status,
-            record_id=record_id,
-        )
+        flt = self._base_filters(project_id=project_id)
+        _ = (entity_types, plan_id, assignee_ids, assignee_display, status)
         qtext = (query_text or "").strip()
         has_vec = bool(query_embedding)
         has_text = bool(qtext) and qtext not in ("*",)
@@ -303,7 +270,7 @@ class ESWorkItemStore:
             search_kw["body"] = body
             return self.es.search(**search_kw)
 
-        if not has_vec and not has_text and not assignee_ids and not assignee_display and not status and record_id is None:
+        if not has_vec and not has_text and not assignee_ids and not assignee_display and not status:
             body = {
                 "size": k,
                 "query": {"bool": {"filter": flt}},
@@ -325,18 +292,34 @@ class ESWorkItemStore:
 
         text_must = self._bm25_must_clause(qtext, title_only=bool(bm25_title_only))
         if has_vec and has_text:
+            search_kind = "knn+bm25"
             body = {
                 "size": k,
                 "query": {"bool": {"filter": flt, "must": [text_must]}},
                 "knn": knn_clause,
             }
         elif has_vec:
+            search_kind = "knn_only"
             body = {"size": k, "knn": knn_clause}
         else:
-            body = {
-                "size": k,
-                "query": {"bool": {"filter": flt, "must": [text_must]}},
-            }
+            search_kind = "bm25_only" if has_text else "filter_only"
+            if has_text:
+                body = {
+                    "size": k,
+                    "query": {"bool": {"filter": flt, "must": [text_must]}},
+                }
+            else:
+                body = {
+                    "size": k,
+                    "query": {"bool": {"filter": flt}},
+                    "sort": [{"updated_at": {"order": "desc"}}],
+                }
+        print(
+            f"[GREP-ES] hybrid_search kind={search_kind} project={project_id} "
+            f"filter=project_only k={k} has_vec={has_vec} has_text={has_text} "
+            f"qtext={(qtext[:80] + '…') if qtext and len(qtext) > 80 else (qtext or '-')!r}",
+            flush=True,
+        )
         res = _do_search(body)
         return self._parse_hits(res, source="hybrid")
 
@@ -344,9 +327,11 @@ class ESWorkItemStore:
         hits = (((res or {}).get("hits") or {}).get("hits") or [])
         out: List[Dict[str, Any]] = []
         min_score = float(self.search_cfg.min_score or 0.0)
+        dropped = 0
         for h in hits:
             score = float((h or {}).get("_score") or 0.0)
             if min_score > 0 and score < min_score:
+                dropped += 1
                 continue
             src = (h or {}).get("_source") or {}
             out.append(
@@ -356,6 +341,12 @@ class ESWorkItemStore:
                     "search_backend": source,
                     **src,
                 }
+            )
+        if hits:
+            print(
+                f"[GREP-ES] parse_hits source={source} raw={len(hits)} kept={len(out)} "
+                f"dropped_by_min_score={dropped} es_min_score={min_score}",
+                flush=True,
             )
         return out
 

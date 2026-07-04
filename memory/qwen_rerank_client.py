@@ -112,6 +112,7 @@ def rerank_documents(
                 usage.get("total_tokens") if isinstance(usage, dict) else None
             )
         meta["status"] = "ok"
+        meta["backend"] = "dashscope"
         meta["hits_n"] = len(hits)
         return hits, meta
     except Exception as e:

@@ -291,6 +291,9 @@ class DeepSeekLLM:
         parallel_tool_calls: bool = False,
         max_tokens: Optional[int] = None,
     ):
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
         resp = self._chat_create(
             messages,
             stream=False,
@@ -338,6 +341,9 @@ class DeepSeekLLM:
         parallel_tool_calls: bool = False,
         max_tokens: Optional[int] = None,
     ) -> Iterator[Any]:
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
         stream = self._chat_create(
             messages,
             stream=True,
@@ -365,12 +371,9 @@ class DeepSeekLLM:
         max_tokens: Optional[int] = None,
         images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        messages: List[Dict[str, Any]] = []
-        if history:
-            messages.extend(history)
-        messages.append(
-            {"role": "user", "content": openai_style_user_content(prompt, images)}
-        )
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history, images=images)
         thinking_on = bool(
             self.enable_thinking
             and self._supports_api_thinking()
@@ -423,12 +426,9 @@ class DeepSeekLLM:
         max_tokens: Optional[int] = None,
         images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        messages: List[Dict[str, Any]] = []
-        if history:
-            messages.extend(history)
-        messages.append(
-            {"role": "user", "content": openai_style_user_content(prompt, images)}
-        )
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history, images=images)
         thinking_on = bool(
             self.enable_thinking
             and self._supports_api_thinking()
@@ -482,10 +482,9 @@ class DeepSeekLLM:
 
     async def chat(self, prompt: str, history: Optional[list] = None) -> str:
         def _sync() -> str:
-            messages: List[Dict[str, Any]] = []
-            if history:
-                messages.extend(history)
-            messages.append({"role": "user", "content": prompt})
+            from llm.chat_messages import prompt_to_messages
+
+            messages = prompt_to_messages(prompt, history=history)
             resp = self._chat_create(messages, stream=False, enable_thinking=False)
             _log_deepseek_prefix_cache_line(getattr(resp, "usage", None), model=self.model, tag="chat")
             return (resp.choices[0].message.content or "").strip()
@@ -527,7 +526,9 @@ class DeepSeekLLM:
         def _sync_parse() -> Optional[dict]:
             user_input_wrapped = wrap_general_user_prompt(user_input, locale)
             if "<system>" in user_input or "<format>" in user_input or "必须返回" in user_input:
-                messages = [{"role": "user", "content": user_input_wrapped}]
+                from llm.chat_messages import prompt_to_messages
+
+                messages = prompt_to_messages(user_input_wrapped)
                 try:
                     resp = self._chat_create(messages, stream=False, enable_thinking=False)
                     _log_deepseek_prefix_cache_line(

@@ -4,6 +4,27 @@ from agents.tools import grep_es_rerank as rerank_mod
 from memory.qwen_rerank_client import RerankHit
 
 
+def test_grep_user_query_text_prefers_raw_without_ui_block():
+    q = rerank_mod.grep_user_query_text(
+        raw_user_input="把状态改成重新打开",
+        user_input="[界面上下文]\n- record_id=123\n把状态改成重新打开",
+    )
+    assert q == "把状态改成重新打开"
+    assert "[界面上下文]" not in q
+
+
+def test_semantic_text_for_grep_embed_strips_ui_block():
+    raw = (
+        "[界面上下文] 用户当前在应用中聚焦的记录\n"
+        "- target=bug\n- record_id=714021551925628928\n"
+        "当前沙箱一次性把之前的diff展示出来了bug的状态修改成重新打开"
+    )
+    q = rerank_mod.semantic_text_for_grep_embed(raw)
+    assert "[界面上下文]" not in q
+    assert "record_id=" not in q
+    assert "重新打开" in q
+
+
 def test_compose_rerank_query_keywords_only():
     q = rerank_mod._compose_rerank_query(
         user_input="[界面上下文] 用户当前在应用中聚焦的记录\n- target=bug\n登录的bug邮箱验证码",

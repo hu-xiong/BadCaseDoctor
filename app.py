@@ -854,6 +854,9 @@ class Project(db.Model):
     login_configs = db.Column(db.Text)  # 网站登录配置 JSON: [{"url": "...", "username": "...", "password": "..."}]
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, nullable=False)
+    # 用户从系统模板克隆的「默认项目」副本；与模板 project（SYSTEM_PROJECT_TEMPLATE_ID）区分
+    is_default = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    cloned_from_template_id = db.Column(db.Integer, nullable=True)
 
 class ProjectPermission(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -2385,12 +2388,18 @@ def has_project_permission(user_id, project_id, required_role='collaborator'):
     """
     权限检查带 2 秒缓存，同一用户对同一项目的权限在短时间内不会变。
     """
+    try:
+        uid = int(user_id)
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return False
+
     # 先检查缓存
-    cache_key = (user_id, project_id, required_role)
+    cache_key = (uid, pid, required_role)
     cache_hit, cached = _cache_get(('perm',) + cache_key, ttl_s=2.0)
     if cache_hit:
         if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
-            print(f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}) cache_hit", flush=True)
+            print(f"[PERF] has_project_permission(project_id={pid}, user_id={uid}) cache_hit", flush=True)
         return cached
     
     # 尽量只做 1 次查询：同时拿到 owner_id + 当前用户在该项目的权限 role
@@ -2399,22 +2408,23 @@ def has_project_permission(user_id, project_id, required_role='collaborator'):
         db.session.query(Project.user_id, ProjectPermission.role)
         .outerjoin(
             ProjectPermission,
-            and_(ProjectPermission.project_id == Project.id, ProjectPermission.user_id == user_id),
+            and_(ProjectPermission.project_id == Project.id, ProjectPermission.user_id == uid),
         )
-        .filter(Project.id == project_id)
+        .filter(Project.id == pid)
         .first()
     )
     dt_ms = (time.perf_counter() - t0) * 1000
     if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
         print(
-            f"[PERF] has_project_permission(project_id={project_id}, user_id={user_id}, required_role={required_role}) db={dt_ms:.1f}ms",
+            f"[PERF] has_project_permission(project_id={pid}, user_id={uid}, required_role={required_role}) db={dt_ms:.1f}ms",
             flush=True,
         )
     if not row:
         _cache_set(('perm',) + cache_key, False)
         return False
     owner_id, role = row
-    result = True if owner_id == user_id else (role in (['admin', 'collaborator'] if required_role != 'admin' else ['admin']))
+    is_owner = owner_id is not None and int(owner_id) == uid
+    result = True if is_owner else (role in (['admin', 'collaborator'] if required_role != 'admin' else ['admin']))
     _cache_set(('perm',) + cache_key, result)
     return result
 
@@ -5236,6 +5246,18 @@ def api_login():
                 print(f"[LOGIN] 校验成功，正在执行 login_user(id={user.id})...")
                 login_user(user)
 
+                project_id = None
+                try:
+                    from utils.project_clone import resolve_user_default_project, ensure_default_plan_for_project
+
+                    project_id, _ = resolve_user_default_project(int(user.id))
+                    ensure_default_plan_for_project(int(project_id), int(user.id))
+                    db.session.commit()
+                    _redis_cache_invalidate_projects(user.id)
+                except Exception as e:
+                    db.session.rollback()
+                    print(f"[LOGIN] 默认项目解析失败: {e}")
+
                 print(f"[LOGIN] === 登录处理成功，总耗时: {time.time() - start_time:.4f}s ===\n")
                 return jsonify({
                     'success': True, 
@@ -5244,7 +5266,8 @@ def api_login():
                         'email': user.email,
                         'name': user.name,
                         'role': user.role
-                    }
+                    },
+                    'project_id': _json_snowflake_id(project_id),
                 })
             else:
                 print("[LOGIN] 错误: 密码校验失败")
@@ -5290,6 +5313,18 @@ def api_register():
     db.session.commit()
     login_user(user)
 
+    project_id = None
+    try:
+        from utils.project_clone import resolve_user_default_project, ensure_default_plan_for_project
+
+        project_id, _ = resolve_user_default_project(int(user.id))
+        ensure_default_plan_for_project(int(project_id), int(user.id))
+        db.session.commit()
+        _redis_cache_invalidate_projects(user.id)
+    except Exception as e:
+        db.session.rollback()
+        print(f"[REGISTER] 默认项目初始化失败: {e}")
+
     return jsonify({
         'success': True,
         'user': {
@@ -5297,7 +5332,8 @@ def api_register():
             'email': user.email,
             'name': user.name,
             'role': user.role
-        }
+        },
+        'project_id': _json_snowflake_id(project_id),
     })
 
 @app.route('/api/user', methods=['GET'])
@@ -5555,6 +5591,47 @@ def api_create_project():
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/projects/ensure-default', methods=['POST'])
+@login_required
+def api_ensure_default_project():
+    """进入工作台后：用户无任何可访问项目时，从系统模板克隆默认项目副本。"""
+    try:
+        uid = current_user.id
+
+        from utils.project_clone import resolve_user_default_project
+
+        def _finish(project_id: int, created: bool):
+            from utils.project_clone import ensure_default_plan_for_project, ensure_project_admin_permission
+
+            ensure_project_admin_permission(int(project_id), int(uid))
+            plan_id, plan_created = ensure_default_plan_for_project(int(project_id), int(uid))
+            db.session.commit()
+            _redis_cache_invalidate_projects(uid)
+            _redis_cache_invalidate_project(int(project_id))
+            try:
+                _cache_invalidate_plans(int(project_id))
+            except Exception:
+                pass
+            return jsonify({
+                'success': True,
+                'project_id': _json_snowflake_id(project_id),
+                'created': created,
+                'default_plan_id': _json_snowflake_id(plan_id),
+                'default_plan_created': plan_created,
+            })
+
+        project_id, created = resolve_user_default_project(int(uid))
+        return _finish(project_id, created)
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        print(f"ensure-default 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': '确保默认项目失败'}), 500
 
 @app.route('/api/projects/<int:project_id>', methods=['GET'])
 @login_required
@@ -8432,6 +8509,8 @@ def sync_database_schema():
                     'login_configs TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'user_id INT NOT NULL',
+                    'is_default BOOLEAN DEFAULT FALSE',
+                    'cloned_from_template_id INT',
                 ]
             },
             'project_permission': {
@@ -8706,6 +8785,28 @@ def sync_database_schema():
                     'checkpoint_json TEXT',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                ]
+            },
+            'cdp_test_runs': {
+                'columns': [
+                    'id VARCHAR(36) PRIMARY KEY',
+                    'chat_session_id INT',
+                    'react_request_id VARCHAR(64)',
+                    'project_id INT NOT NULL',
+                    'plan_id BIGINT',
+                    'user_id INT NOT NULL',
+                    'mode VARCHAR(32) NOT NULL DEFAULT "manual"',
+                    'title VARCHAR(200) NOT NULL DEFAULT "CDP 测试"',
+                    'status VARCHAR(20) NOT NULL DEFAULT "running"',
+                    'spec_json TEXT',
+                    'steps_json TEXT',
+                    'summary TEXT',
+                    'pass_count INT DEFAULT 0',
+                    'fail_count INT DEFAULT 0',
+                    'cdp_session_id VARCHAR(64)',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'finished_at DATETIME',
                 ]
             },
             'terminal_audit': {
@@ -9120,9 +9221,27 @@ def api_create_plan():
                 print(f"缺少必填字段: {field}")
                 return jsonify({'success': False, 'error': f'缺少必填字段: {field}'}), 400
             
+        try:
+            plan_project_id = int(data['project_id'])
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '无效的 project_id'}), 400
+
+        from utils.project_clone import ensure_project_admin_permission, system_project_template_id
+
+        ensure_project_admin_permission(plan_project_id, int(current_user.id))
+        db.session.flush()
+        tpl_id = system_project_template_id()
+        if tpl_id and plan_project_id == int(tpl_id):
+            tpl_proj = Project.query.get(plan_project_id)
+            if tpl_proj and int(tpl_proj.user_id) != int(current_user.id):
+                return jsonify({
+                    'success': False,
+                    'error': '无法直接在系统模板项目上操作，请刷新页面进入您的默认项目',
+                }), 403
+
         # 检查项目权限
-        print(f"检查项目权限: 用户ID={current_user.id}, 项目 ID={data['project_id']}")
-        if not has_project_permission(current_user.id, data['project_id']):
+        print(f"检查项目权限: 用户ID={current_user.id}, 项目 ID={plan_project_id}")
+        if not has_project_permission(current_user.id, plan_project_id):
             print("权限检查失败")
             return jsonify({'success': False, 'error': '没有项目权限'}), 403
         print("权限检查通过")
@@ -9140,11 +9259,8 @@ def api_create_plan():
             end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date() if data.get('end_date') else None
         except ValueError:
             return jsonify({'success': False, 'error': '日期格式错误，请使用 YYYY-MM-DD 格式'}), 400
-            
-        try:
-            pid = int(data['project_id'])
-        except (TypeError, ValueError):
-            return jsonify({'success': False, 'error': '无效的 project_id'}), 400
+
+        pid = plan_project_id
 
         # 创建计划（Plan 表已移除 cycle / plan_count 等字段，勿再传入）
         plan = Plan(
@@ -11501,6 +11617,46 @@ def api_add_chat_message(session_id):
         return jsonify({'success': False, 'error': '添加消息失败'}), 500
 
 
+@app.route('/api/chat-messages/<int:message_id>', methods=['PUT'])
+@login_required
+def api_update_chat_message(message_id):
+    """更新助手消息（流式 checkpoint / 刷新后恢复完整 ReAct 过程）。"""
+    try:
+        mid = _normalize_chat_message_id(message_id)
+        if mid is None:
+            return jsonify({'success': False, 'error': '无效的消息 id'}), 400
+        msg = db.session.get(ChatMessage, mid)
+        if not msg:
+            return jsonify({'success': False, 'error': '消息不存在'}), 404
+        if msg.is_user:
+            return jsonify({'success': False, 'error': '用户消息不可通过此接口更新'}), 400
+        session = db.session.get(ChatSession, msg.session_id)
+        if not session or session.user_id != current_user.id:
+            return jsonify({'success': False, 'error': '没有权限访问此会话'}), 403
+
+        from app_services.chat_message_persist import (
+            apply_assistant_fields_to_message,
+            assistant_fields_from_client,
+        )
+
+        data = request.get_json() or {}
+        fields = assistant_fields_from_client(data)
+        if not fields:
+            return jsonify({'success': False, 'error': '无有效更新字段'}), 400
+        apply_assistant_fields_to_message(msg, fields)
+        session.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'message_id': msg.id,
+            'updated_at': msg.created_at.isoformat() if msg.created_at else None,
+        })
+    except Exception as e:
+        db.session.rollback()
+        print(f"更新消息失败: {e}")
+        return jsonify({'success': False, 'error': '更新消息失败'}), 500
+
+
 @app.route('/api/chat-messages/<int:message_id>/clear-delete-navigation', methods=['POST'])
 @login_required
 def api_clear_chat_message_delete_navigation(message_id):
@@ -11647,6 +11803,19 @@ if __name__ == '__main__':
 
             _grep_warm_th.Thread(
                 target=_grep_es_warmup_bg, name="grep-es-warmup", daemon=True
+            ).start()
+        except Exception:
+            pass
+
+        def _cdp_browser_warmup_bg():
+            # Chromium 按登录用户懒加载；启动时不预拉 anonymous 池，避免与真实 user 池重复占内存。
+            return
+
+        try:
+            import threading as _cdp_warm_th
+
+            _cdp_warm_th.Thread(
+                target=_cdp_browser_warmup_bg, name="cdp-browser-warmup", daemon=True
             ).start()
         except Exception:
             pass

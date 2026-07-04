@@ -388,32 +388,21 @@
         </div>
         
         <!-- 相似问题（选填） -->
-        <div class="problem-section" :class="{ 'has-diff': pendingDiff?.modifications?.base_problem }">
-          <div v-if="pendingDiff?.modifications?.base_problem" class="field-diff-panel">
-            <div class="diff-header">
-              <span class="diff-label">修改预览:</span>
-              <div class="diff-actions">
-                <button @click="applyFieldChange('base_problem')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button @click="cancelFieldChange('base_problem')" class="btn-cancel" title="取消">✗</button>
-              </div>
-            </div>
-            <div class="diff-content">
-              <div class="diff-old">
-                <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.base_problem.old || '未设置' }}</span>
-              </div>
-              <div class="diff-arrow">→</div>
-              <div class="diff-new">
-                <span class="diff-tag new">新值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.base_problem.new }}</span>
-              </div>
-            </div>
-          </div>
+        <div class="problem-section" :class="{ 'has-diff': hasPendingField('base_problem') }">
           <h3 class="problem-title">相似问题（选填）:</h3>
-          <textarea 
-            v-model="badcase.base_problem" 
-            class="problem-textarea" 
-            :class="{ 'field-with-diff': pendingDiff?.modifications?.base_problem }"
+          <InlineFieldDiffBox
+            v-if="hasPendingField('base_problem')"
+            :original="String(pendingFieldMod('base_problem')?.old ?? '')"
+            :modified="String(pendingFieldMod('base_problem')?.new ?? '')"
+            empty-original-label="未设置"
+            height="100px"
+            @apply="applyFieldChange('base_problem')"
+            @cancel="cancelFieldChange('base_problem')"
+          />
+          <textarea
+            v-else
+            v-model="badcase.base_problem"
+            class="problem-textarea"
             placeholder="若无相似问题可留空；有则简要描述…"
             maxlength="500"
           ></textarea>
@@ -421,36 +410,25 @@
         </div>
                 
         <!-- 复现步骤编辑器（Tiptap） -->
-        <div class="editor-section" :class="{ 'has-diff': pendingDiff?.modifications?.reproduction_steps }">
-            <div v-if="pendingDiff?.modifications?.reproduction_steps" class="field-diff-panel">
-              <div class="diff-header">
-                <span class="diff-label">修改预览:</span>
-                <div class="diff-actions">
-                  <button @click="applyFieldChange('reproduction_steps')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                  <button @click="cancelFieldChange('reproduction_steps')" class="btn-cancel" title="取消">✗</button>
-                </div>
-              </div>
-              <div class="diff-content">
-                <div class="diff-old">
-                  <span class="diff-tag old">原值</span>
-                  <span class="diff-value">{{ pendingDiff.modifications.reproduction_steps.old || '未设置' }}</span>
-                </div>
-                <div class="diff-arrow">→</div>
-                <div class="diff-new">
-                  <span class="diff-tag new">新值</span>
-                  <span class="diff-value">{{ pendingDiff.modifications.reproduction_steps.new }}</span>
-                </div>
-              </div>
-            </div>
+        <div class="editor-section" :class="{ 'has-diff': hasPendingField('reproduction_steps') }">
           <div class="editor-content">
             <div class="editor-title-row">
               <h3 class="editor-title">BadCase复现步骤:</h3>
               <button type="button" class="toolbar-btn" title="添加附件到侧栏" @click="addAttachment">📎</button>
             </div>
+            <InlineFieldDiffBox
+              v-if="hasPendingField('reproduction_steps')"
+              :original="htmlToPlainText(pendingFieldMod('reproduction_steps')?.old || '')"
+              :modified="htmlToPlainText(pendingFieldMod('reproduction_steps')?.new || '')"
+              empty-original-label="未设置"
+              height="160px"
+              @apply="applyFieldChange('reproduction_steps')"
+              @cancel="cancelFieldChange('reproduction_steps')"
+            />
             <RichTextHtmlEditor
+              v-else
               v-model="badcase.reproduction_steps"
               class="editor-textarea"
-              :class="{ 'field-with-diff': pendingDiff?.modifications?.reproduction_steps }"
               placeholder="请详细描述BadCase的复现步骤..."
             />
             <div class="editor-count">{{ stepsLength }} / 2000</div>
@@ -458,32 +436,21 @@
         </div>
         
         <!-- 答案输入框 -->
-        <div class="answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.answer }">
-          <div v-if="pendingDiff?.modifications?.answer" class="field-diff-panel">
-            <div class="diff-header">
-              <span class="diff-label">修改预览:</span>
-              <div class="diff-actions">
-                <button @click="applyFieldChange('answer')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button @click="cancelFieldChange('answer')" class="btn-cancel" title="取消">✗</button>
-              </div>
-            </div>
-            <div class="diff-content">
-              <div class="diff-old">
-                <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.answer.old || '未设置' }}</span>
-              </div>
-              <div class="diff-arrow">→</div>
-              <div class="diff-new">
-                <span class="diff-tag new">新值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.answer.new }}</span>
-              </div>
-            </div>
-          </div>
+        <div class="answer-section" :class="{ 'has-diff': hasPendingField('answer') }">
           <h3 class="answer-title">答案:</h3>
-          <textarea 
-            v-model="badcase.answer" 
-            class="answer-textarea" 
-            :class="{ 'field-with-diff': pendingDiff?.modifications?.answer }"
+          <InlineFieldDiffBox
+            v-if="hasPendingField('answer')"
+            :original="String(pendingFieldMod('answer')?.old ?? '')"
+            :modified="String(pendingFieldMod('answer')?.new ?? '')"
+            empty-original-label="未设置"
+            height="120px"
+            @apply="applyFieldChange('answer')"
+            @cancel="cancelFieldChange('answer')"
+          />
+          <textarea
+            v-else
+            v-model="badcase.answer"
+            class="answer-textarea"
             placeholder="请输入答案..."
             maxlength="1000"
           ></textarea>
@@ -491,32 +458,22 @@
         </div>
         
         <!-- 正确答案输入框 -->
-        <div class="correct-answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.correct_answer }">
-          <div v-if="pendingDiff?.modifications?.correct_answer" class="field-diff-panel">
-            <div class="diff-header">
-              <span class="diff-label">正确答案修改预览:</span>
-              <div class="diff-actions">
-                <button @click="applyFieldChange('correct_answer')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button @click="cancelFieldChange('correct_answer')" class="btn-cancel" title="取消">✗</button>
-              </div>
-            </div>
-            <div class="diff-content">
-              <div class="diff-old">
-                <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.correct_answer.old || '未设置' }}</span>
-              </div>
-              <div class="diff-arrow">→</div>
-              <div class="diff-new">
-                <span class="diff-tag new">新值</span>
-                <span class="diff-value">{{ pendingDiff.modifications.correct_answer.new }}</span>
-              </div>
-            </div>
-          </div>
+        <div class="correct-answer-section" :class="{ 'has-diff': hasPendingField('correct_answer') }">
           <h3 class="correct-answer-title">正确答案:</h3>
-          <textarea 
-            v-model="badcase.correct_answer" 
-            class="correct-answer-textarea" 
-            :class="{ 'field-with-diff': pendingDiff?.modifications?.correct_answer }"
+          <InlineFieldDiffBox
+            v-if="hasPendingField('correct_answer')"
+            :original="String(pendingFieldMod('correct_answer')?.old ?? '')"
+            :modified="String(pendingFieldMod('correct_answer')?.new ?? '')"
+            empty-original-label="未设置"
+            label="正确答案修改预览"
+            height="120px"
+            @apply="applyFieldChange('correct_answer')"
+            @cancel="cancelFieldChange('correct_answer')"
+          />
+          <textarea
+            v-else
+            v-model="badcase.correct_answer"
+            class="correct-answer-textarea"
             placeholder="请输入正确答案..."
             maxlength="1000"
           ></textarea>
@@ -525,13 +482,13 @@
                 
         <!-- 问题分类和优先级 -->
         <div class="category-section">
-          <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.case_category }">
+          <div class="form-row" :class="{ 'has-diff': hasPendingField('case_category') }">
             <label class="form-label required">问题分类:</label>
-            <div v-if="pendingDiff?.modifications?.case_category" class="field-diff-panel-inline">
+            <div v-if="hasPendingField('case_category')" class="field-diff-panel-inline">
               <div class="diff-content">
-                <span class="diff-old">{{ pendingDiff.modifications.case_category.old || '未设置' }}</span>
+                <span class="diff-old">{{ pendingFieldMod('case_category')?.old || '未设置' }}</span>
                 <span class="diff-arrow">→</span>
-                <span class="diff-new">{{ pendingDiff.modifications.case_category.new }}</span>
+                <span class="diff-new">{{ pendingFieldMod('case_category')?.new }}</span>
                 <div class="diff-actions">
                   <button type="button" @click="applyFieldChange('case_category')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
                   <button type="button" @click="cancelFieldChange('case_category')" class="btn-cancel-sm" title="取消">✗</button>
@@ -541,7 +498,7 @@
             <select
               v-model="badcase.case_category"
               class="form-select"
-              :class="{ 'field-with-diff': pendingDiff?.modifications?.case_category }"
+              :class="{ 'field-with-diff': hasPendingField('case_category') }"
             >
               <option value="">请选择问题分类</option>
               <option value="功能缺陷">功能缺陷</option>
@@ -552,13 +509,13 @@
               <option value="其他">其他</option>
             </select>
           </div>
-          <div class="form-row" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
+          <div class="form-row" :class="{ 'has-diff': hasPendingField('priority') }">
             <label class="form-label required">优先级:</label>
-            <div v-if="pendingDiff?.modifications?.priority" class="field-diff-panel-inline">
+            <div v-if="hasPendingField('priority')" class="field-diff-panel-inline">
               <div class="diff-content">
-                <span class="diff-old">{{ formatBadcasePriorityLabel(pendingDiff.modifications.priority.old) }}</span>
+                <span class="diff-old">{{ formatBadcasePriorityLabel(pendingFieldMod('priority')?.old) }}</span>
                 <span class="diff-arrow">→</span>
-                <span class="diff-new">{{ formatBadcasePriorityLabel(pendingDiff.modifications.priority.new) }}</span>
+                <span class="diff-new">{{ formatBadcasePriorityLabel(pendingFieldMod('priority')?.new) }}</span>
                 <div class="diff-actions">
                   <button type="button" @click="applyFieldChange('priority')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
                   <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel-sm" title="取消">✗</button>
@@ -568,7 +525,7 @@
             <select
               v-model="badcase.priority"
               class="form-select"
-              :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }"
+              :class="{ 'field-with-diff': hasPendingField('priority') }"
             >
               <option value="p1">P1 - 紧急</option>
               <option value="p2">P2 - 高</option>
@@ -702,17 +659,36 @@
              </div>
            </div>
            <div v-if="entityComments.length" class="comment-timeline">
-             <div v-for="c in entityComments" :key="c.id" class="comment-item">
+             <div
+               v-for="c in entityComments"
+               :key="c.id"
+               class="comment-item"
+               :class="{ 'is-reply': c.parent_id, 'is-pending': c.pending }"
+             >
                <div class="comment-item-meta">
                  <span class="comment-author">{{ c.user_name || '—' }}</span>
+                 <span v-if="c.parent_id" class="comment-reply-tag">回复 @{{ c.parent_user_name || '—' }}</span>
                  <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
                  <span v-if="c.source_message_id" class="comment-op-tag">来自对话操作</span>
+                 <span v-if="c.pending" class="comment-pending-tag">提交中</span>
+                 <button
+                   v-if="isEdit && badcaseId && !c.pending"
+                   type="button"
+                   class="comment-reply-btn"
+                   @click="startReplyToComment(c)"
+                 >
+                   回复
+                 </button>
                </div>
                <div class="comment-item-body" v-html="c.content"></div>
              </div>
            </div>
            <div v-else class="comment-empty">暂无评论</div>
-           <h4 class="comment-input-subtitle">输入评论</h4>
+           <div v-if="replyingTo" class="comment-reply-hint">
+             正在回复 <strong>{{ replyingTo.user_name || '—' }}</strong>
+             <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">取消</button>
+           </div>
+           <h4 class="comment-input-subtitle">{{ replyingTo ? '输入回复' : '输入评论' }}</h4>
            <div class="comment-input-container">
              <template v-if="!commentEditorActive">
                <textarea
@@ -762,20 +738,22 @@ import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { BACKEND_BASE_URL, createBadcase, getBadcaseDetail, updateBadcase, addBadcaseComment, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getPlanDetail } from '../api.js'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
-import { richTextHtmlHasContent, richTextHtmlDisplayLength } from '../utils/richTextContent.js'
+import { richTextHtmlHasContent, richTextHtmlDisplayLength, htmlToPlainText } from '../utils/richTextContent.js'
+import InlineFieldDiffBox from './InlineFieldDiffBox.vue'
 import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate } from '../utils/personLabel'
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
 import {
   getPendingModifyDiffForDetail,
-  clearPendingModifyDiffForDetail
+  clearPendingModifyDiffForDetail,
+  setDiffSlot
 } from '../utils/bcdSessionStore.js'
 
 
 export default {
   name: 'NewBadcase',
-  components: { MonacoDiffEditor, RichTextHtmlEditor },
+  components: { MonacoDiffEditor, RichTextHtmlEditor, InlineFieldDiffBox },
   props: {
     id: {
       type: [String, Number],
@@ -801,6 +779,10 @@ export default {
     show_diff: {
       type: Boolean,
       default: false
+    },
+    pending_diff_seq: {
+      type: Number,
+      default: 0
     },
     embedded: {
       type: Boolean,
@@ -904,8 +886,66 @@ export default {
     // 待确认的 diff 数据
     const pendingDiff = ref(null)
 
-    // 这些字段使用“就地 diff”（显示在对应文本域内部），不在顶部 MonacoDiffEditor 列表重复展示
-    const inlineDiffFields = ['base_problem', 'answer', 'correct_answer', 'reproduction_steps', 'case_category', 'priority']
+    // 长文本字段：沙箱已预览时详情用「一行原值→新值 + ✓/✗」，避免大块重复；下拉类仍用 field-diff-panel-inline
+    const longTextDiffFields = ['base_problem', 'answer', 'correct_answer', 'reproduction_steps']
+
+    /** 从沙箱点进详情（show_diff） */
+    const showDiffFromSandbox = computed(() => {
+      const q = route?.query || {}
+      return !!(props.show_diff || q.show_diff === 'true')
+    })
+
+    const hasPendingField = (field) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return false
+      const f = String(field || '')
+      if (mods[f] && typeof mods[f] === 'object' && 'new' in mods[f]) return true
+      if (f === 'case_category') {
+        return ['classification', 'category'].some((k) => mods[k] && typeof mods[k] === 'object' && 'new' in mods[k])
+      }
+      if (f === 'priority') {
+        return mods.severity && typeof mods.severity === 'object' && 'new' in mods.severity
+      }
+      if (f === 'reproduction_steps') {
+        return ['steps_to_reproduce', 'reproduce_steps', 'steps'].some(
+          (k) => mods[k] && typeof mods[k] === 'object' && 'new' in mods[k]
+        )
+      }
+      if (f === 'correct_answer') {
+        return ['actual_result', 'actual', 'correct_answer_final'].some(
+          (k) => mods[k] && typeof mods[k] === 'object' && 'new' in mods[k]
+        )
+      }
+      if (f === 'answer') {
+        return ['expected_result', 'expected'].some(
+          (k) => mods[k] && typeof mods[k] === 'object' && 'new' in mods[k]
+        )
+      }
+      return false
+    }
+
+    const pendingFieldMod = (field) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return null
+      if (mods[field]) return mods[field]
+      if (field === 'case_category') return mods.classification || mods.category || null
+      if (field === 'priority') return mods.severity || null
+      if (field === 'reproduction_steps') {
+        return mods.steps_to_reproduce || mods.reproduce_steps || mods.steps || null
+      }
+      if (field === 'correct_answer') {
+        return mods.actual_result || mods.actual || mods.correct_answer_final || null
+      }
+      if (field === 'answer') return mods.expected_result || mods.expected || null
+      return null
+    }
+
+    const showFieldDiffBlockPanel = (field) => {
+      if (!hasPendingField(field)) return false
+      if (longTextDiffFields.includes(field)) return false
+      return true
+    }
+    const showFieldDiffCompactStrip = () => false
     
     const badcase = reactive({
       title: '',
@@ -1068,6 +1108,16 @@ export default {
       aliasPendingModKey(mods, 'steps_to_reproduce', 'reproduction_steps')
       aliasPendingModKey(mods, 'reproduction_step', 'reproduction_steps')
       aliasPendingModKey(mods, 'badcase_reproduction_steps', 'reproduction_steps')
+      aliasPendingModKey(mods, 'steps', 'reproduction_steps')
+      aliasPendingModKey(mods, 'expected_result', 'answer')
+      aliasPendingModKey(mods, 'expected', 'answer')
+      aliasPendingModKey(mods, 'actual_result', 'correct_answer')
+      aliasPendingModKey(mods, 'actual', 'correct_answer')
+      aliasPendingModKey(mods, 'severity', 'priority')
+      aliasPendingModKey(mods, 'classification', 'case_category')
+      aliasPendingModKey(mods, 'category', 'case_category')
+      aliasPendingModKey(mods, 'steps', 'reproduction_steps')
+      aliasPendingModKey(mods, 'test_steps', 'reproduction_steps')
       aliasPendingModKey(mods, 'comment', 'append_comment')
       aliasPendingModKey(mods, 'remark', 'append_comment')
       return { ...pd, modifications: mods }
@@ -1083,6 +1133,95 @@ export default {
       }
     }
 
+    const persistPendingDiffToSession = () => {
+      const pid = snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+      if (!pid) return
+      const mods = pendingDiff.value?.modifications
+      const remaining = mods
+        ? Object.keys(mods).filter((k) => !String(k).startsWith('_'))
+        : []
+      if (!pendingDiff.value || remaining.length === 0) {
+        clearPendingModifyDiffForDetail(pid)
+        return
+      }
+      try {
+        setDiffSlot(pid, { ...pendingDiff.value, modifications: { ...mods } })
+      } catch (e) {
+        console.warn('[DIFF] persistPendingDiffToSession 失败:', e)
+      }
+    }
+
+    const normalizePendingFieldCompareValue = (field, val) => {
+      const f = String(field || '')
+      let s = val == null ? '' : String(val).trim()
+      if (f === 'case_category' || f === 'classification' || f === 'category') {
+        const canon = {
+          功能缺陷: '功能缺陷',
+          性能问题: '性能问题',
+          界面问题: '界面问题',
+          兼容性问题: '兼容性问题',
+          安全问题: '安全问题',
+          其他: '其他'
+        }
+        return canon[s] || s
+      }
+      if (f === 'priority' || f === 'severity') {
+        const low = s.toLowerCase()
+        if (['p1', 'p2', 'p3', 'p4'].includes(low)) return low
+        return s
+      }
+      if (f === 'reproduction_steps' || f === 'steps_to_reproduce') {
+        return s.replace(/\s+/g, ' ').trim()
+      }
+      return s
+    }
+
+    /** 仅当库内已是 new 值时剔除（对比 initBadcase 后快照），勿用预填后的表单值误判 */
+    const captureDbBaselineForPendingPrune = () => ({
+      case_category: badcase.case_category,
+      priority: badcase.priority,
+      answer: badcase.answer,
+      correct_answer: badcase.correct_answer,
+      base_problem: badcase.base_problem,
+      reproduction_steps: badcase.reproduction_steps,
+      title: badcase.title,
+      status: badcase.status
+    })
+
+    const baselineValueForPendingField = (baseline, field) => {
+      if (!baseline) return ''
+      const f = String(field || '')
+      if (f === 'classification' || f === 'category') return baseline.case_category
+      if (f === 'severity') return baseline.priority
+      if (f === 'plan_id') return baseline.plan
+      if (baseline[f] !== undefined) return baseline[f]
+      return ''
+    }
+
+    const prunePendingModsAlreadyPersistedInDb = (baseline) => {
+      const mods = pendingDiff.value?.modifications
+      if (!mods || !baseline) return
+      for (const [field, data] of Object.entries(mods)) {
+        if (String(field).startsWith('_')) continue
+        if (!data || typeof data !== 'object' || !('new' in data)) continue
+        const dbVal = baselineValueForPendingField(baseline, field)
+        const newNorm = normalizePendingFieldCompareValue(field, data.new)
+        const dbNorm = normalizePendingFieldCompareValue(field, dbVal)
+        if (newNorm && dbNorm === newNorm) {
+          clearBadcaseDetailPendingDiffField(field)
+        }
+      }
+      const remaining = Object.keys(mods).filter((k) => !String(k).startsWith('_'))
+      if (remaining.length === 0) {
+        pendingDiff.value = null
+        clearPendingModifyDiffForDetail(
+          snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+        )
+      } else {
+        persistPendingDiffToSession()
+      }
+    }
+
     const clearBadcaseDetailPendingDiffField = (field) => {
       const f = String(field || '')
       if (!f) return
@@ -1090,7 +1229,16 @@ export default {
       if (f === 'reproduction_steps' || f === 'steps_to_reproduce' || f === 'reproduce_steps' || f === 'badcase_reproduction_steps') {
         aliases.push('reproduction_steps', 'steps_to_reproduce', 'reproduce_steps', 'badcase_reproduction_steps')
       } else if (f === 'correct_answer' || f === 'correct_answer_final' || f === 'correct_answer_text' || f === 'answer') {
-        aliases.push('correct_answer', 'correct_answer_final', 'correct_answer_text', 'answer')
+        aliases.push(
+          'correct_answer',
+          'correct_answer_final',
+          'correct_answer_text',
+          'answer',
+          'expected_result',
+          'expected',
+          'actual_result',
+          'actual'
+        )
       } else if (f === 'priority' || f === 'severity') {
         aliases.push('priority', 'severity')
       } else if (f === 'case_category' || f === 'classification' || f === 'category') {
@@ -1213,6 +1361,7 @@ export default {
         if (!isBc || (cur && tid && tid !== cur)) return
         pd = normalizePendingDiffModifications(pd)
         pendingDiff.value = pd
+        reconcilePendingOldFromLoadedBadcase()
         applyPendingModificationsToForm()
         await focusAppendCommentDiffInSidebar()
       } catch (e) {
@@ -1221,7 +1370,7 @@ export default {
     }
 
     watch(
-      () => [props.show_diff, props.id],
+      () => [props.show_diff, props.id, props.pending_diff_seq],
       () => {
         reloadPendingDiffFromSession()
       },
@@ -1940,6 +2089,23 @@ export default {
     const entityComments = ref([])
     const commentDraft = ref('')
     const commentSubmitting = ref(false)
+    const replyingTo = ref(null)
+
+    const resolveCommentParentId = (comment) => {
+      if (!comment || comment.pending) return null
+      const id = comment.id
+      if (id == null || String(id).startsWith('pending-')) return null
+      return id
+    }
+
+    const startReplyToComment = (comment) => {
+      replyingTo.value = comment
+      commentEditorActive.value = true
+    }
+
+    const cancelReplyToComment = () => {
+      replyingTo.value = null
+    }
 
     const commentDraftText = computed(() => {
       if (!commentDraft.value) return ''
@@ -2063,14 +2229,22 @@ export default {
       const cur = resolveEditorBadcaseId()
       if (!tid || !cur || tid !== cur) return
 
+      if (event?.detail?.reloadPendingDiff === true) {
+        await reloadPendingDiffFromSession()
+        return
+      }
+
       const fieldUpdates = event?.detail?.fieldUpdates
+      const skipCommentReload = event?.detail?.skipCommentReload === true
       if (fieldUpdates && typeof fieldUpdates === 'object') {
         for (const [field, val] of Object.entries(fieldUpdates)) {
           const f = String(field)
           if (f === 'append_comment' || f === 'comment' || f === 'remark') {
             const plain = plainCommentFromDiffValue(val)
             optimisticAppendEntityComment(plain)
-            await reloadEntityCommentsAfterAdopt(plain)
+            if (!skipCommentReload) {
+              await reloadEntityCommentsAfterAdopt(plain)
+            }
             clearCommentPendingDiffKeys()
           } else {
             applyDetailFieldToBadcase(f, val)
@@ -2084,23 +2258,63 @@ export default {
         Object.keys(pendingDiff.value.modifications).filter((k) => !String(k).startsWith('_')).length === 0
       ) {
         pendingDiff.value = null
+        clearPendingModifyDiffForDetail(
+          snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+        )
+      } else if (pendingDiff.value?.modifications) {
+        persistPendingDiffToSession()
+      }
+    }
+
+    const reloadEntityCommentsAfterSubmit = async (tempId) => {
+      const delays = [400, 1200, 3000]
+      for (const ms of delays) {
+        await new Promise((resolve) => setTimeout(resolve, ms))
+        await loadEntityComments()
+        if (!tempId || !entityComments.value.some((c) => c.id === tempId && c.pending)) return
       }
     }
 
     const submitCommentDraft = async () => {
       if (!isEdit.value || !badcaseId.value || !richTextHtmlHasContent(commentDraft.value)) return
+      const parentId = replyingTo.value ? resolveCommentParentId(replyingTo.value) : null
+      const author = currentUser.value ? personPrimaryLabel(currentUser.value) : '—'
+      const tempId = `pending-${Date.now()}`
+      const optimistic = {
+        id: tempId,
+        content: commentDraft.value,
+        user_name: author,
+        user_id: currentUser.value?.id ?? null,
+        parent_id: parentId,
+        parent_user_name: replyingTo.value?.user_name || '',
+        created_at: new Date().toISOString(),
+        pending: true
+      }
+      entityComments.value = [...entityComments.value, optimistic]
+      const draftSnapshot = commentDraft.value
+      commentDraft.value = ''
+      commentEditorActive.value = false
+      replyingTo.value = null
       commentSubmitting.value = true
       try {
-        const resp = await addBadcaseComment(badcaseId.value, { content: commentDraft.value })
+        const body = { content: draftSnapshot }
+        if (parentId != null) body.parent_id = parentId
+        const resp = await addBadcaseComment(badcaseId.value, body)
         const res = resp?.data || resp
         if (res?.success && res.comment) {
-          entityComments.value = [...entityComments.value, res.comment]
-          commentDraft.value = ''
-          commentEditorActive.value = false
+          if (res.async) {
+            reloadEntityCommentsAfterSubmit(tempId)
+          } else {
+            entityComments.value = entityComments.value.map((c) =>
+              c.id === tempId ? res.comment : c
+            )
+          }
         } else {
+          entityComments.value = entityComments.value.filter((c) => c.id !== tempId)
           alert(res?.error || res?.message || '发表评论失败')
         }
       } catch (e) {
+        entityComments.value = entityComments.value.filter((c) => c.id !== tempId)
         console.error('[Badcase] 发表评论失败:', e)
         alert('发表评论失败')
       } finally {
@@ -2207,32 +2421,40 @@ export default {
     // 确认字段修改
     const confirmFieldChange = (field) => {
       console.log('[DIFF] 确认字段修改:', field)
-      if (pendingDiff.value?.modifications?.[field]) {
-        // 已经预填充了新值，直接清除 diff 显示
-        delete pendingDiff.value.modifications[field]
-        
-        // 如果所有字段都已确认，清除 sessionStorage 并通知对话区
-        const remainingFields = Object.keys(pendingDiff.value.modifications || {}).filter(k => !String(k).startsWith('_'))
-        if (remainingFields.length === 0) {
-          clearPendingModifyDiffForDetail(
-            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+      const mods = pendingDiff.value?.modifications
+      if (!mods) return
+      const beforeKeys = Object.keys(mods).filter((k) => !String(k).startsWith('_'))
+      clearBadcaseDetailPendingDiffField(field)
+      const afterKeys = Object.keys(pendingDiff.value?.modifications || {}).filter(
+        (k) => !String(k).startsWith('_')
+      )
+      if (afterKeys.length >= beforeKeys.length) return
+
+      const remainingFields = Object.keys(pendingDiff.value?.modifications || {}).filter(
+        (k) => !String(k).startsWith('_')
+      )
+      if (remainingFields.length === 0) {
+        const tid = pendingDiff.value?.targetId
+        clearPendingModifyDiffForDetail(
+          snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
+        )
+        pendingDiff.value = null
+        if (tid != null) {
+          window.dispatchEvent(
+            new CustomEvent('modify-confirmed', {
+              detail: { targetId: tid },
+              bubbles: true
+            })
           )
-          // 通知对话区修改已确认
-          const event = new CustomEvent('modify-confirmed', {
-            detail: { targetId: pendingDiff.value.targetId },
-            bubbles: true
-          })
-          window.dispatchEvent(event)
-          
-          // 通知列表页面清除 pendingModifications 标记
-          const clearEvent = new CustomEvent('clear-pending-modification', {
-            detail: { targetId: pendingDiff.value.targetId },
-            bubbles: true
-          })
-          window.dispatchEvent(clearEvent)
-          
-          pendingDiff.value = null
+          window.dispatchEvent(
+            new CustomEvent('clear-pending-modification', {
+              detail: { targetId: tid },
+              bubbles: true
+            })
+          )
         }
+      } else {
+        persistPendingDiffToSession()
       }
     }
     
@@ -2259,16 +2481,17 @@ export default {
           normalizeBadcaseCaseCategoryForForm()
         }
 
-        // 清除该字段的 diff
-        delete pendingDiff.value.modifications[field]
-        
-        // 如果所有字段都已取消，清除 sessionStorage
-        const remainingFields = Object.keys(pendingDiff.value.modifications || {}).filter(k => !String(k).startsWith('_'))
+        clearBadcaseDetailPendingDiffField(field)
+        const remainingFields = Object.keys(pendingDiff.value?.modifications || {}).filter(
+          (k) => !String(k).startsWith('_')
+        )
         if (remainingFields.length === 0) {
           clearPendingModifyDiffForDetail(
             snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
           )
           pendingDiff.value = null
+        } else {
+          persistPendingDiffToSession()
         }
       }
     }
@@ -2279,8 +2502,45 @@ export default {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
 
-    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue) => {
-      if (pendingDiff.value) return
+    const notifyDetailFieldAdopted = (adoptedField, adoptedValue, serverResult = null) => {
+      const tid =
+        props.id != null && props.id !== ''
+          ? String(props.id).trim()
+          : badcaseId.value
+            ? String(badcaseId.value).trim()
+            : ''
+      if (!tid || !adoptedField) return
+      window.dispatchEvent(
+        new CustomEvent('detail-modify-adopted', {
+          detail: {
+            targetId: tid,
+            targetType: 'badcase',
+            adoptedField,
+            adoptedValue,
+            serverResult: serverResult ?? null,
+            partial: !!pendingDiff.value?.modifications
+          },
+          bubbles: true
+        })
+      )
+      window.dispatchEvent(
+        new CustomEvent('badcase-detail-refresh', {
+          detail: {
+            targetId: tid,
+            fieldUpdates: { [adoptedField]: adoptedValue },
+            skipCommentReload: true
+          },
+          bubbles: true
+        })
+      )
+    }
+
+    const notifyDetailAdoptCompleteIfDone = (adoptedField, adoptedValue, serverResult = null) => {
+      notifyDetailFieldAdopted(adoptedField, adoptedValue, serverResult)
+      const rem = pendingDiff.value?.modifications
+        ? Object.keys(pendingDiff.value.modifications).filter((k) => !String(k).startsWith('_'))
+        : []
+      if (rem.length > 0) return
       const tid =
         props.id != null && props.id !== ''
           ? String(props.id).trim()
@@ -2289,19 +2549,73 @@ export default {
             : ''
       if (!tid) return
       window.dispatchEvent(
-        new CustomEvent('detail-modify-adopted', {
-          detail: {
-            targetId: tid,
-            targetType: 'badcase',
-            adoptedField,
-            adoptedValue
-          },
+        new CustomEvent('modify-confirmed', {
+          detail: { targetId: tid },
+          bubbles: true
+        })
+      )
+      window.dispatchEvent(
+        new CustomEvent('clear-pending-modification', {
+          detail: { targetId: tid },
           bubbles: true
         })
       )
     }
 
-    // 采纳字段修改：单字段落库（复用既有 /api/projects/{project_id}/modify）
+    const applyOptimisticFieldToBadcase = (field, newValue) => {
+      if (field === 'append_comment' || field === 'comment') {
+        optimisticAppendEntityComment(plainCommentFromDiffValue(newValue))
+        commentDraft.value = ''
+        return
+      }
+      if (field === 'plan_id') {
+        badcase.plan = normalizePlanId(newValue) || ''
+      } else if (field === 'project_id') {
+        badcase.project_id = String(newValue)
+        badcase.associate_project = true
+      } else if (badcase.hasOwnProperty(field)) {
+        badcase[field] = newValue
+      }
+      if (field === 'priority') {
+        normalizeBadcasePriorityForForm()
+      }
+      if (field === 'case_category') {
+        normalizeBadcaseCaseCategoryForForm()
+      }
+    }
+
+    const rollbackOptimisticBadcaseField = (field, modSnapshot, pendingMeta) => {
+      const oldValue = modSnapshot?.old
+      if (field === 'append_comment' || field === 'comment') {
+        entityComments.value = entityComments.value.filter(
+          (c) => !String(c?.id || '').startsWith('pending-')
+        )
+      } else if (field === 'plan_id') {
+        badcase.plan = normalizePlanId(oldValue) || ''
+      } else if (field === 'project_id') {
+        badcase.project_id = oldValue ? String(oldValue) : ''
+        badcase.associate_project = !!badcase.project_id
+      } else if (badcase.hasOwnProperty(field)) {
+        badcase[field] = oldValue ?? ''
+      }
+      if (field === 'priority') {
+        normalizeBadcasePriorityForForm()
+      }
+      if (field === 'case_category') {
+        normalizeBadcaseCaseCategoryForForm()
+      }
+      const pd = pendingDiff.value || {
+        targetId: pendingMeta.targetId,
+        target: pendingMeta.target,
+        messageId: pendingMeta.messageId,
+        modifications: {}
+      }
+      pd.modifications[field] = { ...modSnapshot }
+      pendingDiff.value = pd
+      persistPendingDiffToSession()
+    }
+
+    // 采纳字段修改：乐观更新表单 → POST → 失败回滚
     const applyFieldChange = async (field) => {
       if (!pendingDiff.value?.modifications?.[field]) return
 
@@ -2309,11 +2623,20 @@ export default {
       const targetId = pendingDiff.value?.targetId || props.id
       const target = pendingDiff.value?.target || 'badcase'
       const newValue = pendingDiff.value.modifications[field]?.new
+      const modSnapshot = { ...pendingDiff.value.modifications[field] }
+      const pendingMeta = {
+        targetId,
+        target,
+        messageId: pendingDiff.value?.messageId ?? null
+      }
 
       if (!projectId || !targetId) {
         console.warn('[DIFF] projectId/targetId 缺失，无法采纳', { projectId, targetId })
         return
       }
+
+      applyOptimisticFieldToBadcase(field, newValue)
+      confirmFieldChange(field)
 
       try {
         const resp = await fetch(`${BACKEND_BASE_URL}/api/projects/${projectId}/modify`, {
@@ -2325,41 +2648,28 @@ export default {
             target_id: targetId,
             modifications: { [field]: newValue },
             confirm: true,
-            message_id: pendingDiff.value?.messageId
+            message_id: pendingMeta.messageId
           })
         })
         const result = await resp.json()
         if (!result.success) {
+          rollbackOptimisticBadcaseField(field, modSnapshot, pendingMeta)
           console.error('[DIFF] 采纳失败:', result.error)
+          alert(result.error || '采纳失败')
           return
         }
 
         if (field === 'append_comment' || field === 'comment') {
           const plain = plainCommentFromDiffValue(newValue)
-          optimisticAppendEntityComment(plain)
           if (result.async === true) {
             await new Promise((resolve) => setTimeout(resolve, 420))
           }
           await reloadEntityCommentsAfterAdopt(plain)
-          commentDraft.value = ''
-        } else if (field === 'plan_id') {
-          badcase.plan = normalizePlanId(newValue) || ''
-        } else if (field === 'project_id') {
-          badcase.project_id = String(newValue)
-          badcase.associate_project = true
-        } else if (badcase.hasOwnProperty(field)) {
-          badcase[field] = newValue
-        }
-        if (field === 'priority') {
-          normalizeBadcasePriorityForForm()
-        }
-        if (field === 'case_category') {
-          normalizeBadcaseCaseCategoryForForm()
         }
 
-        confirmFieldChange(field)
-        notifyDetailAdoptCompleteIfDone(field, newValue)
+        notifyDetailAdoptCompleteIfDone(field, newValue, result)
       } catch (e) {
+        rollbackOptimisticBadcaseField(field, modSnapshot, pendingMeta)
         console.error('[DIFF] 采纳字段异常:', e)
       }
     }
@@ -2457,6 +2767,7 @@ export default {
     
     onMounted(async () => {
       window.addEventListener('badcase-detail-refresh', onDetailModifyAdopted)
+      window.addEventListener('detail-modify-adopted', onDetailModifyAdopted)
       console.log('=== 组件挂载开始 ===')
       
       try {
@@ -2545,32 +2856,22 @@ export default {
           }
         }
         clearPendingModifyIfNotThisBadcase()
-        if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
-          const mods = pendingDiff.value.modifications
-          for (const [field, data] of Object.entries(mods)) {
-            if (String(field).startsWith('_')) continue
-            const newVal = data?.new != null ? String(data.new).trim() : ''
-            const oldVal = data?.old != null ? String(data.old).trim() : ''
-            const curVal = badcase[field] != null ? String(badcase[field]).trim() : ''
-            if (newVal && curVal === newVal && oldVal === newVal) {
-              delete mods[field]
-            }
-          }
-          const remaining = Object.keys(mods).filter(k => !String(k).startsWith('_'))
-          if (remaining.length === 0) {
-            clearPendingModifyDiffForDetail(
-            snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
-          )
-            pendingDiff.value = null
-          }
-        }
+        const dbBaselineForPending = isEdit.value ? captureDbBaselineForPendingPrune() : null
         const reconcilePendingOldFromLoadedBadcase = () => {
           if (!pendingDiff.value?.modifications) return
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (String(field).startsWith('_')) continue
             if (!badcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
-            if (field !== 'status' && field !== 'title' && field !== 'case_category') continue
-            const bv = badcase[field]
+            let bv = null
+            if (field === 'case_category' || field === 'classification' || field === 'category') {
+              bv = badcase.case_category
+            } else if (field === 'priority' || field === 'severity') {
+              bv = badcase.priority
+            } else if (badcase.hasOwnProperty(field)) {
+              bv = badcase[field]
+            } else {
+              continue
+            }
             const bs = bv != null ? String(bv).trim() : ''
             if (!bs) continue
             const oldS = data.old != null ? String(data.old).trim() : ''
@@ -2583,7 +2884,11 @@ export default {
         }
         reconcilePendingOldFromLoadedBadcase()
         if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
+          if (dbBaselineForPending) {
+            prunePendingModsAlreadyPersistedInDb(dbBaselineForPending)
+          }
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+            if (String(field).startsWith('_')) continue
             if (
               badcase.hasOwnProperty(field) &&
               data &&
@@ -2593,8 +2898,14 @@ export default {
               String(data.new).trim() !== ''
             ) {
               badcase[field] = data.new
+            } else if (field === 'classification' || field === 'category') {
+              badcase.case_category = data.new
+            } else if (field === 'severity') {
+              badcase.priority = data.new
             }
           }
+          normalizeBadcasePriorityForForm()
+          normalizeBadcaseCaseCategoryForForm()
         }
         normalizeBadcasePriorityForForm()
         normalizeBadcaseCaseCategoryForForm()
@@ -2632,6 +2943,7 @@ export default {
 
     onUnmounted(() => {
       window.removeEventListener('badcase-detail-refresh', onDetailModifyAdopted)
+      window.removeEventListener('detail-modify-adopted', onDetailModifyAdopted)
     })
     
     return {
@@ -2703,6 +3015,9 @@ export default {
       commentDraftText,
       commentDraftLength,
       commentSubmitting,
+      replyingTo,
+      startReplyToComment,
+      cancelReplyToComment,
       entityFieldDiff,
       hasEntityFieldDiff,
       formatEntityDiffValue,
@@ -2712,7 +3027,13 @@ export default {
       commentEditorActive,
       activateCommentEditor,
       finishCommentEditor,
-      inlineDiffFields,
+      longTextDiffFields,
+      hasPendingField,
+      pendingFieldMod,
+      showDiffFromSandbox,
+      showFieldDiffBlockPanel,
+      showFieldDiffCompactStrip,
+      htmlToPlainText,
       isRightSidebarOpen,
       toggleRightSidebar
     }
@@ -2746,6 +3067,61 @@ export default {
   background: #f8f9fa;
   border-radius: 6px;
   border: 1px solid #e9ecef;
+}
+
+.comment-item.is-reply {
+  margin-left: 16px;
+  border-left: 3px solid #dee2e6;
+}
+
+.comment-item.is-pending {
+  opacity: 0.85;
+}
+
+.comment-reply-btn {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #0d6efd;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comment-reply-btn:hover {
+  text-decoration: underline;
+}
+
+.comment-reply-tag,
+.comment-pending-tag {
+  font-size: 11px;
+  color: #6c757d;
+}
+
+.comment-pending-tag {
+  color: #fd7e14;
+}
+
+.comment-reply-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #495057;
+  background: #eef5ff;
+  border-radius: 4px;
+}
+
+.comment-reply-cancel {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #6c757d;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .comment-item-meta {
@@ -4929,6 +5305,24 @@ export default {
   position: relative;
 }
 
+.field-diff-panel--compact {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+}
+
+.field-diff-panel--compact .field-diff-panel-inline {
+  margin-bottom: 0;
+}
+
+.diff-value--clip {
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+
 .field-diff-panel {
   background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
   border: 2px solid #f59e0b;
@@ -5037,6 +5431,20 @@ export default {
 .field-with-diff {
   border-color: #f59e0b !important;
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2) !important;
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.diff-actions--title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 /* 内联 diff 面板样式（用于下拉框等） */

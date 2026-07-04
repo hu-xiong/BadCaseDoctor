@@ -2,6 +2,7 @@
 
 > 版本：v2 设计稿（2026-05）  
 > 范围：grep 工具、ES 向量索引、Bug/BadCase 首批入库、编排层 target 分类治理  
+> **性能优化定位**：**工具层 / 检索子系统**（embed、ES、rerank、plan_tree 并行），不替代 [推理/执行分离总纲](./需求文档_下一轮性能优化_推理执行分离总结与响应形态.md) 的 P0。  
 > 关联：[意图识别与 grep-modify 路由](./意图识别与grep-modify路由机制.md)、[grep 与 modify 候选集对齐](./需求文档_grep与modify候选集对齐_现状与优化方向.md)
 
 ---

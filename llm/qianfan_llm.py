@@ -87,11 +87,9 @@ class QianfanLLM:
         if getattr(self, "force_disable_thinking", False) and isinstance(model_to_use, str) and model_to_use.lower().startswith("ernie-x1"):
             model_to_use = "ernie-4.5-turbo-128k"
         
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": prompt})
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history)
 
         payload = json.dumps({
             "model": model_to_use,
@@ -142,6 +140,9 @@ class QianfanLLM:
         ) and model_to_use.lower().startswith("ernie-x1"):
             model_to_use = "ernie-4.5-turbo-128k"
 
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
         payload: Dict[str, Any] = {
             "model": model_to_use,
             "messages": messages,
@@ -191,6 +192,9 @@ class QianfanLLM:
         """
         千帆 v2 流式 FC：SSE data 行解析为与 OpenAI 兼容的整包 JSON（choices[0].delta）。
         """
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
         url = "https://qianfan.baidubce.com/v2/chat/completions"
         model_to_use = self.model
         if getattr(self, "force_disable_thinking", False) and isinstance(
@@ -320,12 +324,10 @@ class QianfanLLM:
           {"type": "content_delta", "delta": "..."}
           {"type": "done"}
         """
+        from llm.chat_messages import prompt_to_messages
+
         url = "https://qianfan.baidubce.com/v2/chat/completions"
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": prompt})
+        messages = prompt_to_messages(prompt, history=history)
 
         model_to_use = self.model
         if getattr(self, "force_disable_thinking", False) and isinstance(
@@ -404,11 +406,9 @@ class QianfanLLM:
         model_to_use = self.model
         if getattr(self, "force_disable_thinking", False) and isinstance(model_to_use, str) and model_to_use.lower().startswith("ernie-x1"):
             model_to_use = "ernie-4.5-turbo-128k"
-        messages: List[Dict[str, str]] = []
-        if history:
-            for msg in history:
-                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": prompt})
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history)
         payload = json.dumps({
             "model": model_to_use,
             "messages": messages,

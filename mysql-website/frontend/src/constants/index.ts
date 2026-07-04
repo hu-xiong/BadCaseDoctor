@@ -1,5 +1,8 @@
-// API Constants
-export const API_BASE_URL = 'http://localhost:8080/api/v1'
+// 与 BadCaseDoctor（5000 / 5173）错开的 MySQL 官网专用端口
+export const WEBSITE_BACKEND_PORT = 8090
+export const WEBSITE_FRONTEND_PORT = 5180
+export const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || `http://localhost:${WEBSITE_BACKEND_PORT}/api/v1`
 export const API_TIMEOUT = 10000
 
 // Pagination

@@ -31,9 +31,10 @@ class UnifiedThinkStreamSanitizer:
     """块级状态机 + 语义标记（前端不再解析 XML，仅此后端实现）。"""
 
     markers: Dict[str, str]
-    mode: str = "neutral"  # neutral | in_thinking | in_observation | in_decision | in_task_plan
+    mode: str = "neutral"  # neutral | in_thinking | in_observation | in_decision | in_task_plan | in_think_summary
     prev_mode: str = ""  # 进入 task_plan 前的模式
     tail: str = ""
+    summary_buffer: str = ""  # think_summary 缓冲：thinking 闭合后再下发 SSE
 
     def feed(self, chunk: str) -> List[Tuple[str, Optional[str]]]:
         """
@@ -57,6 +58,9 @@ class UnifiedThinkStreamSanitizer:
             if self.mode == "in_task_plan":
                 work = self._in_task_plan(work, out, m)
                 continue
+            if self.mode == "in_think_summary":
+                work = self._in_think_summary(work, out, m)
+                continue
             if self.mode == "in_observation":
                 work = self._in_observation(work, out, m)
                 continue
@@ -69,14 +73,30 @@ class UnifiedThinkStreamSanitizer:
 
     def end(self) -> List[Tuple[str, Optional[str]]]:
         """流结束：吐出尾部（非标签碎片）。"""
+        out: List[Tuple[str, Optional[str]]] = []
+        if self.summary_buffer:
+            self._flush_think_summary_buffer(out)
         if not self.tail:
-            return []
+            return out
         t = self.tail
         self.tail = ""
         if self.mode != "neutral":
             # 异常截断：尽量不丢字
-            return [(t, None)]
-        return [(t, None)]
+            out.append((t, None))
+            return out
+        out.append((t, None))
+        return out
+
+    def _buffer_think_summary_piece(self, piece: str) -> None:
+        if piece:
+            self.summary_buffer += piece
+
+    def _flush_think_summary_buffer(self, out: List[Tuple[str, Optional[str]]]) -> None:
+        if not self.summary_buffer:
+            return
+        out.append((self.summary_buffer, "think_summary_piece"))
+        self.summary_buffer = ""
+        out.append(("", "think_summary_end"))
 
     def _neutral(self, work: str, out: List[Tuple[str, Optional[str]]], m: Dict[str, str]) -> str:
         t_think = _lower_find(work, "<thinking", 0)
@@ -107,6 +127,7 @@ class UnifiedThinkStreamSanitizer:
                 return ""
             # 输出开始标记和阶段信息（用于前端阶段切换）
             out.append((m["thinking_start"], "thinking_start"))
+            self.summary_buffer = ""
             self.mode = "in_thinking"
             return work[gt + 1 :]
 
@@ -146,8 +167,21 @@ class UnifiedThinkStreamSanitizer:
             self.tail = work
 
     def _in_thinking(self, work: str, out: List[Tuple[str, Optional[str]]], m: Dict[str, str]) -> str:
+        t_summary = _lower_find(work, "<think_summary", 0)
         t_task = _lower_find(work, "<task_plan", 0)
         close = _lower_find(work, "</thinking>", 0)
+        # 嵌套 <think_summary>：缓冲至 </thinking> 后再下发（想完再总结）
+        if t_summary >= 0 and (close < 0 or t_summary < close):
+            if t_summary > 0:
+                out.append((work[:t_summary], None))
+                return work[t_summary:]
+            gt = _end_of_open_tag(work, 0, "think_summary")
+            if gt < 0:
+                self._stash_thinking_tail(work, out)
+                return ""
+            self.prev_mode = self.mode
+            self.mode = "in_think_summary"
+            return work[gt + 1 :]
         # 嵌套 <task_plan>：须在 </thinking> 之前处理；前文先出字
         if t_task >= 0 and (close < 0 or t_task < close):
             if t_task > 0:
@@ -189,6 +223,21 @@ class UnifiedThinkStreamSanitizer:
             self.tail = work[-MAX_TAIL:]
         else:
             self.tail = work
+
+    def _in_think_summary(self, work: str, out: List[Tuple[str, Optional[str]]], m: Dict[str, str]) -> str:
+        close = _lower_find(work, "</think_summary>", 0)
+        if close < 0:
+            if len(work) > CLOSE_TAIL:
+                safe = work[:-CLOSE_TAIL]
+                self.tail = work[-CLOSE_TAIL:]
+                self._buffer_think_summary_piece(safe)
+            else:
+                self.tail = work
+            return ""
+        if close > 0:
+            self._buffer_think_summary_piece(work[:close])
+        self.mode = self.prev_mode or "in_thinking"
+        return work[close + len("</think_summary>") :]
 
     def _in_task_plan(self, work: str, out: List[Tuple[str, Optional[str]]], m: Dict[str, str]) -> str:
         close = _lower_find(work, "</task_plan>", 0)

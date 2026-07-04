@@ -18,7 +18,7 @@ const form = ref({
   confirmPassword: ''
 })
 
-const validateConfirmPassword = (rule: any, value: any, callback: any) => {
+const validateConfirmPassword = (_rule: any, value: any, callback: any) => {
   if (value !== form.value.password) {
     callback(new Error('Passwords do not match'))
   } else {

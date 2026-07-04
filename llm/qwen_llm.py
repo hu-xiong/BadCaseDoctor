@@ -314,6 +314,9 @@ class QwenLLM:
         百炼 OpenAI 兼容 /chat/completions：透传 tools、tool_choice、parallel_tool_calls。
         ReAct 决策步使用；不开启 enable_thinking，避免干扰结构化 tool 参数。
         """
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -345,6 +348,9 @@ class QwenLLM:
         流式 FC：与 chat_completion_with_tools 相同参数，stream=True。
         迭代 yield 原生 chunk（OpenAI SDK ChatCompletionChunk），供 ReAct 边收边推 agent_thought、累积 tool_calls。
         """
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -384,7 +390,9 @@ class QwenLLM:
 
             user_input_wrapped = wrap_general_user_prompt(user_input, locale)
             if "<system>" in user_input or "<format>" in user_input or "必须返回" in user_input:
-                messages = [{"role": "user", "content": user_input_wrapped}]
+                from llm.chat_messages import prompt_to_messages
+
+                messages = prompt_to_messages(user_input_wrapped)
                 eth = self._thinking_enabled_for(user_input)
                 if eth:
                     print(f"[QWEN-LLM-PARSE] enable_thinking=True model={self.model}")
@@ -468,11 +476,10 @@ class QwenLLM:
         """流式聊天方法 (同步生成器，方便 Flask 使用)。max_tokens 供 ReAct observe 等场景可选上限。"""
         from agents.locale_prompts import wrap_general_user_prompt
 
+        from llm.chat_messages import prompt_to_messages
+
         p = wrap_general_user_prompt(prompt, locale)
-        messages = []
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": p})
+        messages = prompt_to_messages(p, history=history)
 
         eth = self._thinking_enabled_for(p)
         if eth:
@@ -500,12 +507,9 @@ class QwenLLM:
         max_tokens: Optional[int] = None,
         images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        messages = []
-        if history:
-            messages.extend(history)
-        messages.append(
-            {"role": "user", "content": openai_style_user_content(prompt, images)}
-        )
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history, images=images)
         eth = self._thinking_enabled_for(prompt)
         if eth:
             print(f"[QWEN-LLM-STREAM-REASONING] enable_thinking=True model={self.model}")
@@ -595,12 +599,9 @@ class QwenLLM:
         max_tokens: Optional[int] = None,
         images: Optional[List[Dict[str, Any]]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        messages: List[Dict[str, Any]] = []
-        if history:
-            messages.extend(history)
-        messages.append(
-            {"role": "user", "content": openai_style_user_content(prompt, images)}
-        )
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history, images=images)
         eth = self._thinking_enabled_for(prompt)
         _pl = len(prompt) if isinstance(prompt, str) else 0
         try:

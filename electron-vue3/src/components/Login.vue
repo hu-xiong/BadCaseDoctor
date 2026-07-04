@@ -173,8 +173,9 @@
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { login, register, sendVerificationCode, getProjects, createProject, warmupAgent } from '../api.js'
+import { login, register, sendVerificationCode } from '../api.js'
 import { setUser } from '../store/user.js'
+import { navigateAfterAuth } from '../utils/loginNavigate.js'
 
 export default {
   name: 'Login',
@@ -214,49 +215,8 @@ export default {
         })
         
         if (response.data.success) {
-          // 登录成功，保存用户状态
           setUser(response.data.user)
-          void warmupAgent().catch(() => {})
-
-          // 获取项目列表
-          const projectsResponse = await getProjects()
-          let projectId = null
-          
-          if (projectsResponse.data.success) {
-            const projects = projectsResponse.data.projects || []
-            
-            if (projects.length > 0) {
-              // 选择最近操作的项目（这里简单取第一个）
-              projectId = projects[0].id
-            } else {
-              // 没有项目，创建默认项目
-              const defaultProjectResponse = await createProject({
-                name: '默认项目',
-                description: '系统默认创建的项目'
-              })
-              
-              if (defaultProjectResponse.data.success) {
-                projectId = defaultProjectResponse.data.project.id
-              } else {
-                console.error('创建默认项目失败:', defaultProjectResponse.data.error)
-                // 如果创建失败，仍然跳转到dashboard
-                router.push('/project-manage')
-                return
-              }
-            }
-            
-            // 跳转到项目详情页
-            if (projectId) {
-              router.push(`/project-detail/${projectId}`)
-            } else {
-              // 以防万一，跳转到dashboard
-              router.push('/project-manage')
-            }
-          } else {
-            console.error('获取项目列表失败:', projectsResponse.data.error)
-            // 如果获取失败，仍然跳转到dashboard
-            router.push('/project-manage')
-          }
+          await navigateAfterAuth(router, { projectId: response.data.project_id })
         } else {
           alert(response.data.error || t('auth.loginFailed'))
         }
@@ -285,38 +245,8 @@ export default {
         if (response.data.success) {
           showRegister.value = false
           alert(t('auth.registerSuccess'))
-          
-          // 注册成功后自动登录
-          const loginResponse = await login({
-            email: registerForm.email,
-            password: registerForm.password
-          })
-          
-          if (loginResponse.data.success) {
-            // 登录成功，保存用户状态
-            setUser(loginResponse.data.user)
-            void warmupAgent().catch(() => {})
-            
-            // 创建默认项目
-            const defaultProjectResponse = await createProject({
-              name: '默认项目',
-              description: '系统默认创建的项目'
-            })
-            
-            if (defaultProjectResponse.data.success) {
-              const projectId = defaultProjectResponse.data.project.id
-              // 跳转到项目详情页
-              router.push(`/project-detail/${projectId}`)
-            } else {
-              console.error('创建默认项目失败:', defaultProjectResponse.data.error)
-              // 如果创建失败，跳转到dashboard
-              router.push('/project-manage')
-            }
-          } else {
-            console.error('自动登录失败:', loginResponse.data.error)
-            // 如果自动登录失败，跳转到dashboard
-            router.push('/project-manage')
-          }
+          setUser(response.data.user)
+          await navigateAfterAuth(router, { projectId: response.data.project_id })
         } else {
           alert(response.data.error || t('auth.registerFailed'))
         }

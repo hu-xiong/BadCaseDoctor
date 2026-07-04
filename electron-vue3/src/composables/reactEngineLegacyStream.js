@@ -272,6 +272,7 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     }
     // 统一流每轮 think 前会发 todo_skip:true，仅为索引对齐；勿揭 AgentTaskRun、勿写「── 开始 ──」，否则无工具也出「步骤 1」
     const thinkOnlyTodoStart = stepEvent.todo_skip === true
+    const macroExecOnly = stepEvent.macro_exec_only === true
     if (!thinkOnlyTodoStart) {
       aiMessage._placeholderSteps = false
     }
@@ -300,6 +301,9 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     const st = _tsi != null ? aiMessage.steps[_tsi] : null
     if (st) {
       st.status = 'running'
+      if (macroExecOnly) {
+        st.macroExecOnly = true
+      }
       if (st.stepStartedAt == null) {
         st.stepStartedAt = Date.now()
       }
@@ -452,6 +456,28 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
       handleNavigation,
       buildReactStepsFromTodoStrings
     })
+    return {}
+  }
+  if (stepEvent.event === 'cdp_records_created') {
+    const data = stepEvent.data && typeof stepEvent.data === 'object' ? stepEvent.data : {}
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('cdp-records-created', {
+          detail: data,
+          bubbles: true
+        })
+      )
+    }
+    const n = Array.isArray(data.items)
+      ? data.items.filter((x) => x && x.target === 'bug').length
+      : 0
+    if (n > 0) {
+      appendStepDetailLine(
+        aiMessage,
+        resolveStreamStepIndex(aiMessage),
+        `cdp：已在项目 #${data.project_id || projectId} 创建 ${n} 条 Bug 记录`
+      )
+    }
     return {}
   }
   if (stepEvent.event === 'evidence') {
@@ -697,14 +723,19 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
   }
 
   const _doneSt = stepEvent.status
+  const anyFailedStep =
+    Array.isArray(aiMessage.steps) &&
+    aiMessage.steps.some((s) => s?.status === 'failed' || s?.status === 'error')
   aiMessage.agentResult.status =
     _doneSt === 'error'
       ? 'error'
       : _doneSt === 'cancelled'
         ? 'cancelled'
-        : _doneSt === 'partial'
+        : _doneSt === 'partial' || (_doneSt === 'success' && anyFailedStep)
           ? 'partial'
-          : 'success'
+          : anyFailedStep
+            ? 'failed'
+            : 'success'
   aiMessage.agentResult.execution_time = stepEvent.duration
   aiMessage.agentResult.steps_count = stepEvent.steps_count || 0
   if (stepEvent.thinking_time != null && stepEvent.thinking_time >= 0) {
@@ -801,6 +832,21 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
 
   if (displayFindings.length > 0) {
     aiMessage.agentResult.findings = displayFindings
+  }
+
+  if (anyFailedStep) {
+    const failedDescs = (aiMessage.steps || [])
+      .filter((s) => s?.status === 'failed' || s?.status === 'error')
+      .map((s) => String(s.description || '').trim())
+      .filter(Boolean)
+    const failLine = failedDescs[0] ? `❌ ${failedDescs[0]}` : '❌ 部分步骤执行失败'
+    const rs = String(aiMessage.runningSummaryDraft || aiMessage.agentResult?.summaryText || '')
+    if (!rs.includes('失败') && !rs.includes('failed')) {
+      aiMessage.agentResult.findings = [...(aiMessage.agentResult.findings || []), failLine]
+    }
+    if (aiMessage.agentResult.status === 'success') {
+      aiMessage.agentResult.status = 'partial'
+    }
   }
 
   if ((stepEvent.steps_count === 0 || !stepEvent.steps_count) && displayFindings.length > 0) {

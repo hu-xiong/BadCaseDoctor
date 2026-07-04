@@ -46,10 +46,10 @@ export function getCurrentUser() {
 export function pingBackend() {
   return api.get('/api/ping', { timeout: 20000 })
 }
-/** 登录后进项目页时异步预热 ReAct Agent（工具注册），勿 await 阻塞 UI */
+/** 登录后进项目页时异步预热 ReAct LLM client，勿 await 阻塞 UI */
 export function warmupAgent(models) {
   const body = Array.isArray(models) && models.length > 0 ? { models } : {}
-  return api.post('/api/agent/warmup', body, { timeout: 8000 })
+  return api.post('/api/agent/warmup', body, { timeout: 30000 })
 }
 // 发送邮箱验证码
 export function sendVerificationCode(data) {
@@ -58,6 +58,10 @@ export function sendVerificationCode(data) {
 // 获取项目列表
 export function getProjects() {
   return api.get('/api/projects')
+}
+/** 进入界面后：无项目则从系统模板克隆默认项目副本（勿在登录页 await） */
+export function ensureDefaultProject() {
+  return api.post('/api/projects/ensure-default', {}, { timeout: 120000 })
 }
 // 创建项目
 export function createProject(data) {
@@ -271,6 +275,11 @@ export function addChatMessage(sessionId, data) {
   return api.post(`/api/chat-sessions/${sessionId}/messages`, data, { timeout: 120000 })
 }
 
+/** 更新助手消息（ReAct 流式 checkpoint / 中断后保留过程） */
+export function updateChatMessage(messageId, data) {
+  return api.put(`/api/chat-messages/${apiPathId(messageId)}`, data, { timeout: 120000 })
+}
+
 /**
  * 聊天附图异步落库：POST /upload（MinIO），返回可公网/内网访问的 url。
  * 勿手动设 Content-Type，以便浏览器带 multipart boundary。
@@ -349,10 +358,11 @@ export function deleteBug(id) {
   return api.delete(`/api/bugs/${apiPathId(id)}`)
 }
 
-/** Bug 评论：仅追加 */
-export function addBugComment(bugId, content, messageId = null) {
+/** Bug 评论：仅追加；parentId 为回复目标评论 id */
+export function addBugComment(bugId, content, messageId = null, parentId = null) {
   const body = { content }
   if (messageId != null) body.message_id = messageId
+  if (parentId != null && parentId !== '') body.parent_id = parentId
   return api.post(`/api/bugs/${apiPathId(bugId)}/comment`, body)
 }
 
@@ -373,10 +383,11 @@ export function getTestCaseDetail(id) {
   return api.get(`/api/testcases/${apiPathId(id)}`)
 }
 
-/** 测例评论：仅追加 */
-export function addTestCaseComment(testcaseId, content, messageId = null) {
+/** 测例评论：仅追加；parentId 为回复目标评论 id */
+export function addTestCaseComment(testcaseId, content, messageId = null, parentId = null) {
   const body = { content }
   if (messageId != null) body.message_id = messageId
+  if (parentId != null && parentId !== '') body.parent_id = parentId
   return api.post(`/api/testcases/${apiPathId(testcaseId)}/comment`, body)
 }
 

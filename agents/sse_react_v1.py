@@ -167,8 +167,10 @@ def react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
     if ev in ("exploring", "retry"):
         return {"react_phase": REACT_PHASE_ACT}
     if ev in ("todo_start", "todo_end"):
-        # 统一流：todo_skip 仅对齐索引，本轮仍在 LLM think，勿标 act（否则引擎包先出现「执行态」）
+        # 统一流：todo_skip 仅对齐索引；宏执行轮 todo_skip 为执行衔接，非思考
         if ev == "todo_start" and step_data.get("todo_skip") is True:
+            if step_data.get("macro_exec_only"):
+                return {"react_phase": REACT_PHASE_ACT}
             return {"react_phase": REACT_PHASE_THINK}
         return {"react_phase": REACT_PHASE_ACT}
     if ev == "tool_error":
@@ -195,6 +197,9 @@ def react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
         # 统一轮 think 首包、决策叙述等待：语义为 think，勿标成 observe_decide
         if kind in ("unified_round_think", "decision_stream"):
             return {"react_phase": REACT_PHASE_THINK}
+        # 宏路径 grep→modify 连续执行：准备下一步参数，属执行态而非思考
+        if kind in ("preparing_next_step", "macro_params_llm"):
+            return {"react_phase": REACT_PHASE_ACT}
         return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
     if ev == "unified_summary_loading":
         return {"react_phase": REACT_PHASE_OBSERVE_DECIDE}
@@ -431,6 +436,9 @@ def _pack_stream_think(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     _as = step_data.get("as")
     if isinstance(_as, str) and _as.strip():
         pl["as"] = _as.strip()
+    _tsd = step_data.get("think_summary_delta")
+    if isinstance(_tsd, str) and _tsd:
+        pl["think_summary_delta"] = _tsd
     return [{"type": ClientWireType.STREAM.value, "payload": pl}]
 
 
@@ -618,6 +626,29 @@ def _pack_tool_task_lifecycle(step_data: Dict[str, Any]) -> List[Dict[str, Any]]
     return [{"type": ClientWireType.TOOL_TASK.value, "payload": deep_sse_json_safe(pl)}]
 
 
+def _pack_cdp_test_task(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """CDP 浏览器测试 run：opened / step / done。"""
+    ev = str(step_data.get("event") or "")
+    lifecycle = ev.replace("cdp_test_task_", "") if ev.startswith("cdp_test_task_") else ev
+    pl: Dict[str, Any] = {
+        "lane": "cdp_test_task",
+        "lifecycle": lifecycle,
+        "run_id": step_data.get("run_id"),
+        "mode": step_data.get("mode"),
+        "title": step_data.get("title"),
+        "status": step_data.get("status"),
+        "summary": step_data.get("summary"),
+        "pass_count": step_data.get("pass_count"),
+        "fail_count": step_data.get("fail_count"),
+        "step": step_data.get("step"),
+        "steps": step_data.get("steps"),
+        "testcases": step_data.get("testcases"),
+        "react_phase": step_data.get("react_phase") or REACT_PHASE_ACT,
+    }
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": ClientWireType.STREAM.value, "payload": deep_sse_json_safe(pl)}]
+
+
 # 引擎 event 字符串 → 打包函数（新增映射时只改这一处表即可）
 _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, Any]]]] = {
     "plan": _pack_plan,
@@ -642,6 +673,9 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "tool_task_running": _pack_tool_task_lifecycle,
     "tool_task_done": _pack_tool_task_lifecycle,
     "tool_task_failed": _pack_tool_task_lifecycle,
+    "cdp_test_task_opened": _pack_cdp_test_task,
+    "cdp_test_task_step": _pack_cdp_test_task,
+    "cdp_test_task_done": _pack_cdp_test_task,
     "batch_preview_row": _pack_batch_preview_row,
     "tool_error": _pack_tool_error_event,
     "client_local_run": _pack_client_local_run,

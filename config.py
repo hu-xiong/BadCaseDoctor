@@ -13,6 +13,8 @@ class Config:
     # 主业务库：必须为 MySQL（app 启动时会校验 URI）。在 .env 中设置 DATABASE_URL；迁移/工具脚本如需 SQLite 见 scripts/migrate_sqlite_to_mysql.py
     SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'mysql+pymysql://root:hx123456@117.72.33.38:33106/bad_case')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # 新用户无项目时，从此模板项目克隆副本并关联到用户（见 POST /api/projects/ensure-default）
+    SYSTEM_PROJECT_TEMPLATE_ID = int(os.getenv('SYSTEM_PROJECT_TEMPLATE_ID', '1'))
     
     # 邮件配置
     MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.qq.com')
@@ -100,6 +102,23 @@ class Config:
     except ValueError:
         DEEPSEEK_V4_PRO_MAX_TOKENS = 2048
 
+    # ==================== 豆包 / 火山方舟 Ark（OpenAI 兼容 API）====================
+    # 密钥仅放 .env（DOUBAO_API_KEY），勿提交仓库。model 可为控制台推理接入点 ID（ep-xxx）或模型名。
+    DOUBAO_API_KEY = os.getenv('DOUBAO_API_KEY', '').strip()
+    DOUBAO_API_BASE_URL = os.getenv(
+        'DOUBAO_API_BASE_URL', 'https://ark.cn-beijing.volces.com/api/v3'
+    ).strip().rstrip('/')
+    DOUBAO_MODEL = os.getenv('DOUBAO_MODEL', 'doubao-1-5-pro-32k').strip()
+    DOUBAO_TEMPERATURE = float(os.getenv('DOUBAO_TEMPERATURE', '0.7'))
+    # 豆包多模态向量（Ark /embeddings/multimodal）；默认与 DOUBAO_API_KEY 共用
+    DOUBAO_EMBEDDING_MODEL = os.getenv(
+        'DOUBAO_EMBEDDING_MODEL', 'doubao-embedding-vision-251215'
+    ).strip()
+    DOUBAO_EMBEDDING_BASE_URL = (
+        os.getenv('DOUBAO_EMBEDDING_BASE_URL', '').strip().rstrip('/')
+        or DOUBAO_API_BASE_URL
+    )
+
     # ==================== modify 歧义意图（轻量 LLM）====================
     # 默认开；设 MODIFY_INTENT_LLM=0 / false / off 关闭。无 DEEPSEEK_API_KEY 时不会请求。
     MODIFY_INTENT_LLM = (os.getenv("MODIFY_INTENT_LLM") or "1").strip()
@@ -111,7 +130,6 @@ class Config:
         MODIFY_INTENT_LLM_TIMEOUT = 4.0
     # modify 沙箱预览：默认 mysql_temp（原库 TEMPORARY TABLE 试写，与生产同引擎校验 UPDATE）；显式设 skip_update 可仅 diff 无试写
     MODIFY_SANDBOX_PREVIEW_MODE = (os.getenv("MODIFY_SANDBOX_PREVIEW_MODE") or "mysql_temp").strip().lower()
-    
     REDIS_DATABASE=int(os.getenv('REDIS_DATABASE', 0))
     REDIS_USERNAME=os.getenv('REDIS_USERNAME', None)
 
@@ -144,6 +162,9 @@ class Config:
     ES_PASSWORD = os.getenv("ES_PASSWORD", "").strip()
     ES_API_KEY = os.getenv("ES_API_KEY", "").strip()
     ES_VERIFY_CERTS = os.getenv("ES_VERIFY_CERTS", "true").lower() == "true"
+    # elasticsearch-py 每节点 HTTP 连接池大小（keep-alive）；默认 50，上限 500
+    ES_CONNECTIONS_PER_NODE = int(os.getenv("ES_CONNECTIONS_PER_NODE", "50"))
+    ES_CLIENT_REQUEST_TIMEOUT_S = float(os.getenv("ES_CLIENT_REQUEST_TIMEOUT_S", "30"))
 
     # --- ES 索引命名（本项目自拟）：{命名空间}_{环境}_ + 逻辑后缀，共集群时与其它系统隔离 ---
     # ES_INDEX_NAMESPACE：产品简称 bdc = BadCaseDoctor；ES_INDEX_ENV：dev/stg/prod（仅小写字母数字）
@@ -175,17 +196,37 @@ class Config:
     EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "remote").strip().lower()  # remote | local
     EMBEDDING_LOCAL_MODEL = os.getenv("EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5").strip()
 
-    # Grep 检索专用向量 / rerank（默认千帆 BGE，比 DashScope 多模态+VL-rerank 快）
-    GREP_EMBEDDING_BACKEND = os.getenv("GREP_EMBEDDING_BACKEND", "qianfan").strip().lower()
-    GREP_EMBEDDING_MODEL = os.getenv("GREP_EMBEDDING_MODEL", "bge-large-zh").strip()
-    GREP_EMBEDDING_BASE_URL = os.getenv(
-        "GREP_EMBEDDING_BASE_URL", "https://qianfan.baidubce.com/v2"
-    ).strip()
-    GREP_EMBEDDING_API_KEY = (
-        os.getenv("GREP_EMBEDDING_API_KEY", "").strip() or QIANFAN_API_KEY
-    )
+    # Grep 检索专用向量（默认豆包 Ark 多模态；物理索引名含 model slug + 维度，换模型会新建索引）
+    GREP_EMBEDDING_BACKEND = os.getenv("GREP_EMBEDDING_BACKEND", "doubao").strip().lower()
+    _grep_backend = GREP_EMBEDDING_BACKEND
+    _grep_model_env = os.getenv("GREP_EMBEDDING_MODEL", "").strip()
+    if _grep_model_env:
+        GREP_EMBEDDING_MODEL = _grep_model_env
+    elif _grep_backend in ("doubao", "ark", "volcengine"):
+        GREP_EMBEDDING_MODEL = DOUBAO_EMBEDDING_MODEL
+    else:
+        GREP_EMBEDDING_MODEL = EMBEDDING_MODEL
+    _grep_url_env = os.getenv("GREP_EMBEDDING_BASE_URL", "").strip()
+    if _grep_url_env:
+        GREP_EMBEDDING_BASE_URL = _grep_url_env
+    elif _grep_backend in ("doubao", "ark", "volcengine"):
+        GREP_EMBEDDING_BASE_URL = DOUBAO_EMBEDDING_BASE_URL
+    else:
+        GREP_EMBEDDING_BASE_URL = EMBEDDING_BASE_URL
+    _grep_key_env = os.getenv("GREP_EMBEDDING_API_KEY", "").strip()
+    if _grep_key_env:
+        GREP_EMBEDDING_API_KEY = _grep_key_env
+    elif _grep_backend in ("doubao", "ark", "volcengine"):
+        GREP_EMBEDDING_API_KEY = DOUBAO_API_KEY
+    else:
+        GREP_EMBEDDING_API_KEY = EMBEDDING_API_KEY
     _grep_emb_dim = os.getenv("GREP_EMBEDDING_DIMENSION", "").strip()
-    GREP_EMBEDDING_DIMENSION = int(_grep_emb_dim) if _grep_emb_dim.isdigit() else None
+    if _grep_emb_dim.isdigit():
+        GREP_EMBEDDING_DIMENSION = int(_grep_emb_dim)
+    elif _grep_backend in ("doubao", "ark", "volcengine"):
+        GREP_EMBEDDING_DIMENSION = 2048
+    else:
+        GREP_EMBEDDING_DIMENSION = EMBEDDING_DIMENSION
     GREP_EMBEDDING_LOCAL_MODEL = os.getenv(
         "GREP_EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5"
     ).strip()
@@ -196,11 +237,16 @@ class Config:
     _grep_wi = os.getenv("GREP_WORK_ITEM_INDEX", "").strip()
     GREP_WORK_ITEM_INDEX = _grep_wi  # 空则运行时按 model+dims 生成物理索引名
     GREP_VECTOR_TOP_K = int(os.getenv("GREP_VECTOR_TOP_K", "8"))
-    # auto：短关键词仅 BM25（不调 embedding）；长句(>=GREP_QUERY_EMBED_MIN_CHARS)才 KNN
+    # auto：<GREP_QUERY_EMBED_MIN_CHARS 仅 BM25；[min, full) hybrid；>= full 全向量
     GREP_QUERY_EMBED_MODE = os.getenv("GREP_QUERY_EMBED_MODE", "auto").strip().lower()
-    GREP_QUERY_EMBED_MIN_CHARS = int(os.getenv("GREP_QUERY_EMBED_MIN_CHARS", "80"))
+    GREP_QUERY_EMBED_MIN_CHARS = int(os.getenv("GREP_QUERY_EMBED_MIN_CHARS", "8"))
+    GREP_QUERY_FULL_VECTOR_MIN_CHARS = int(
+        os.getenv("GREP_QUERY_FULL_VECTOR_MIN_CHARS", "80")
+    )
     # 有关键词时是否仍加载整棵计划材料树（极慢）；默认关，检索走 ES
     GREP_PLAN_RECORDS_ON_KEYWORD = os.getenv("GREP_PLAN_RECORDS_ON_KEYWORD", "false").lower() == "true"
+    # ES 向量召回后、rerank 前：按 cosine 相似度过滤（仅 KNN/混合向量路径；BM25 分数量纲不同见 GREP_VECTOR_MIN_SCORE）
+    GREP_PRE_RERANK_MIN_SCORE = float(os.getenv("GREP_PRE_RERANK_MIN_SCORE", "0.90"))
     GREP_VECTOR_MIN_SCORE = float(os.getenv("GREP_VECTOR_MIN_SCORE", "0.0"))
     GREP_HYBRID_RRF_K = int(os.getenv("GREP_HYBRID_RRF_K", "60"))
     GREP_INDEX_ASYNC = os.getenv("GREP_INDEX_ASYNC", "true").lower() == "true"
@@ -220,11 +266,10 @@ class Config:
     GREP_ES_LLM_JUDGE_MAX_CANDIDATES = int(os.getenv("GREP_ES_LLM_JUDGE_MAX_CANDIDATES", "30"))
     GREP_ES_LLM_JUDGE_MAX_TOKENS = int(os.getenv("GREP_ES_LLM_JUDGE_MAX_TOKENS", "512"))
     GREP_RERANK_ENABLED = os.getenv("GREP_RERANK_ENABLED", "true").lower() == "true"
-    GREP_RERANK_BACKEND = os.getenv("GREP_RERANK_BACKEND", "qianfan").strip().lower()
-    GREP_RERANK_MODEL = os.getenv("GREP_RERANK_MODEL", "bce-reranker-base").strip()
-    GREP_RERANK_BASE_URL = os.getenv(
-        "GREP_RERANK_BASE_URL", "https://qianfan.baidubce.com/v2"
-    ).strip()
+    # 默认通义 qwen3-vl-rerank（DashScope）；千帆 BCE 可设 GREP_RERANK_BACKEND=qianfan
+    GREP_RERANK_BACKEND = os.getenv("GREP_RERANK_BACKEND", "dashscope").strip().lower()
+    GREP_RERANK_MODEL = os.getenv("GREP_RERANK_MODEL", "").strip() or "qwen3-vl-rerank"
+    GREP_RERANK_BASE_URL = os.getenv("GREP_RERANK_BASE_URL", "").strip()
     # rerank 是 grep 的可选精排，不应长时间阻塞主检索；超时后保留 ES 原序。
     GREP_RERANK_HTTP_TIMEOUT = float(os.getenv("GREP_RERANK_HTTP_TIMEOUT", "2.5"))
     GREP_RERANK_MIN_SCORE = float(os.getenv("GREP_RERANK_MIN_SCORE", "0.48"))
@@ -245,20 +290,29 @@ class Config:
         "GREP_RERANK_SKIP_IF_ES_CONFIDENT", "true"
     ).lower() == "true"
     # 短关键词 BM25 只查 title（比扫 search_text 快）
-    GREP_ES_BM25_TITLE_ONLY_MAX_CHARS = int(os.getenv("GREP_ES_BM25_TITLE_ONLY_MAX_CHARS", "64"))
+    # 0=禁用「只搜 title」；混合/全向量路径均用 title+search_text
+    GREP_ES_BM25_TITLE_ONLY_MAX_CHARS = int(os.getenv("GREP_ES_BM25_TITLE_ONLY_MAX_CHARS", "0"))
     GREP_ES_SEARCH_TIMEOUT_S = float(os.getenv("GREP_ES_SEARCH_TIMEOUT_S", "2"))
     # 有关键词且走 ES 时跳过全项目 plan_tree 查询（省 ~100ms+ MySQL）
+    # 关键词走 ES 时：minimal plan_tree 与 hybrid(embed+ES) 并行，避免 plan_tree+hybrid 串行叠满 ~3s
+    GREP_PARALLEL_ES_PLAN_TREE = os.getenv("GREP_PARALLEL_ES_PLAN_TREE", "true").lower() == "true"
     GREP_SKIP_PLAN_TREE_ON_KEYWORD = os.getenv(
         "GREP_SKIP_PLAN_TREE_ON_KEYWORD", "true"
     ).lower() == "true"
     GREP_HYBRID_CACHE_TTL_S = float(os.getenv("GREP_HYBRID_CACHE_TTL_S", "45"))
     # 勿在首次 grep 同步 warmup（会阻塞 ~3s）；需要时可 app 启动后后台预热
     GREP_ES_WARMUP = os.getenv("GREP_ES_WARMUP", "false").lower() == "true"
+    # 后台预热一条 embedding（豆包首包常 ~800ms，预热后 query_embed 约 150~300ms）
+    GREP_EMBEDDING_WARMUP = os.getenv("GREP_EMBEDDING_WARMUP", "true").lower() == "true"
+    # 后台预热一次 knn+bm25（仅 info 无法消除首条 search 冷启动 ~500ms；压测热路径约 200ms）
+    GREP_ES_SEARCH_WARMUP = os.getenv("GREP_ES_SEARCH_WARMUP", "true").lower() == "true"
     # 未走远端 rerank（skipped_small_set 等）时跳过 LLM 二审
     GREP_SKIP_LLM_JUDGE_IF_NO_RERANK_API = os.getenv(
         "GREP_SKIP_LLM_JUDGE_IF_NO_RERANK_API", "true"
     ).lower() == "true"
-    GREP_RERANK_API_KEY = os.getenv("GREP_RERANK_API_KEY", "").strip() or QIANFAN_API_KEY
+    GREP_RERANK_API_KEY = (
+        os.getenv("GREP_RERANK_API_KEY", "").strip() or DASHSCOPE_API_KEY or QWEN_API_KEY
+    )
     GREP_RERANK_INSTRUCT = os.getenv(
         "GREP_RERANK_INSTRUCT",
         "Given a web search query, retrieve relevant passages that answer the query.",
@@ -270,6 +324,7 @@ class Config:
     LONG_MEMORY_MIN_SCORE = float(os.getenv("LONG_MEMORY_MIN_SCORE", "0.0"))
 
     # 调试：是否在控制台打印发往 LLM 的完整请求（messages 等）。.env 写 LLM_LOG_PROMPTS=1 后须重启 python
+    # REACT_PROMPT_LOG=1：额外打印 ReAct 组装 prompt（grep/modify/skill/macro）；未设时随 LLM_LOG_PROMPTS
     _llp_raw = (
         os.getenv("LLM_LOG_PROMPTS")
         or os.getenv("LLM_DEBUG_PROMPTS")
@@ -277,6 +332,18 @@ class Config:
         or ""
     ).strip().lower()
     LLM_LOG_PROMPTS = _llp_raw in ("1", "true", "yes", "on")
+    _perf_log_on = (os.getenv("PERF_LOG", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    _rpl_raw = (os.getenv("REACT_PROMPT_LOG") or "").strip().lower()
+    REACT_PROMPT_LOG = (
+        _rpl_raw in ("1", "true", "yes", "on")
+        if _rpl_raw
+        else (_perf_log_on or LLM_LOG_PROMPTS)
+    )
 
     # 嵌入式终端：AI 生成命令白名单（仅约束 /api/terminal/ai_suggest 返回值，不拦截用户手动键入）
     TERMINAL_AI_WHITELIST_ENABLED = os.getenv("TERMINAL_AI_WHITELIST_ENABLED", "false").lower() in (
@@ -297,3 +364,49 @@ class Config:
     MINIO_SAAS_FILE_PATH = f"{_minio_prefix}/" if _minio_prefix else ""
     MINIO_MAX_FILE_SIZE = int(os.getenv("MINIO_MAX_FILE_SIZE", str(524288000)))  # 默认 500MB，与历史 app 一致
     MINIO_MAX_SUM_FILE_SIZE = int(os.getenv("MINIO_MAX_SUM_FILE_SIZE", str(MINIO_MAX_FILE_SIZE)))
+
+    # ==================== 提示词页表 / KV Cache 调度（P0）====================
+    PROMPT_PAGE_TABLE_ENABLED = (
+        os.getenv("PROMPT_PAGE_TABLE_ENABLED", "1") or "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    PROMPT_PAGE_CANONICAL_ASSEMBLE = (
+        os.getenv("PROMPT_PAGE_CANONICAL_ASSEMBLE", "1") or "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    PROMPT_TOKENS_PER_PAGE = int(os.getenv("PROMPT_TOKENS_PER_PAGE", "800"))
+    PROMPT_SESSION_TOKEN_SOFT_LIMIT = int(
+        os.getenv("PROMPT_SESSION_TOKEN_SOFT_LIMIT", "8000000")
+    )
+    PROMPT_REQUEST_PREFILL_TOKEN_LIMIT = int(
+        os.getenv("PROMPT_REQUEST_PREFILL_TOKEN_LIMIT", "21000")
+    )
+
+    # ==================== CDP 浏览器自动化 ====================
+    CDP_ENABLED = (os.getenv("CDP_ENABLED", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    CDP_HEADLESS = (os.getenv("CDP_HEADLESS", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    CDP_DEFAULT_TIMEOUT_MS = int(os.getenv("CDP_DEFAULT_TIMEOUT_MS", "30000"))
+    CDP_SNAPSHOT_MAX_NODES = int(os.getenv("CDP_SNAPSHOT_MAX_NODES", "200"))
+    CDP_STALE_REF_AUTO_SNAPSHOT = (os.getenv("CDP_STALE_REF_AUTO_SNAPSHOT", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    CDP_SESSION_TTL_SEC = int(os.getenv("CDP_SESSION_TTL_SEC", "1800"))
+    CDP_MAX_SESSIONS = int(os.getenv("CDP_MAX_SESSIONS", "8"))
+    CDP_BROWSER_WARMUP = (os.getenv("CDP_BROWSER_WARMUP", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    CDP_BROWSER_IDLE_SEC = int(os.getenv("CDP_BROWSER_IDLE_SEC", "600"))

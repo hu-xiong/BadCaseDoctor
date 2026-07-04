@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { ElLoading } from 'element-plus'
-
 interface Props {
   fullscreen?: boolean
   text?: string

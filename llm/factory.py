@@ -33,14 +33,20 @@ def get_llm(provider: str = None, model: str = None):
     print(f"[LLM-FACTORY] 请求参数 - provider: {provider}, model: {model}")
 
     try:
-        from .prompt_log import llm_prompt_log_enabled, llm_prompt_log_file_path
+        from .prompt_log import (
+            llm_prompt_log_enabled,
+            llm_prompt_log_file_path,
+            react_prompt_log_enabled,
+        )
 
         _pf = llm_prompt_log_file_path()
-        if (llm_prompt_log_enabled() or _pf) and not _LLM_PROMPT_BANNER_DONE:
+        if (llm_prompt_log_enabled() or react_prompt_log_enabled() or _pf) and not _LLM_PROMPT_BANNER_DONE:
             _LLM_PROMPT_BANNER_DONE = True
             parts = []
             if llm_prompt_log_enabled():
-                parts.append("控制台打印完整 JSON（LLM_LOG_PROMPTS=1）")
+                parts.append("控制台打印 LLM 请求 JSON（LLM_LOG_PROMPTS=1）")
+            if react_prompt_log_enabled():
+                parts.append("ReAct 组装 prompt（REACT_PROMPT_LOG=1 或随 LLM_LOG_PROMPTS）")
             if _pf:
                 parts.append(f"追加写入文件 {_pf}（LLM_PROMPT_LOG_PATH）")
             _b = "[LLM_PROMPT] 已开启：" + "；".join(parts) + "。关闭请删 .env 对应项并重启。"
@@ -61,6 +67,8 @@ def get_llm(provider: str = None, model: str = None):
             provider = "qwen"
         elif "deepseek" in ml:
             provider = "deepseek"
+        elif "doubao" in ml or ml.startswith("ep-"):
+            provider = "doubao"
         print(f"[LLM-FACTORY] 根据模型名推断 provider: {provider}")
     
     provider = provider or Config.DEFAULT_LLM
@@ -90,6 +98,12 @@ def get_llm(provider: str = None, model: str = None):
         final_model = model or getattr(Config, "DEEPSEEK_V4_MODEL", None) or "deepseek-v4-pro"
         print(f"[LLM-FACTORY] 创建 DeepSeekLLM, model: {final_model}")
         return DeepSeekLLM(model=final_model)
+    elif provider == "doubao":
+        from .doubao_llm import DoubaoLLM
+
+        final_model = model or getattr(Config, "DOUBAO_MODEL", None) or "doubao-1-5-pro-32k"
+        print(f"[LLM-FACTORY] 创建 DoubaoLLM, model: {final_model}")
+        return DoubaoLLM(model=final_model)
     else:
         print(f"[LLM-FACTORY] 使用默认 ZhipuLLM, model: {model}")
         return ZhipuLLM(model=model)  # 默认使用智谱 GLM

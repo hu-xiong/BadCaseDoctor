@@ -1,18 +1,21 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import SectionHeader from '@/components/SectionHeader.vue'
+import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import { useAuthStore } from '@/stores/auth'
+import { getPosts, createPost, type CommunityPost } from '@/api/community'
+import { formatDate as formatDateUtil } from '@/utils/format'
 
 const authStore = useAuthStore()
 
 const selectedCategory = ref('')
 const showCreateDialog = ref(false)
+const loading = ref(true)
+const posts = ref<CommunityPost[]>([])
 const newPost = ref({
   title: '',
   content: '',
-  category: '',
-  tags: []
+  category: ''
 })
 
 const categories = [
@@ -23,57 +26,26 @@ const categories = [
   { value: 'jobs', label: 'Jobs & Opportunities' }
 ]
 
-const posts = ref([
-  {
-    id: 1,
-    title: 'Best practices for MySQL query optimization',
-    summary: 'I wanted to share some tips I have learned over the years for optimizing MySQL queries...',
-    author: { username: 'dbadmin', avatar: '' },
-    category: 'tutorials',
-    tags: ['optimization', 'performance'],
-    createdAt: '2024-04-15',
-    viewCount: 1234,
-    replyCount: 23
-  },
-  {
-    id: 2,
-    title: 'MySQL 8.4 LTS - First impressions',
-    summary: 'Just upgraded to MySQL 8.4 LTS. Here are my initial thoughts on the new features...',
-    author: { username: 'techlead', avatar: '' },
-    category: 'general',
-    tags: ['mysql84', 'review'],
-    createdAt: '2024-04-14',
-    viewCount: 856,
-    replyCount: 15
-  },
-  {
-    id: 3,
-    title: 'Help: Replication lag issues',
-    summary: 'I am experiencing significant replication lag on my MySQL Cluster. Looking for advice...',
-    author: { username: 'dba_newbie', avatar: '' },
-    category: 'help',
-    tags: ['replication', 'cluster'],
-    createdAt: '2024-04-13',
-    viewCount: 432,
-    replyCount: 8
-  },
-  {
-    id: 4,
-    title: 'Showcase: Real-time analytics dashboard',
-    summary: 'Built a real-time analytics dashboard using MySQL and Node.js. Sharing the architecture...',
-    author: { username: 'fullstack_dev', avatar: '' },
-    category: 'showcase',
-    tags: ['analytics', 'nodejs'],
-    createdAt: '2024-04-12',
-    viewCount: 2341,
-    replyCount: 45
+async function loadPosts() {
+  loading.value = true
+  try {
+    const params: Record<string, string | number> = { page: 1, page_size: 20 }
+    if (selectedCategory.value) {
+      params.category = selectedCategory.value
+    }
+    const data = await getPosts(params)
+    posts.value = data.list
+  } catch {
+    posts.value = []
+  } finally {
+    loading.value = false
   }
-])
+}
 
-const filteredPosts = computed(() => {
-  if (!selectedCategory.value) return posts.value
-  return posts.value.filter(p => p.category === selectedCategory.value)
-})
+onMounted(loadPosts)
+watch(selectedCategory, loadPosts)
+
+const filteredPosts = computed(() => posts.value)
 
 const handleCreatePost = () => {
   if (!authStore.isAuthenticated) {
@@ -83,16 +55,27 @@ const handleCreatePost = () => {
   showCreateDialog.value = true
 }
 
-const submitPost = () => {
-  ElMessage.success('Post created successfully!')
-  showCreateDialog.value = false
-  newPost.value = { title: '', content: '', category: '', tags: [] }
+const submitPost = async () => {
+  if (!newPost.value.title.trim() || !newPost.value.content.trim()) {
+    ElMessage.warning('Title and content are required')
+    return
+  }
+  try {
+    await createPost({
+      title: newPost.value.title,
+      content: newPost.value.content,
+      category: newPost.value.category || 'general'
+    })
+    ElMessage.success('Post created successfully!')
+    showCreateDialog.value = false
+    newPost.value = { title: '', content: '', category: '' }
+    await loadPosts()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || 'Failed to create post')
+  }
 }
 
-const formatDate = (dateStr: string) => {
-  const date = new Date(dateStr)
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+const formatDate = (dateStr: string) => formatDateUtil(dateStr)
 </script>
 
 <template>
@@ -135,35 +118,27 @@ const formatDate = (dateStr: string) => {
             </div>
 
             <!-- Posts List -->
-            <div class="posts-list">
+            <LoadingSpinner v-if="loading" />
+            <div v-else class="posts-list">
+              <el-empty v-if="!filteredPosts.length" description="No posts yet" />
               <div
                 v-for="post in filteredPosts"
                 :key="post.id"
                 class="post-card card"
               >
                 <div class="post-avatar">
-                  {{ post.author.username.charAt(0).toUpperCase() }}
+                  {{ (post.user?.username || 'U').charAt(0).toUpperCase() }}
                 </div>
                 <div class="post-content">
                   <div class="post-meta">
                     <span class="post-category">{{ post.category }}</span>
-                    <span class="post-date">{{ formatDate(post.createdAt) }}</span>
+                    <span class="post-date">{{ formatDate(post.created_at) }}</span>
                   </div>
                   <h3 class="post-title">{{ post.title }}</h3>
-                  <p class="post-summary">{{ post.summary }}</p>
-                  <div class="post-tags">
-                    <el-tag
-                      v-for="tag in post.tags"
-                      :key="tag"
-                      size="small"
-                      type="info"
-                    >
-                      {{ tag }}
-                    </el-tag>
-                  </div>
+                  <p class="post-summary">{{ post.content }}</p>
                   <div class="post-stats">
-                    <span><i class="el-icon-view"></i> {{ post.viewCount }}</span>
-                    <span><i class="el-icon-chat-line-square"></i> {{ post.replyCount }}</span>
+                    <span><i class="el-icon-view"></i> {{ post.view_count }}</span>
+                    <span><i class="el-icon-star-off"></i> {{ post.like_count }}</span>
                   </div>
                 </div>
               </div>
@@ -209,22 +184,6 @@ const formatDate = (dateStr: string) => {
               :key="cat.value"
               :label="cat.label"
               :value="cat.value"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="Tags">
-          <el-select
-            v-model="newPost.tags"
-            multiple
-            filterable
-            allow-create
-            placeholder="Add tags"
-          >
-            <el-option
-              v-for="tag in ['mysql', 'performance', 'optimization', 'replication']"
-              :key="tag"
-              :label="tag"
-              :value="tag"
             />
           </el-select>
         </el-form-item>

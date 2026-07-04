@@ -66,7 +66,7 @@ go mod download
 go run main.go
 ```
 
-服务将在 `http://localhost:8080` 启动。
+服务将在 `http://localhost:8090` 启动（与 BadCaseDoctor 后端 5000 错开）。
 
 ## API 接口
 
@@ -119,7 +119,7 @@ go run main.go
 ### 注册用户
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/register \
+curl -X POST http://localhost:8090/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"user@example.com","password":"password123","username":"testuser"}'
 ```
@@ -127,7 +127,7 @@ curl -X POST http://localhost:8080/api/v1/auth/register \
 ### 登录
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/login \
+curl -X POST http://localhost:8090/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"user@example.com","password":"password123"}'
 ```
@@ -135,13 +135,13 @@ curl -X POST http://localhost:8080/api/v1/auth/login \
 ### 获取下载列表
 
 ```bash
-curl http://localhost:8080/api/v1/downloads
+curl http://localhost:8090/api/v1/downloads
 ```
 
 ### 获取文档分类
 
 ```bash
-curl http://localhost:8080/api/v1/docs/categories
+curl http://localhost:8090/api/v1/docs/categories
 ```
 
 ## 配置说明
@@ -150,7 +150,7 @@ curl http://localhost:8080/api/v1/docs/categories
 
 ```yaml
 server:
-  port: 8080        # 服务端口
+  port: 8090        # 服务端口（勿与 BadCaseDoctor 5000 冲突）
   mode: debug       # Gin 模式: debug, release, test
 
 database:

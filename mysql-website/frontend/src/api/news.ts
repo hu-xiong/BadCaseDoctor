@@ -1,24 +1,27 @@
 import apiClient from './axios'
+import { unwrapData, type PaginatedList } from './response'
 
 export interface NewsItem {
   id: number
   title: string
   summary: string
   content: string
-  author: string
-  publishDate: string
-  category: string
-  imageUrl?: string
+  image_url?: string
+  status: number
+  created_at: string
 }
 
-export const getNews = (params?: { page?: number; limit?: number; category?: string }) => {
-  return apiClient.get('/news', { params })
+export const getNews = async (params?: { page?: number; page_size?: number }) => {
+  const response = await apiClient.get('/news', { params })
+  return unwrapData<PaginatedList<NewsItem>>(response)
 }
 
-export const getNewsDetail = (id: number) => {
-  return apiClient.get(`/news/${id}`)
+export const getLatestNews = async (limit = 3) => {
+  const response = await apiClient.get('/news/latest', { params: { limit } })
+  return unwrapData<NewsItem[]>(response)
 }
 
-export const getNewsCategories = () => {
-  return apiClient.get('/news/categories')
+export const getNewsDetail = async (id: number | string) => {
+  const response = await apiClient.get(`/news/${id}`)
+  return unwrapData<NewsItem>(response)
 }

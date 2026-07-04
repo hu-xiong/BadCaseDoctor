@@ -24,6 +24,30 @@ function thoughtStepHasSubstantiveProse(st, aiMessage) {
   return false
 }
 
+/**
+ * THINK / think_summary 绑定步骤：index 对应 steps[n] 未就绪时回落到 running 或最后一行（对齐 step_log）。
+ */
+function resolveThinkTargetStep(aiMessage, rawIndex, resolveStreamStepIndex) {
+  const steps = aiMessage?.steps
+  if (!Array.isArray(steps) || !steps.length) return { j: null, st: null }
+  let j = resolveStreamStepIndex(rawIndex, steps)
+  if (j != null && steps[j]) return { j, st: steps[j] }
+  if (
+    Array.isArray(steps) &&
+    steps.length === 1 &&
+    (rawIndex === 0 || rawIndex === '0')
+  ) {
+    return { j: 0, st: steps[0] }
+  }
+  const running = steps.find((s) => s.status === 'running')
+  if (running) {
+    j = steps.indexOf(running)
+    return { j, st: running }
+  }
+  j = steps.length - 1
+  return { j, st: steps[j] }
+}
+
 /** 进入决策块时冻结「思考」墙钟 */
 function freezeThoughtPhaseEndForActionXmlWait(st, aiMessage) {
   if (!st || st.thoughtPhaseEndAtMs != null || st.stepStartedAt == null) return
@@ -198,15 +222,12 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       return true
     }
     case 'agent_thought': {
-      let j = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
-      if (
-        j == null &&
-        Array.isArray(aiMessage.steps) &&
-        aiMessage.steps.length === 1 &&
-        (stepEvent.index === 0 || stepEvent.index === '0')
-      ) {
-        j = 0
-      }
+      const thinkTarget = resolveThinkTargetStep(
+        aiMessage,
+        stepEvent.index,
+        resolveStreamStepIndex
+      )
+      let j = thinkTarget.j
       const piece = stepEvent.delta
       const rp = stepEvent.react_phase
       const isThink =
@@ -217,6 +238,29 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
         pieceVisible = appendUnifiedFilteredThinkPiece(aiMessage, j, piece)
       }
       pieceVisible = stripReasoningChannelArtifacts(pieceVisible)
+
+      const summaryPiece =
+        stepEvent.think_summary_delta != null ? String(stepEvent.think_summary_delta) : ''
+      if (summaryPiece && !/^frozen_macro_step_\d+$/i.test(summaryPiece.trim())) {
+        let sumTarget = resolveThinkTargetStep(
+          aiMessage,
+          stepEvent.index,
+          resolveStreamStepIndex
+        )
+        if (!sumTarget.st && ctx.ensureThinkPlaceholder) {
+          ctx.ensureThinkPlaceholder(aiMessage)
+          sumTarget = resolveThinkTargetStep(
+            aiMessage,
+            stepEvent.index,
+            resolveStreamStepIndex
+          )
+        }
+        if (sumTarget.st) {
+          sumTarget.st.thoughtSummaryDraft =
+            (sumTarget.st.thoughtSummaryDraft || '') + summaryPiece
+        }
+        scheduleReasoningTypewriter(aiMessage)
+      }
 
       if (typeof piece === 'string' && piece && isThink) {
         aiMessage.hadAgentThinkPhase = true
@@ -276,10 +320,11 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       if (j != null && aiMessage.steps[j]) {
         const st = aiMessage.steps[j]
         const kind = stepEvent.kind != null ? String(stepEvent.kind) : ''
-        if (stepEvent.active) {
-          // unified_round_think：等待模型首 token 前，勿把「开始等待」当成思考已结束，否则眉标会显示 0.0 秒
+          if (stepEvent.active) {
+          // 仅首轮 unified think 保持思考计时；宏路径「准备下一步」属执行衔接，勿当作思考中
+          const phaseWaitKeepsThoughtOpen = kind === 'unified_round_think'
           if (
-            kind !== 'unified_round_think' &&
+            !phaseWaitKeepsThoughtOpen &&
             st.thoughtPhaseEndAtMs == null &&
             st.stepStartedAt != null
           ) {
@@ -289,6 +334,13 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
             active: true,
             kind,
             message: stepEvent.message != null ? String(stepEvent.message) : ''
+          }
+          if (
+            (kind === 'preparing_next_step' || kind === 'macro_params_llm') &&
+            st.thoughtPhaseEndAtMs == null &&
+            st.stepStartedAt != null
+          ) {
+            st.thoughtPhaseEndAtMs = Date.now()
           }
         } else {
           st.phaseWait = null

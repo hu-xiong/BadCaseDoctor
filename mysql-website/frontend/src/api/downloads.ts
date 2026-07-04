@@ -1,26 +1,38 @@
 import apiClient from './axios'
+import { unwrapData, type PaginatedList } from './response'
 
-export interface DownloadVersion {
+export interface DownloadItem {
   id: number
   name: string
   version: string
-  type: 'enterprise' | 'community' | 'cluster'
-  releaseDate: string
-  size: string
+  edition: string
+  os: string
+  file_path: string
+  file_size: number
   sha256: string
-  downloadUrl: string
+  description: string
+  download_count: number
+  created_at: string
 }
 
 export interface DownloadFilter {
-  type?: 'enterprise' | 'community' | 'cluster'
-  os?: 'windows' | 'linux' | 'macos'
-  version?: string
+  edition?: string
+  os?: string
+  page?: number
+  page_size?: number
 }
 
-export const getDownloads = (filters?: DownloadFilter) => {
-  return apiClient.get('/downloads', { params: filters })
+export const getDownloads = async (filters?: DownloadFilter) => {
+  const response = await apiClient.get('/downloads', { params: filters })
+  return unwrapData<PaginatedList<DownloadItem>>(response)
 }
 
-export const getDownloadVersions = () => {
-  return apiClient.get('/downloads/versions')
+export const getDownloadDetail = async (id: number) => {
+  const response = await apiClient.get(`/downloads/${id}`)
+  return unwrapData<DownloadItem>(response)
+}
+
+export const recordDownload = async (id: number) => {
+  const response = await apiClient.post(`/downloads/${id}/record`)
+  return unwrapData(response)
 }

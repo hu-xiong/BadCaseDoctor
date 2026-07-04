@@ -20,11 +20,23 @@ except Exception:  # pragma: no cover
     pass
 
 
+# JSON.parse 在浏览器中会丢失精度的大整数（> 2^53-1），SSE 下发前转为字符串
+_JS_MAX_SAFE_INTEGER = 9007199254740991
+
+
 def deep_sse_json_safe(obj: Any, _depth: int = 0, _max_depth: int = 64) -> Any:
     """SSE/JSON：递归剔除 Queue、回调等不可序列化对象，避免 json.dumps 抛错拉断连接。"""
     if _depth > _max_depth:
         return None
-    if obj is None or isinstance(obj, (bool, int, float, str)):
+    if obj is None or isinstance(obj, bool):
+        return obj
+    if isinstance(obj, int):
+        if abs(obj) > _JS_MAX_SAFE_INTEGER:
+            return str(obj)
+        return obj
+    if isinstance(obj, float):
+        return obj
+    if isinstance(obj, str):
         return obj
     if isinstance(obj, Decimal):
         try:
@@ -91,7 +103,7 @@ class EvidenceExtractor:
         从工具执行结果中提取执行证据
         
         Args:
-            tool_name: 工具名称（如 browser_test, database_query 等）
+            tool_name: 工具名称（如 cdp, database_query 等）
             params: 工具参数
             observation: 工具执行结果
             

@@ -111,15 +111,6 @@ def _build_registry() -> List[ModelSpec]:
             priority=60,
         ),
         ModelSpec(
-            id="qwen3.6-flash",
-            label="Qwen-3.6-Flash",
-            provider="qwen",
-            enabled=_enabled("qwen3.6-flash", default=True),
-            vision=False,
-            pricing=_price_for("qwen3.6-flash"),
-            priority=58,
-        ),
-        ModelSpec(
             id="qwen3.6-plus",
             label="Qwen-3.6-Plus",
             provider="qwen",
@@ -196,6 +187,27 @@ def _build_registry() -> List[ModelSpec]:
             context_length=128_000,
             pricing=_price_for("deepseek-v4-flash"),
             priority=66,
+        ),
+        # ---- Doubao (Volcengine Ark) ----
+        ModelSpec(
+            id="doubao-1-5-pro-32k",
+            label="豆包-1.5-Pro-32k",
+            provider="doubao",
+            enabled=_enabled("doubao-1-5-pro-32k", default=True),
+            vision=False,
+            context_length=32_000,
+            pricing=_price_for("doubao-1-5-pro-32k"),
+            priority=58,
+        ),
+        ModelSpec(
+            id="doubao-1-5-lite-32k",
+            label="豆包-1.5-Lite-32k",
+            provider="doubao",
+            enabled=_enabled("doubao-1-5-lite-32k", default=False),
+            vision=False,
+            context_length=32_000,
+            pricing=_price_for("doubao-1-5-lite-32k"),
+            priority=52,
         ),
     ]
 

@@ -28,7 +28,6 @@ class ParsedGrepQuery:
     keywords: Optional[str] = None
     assignee: Optional[str] = None
     status: Optional[str] = None
-    record_id: Optional[int] = None
     entity_types: List[str] = field(default_factory=list)
 
 
@@ -101,13 +100,6 @@ def enrich_grep_params(
         combined = f"{user_input or ''} {todo or ''}"
         asn = extract_assignee_from_natural_language(combined)
 
-    record_id: Optional[int] = None
-    if kw and kw.isdigit():
-        try:
-            record_id = int(kw)
-        except ValueError:
-            record_id = None
-
     entity_types: List[str] = []
     t = (target or "all").strip().lower()
     if t in ("bug", "badcase", "testcase", "card"):
@@ -119,6 +111,5 @@ def enrich_grep_params(
         keywords=kw,
         assignee=asn,
         status=st,
-        record_id=record_id,
         entity_types=entity_types,
     )

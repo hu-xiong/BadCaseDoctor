@@ -44,6 +44,19 @@ examples:
   - 将BadCase456分配给开发人员
   - 调整测试用例的优先级
   - 修正BadCase的描述信息
+  - 问登录问题答的不好 复现步骤修改为提问登录问题即可
+
+prompt_template: |
+  你正在执行 **modify_badcase（修改 BadCase）** 技能。
+
+  **工作流（必须按顺序，一轮一个工具）：**
+  1. **grep**：target=badcase，keywords 用用户话里的标题/关键词或 record_id；须带 project_id
+  2. **modify**：target=badcase，target_id 取 grep 的 first_badcase_id；字段写在 modifications 内；confirm=false 沙箱预览
+
+  **规则：**
+  - 首轮**只能 grep**，禁止跳过检索、禁止用界面 record_id 直接 modify
+  - modifications 必须嵌套：`{"字段名": "新值"}`（如 reproduction_steps、status）
+  - 不确定字段名或参数 → 先 get_tool_description("modify")
 
 metadata:
   category: badcase_management

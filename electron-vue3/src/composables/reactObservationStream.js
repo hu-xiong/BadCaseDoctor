@@ -11,6 +11,33 @@ import {
   normalizeTestcaseModifyFieldKey,
   isTestcaseDetailModifyField
 } from '../utils/testcaseModifyFields.js'
+import { looksLikeDeleteToolPreview } from '../utils/deletePreviewUtils.js'
+
+/** 计划/实体主键：禁止 parseInt/Number，避免雪花 ID 精度丢失 */
+function normalizePlanIdStr(raw) {
+  if (raw == null || raw === '') return null
+  const s = snowflakeIdStr(raw) || String(raw).trim()
+  return s && /^\d+$/.test(s) ? s : null
+}
+
+/** delete 预览主键：plan 优先 plan_id，其余优先 target_id */
+function pickDeletePreviewTargetId(tgt, rec, flat, toolData) {
+  const t = String(tgt || '').toLowerCase()
+  const fromWire =
+    normalizePlanIdStr(flat.target_id ?? toolData?.target_id) ||
+    normalizePlanIdStr(flat.plan_id ?? toolData?.plan_id)
+  if (fromWire) return fromWire
+  if (t === 'plan') {
+    if (typeof rec?.id === 'string') return normalizePlanIdStr(rec.id)
+    // 数字 id 可能已被 JS 截断；仍写入占位，由 show-delete-in-list 按名称纠正
+    return normalizePlanIdStr(rec?.id)
+  }
+  return (
+    normalizePlanIdStr(rec?.id ?? flat.target_id ?? toolData?.target_id) ||
+    String(rec?.id ?? flat.target_id ?? toolData?.target_id ?? '').trim() ||
+    null
+  )
+}
 
 /** modify 预览：从工具结果或 before 快照取关联 Card.id，供列表跳转（与 Bug 源表 id 区分） */
 function pickModifyNavCardId(rr, r, toolData) {
@@ -214,7 +241,7 @@ export const extractToolName = (title) => {
   if (t.includes('modify')) return 'modify'
   if (t.includes('delete') || t.includes('删除')) return 'delete'
   if (t.includes('create')) return 'create'
-  if (t.includes('browser_test')) return 'browser_test'
+  if (t.includes('cdp') || t.includes('browser_test')) return 'cdp'
   if (t.includes('log_analyzer')) return 'log_analyzer'
   if (t.includes('search')) return 'search'
   return ''
@@ -533,6 +560,13 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     if (typeof td0 === 'object' && td0 !== null) {
       runningStep.resultSummary = buildStepResultSummary(outputData, resolvedTool, td0)
       appendStepDetailLine(runningStep, `── 结果 ──\n${runningStep.resultSummary}`)
+      const sumDraft = String(runningStep.thoughtSummaryDraft || '').replace(/\s+/g, ' ').trim()
+      if (sumDraft.length < 2 && runningStep.resultSummary) {
+        const rs = String(runningStep.resultSummary).replace(/\s+/g, ' ').trim().slice(0, 40)
+        if (rs.length >= 2 && /[\u4e00-\u9fa5A-Za-z0-9]/.test(rs)) {
+          runningStep.thoughtSummaryDraft = rs
+        }
+      }
     }
   }
 
@@ -863,6 +897,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     }
 
     if (toolName === 'create' && toolData && typeof toolData === 'object') {
+      if (!looksLikeDeleteToolPreview(toolData)) {
       const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
       const hasPreview = toolData.preview && typeof toolData.preview === 'object' && Object.keys(toolData.preview).length > 0
       const looksLikePreview =
@@ -896,11 +931,42 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           return 'bug'
         }
         const resolvedTarget = inferCreateTarget()
-        const adoptedId =
-          projectId != null
+        const adoptedPlanHint =
+          projectId != null && resolvedTarget === 'plan'
             ? getStableCreatedId(projectId, resolvedTarget, pv)
             : null
-        if (adoptedId != null) {
+        const adoptedId =
+          projectId != null && resolvedTarget !== 'plan'
+            ? getStableCreatedId(projectId, resolvedTarget, pv)
+            : null
+        if (resolvedTarget === 'plan' && projectId != null) {
+          aiMessage.modifyNavigation = {
+            target: resolvedTarget,
+            target_id: 'new',
+            diff: hasDiff ? toolData.diff : [],
+            preview: toolData.preview,
+            modifications: toolData.preview || {},
+            confirmation_required: true,
+            is_create: true,
+            _awaitStableVerify: true
+          }
+          tick(() => {
+            window.dispatchEvent(
+              new CustomEvent('verify-stable-create-id', {
+                detail: {
+                  messageId: aiMessage.id,
+                  projectId,
+                  target: resolvedTarget,
+                  preview: pv,
+                  adoptedId: adoptedPlanHint,
+                  toolPreview: toolData.preview,
+                  diff: hasDiff ? toolData.diff : []
+                },
+                bubbles: true
+              })
+            )
+          })
+        } else if (adoptedId != null) {
           const planIdNav = pv.plan_id ?? pv.planId
           aiMessage.modifyNavigation = {
             target: resolvedTarget,
@@ -943,6 +1009,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         if (
           handleShowModifyInList &&
           navCreate?.is_create === true &&
+          !navCreate._awaitStableVerify &&
           navCreate.confirmation_required !== false &&
           !navCreate.navigate_to_existing
         ) {
@@ -968,6 +1035,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           toolDataKeys: Object.keys(toolData),
           hint
         })
+      }
       }
     }
 
@@ -1010,12 +1078,11 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
                 ? { ...pvRaw, record: recRaw }
                 : { target: flat.target || toolData.target || 'bug', record: recRaw }
           const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
-          let planId = recRaw.plan_id ?? flat.plan_id ?? toolData.plan_id
-          if (planId != null && planId !== '') planId = parseInt(planId, 10)
+          let planId = normalizePlanIdStr(recRaw.plan_id ?? flat.plan_id ?? toolData.plan_id)
           aiMessage.deleteNavigation = {
             target: tgt || 'bug',
             target_id: delId,
-            plan_id: Number.isFinite(planId) ? planId : null,
+            plan_id: planId,
             preview: pv,
             confirmation_required: false,
             success: true,
@@ -1044,28 +1111,35 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
               : { target: flat.target || toolData.target || 'bug', record: recRaw }
         const rec = recRaw
         const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
-        const rid =
-          snowflakeIdStr(rec.id ?? flat.target_id ?? toolData.target_id) ||
-          String(rec.id ?? flat.target_id ?? toolData.target_id ?? '').trim()
-        let planId = rec.plan_id ?? flat.plan_id ?? toolData.plan_id
-        if (planId != null && planId !== '') planId = parseInt(planId, 10)
+        const rid = pickDeletePreviewTargetId(tgt, rec, flat, toolData)
+        let planId = normalizePlanIdStr(rec.plan_id ?? flat.plan_id ?? toolData.plan_id)
+        if (tgt === 'plan' && rid) planId = rid
         if (rid && /^\d+$/.test(rid)) {
           aiMessage.deleteNavigation = {
             target: tgt || 'bug',
             target_id: rid,
-            plan_id: Number.isFinite(planId) ? planId : null,
-            preview: pv,
+            plan_id: planId,
+            preview: { ...pv, record: { ...rec, id: rid } },
             confirmation_required: true
           }
           console.log('[DELETE] 已写入 deleteNavigation', aiMessage.deleteNavigation)
+          if (
+            aiMessage.modifyNavigation?.is_create === true &&
+            looksLikeDeleteToolPreview(flat)
+          ) {
+            aiMessage.modifyNavigation = null
+          }
           tick(() => {
             window.dispatchEvent(
               new CustomEvent('show-delete-in-list', {
                 detail: {
                   target: tgt || 'bug',
                   target_id: rid,
-                  plan_id: Number.isFinite(planId) ? planId : null,
-                  preview: pv,
+                  plan_id: planId,
+                  preview: {
+                    ...pv,
+                    record: { ...rec, id: rid }
+                  },
                   messageId: aiMessage.id
                 },
                 bubbles: true

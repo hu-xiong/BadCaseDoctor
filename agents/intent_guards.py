@@ -355,7 +355,7 @@ def react_need_todo_list_heuristic_fallback(user_input: Optional[str]) -> bool:
         return True
     if re.search(r"(批量|多个|分别|以及|同时|还有|另外|再)", u) and len(u) > 6:
         return True
-    if len(re.findall(r"\b(?:grep|modify|create|delete|browser_test)\b", u, re.I)) >= 2:
+    if len(re.findall(r"\b(?:grep|modify|create|delete|cdp)\b", u, re.I)) >= 2:
         return True
     if re.search(r"(复制|拷贝).{0,40}(并|再|然后|接着)", u):
         return True
@@ -371,6 +371,98 @@ def resolve_need_todo_list_effective(
         if ntl is not None:
             return bool(ntl)
     return react_need_todo_list_heuristic_fallback(user_input)
+
+
+def react_require_grep_before_modify() -> bool:
+    """统一流：modify/delete 前须至少执行过一次 grep（默认开启）。REACT_REQUIRE_GREP_BEFORE_MODIFY=0 关闭。"""
+    return (os.getenv("REACT_REQUIRE_GREP_BEFORE_MODIFY", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def react_grep_before_modify_coerce() -> bool:
+    """
+    模型仍首轮选 modify 时：同轮改写为 grep 并执行（默认开），避免再跑一整轮思考。
+    REACT_GREP_BEFORE_MODIFY_COERCE=0 时仅依赖 prompt，不改写 decision。
+    """
+    return (os.getenv("REACT_GREP_BEFORE_MODIFY_COERCE", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def react_delete_plan_may_skip_grep(
+    tool_params: Optional[dict],
+    *,
+    ui_context: Optional[dict] = None,
+    sidebar_plan_id: Any = None,
+) -> bool:
+    """
+    delete(target=plan) 且 plan_id 已明确（params / ui_context / 侧栏）时不必先 grep。
+    与 delete_plan 技能及侧栏「删除当前迭代计划」场景对齐。
+    """
+    if not isinstance(tool_params, dict):
+        return False
+    if str(tool_params.get("target") or "").strip().lower() != "plan":
+        return False
+    pid = tool_params.get("plan_id")
+    if pid in (None, "", 0, "0"):
+        ui = ui_context if isinstance(ui_context, dict) else {}
+        pid = ui.get("plan_id") or ui.get("planId")
+    if pid in (None, "", 0, "0") and sidebar_plan_id not in (None, "", 0, "0"):
+        pid = sidebar_plan_id
+    try:
+        return int(pid) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def react_context_has_grep_for_mutate(
+    result_context: Optional[dict],
+    prev_action: Optional[dict],
+    *,
+    grep_tool_calls: int = 0,
+) -> bool:
+    """
+    是否已满足「先 grep 再 modify/delete」。
+    仅 ui_context 种子化 grep_result、未真正调用 grep 工具时返回 False。
+    """
+    if grep_tool_calls > 0:
+        return True
+    if isinstance(prev_action, dict):
+        if str(prev_action.get("tool") or "").strip().lower() == "grep":
+            return True
+    if not isinstance(result_context, dict):
+        return False
+    if result_context.get("_grep_seeded_from_ui_context"):
+        return False
+    gr = result_context.get("grep_result")
+    if isinstance(gr, dict) and gr:
+        for k in (
+            "bug_list",
+            "badcase_list",
+            "testcase_list",
+            "card_list",
+            "plan_list",
+            "first_bug_id",
+            "first_badcase_id",
+            "first_testcase_id",
+            "first_card_id",
+            "first_plan_id",
+        ):
+            v = gr.get(k)
+            if v:
+                return True
+    for k in ("bug_list", "badcase_list", "testcase_list", "card_list", "plan_list"):
+        lst = result_context.get(k)
+        if isinstance(lst, list) and lst:
+            return True
+    return False
 
 
 THINK_EMBEDDED_GATE_OPEN = "[GATE]"
@@ -561,10 +653,12 @@ def react_tools_intent_classify_sync(
         print("[REACT-TOOLS-INTENT] 无 DashScope Key，跳过门控")
         return True, "", None
 
+    from llm.chat_messages import build_chat_messages
+
     if is_english_locale(locale):
-        prompt = (
+        system = (
             "You gate a testing/defect workflow assistant. Decide if the user's message requires "
-            "calling system tools (e.g. grep, modify, create, database_query, search, browser_test) "
+            "calling system tools (e.g. grep, modify, create, database_query, search, cdp) "
             "to fulfill the request.\n"
             "need_tools=true: user wants to query/list/search/edit/create/run tests or work with Bugs, "
             "test cases, BadCases in the project, or similar actionable ops.\n"
@@ -581,13 +675,13 @@ def react_tools_intent_classify_sync(
             '{"need_tools": true}\n'
             '{"need_tools": true, "need_plan_ui": false}\n'
             '{"need_tools": true, "need_plan_ui": true}\n'
-            'or {"need_tools": false, "message": "..."}\n\n'
-            f"User message:\n{u[:4000]}"
+            'or {"need_tools": false, "message": "..."}'
         )
+        user_block = f"User message:\n{u[:4000]}"
     else:
-        prompt = (
+        system = (
             "你是测试/缺陷工作流助手的意图门控。判断用户这句话是否需要调用系统工具"
-            "（如 grep、modify、create、database_query、search、browser_test 等）才能完成。\n"
+            "（如 grep、modify、create、database_query、search、cdp 等）才能完成。\n"
             "need_tools=true：要查询/列出/搜索/修改/创建/测试项目内 Bug、测试用例、BadCase，"
             "或跑自动化、查日志、执行数据操作等明确任务。\n"
             "need_tools=false：纯寒暄、致谢、闲聊或与具体数据操作无关的泛泛而谈。"
@@ -603,15 +697,17 @@ def react_tools_intent_classify_sync(
             '{"need_tools": true}\n'
             '{"need_tools": true, "need_plan_ui": false}\n'
             '{"need_tools": true, "need_plan_ui": true}\n'
-            '或 {"need_tools": false, "message": "..."}\n\n'
-            f"用户输入：\n{u[:4000]}"
+            '或 {"need_tools": false, "message": "..."}'
         )
+        user_block = f"用户输入：\n{u[:4000]}"
+
+    messages = build_chat_messages(system=system, user=user_block)
 
     try:
         client = get_dashscope_compat_client()
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             max_tokens=384,
             temperature=0.45,
         )
@@ -659,20 +755,23 @@ def arbitrate_modify_or_create(user_input: Optional[str]) -> str:
         print("[INTENT-ARB] 无 DashScope Key，默认 modify")
         return "modify"
 
-    prompt = (
+    from llm.chat_messages import build_chat_messages
+
+    system = (
         "你是意图分类器，只做二选一。系统里有 Bug、测试用例、BadCase 等「已存在」的记录。\n"
         "modify = 用户要改已有记录（状态、负责人、标题、草稿变生效、评审等）。\n"
         "create = 用户要新做一条记录（创建/新建/添加一条全新的用例或 Bug 等）。\n"
         "若一句话里既有「新建」又有「改某条已有」，以是否以「改已有」为主目标为准。\n"
         "只输出一行 JSON，不要 Markdown、不要解释："
-        '{"intent":"modify"} 或 {"intent":"create"}\n\n'
-        f"用户原话：{u[:2000]}"
+        '{"intent":"modify"} 或 {"intent":"create"}'
     )
+    user_block = f"用户原话：{u[:2000]}"
+    messages = build_chat_messages(system=system, user=user_block)
     try:
         client = get_dashscope_compat_client()
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
         )
         text = (resp.choices[0].message.content or "").strip()
         m = re.search(r"\{[^{}]*\"intent\"[^{}]*\}", text)

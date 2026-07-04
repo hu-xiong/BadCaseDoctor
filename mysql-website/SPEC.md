@@ -251,7 +251,7 @@ mysql-website/
 cd backend
 go mod tidy
 go run main.go
-# 服务运行在 http://localhost:8080
+# 服务运行在 http://localhost:8090
 ```
 
 ### 前端
@@ -259,7 +259,7 @@ go run main.go
 cd frontend
 npm install
 npm run dev
-# 服务运行在 http://localhost:5173
+# 服务运行在 http://localhost:5180
 ```
 
 ---
