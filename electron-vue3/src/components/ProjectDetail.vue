@@ -1721,6 +1721,8 @@ export default {
     
     // BadCase数据
     const badcases = ref([])
+    const bugs = ref([])
+    const testcases = ref([])
     const filteredBadcases = ref([]) // 根据选择的计划过滤后的BadCase
     const badcaseLoading = ref(false)
     const badcasePage = ref(1)

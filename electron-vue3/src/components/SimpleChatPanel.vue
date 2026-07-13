@@ -811,6 +811,7 @@ import {
 } from '../composables/useAgentStream.js'
 import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
+import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
   pingLocalGoProxy as sharedPingLocalGoProxy
@@ -2216,8 +2217,8 @@ function getMergedPendingForTarget(msgs, target, targetId) {
     const msgIdx = i
     for (const group of msg.modifyGroups || []) {
       for (const item of group.items || []) {
-        const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
-        if (isNaN(tid) || tid !== targetId) continue
+        const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
+        if (!tid || tid !== targetId) continue
         if (item.target && item.target !== target) continue
         if (item.cancelled === true) continue
         const itTarget = item.target || group.target || target
@@ -2243,8 +2244,8 @@ function getMergedPendingForTarget(msgs, target, targetId) {
     const nav = msg.modifyNavigation
     if (nav?.batch_modify && nav.batch_results?.length) {
       for (const r of nav.batch_results) {
-        const tid = parseInt(r.target_id, 10)
-        if (isNaN(tid) || tid !== targetId) continue
+        const tid = snowflakeIdStr(r.target_id)
+        if (!tid || tid !== targetId) continue
         if (r.cancelled === true) continue
         if (r.target && r.target !== target) continue
         const itTarget = r.target || nav.target || target
@@ -2267,8 +2268,8 @@ function getMergedPendingForTarget(msgs, target, targetId) {
         })
       }
     } else if (nav && !nav.batch_modify && !nav.is_create && nav.cancelled !== true) {
-      const tid = parseInt(nav.target_id ?? nav.targetId, 10)
-      if (isNaN(tid) || tid !== targetId || (nav.target || 'badcase') !== target) {
+      const tid = snowflakeIdStr(nav.target_id ?? nav.targetId)
+      if (!tid || tid !== targetId || (nav.target || 'badcase') !== target) {
         continue
       }
       const pk = makePersistDiffKey(target, tid)
@@ -2349,8 +2350,8 @@ const getModifyJumpButtonLabel = (target) => {
 
 const makePersistDiffKey = (target, targetId) => {
   const nt = normalizeModifyTarget(target)
-  const tid = Number(targetId)
-  if (!nt || !Number.isFinite(tid) || tid <= 0) return ''
+  const tid = snowflakeIdStr(targetId)
+  if (!nt || !tid) return ''
   return `${nt}:${tid}`
 }
 
@@ -2447,8 +2448,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
   const messageIsHistorical = !!(msgObj && msgObj.isHistorical)
 
   const peerTargetIds = group.items
-    .map((it) => parseInt(it?.target_id ?? it?.targetId ?? it?.id))
-    .filter((id) => !isNaN(id))
+    .map((it) => snowflakeIdStr(it?.target_id ?? it?.targetId ?? it?.id))
+    .filter(Boolean)
 
   const batchItems = []
   /** 已采纳：合并为一次 grep-navigate，避免逐条异步定位造成「一行行」闪高亮 */
@@ -2460,8 +2461,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
       console.warn('[MODIFY] 跳过无效 item:', item)
       continue
     }
-    const intTargetId = parseInt(rawId)
-    if (isNaN(intTargetId)) {
+    const intTargetId = snowflakeIdStr(rawId)
+    if (!intTargetId) {
       console.warn('[MODIFY] 跳过无效 target_id:', rawId)
       continue
     }
@@ -2561,8 +2562,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   if (modifyData.batch_modify && modifyData.batch_results && Array.isArray(modifyData.batch_results) && modifyData.batch_results.length > 0) {
     console.log('[MODIFY] 批量修改，合并为单次列表事件')
     const peerTargetIds = modifyData.batch_results
-      .map((r) => parseInt(r.target_id))
-      .filter((id) => !isNaN(id))
+      .map((r) => snowflakeIdStr(r.target_id))
+      .filter(Boolean)
     const batchItems = []
     const adoptedNavBatch = []
     for (let index = 0; index < modifyData.batch_results.length; index++) {
@@ -2571,8 +2572,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         console.warn('[MODIFY] 跳过无效 result:', result)
         continue
       }
-      const intTargetId = parseInt(result.target_id)
-      if (isNaN(intTargetId)) {
+      const intTargetId = snowflakeIdStr(result.target_id)
+      if (!intTargetId) {
         console.warn('[MODIFY] 跳过无效 target_id:', result.target_id)
         continue
       }
@@ -2664,8 +2665,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
 
   // 单个修改
   const rawId = modifyData.target_id ?? modifyData.targetId ?? modifyData.id
-  const intTargetId = parseInt(rawId)
-  if (isNaN(intTargetId)) {
+  const intTargetId = snowflakeIdStr(rawId)
+  if (!intTargetId) {
     console.error('[MODIFY] 无效的 target_id:', rawId)
     return
   }
@@ -3246,8 +3247,8 @@ const normalizeModifyTarget = (target) => {
 const isSandboxModifyItemPending = (item, message = null) => {
   if (!item || typeof item !== 'object') return false
   if (item.cancelled === true) return false
-  const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
-  if (Number.isNaN(tid)) return false
+  const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
+  if (!tid) return false
   const tgt = normalizeModifyTarget(item.target || 'badcase')
   const pk = makePersistDiffKey(tgt, tid)
   if (persistedPendingLoaded.value && pk) {
@@ -3314,12 +3315,12 @@ const handleRequestPendingModifyForPlan = async (event) => {
       for (const group of msg.modifyGroups) {
         if (Number(group.plan_id) !== pid) continue
         const peerTargetIds = (group.items || [])
-          .map((it) => parseInt(it?.target_id ?? it?.targetId ?? it?.id, 10))
-          .filter((id) => !isNaN(id))
+          .map((it) => snowflakeIdStr(it?.target_id ?? it?.targetId ?? it?.id))
+          .filter(Boolean)
         for (const item of group.items || []) {
           const rawId = item?.target_id ?? item?.targetId ?? item?.id
-          const intTargetId = parseInt(rawId, 10)
-          if (isNaN(intTargetId)) continue
+          const intTargetId = snowflakeIdStr(rawId)
+          if (!intTargetId) continue
           const tgt = item.target || 'badcase'
           if (item.cancelled === true) continue
           if (!hasBackendPendingRow(tgt, intTargetId)) continue
@@ -3349,13 +3350,13 @@ const handleRequestPendingModifyForPlan = async (event) => {
 
     if (nav.batch_modify && nav.batch_results?.length) {
       const peerTargetIds = nav.batch_results
-        .map((r) => parseInt(r.target_id, 10))
-        .filter((id) => !isNaN(id))
+        .map((r) => snowflakeIdStr(r.target_id))
+        .filter(Boolean)
       for (const result of nav.batch_results) {
         const tplPid = result.plan_id ?? nav.plan_id
         if (Number(tplPid) !== pid) continue
-        const intTargetId = parseInt(result.target_id, 10)
-        if (isNaN(intTargetId)) continue
+        const intTargetId = snowflakeIdStr(result.target_id)
+        if (!intTargetId) continue
         const tgt = result.target || 'badcase'
         if (result.cancelled === true) continue
         if (!hasBackendPendingRow(tgt, intTargetId)) continue
@@ -3384,8 +3385,8 @@ const handleRequestPendingModifyForPlan = async (event) => {
       if (nav.cancelled === true) continue
       const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
       if (Number(tplPid) !== pid) continue
-      const intTargetId = parseInt(nav.target_id ?? nav.targetId, 10)
-      if (isNaN(intTargetId)) continue
+      const intTargetId = snowflakeIdStr(nav.target_id ?? nav.targetId)
+      if (!intTargetId) continue
       const tgt = nav.target || 'badcase'
       if (!hasBackendPendingRow(tgt, intTargetId)) continue
       const key = `${tgt}:${intTargetId}`
@@ -4157,9 +4158,9 @@ onMounted(() => {
 // 处理修改取消事件
 const handleModifyCancelled = (event) => {
   const { targetId } = event.detail
-  const intTargetId = parseInt(targetId)
+  const intTargetId = snowflakeIdStr(targetId)
   console.log('[MODIFY] 收到取消事件，targetId:', intTargetId)
-  if (isNaN(intTargetId)) return
+  if (!intTargetId) return
 
   // 与确认事件保持一致：同步标记 modifyGroups / batch_results / modifyNavigation
   messages.value.forEach((msg, msgIdx) => {
@@ -4220,10 +4221,10 @@ const handleModifyCancelled = (event) => {
 // 处理修改确认事件
 const handleModifyConfirmed = (event) => {
   const { targetId } = event.detail
-  const intTargetId = parseInt(targetId)
+  const intTargetId = snowflakeIdStr(targetId)
   console.log('[MODIFY] 收到确认事件，targetId:', intTargetId)
   
-  if (isNaN(intTargetId)) {
+  if (!intTargetId) {
     console.error('[MODIFY] 无效的 targetId:', targetId)
     return
   }

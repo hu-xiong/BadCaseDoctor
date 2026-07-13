@@ -1,5 +1,8 @@
 import axios from 'axios'
 import { normalizeUploadImageUrl, uploadResponseToImageUrl } from './utils/uploadImageUrl.js'
+import JSONBigInt from 'json-bigint'
+
+const jsonBig = JSONBigInt({ storeAsString: true })
 
 // 开发环境走 Vite 代理（与页面同源），登录 Cookie 才能可靠带到 /api，避免直连 :5000 与 127.0.0.1/localhost 混用导致会话丢失。
 // 生产 / Electron 打包仍指向实际后端（可通过 VITE_BACKEND_URL 覆盖）。
@@ -10,7 +13,16 @@ export const BACKEND_BASE_URL =
 const api = axios.create({
     baseURL: BACKEND_BASE_URL,
     timeout: 30000, // 增加超时时间到30秒
-    withCredentials: true // 如需携带cookie
+    withCredentials: true, // 如需携带cookie
+    transformResponse: [
+      (data) => {
+        try {
+          return jsonBig.parse(data)
+        } catch (_e) {
+          return data
+        }
+      }
+    ]
 })
 
 export { api }

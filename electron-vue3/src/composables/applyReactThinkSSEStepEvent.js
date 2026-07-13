@@ -467,6 +467,38 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
  * THINK 轨写在 aiMessage 上的草稿，在 todos / plan 建成正式 steps 后并入 steps[0]，
  * 与 AgentTaskRun「先思考、后规划备忘」的 DOM 顺序一致，避免只有 message 有正文而 step0 空白。
  */
+/** 停止/中断/进入下一轮 THINK 时收尾首轮 THINK 流：同步草稿到 step0、冻结墙钟、清 phaseWait */
+export function finalizeMessageFirstThinkStream(aiMessage) {
+  if (!aiMessage) return
+  syncPlaceholderStepThought(aiMessage)
+  if (Array.isArray(aiMessage.steps)) {
+    const now = Date.now()
+    for (const st of aiMessage.steps) {
+      if (st && st.thoughtPhaseEndAtMs == null && st.stepStartedAt != null) {
+        st.thoughtPhaseEndAtMs = now
+      }
+      if (st && st.phaseWait?.active) {
+        st.phaseWait = null
+      }
+    }
+  }
+  aiMessage._reasoningPhaseLive = false
+}
+
+/** 新一轮 THINK 开始前：将 tsi 之前的 step 标记为已完成（不再 running），避免旧步骤残留运行态 */
+export function sealPriorStepsBeforeThinkRound(aiMessage, tsi) {
+  if (!aiMessage?.steps || tsi == null || tsi <= 0) return
+  for (let i = 0; i < tsi && i < aiMessage.steps.length; i++) {
+    const st = aiMessage.steps[i]
+    if (!st) continue
+    if (st.status === 'running') st.status = 'done'
+    if (st.thoughtPhaseEndAtMs == null && st.stepStartedAt != null) {
+      st.thoughtPhaseEndAtMs = Date.now()
+    }
+    if (st.phaseWait?.active) st.phaseWait = null
+  }
+}
+
 export function mergeMessageThinkDraftsIntoReactStepZero(aiMessage) {
   if (!aiMessage?.steps?.[0]) return
   const s0 = aiMessage.steps[0]
