@@ -10,10 +10,12 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173,
+    // 与 BadCaseDoctor 前端 5173 / 后端 5000 错开
+    port: 5180,
+    strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:8090',
         changeOrigin: true
       }
     }

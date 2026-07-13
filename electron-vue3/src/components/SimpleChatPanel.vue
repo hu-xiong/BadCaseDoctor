@@ -14,41 +14,8 @@
     <!-- 图片大图预览弹层 -->
     <Teleport to="body">
       <div v-if="imagePreviewSrc" class="image-preview-overlay" @click.self="closeImagePreview">
-        <div class="image-preview-stage" @click.stop>
-          <div class="image-preview-toolbar">
-            <button
-              type="button"
-              class="image-preview-tool-btn"
-              :title="t('chat.copyImage')"
-              @click.stop="copyPreviewImage"
-            >
-              <svg class="image-preview-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
-              </svg>
-            </button>
-            <button
-              type="button"
-              class="image-preview-tool-btn"
-              :title="t('chat.downloadImage')"
-              @click.stop="downloadPreviewImage"
-            >
-              <svg class="image-preview-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-              </svg>
-            </button>
-            <button
-              type="button"
-              class="image-preview-tool-btn image-preview-tool-btn--close"
-              :title="t('chat.closePreview')"
-              @click.stop="closeImagePreview"
-            >
-              <svg class="image-preview-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path fill="currentColor" d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-              </svg>
-            </button>
-          </div>
-          <img :src="imagePreviewSrc" class="image-preview-full" :alt="t('chat.imagePreview')" />
-        </div>
+        <button type="button" class="image-preview-close" @click="closeImagePreview" :title="t('chat.closePreview')">×</button>
+        <img :src="imagePreviewSrc" class="image-preview-full" :alt="t('chat.imagePreview')" @click.stop />
       </div>
     </Teleport>
 
@@ -82,7 +49,7 @@
             >
               <template v-if="message.images && message.images.length > 0">
                 <div class="user-message-images">
-                  <img v-for="(img, i) in message.images" :key="i" :src="img.data" class="user-msg-thumb" :alt="t('chat.uploadImageAlt')" @click.stop="openImagePreview(img.data, img.filename)" />
+                  <img v-for="(img, i) in message.images" :key="i" :src="img.data" class="user-msg-thumb" :alt="t('chat.uploadImageAlt')" @click.stop="openImagePreview(img.data)" />
                 </div>
               </template>
               <template v-if="message.content">{{ message.content }}</template>
@@ -91,24 +58,7 @@
               v-else
               class="inline-composer"
             >
-            <div
-              class="input-box-wrapper"
-              :class="{ 'input-box-wrapper--dragover': isInlineDragOver }"
-              @dragover.prevent="isInlineDragOver = true"
-              @dragleave.prevent="isInlineDragOver = false"
-              @drop.prevent="handleInlineImageDrop"
-            >
-              <div v-if="inlinePendingImages.length > 0" class="pending-images-row">
-                <div v-for="(img, idx) in inlinePendingImages" :key="idx" class="pending-image-item">
-                  <img
-                    :src="img.data"
-                    class="pending-thumb"
-                    :alt="t('chat.imagePreview')"
-                    @click.stop="openImagePreview(img.data, img.filename)"
-                  />
-                  <button type="button" class="pending-image-remove" @click.stop="removePendingInline(idx)" :title="t('chat.removeImage')">×</button>
-                </div>
-              </div>
+            <div class="input-box-wrapper">
               <textarea
                 ref="inlineTextareaRef"
                 v-model="inlineInputMessage"
@@ -116,10 +66,7 @@
                 @keydown.enter.exact="handleInlineSend"
                 @keydown.enter.shift.exact="addNewLineInline"
                 @keydown.esc.exact="cancelEditUserMessage"
-                @paste="onPasteInlineComposer"
-                @compositionstart="isComposing = true"
-                @compositionend="isComposing = false"
-                :placeholder="t('chat.placeholderWithImage')"
+                :placeholder="t('chat.placeholder')"
                 class="message-input"
                 rows="1"
               ></textarea>
@@ -134,56 +81,42 @@
                   </div>
                   <div class="selector-item model-select-wrapper">
                     <img
-                      v-if="inlineModelIsQwen"
+                      v-if="isQwenModel"
                       :src="qwenIcon"
                       alt="Qwen"
                       class="model-icon"
                     />
                     <img
-                      v-else-if="inlineModelIsGlm"
+                      v-else-if="isErnieModel"
+                      :src="ernieIcon"
+                      alt="Ernie"
+                      class="model-icon model-icon--ernie"
+                    />
+                    <img
+                      v-else-if="isGlmModel"
                       :src="glmIcon"
                       alt="GLM"
                       class="model-icon"
                     />
-                    <img
-                      v-else-if="inlineModelIsDeepSeek || inlineModelIsAuto"
-                      :src="deepThinkingIcon"
-                      :alt="inlineModelIsAuto ? 'Auto' : 'DeepSeek'"
-                      class="model-icon"
-                    />
-                    <select v-model="inlineEditSelectedModel" class="footer-select">
-                      <option
-                        v-for="opt in chatModelOptions"
-                        :key="'inline-' + opt.id"
-                        :value="opt.id"
-                      >{{ opt.label }}</option>
+                    <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
+                      <option value="auto">{{ t('chat.modelAutoOption') }}</option>
+                      <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
+                      <option value="qwen-max-thinking">Qwen-Max</option>
+                      <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
+                      <option value="ernie-x1-turbo-32k">Ernie-X1</option>
+                      <option value="deepseek-v4-flash">DeepSeek-V4-Flash</option>
+                      <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
+                      <option value="glm-5">GLM-5</option>
                     </select>
                   </div>
                 </div>
 
                 <div class="footer-right">
-                  <input
-                    ref="inlineImageFileInputRef"
-                    type="file"
-                    accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
-                    multiple
-                    style="display: none"
-                    @change="handleInlineImageSelect"
-                  />
-                  <button
-                    type="button"
-                    class="image-upload-button"
-                    :class="{ 'image-upload-button--active': inlinePendingImages.length > 0 }"
-                    :title="t('chat.uploadImageAlt')"
-                    @click="triggerInlineImageSelect"
-                  >
-                    <img :src="imageUploadIcon" :alt="t('chat.uploadImageAlt')" class="image-upload-icon" />
-                  </button>
                   <button
                     v-if="!isSending"
                     @click="handleInlineSend"
                     class="send-icon-button"
-                    :disabled="!inlineInputMessage.trim() && inlinePendingImages.length === 0"
+                    :disabled="!inlineInputMessage.trim()"
                     :title="t('chat.send')"
                   >
                     <img class="send-icon-img" :src="sendCursorIcon" alt="send" />
@@ -260,7 +193,7 @@
                 </span>
                 <span class="cursor-reason-chevron">{{ message.thoughtCollapsed ? '▶' : '▼' }}</span>
               </button>
-              <div v-if="!message.thoughtCollapsed" class="cursor-reason-feed">
+              <div v-show="!message.thoughtCollapsed" class="cursor-reason-feed">
                 <div class="cursor-reason-feed-stack">
                   <!-- 流式中：content 轨与 reasoning 轨同时存在时用双 pre；仅 reasoning 时用打字机缓冲（避免多包同帧合并后 thinkReasoningDraft 整段闪现） -->
                   <template
@@ -269,10 +202,10 @@
                     <pre
                       v-if="thinkDraftReasoningVisible(message)"
                       class="react-sse-stream react-sse-stream--reasoning"
-                    >{{ squeezeReasoningVerticalWhitespace(message.thinkReasoningDraft) }}</pre>
+                    >{{ message.thinkReasoningDraft }}</pre>
                     <pre
                       class="react-sse-stream react-sse-stream--content"
-                    >{{ squeezeReasoningVerticalWhitespace(message.thinkContentDraft) }}</pre>
+                    >{{ message.thinkContentDraft }}</pre>
                   </template>
                   <div
                     v-else-if="
@@ -449,44 +382,9 @@
             </div>
           </div>
           
-          <div
-            v-if="message.modifyNavigation?.is_create && tempCardProposalForMessage(message.id)"
-            class="temp-card-proposal-bar temp-card-proposal-bar--inline"
-          >
-            <span class="temp-card-proposal-text">{{
-              t('chat.tempCardProposal', {
-                plan: tempCardProposalForMessage(message.id).planLabel,
-                cardTitle: tempCardProposalForMessage(message.id).cardTitle
-              })
-            }}</span>
-            <div class="temp-card-proposal-actions">
-              <button
-                type="button"
-                class="temp-card-proposal-btn temp-card-proposal-btn--approve"
-                @click="approveTempCardProposal(tempCardProposalForMessage(message.id))"
-              >
-                {{ t('chat.tempCardApprove') }}
-              </button>
-              <button
-                type="button"
-                class="temp-card-proposal-btn temp-card-proposal-btn--reject"
-                @click="rejectTempCardProposal(tempCardProposalForMessage(message.id))"
-              >
-                {{ t('chat.tempCardReject') }}
-              </button>
-            </div>
-          </div>
           <div :id="'sandbox-mod-below-' + message.id" class="agent-modify-sandbox-anchor" />
           <Teleport
-            v-if="
-              sandboxTeleportTargetExists(message) &&
-              (message.modifyGroups?.length || message.modifyNavigation) &&
-              !(
-                message.modifyNavigation?.is_create &&
-                isCreateAwaitingTempCard(message.id) &&
-                tempCardProposalForMessage(message.id)
-              )
-            "
+            v-if="sandboxTeleportTargetExists(message) && (message.modifyGroups?.length || message.modifyNavigation)"
             :to="sandboxModifyTeleportTargetForMessage(message)"
           >
           <!-- 修改预览导航区域 - 沙箱预览：整行点击跳转，下三角=展开/收起，无单独跳转按钮 -->
@@ -496,51 +394,40 @@
               <div
                 v-if="groupHasPendingSandboxConfirm(group, message)"
                 class="collapsible-card findings-card sandbox-card"
-                :class="{ 'sandbox-card--has-expand': sandboxPreviewNeedsCollapse(message, groupIdx) }"
                 style="margin-bottom: 12px;"
               >
                 <div class="collapsible-header sandbox-header" @click="handleShowGroupInList(group, message.id)">
                   <span class="card-icon">📝</span>
                   <span class="card-title">{{ t('chat.sandboxPreview') }}</span>
-                  <span class="card-count">{{ t('chat.itemsCount', { n: countGroupSandboxDisplayRows(group) }) }}</span>
+                  <span class="card-count">{{ t('chat.itemsCount', { n: group.items.length }) }}</span>
                   <span v-if="group.plan_id" class="plan-badge">{{ t('chat.planBadge', { id: group.plan_id }) }}</span>
-                </div>
-                <div
-                  class="collapsible-content modify-navigation-content sandbox-preview-body"
-                  :class="{ 'sandbox-preview-body--collapsed': isSandboxPreviewCollapsed(message, groupIdx) }"
-                >
-                  <div
-                    v-if="isSandboxPreviewCollapsed(message, groupIdx)"
-                    class="sandbox-preview-fade"
-                    aria-hidden="true"
+                  <img
+                    class="sandbox-toggle"
+                    :class="{ expanded: isSandboxExpanded(message.id, groupIdx) }"
+                    :src="isSandboxExpanded(message.id, groupIdx) ? chevronDownIcon : chevronRightIcon"
+                    alt="toggle"
+                    @click.stop="toggleSandboxExpand(message.id, groupIdx)"
                   />
-                  <template v-for="(entry, vidx) in visibleGroupSandboxEntries(message, groupIdx)" :key="`${entry.gix}-${entry.rowIdx}-${vidx}`">
-                    <div v-if="entry.showRecordHeader" class="group-item-target">
-                      {{ t('chat.recordNum', { id: entry.git.target_id }) }}
-                    </div>
-                    <div class="modify-field-preview">
-                      <span class="field-label">{{ sandboxFieldHeaderLabel(entry.fieldDiff, entry.git, group.target) }}:</span>
-                      <span :class="['old-value', { 'empty-value': !(formatSandboxModifySideDisplay(entry.git, entry.fieldDiff, 'old') || getFieldOldValue(entry.fieldDiff)) }]">
-                        {{ (formatSandboxModifySideDisplay(entry.git, entry.fieldDiff, 'old') || getFieldOldValue(entry.fieldDiff)) || t('chat.notSet') }}
-                      </span>
-                      <span class="arrow">→</span>
-                      <span class="new-value">{{ (formatSandboxModifySideDisplay(entry.git, entry.fieldDiff, 'new') || getFieldNewValue(entry.fieldDiff)) || '-' }}</span>
-                    </div>
-                  </template>
-                  <template
-                    v-if="!sandboxPreviewNeedsCollapse(message, groupIdx) || isSandboxExpanded(message, groupIdx)"
-                    v-for="(git, gix) in group.items"
-                    :key="'muted-' + gix"
-                  >
+                </div>
+                <div v-show="isSandboxExpanded(message.id, groupIdx)" class="collapsible-content modify-navigation-content">
+                  <template v-for="(git, gix) in group.items" :key="gix">
+                    <div v-if="group.items.length > 1" class="group-item-target">{{ t('chat.recordNum', { id: git.target_id }) }}</div>
                     <template v-if="!isSandboxModifyItemPending(git, message)">
                       <div class="modify-field-preview modify-field-preview--muted">
                         {{ t('chat.adoptedNoPendingDetail') }}
                       </div>
                     </template>
-                    <div
-                      v-else-if="group.items.length > 1 && isSandboxModifyItemPending(git, message) && !resolveSandboxDiffRowsForDisplay(git, group.target).length"
-                      class="modify-field-preview modify-field-preview--muted"
-                    >
+                    <template v-else-if="git.diff && git.diff.length">
+                      <div v-for="(fieldDiff, idx) in git.diff" :key="`${gix}-${idx}`" class="modify-field-preview">
+                        <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                        <span :class="['old-value', { 'empty-value': !getFieldOldValue(fieldDiff) }]">
+                          {{ getFieldOldValue(fieldDiff) || t('chat.notSet') }}
+                        </span>
+                        <span class="arrow">→</span>
+                        <span class="new-value">{{ getFieldNewValue(fieldDiff) || '-' }}</span>
+                      </div>
+                    </template>
+                    <div v-else-if="group.items.length > 1" class="modify-field-preview modify-field-preview--muted">
                       {{ t('chat.noDiffLines', { id: git.target_id }) }}
                     </div>
                   </template>
@@ -548,16 +435,6 @@
                     {{ t('chat.mergeGroupHint', { n: group.items.length }) }}
                   </div>
                 </div>
-                <button
-                  v-if="sandboxPreviewNeedsCollapse(message, groupIdx)"
-                  type="button"
-                  class="sandbox-expand-bar"
-                  :class="{ expanded: isSandboxExpanded(message, groupIdx) }"
-                  :title="isSandboxExpanded(message, groupIdx) ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
-                  @click.stop="toggleSandboxExpand(message, groupIdx)"
-                >
-                  <img class="sandbox-expand-chevron" :src="chevronDownIcon" alt="" />
-                </button>
               </div>
               <!-- 本组已全部采纳：只保留一行摘要，避免重复 N 条「已采纳」占用空间 -->
               <div
@@ -597,25 +474,20 @@
                 }}</span>
               </div>
             </div>
-            <div
-              v-else
-              class="collapsible-card findings-card sandbox-card"
-              :class="{ 'sandbox-card--has-expand': sandboxPreviewNeedsCollapse(message, null) }"
-            >
+            <div v-else class="collapsible-card findings-card sandbox-card">
               <div class="collapsible-header sandbox-header" @click="handleShowModifyInList(message.modifyNavigation, message.id)">
                 <span class="card-icon">{{ message.modifyNavigation.batch_modify ? '🧩' : (message.modifyNavigation.navigate_to_existing ? '🔍' : (message.modifyNavigation.is_create ? '➕' : '📝')) }}</span>
                 <span class="card-title">{{ message.modifyNavigation.batch_modify ? t('chat.batchSandboxPreview') : (message.modifyNavigation.navigate_to_existing ? t('chat.createdLocate') : (message.modifyNavigation.is_create ? t('chat.newPreview') : t('chat.sandboxPreview'))) }}</span>
                 <span class="card-count">{{ t('chat.itemsCount', { n: message.modifyNavigation.batch_modify ? (message.modifyNavigation.batch_count || message.modifyNavigation.batch_results?.length || 0) : getSandboxDiffRows(message).length }) }}</span>
-              </div>
-              <div
-                class="collapsible-content modify-navigation-content sandbox-preview-body"
-                :class="{ 'sandbox-preview-body--collapsed': isSandboxPreviewCollapsed(message, null) }"
-              >
-                <div
-                  v-if="isSandboxPreviewCollapsed(message, null)"
-                  class="sandbox-preview-fade"
-                  aria-hidden="true"
+                <img
+                  class="sandbox-toggle"
+                  :class="{ expanded: isSandboxExpanded(message.id, null) }"
+                  :src="isSandboxExpanded(message.id, null) ? chevronDownIcon : chevronRightIcon"
+                  alt="toggle"
+                  @click.stop="toggleSandboxExpand(message.id, null)"
                 />
+              </div>
+              <div v-show="isSandboxExpanded(message.id, null)" class="collapsible-content modify-navigation-content">
                 <!-- 批量 modify：按条与列表一致；已采纳项不再展示 diff -->
                 <template
                   v-if="message.modifyNavigation.batch_modify && message.modifyNavigation.batch_results?.length"
@@ -629,33 +501,36 @@
                   >
                     {{ t('chat.batchSandboxBatchHint') }}
                   </div>
-                  <template v-for="(entry, vidx) in visibleBatchSandboxEntries(message)" :key="`batch-${entry.bix}-${entry.rowIdx}-${vidx}`">
-                    <div v-if="entry.showRecordHeader" class="group-item-target">
-                      {{ t('chat.recordNum', { id: entry.br.target_id }) }}
+                  <template v-for="(br, bix) in message.modifyNavigation.batch_results" :key="bix">
+                    <div
+                      v-if="message.modifyNavigation.batch_results.length > 1"
+                      class="group-item-target"
+                    >
+                      {{ t('chat.recordNum', { id: br.target_id }) }}
                     </div>
-                    <div class="modify-field-preview">
-                      <span class="field-label">{{ sandboxFieldHeaderLabel(entry.fieldDiff, entry.br) }}:</span>
-                      <span
-                        :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(entry.br, entry.fieldDiff, 'old') }]"
-                      >
-                        {{ formatSandboxModifySideDisplay(entry.br, entry.fieldDiff, 'old') || t('chat.notSet') }}
-                      </span>
-                      <span class="arrow">→</span>
-                      <span class="new-value">{{ formatSandboxModifySideDisplay(entry.br, entry.fieldDiff, 'new') || '-' }}</span>
-                    </div>
-                  </template>
-                  <template
-                    v-if="!sandboxPreviewNeedsCollapse(message, null) || isSandboxExpanded(message, null)"
-                    v-for="(br, bix) in message.modifyNavigation.batch_results"
-                    :key="'batch-muted-' + bix"
-                  >
                     <template v-if="!isSandboxModifyItemPending(br, message)">
                       <div class="modify-field-preview modify-field-preview--muted">
                         {{ t('chat.adoptedNoPendingDetail') }}
                       </div>
                     </template>
+                    <template v-else-if="getBatchItemSandboxDiffRows(br).length">
+                      <div
+                        v-for="(fieldDiff, idx) in getBatchItemSandboxDiffRows(br)"
+                        :key="`${bix}-${idx}`"
+                        class="modify-field-preview"
+                      >
+                        <span class="field-label">{{ fieldDiff.field_label }}:</span>
+                        <span
+                          :class="['old-value', { 'empty-value': !fieldDiff.lines?.find((l) => l.type === 'delete')?.content }]"
+                        >
+                          {{ fieldDiff.lines?.find((l) => l.type === 'delete')?.content || t('chat.notSet') }}
+                        </span>
+                        <span class="arrow">→</span>
+                        <span class="new-value">{{ fieldDiff.lines?.find((l) => l.type === 'add')?.content || '-' }}</span>
+                      </div>
+                    </template>
                     <div
-                      v-else-if="message.modifyNavigation.batch_results.length > 1 && !getBatchItemSandboxDiffRows(br, message.modifyNavigation?.target).length"
+                      v-else-if="message.modifyNavigation.batch_results.length > 1"
                       class="modify-field-preview modify-field-preview--muted"
                     >
                       {{ t('chat.noDiffLines', { id: br.target_id }) }}
@@ -678,31 +553,21 @@
                   >
                     {{ t('chat.detailFieldsHint') }}
                   </div>
-                  <div v-for="(fieldDiff, idx) in visibleSandboxPreviewRows(message, null)" :key="idx" class="modify-field-preview">
-                    <span class="field-label">{{ sandboxFieldHeaderLabel(fieldDiff, message.modifyNavigation) }}:</span>
+                  <div v-for="(fieldDiff, idx) in getSandboxDiffRows(message)" :key="idx" class="modify-field-preview">
+                    <span class="field-label">{{ fieldDiff.field_label }}:</span>
                     <template v-if="message.modifyNavigation.is_create">
                       <span class="new-value create-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
                     </template>
                     <template v-else>
-                      <span :class="['old-value', { 'empty-value': !formatSandboxModifySideDisplay(message.modifyNavigation, fieldDiff, 'old') }]">
-                        {{ formatSandboxModifySideDisplay(message.modifyNavigation, fieldDiff, 'old') || t('chat.notSet') }}
+                      <span :class="['old-value', { 'empty-value': !fieldDiff.lines?.find(l => l.type === 'delete')?.content }]">
+                        {{ fieldDiff.lines?.find(l => l.type === 'delete')?.content || t('chat.notSet') }}
                       </span>
                       <span class="arrow">→</span>
-                      <span class="new-value">{{ formatSandboxModifySideDisplay(message.modifyNavigation, fieldDiff, 'new') || '-' }}</span>
+                      <span class="new-value">{{ fieldDiff.lines?.find(l => l.type === 'add')?.content || '-' }}</span>
                     </template>
                   </div>
                 </template>
               </div>
-              <button
-                v-if="sandboxPreviewNeedsCollapse(message, null)"
-                type="button"
-                class="sandbox-expand-bar"
-                :class="{ expanded: isSandboxExpanded(message, null) }"
-                :title="isSandboxExpanded(message, null) ? t('agentTask.clickCollapse') : t('agentTask.clickExpand')"
-                @click.stop="toggleSandboxExpand(message, null)"
-              >
-                <img class="sandbox-expand-chevron" :src="chevronDownIcon" alt="" />
-              </button>
             </div>
           </div>
           
@@ -801,21 +666,6 @@
       </div>
     </div>
     
-    <!-- 临时卡片确认（新建预览未指定卡片时） -->
-    <div v-for="p in tempCardProposals" :key="p.scopeKey" class="temp-card-proposal-bar">
-      <span class="temp-card-proposal-text">{{
-        t('chat.tempCardProposal', { plan: p.planLabel, cardTitle: p.cardTitle })
-      }}</span>
-      <div class="temp-card-proposal-actions">
-        <button type="button" class="temp-card-proposal-btn temp-card-proposal-btn--approve" @click="approveTempCardProposal(p)">
-          {{ t('chat.tempCardApprove') }}
-        </button>
-        <button type="button" class="temp-card-proposal-btn temp-card-proposal-btn--reject" @click="rejectTempCardProposal(p)">
-          {{ t('chat.tempCardReject') }}
-        </button>
-      </div>
-    </div>
-
     <!-- 输入区域 -->
     <div class="input-container">
       <div 
@@ -828,12 +678,7 @@
         <!-- 图片缩略图预览 -->
         <div v-if="pendingImages.length > 0" class="pending-images-row">
           <div v-for="(img, idx) in pendingImages" :key="idx" class="pending-image-item">
-            <img
-              :src="img.data"
-              class="pending-thumb"
-              :alt="t('chat.imagePreview')"
-              @click.stop="openImagePreview(img.data, img.filename)"
-            />
+            <img :src="img.data" class="pending-thumb" :alt="t('chat.imagePreview')" @click="openImagePreview(img.data)" />
             <button type="button" class="pending-image-remove" @click.stop="removePendingImage(idx)" :title="t('chat.removeImage')">×</button>
           </div>
         </div>
@@ -843,7 +688,6 @@
           @input="autoResize"
           @keydown.enter.exact="handleSend"
           @keydown.enter.shift.exact="addNewLine"
-          @paste="onPasteMainComposer"
           @compositionstart="isComposing = true"
           @compositionend="isComposing = false"
           :placeholder="t('chat.placeholderWithImage')"
@@ -868,23 +712,26 @@
               class="model-icon"
             />
             <img
+              v-else-if="isErnieModel"
+              :src="ernieIcon"
+              alt="Ernie"
+              class="model-icon model-icon--ernie"
+            />
+            <img
               v-else-if="isGlmModel"
               :src="glmIcon"
               alt="GLM"
               class="model-icon"
             />
-            <img
-              v-else-if="isDeepSeekModel || isAutoModel"
-              :src="deepThinkingIcon"
-              :alt="isAutoModel ? 'Auto' : 'DeepSeek'"
-              class="model-icon"
-            />
             <select v-model="selectedModel" @change="saveModelSelection" class="footer-select">
-              <option
-                v-for="opt in chatModelOptions"
-                :key="opt.id"
-                :value="opt.id"
-              >{{ opt.label }}</option>
+              <option value="auto">{{ t('chat.modelAutoOption') }}</option>
+              <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
+              <option value="qwen-max-thinking">Qwen-Max</option>
+              <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
+              <option value="ernie-x1-turbo-32k">Ernie-X1</option>
+              <option value="deepseek-v4-flash">DeepSeek-V4-Flash</option>
+              <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
+              <option value="glm-5">GLM-5</option>
             </select>
           </div>
           </div>
@@ -906,10 +753,9 @@
             >
               <img :src="imageUploadIcon" :alt="t('chat.uploadImageAlt')" class="image-upload-icon" />
             </button>
-            <button
+            <button 
               v-if="!isSending"
-              type="button"
-              @click="handleSend"
+              @click="handleSend" 
               class="send-icon-button"
               :disabled="!inputMessage.trim() && pendingImages.length === 0"
               :title="t('chat.send')"
@@ -938,24 +784,7 @@
 import { ref, reactive, nextTick, onMounted, onUnmounted, watch, computed, toRaw, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
-import {
-  BACKEND_BASE_URL,
-  getChatSession,
-  addChatMessage,
-  saveAgentBugs,
-  generateSessionTitle,
-  getBugDetail
-} from '../api.js'
-import {
-  patchAgentRunSeq,
-  patchAgentRunSnapshot,
-  getAgentRun,
-  clearAgentRun,
-  saveDraft,
-  getDraft,
-  clearDraft,
-  AGENT_RUN_STALE_MS
-} from '../utils/bcdSessionStore.js'
+import { BACKEND_BASE_URL, getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
 import { apiLocaleParam } from '../i18n/index.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
@@ -964,8 +793,10 @@ import AgentTaskRun from './AgentTaskRun.vue'
 import ExecutionResult from './ExecutionResult.vue'
 import CreatePreview from './CreatePreview.vue'
 import deepThinkingIcon from '../assets/deep-thinking-icon.svg'
+import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
 import qwenIcon from '../assets/qwen-icon.png'
+import ernieIcon from '../assets/ernie-icon.png'
 import glmIcon from '../assets/glm-icon.png'
 import sendCursorIcon from '../assets/send-cursor.png'
 import imageUploadIcon from '../assets/image-upload-icon.png'
@@ -974,49 +805,13 @@ import {
   foldAgentSseText,
   consumeAgentSseV1Chunk,
   yieldAgentSseUiFrame,
-  createSseUiPaintScheduler,
-  sseChunkNeedsImmediatePaint,
   shouldMergeModifyPreviewItems,
   DETAIL_FIELDS,
   extractToolName
 } from '../composables/useAgentStream.js'
 import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
-import { reconcileReactMessageAfterSseClose } from '../composables/reactEngineLegacyStream.js'
+import { finalizeMessageFirstThinkStream } from '../composables/applyReactThinkSSEStepEvent.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
-import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
-import { snowflakeIdStr } from '../utils/snowflakeId.js'
-import { diffReviewPushShared } from '../composables/useDiffReviewPush.js'
-import {
-  readBugReproductionStepsFromRow,
-  formatBugReproductionStepsForDisplay,
-  readBugExpectedResultFromRow,
-  formatBugExpectedResultForDisplay,
-  BUG_EXPECTED_RESULT_KEYS,
-  BUG_EXPECTED_PENDING_ALIASES,
-  enrichBugSandboxDiffRows
-} from '../utils/bugModifyFields.js'
-import {
-  normalizeTestcaseModifyFieldKey,
-  isTestcaseDetailModifyField,
-  getTestcaseModifyModKeys,
-  getTestcaseFieldLabel,
-  formatTestcaseModifyFieldValue,
-  formatTestcaseSelectFieldLabel,
-  isTestcaseSelectDetailField,
-  readTestcaseModifySideValue,
-  readTestcaseDetailRawField,
-  testcaseDetailFieldValuesEqual,
-  normalizeTestcaseSandboxDiffRow,
-  enrichTestcaseSandboxDiffRows,
-  buildTestcaseRelatedDefectTitleMap,
-  collectTestcaseRelatedDefectIdsFromNav,
-  isPlaceholderTestcaseDefectTitle,
-  remapMislabeledTestcaseSandboxFieldKey,
-  isTestcaseExecutionResultEnumValue,
-  TESTCASE_DETAIL_FIELDS,
-  TESTCASE_LIST_FIELDS,
-  TESTCASE_FIELD_LABEL_I18N
-} from '../utils/testcaseModifyFields.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
   pingLocalGoProxy as sharedPingLocalGoProxy
@@ -1039,12 +834,6 @@ const props = defineProps({
     type: String,
     required: false,
     default: ''
-  },
-  /** 左侧计划树当前选中的迭代计划 id（字符串，避免大整数精度丢失） */
-  planId: {
-    type: [String, Number],
-    required: false,
-    default: null
   }
 })
 
@@ -1054,23 +843,6 @@ const { t } = useI18n()
 
 /** 由 ProjectDetail 在打开项目时拉取（mode=recent），避免每条对话在后端做向量检索 */
 const projectLongMemoryContext = inject('projectLongMemoryContext', null)
-/** 项目页当前聚焦的 Bug/用例等（雪花 record_id），供 Agent 复制新建 */
-const agentUiContext = inject('agentUiContext', null)
-
-const agentUiContextForReact = () => {
-  try {
-    const r =
-      agentUiContext && typeof agentUiContext === 'object' && 'value' in agentUiContext
-        ? agentUiContext.value
-        : agentUiContext
-    if (!r || typeof r !== 'object') return {}
-    const rid = r.record_id ?? r.recordId
-    if (rid == null || String(rid).trim() === '') return {}
-    return { ui_context: r }
-  } catch (_e) {
-    return {}
-  }
-}
 
 const localGoProxyOk = inject('localGoProxyOk', sharedLocalGoProxyRef)
 const pingLocalGoProxy = inject('pingLocalGoProxy', sharedPingLocalGoProxy)
@@ -1115,12 +887,6 @@ function readDebugReactThinkSSE() {
 const isDebugReactThinkSSE = readDebugReactThinkSSE()
 
 const messages = ref([])
-/** 新建预览缺卡片时：对话区确认是否创建临时 Bug/BadCase/用例卡片 */
-const tempCardProposals = ref([])
-/** 已发起临时卡片确认、尚未落列表时隐藏沙箱新建预览 */
-const createAwaitingTempCardMessageIds = ref([])
-/** 沙箱/修改预览：关联缺陷 id → Bug 标题（按需 getBugDetail 补全） */
-const sandboxBugTitleById = ref({})
 /** GET /api/chat-sessions/:id 同步，用于判断是否为默认标题并触发生成 */
 const sessionTitleRef = ref('')
 const titleGenInFlight = ref(false)
@@ -1184,145 +950,11 @@ function isPlaceholderSessionTitle(title) {
     })
   }
 
-  /** 统一归一 diff 行字段名与 i18n 标签，并补全测例属性快照 */
-  const inferSandboxNavTarget = (ctx, groupTarget = null) => {
-    const explicit = String(groupTarget || ctx?.target || '')
-      .trim()
-      .toLowerCase()
-    if (explicit === 'testcase' || explicit === 'test_case') return 'testcase'
-    const mods = ctx?.modifications
-    if (mods && typeof mods === 'object') {
-      if (Object.keys(mods).some((k) => isTestcaseDetailModifyField(k))) return 'testcase'
-    }
-    const b = ctx?.before
-    if (
-      b &&
-      typeof b === 'object' &&
-      (b.case_type != null ||
-        b.testcase_type != null ||
-        b.steps != null ||
-        b.preconditions != null ||
-        b.execution_result != null ||
-        b.executionResult != null ||
-        b.related_defects != null ||
-        b.append_comment != null)
-    ) {
-      return 'testcase'
-    }
-    if (Array.isArray(ctx?.diff)) {
-      if (ctx.diff.some((fd) => isTestcaseDetailModifyField(fd?.field, fd?.field_label))) {
-        return 'testcase'
-      }
-    }
-    return explicit
-  }
-
-  const mergeSandboxDefectTitleMap = (nav) => ({
-    ...sandboxBugTitleById.value,
-    ...buildTestcaseRelatedDefectTitleMap(nav)
-  })
-
-  const hydrateSandboxDefectTitles = async (nav) => {
-    if (!nav || typeof nav !== 'object') return
-    const merged = mergeSandboxDefectTitleMap(nav)
-    const ids = collectTestcaseRelatedDefectIdsFromNav(nav).filter(
-      (id) => !merged[id] || isPlaceholderTestcaseDefectTitle(id, merged[id])
-    )
-    if (!ids.length) return
-    const updates = {}
-    await Promise.all(
-      ids.map(async (id) => {
-        if (
-          sandboxBugTitleById.value[id] &&
-          !isPlaceholderTestcaseDefectTitle(id, sandboxBugTitleById.value[id])
-        ) {
-          return
-        }
-        try {
-          const res = await getBugDetail(id)
-          const payload = res?.data
-          const bug =
-            payload?.bug ??
-            payload?.data ??
-            (payload?.success && payload?.title != null ? payload : null)
-          const title = String(bug?.title ?? '').trim()
-          if (!title || isPlaceholderTestcaseDefectTitle(id, title)) return
-          updates[id] = title
-        } catch (_e) {
-          /* ignore */
-        }
-      })
-    )
-    if (Object.keys(updates).length) {
-      sandboxBugTitleById.value = { ...sandboxBugTitleById.value, ...updates }
-    }
-  }
-
-  const collectModifyNavsFromMessages = (msgs) => {
-    const navs = []
-    if (!Array.isArray(msgs)) return navs
-    for (const msg of msgs) {
-      if (msg?.modifyNavigation) navs.push(msg.modifyNavigation)
-      for (const grp of msg.modifyGroups || []) {
-        for (const it of grp.items || []) {
-          if (it && typeof it === 'object') navs.push(it)
-        }
-        if (Array.isArray(grp.batch_results)) {
-          for (const br of grp.batch_results) {
-            if (br && typeof br === 'object') navs.push(br)
-          }
-        }
-      }
-      const nav = msg?.modifyNavigation
-      if (nav && Array.isArray(nav.batch_results)) {
-        for (const br of nav.batch_results) {
-          if (br && typeof br === 'object') navs.push(br)
-        }
-      }
-    }
-    return navs
-  }
-
-  watch(
-    messages,
-    (msgs) => {
-      for (const nav of collectModifyNavsFromMessages(msgs)) {
-        void hydrateSandboxDefectTitles(nav)
-      }
-    },
-    { deep: true }
-  )
-
-  const resolveSandboxDiffRowsForDisplay = (ctx, groupTarget = null) => {
-    const tgt = inferSandboxNavTarget(ctx, groupTarget)
-    const base = Array.isArray(ctx?.diff) ? ctx.diff : []
-    const navObj = {
-      target: tgt || ctx?.target,
-      before: ctx?.before,
-      after: ctx?.after,
-      modifications: ctx?.modifications,
-      diff: base
-    }
-    void hydrateSandboxDefectTitles(navObj)
-    const tcRows = enrichTestcaseSandboxDiffRows(navObj, base, t, {
-      defectTitleMap: mergeSandboxDefectTitleMap(navObj)
-    })
-    return enrichBugSandboxDiffRows(navObj, tcRows)
-  }
-
-  const countGroupSandboxDisplayRows = (group) => {
-    if (!group?.items?.length) return 0
-    let n = 0
-    for (const git of group.items) {
-      n += resolveSandboxDiffRowsForDisplay(git, group.target).length
-    }
-    return n
-  }
-
   /** 单条 batch_result 展平为沙箱 diff 行（供批量卡片按条判断是否仍待确认） */
-  const getBatchItemSandboxDiffRows = (br, navTarget = null) => {
+  const getBatchItemSandboxDiffRows = (br) => {
     if (!br || typeof br !== 'object') return []
     const tid = br.target_id ?? br.targetId
+    const dif = Array.isArray(br.diff) ? br.diff : []
     const title =
       (br.record_title && String(br.record_title).trim()) ||
       (br.before && (br.before.title || br.before.name) && String(br.before.title || br.before.name).trim()) ||
@@ -1331,12 +963,14 @@ function isPlaceholderSessionTitle(title) {
       tid != null
         ? `#${tid}${title ? ` ${title.slice(0, 40)}${title.length > 40 ? '...' : ''}` : ''}`
         : ''
-    const resolved = resolveSandboxDiffRowsForDisplay(br, navTarget || br.target)
-    if (!head) return resolved
-    return resolved.map((fd) => {
-      const fl = fd.field_label || getTestcaseFieldLabel(t, fd.field, fd.field_label)
-      return { ...fd, field_label: `${head} · ${fl}` }
-    })
+    const rows = []
+    for (const fd of dif) {
+      if (!fd || typeof fd !== 'object') continue
+      const fl = fd.field_label || fd.field || ''
+      const field_label = head ? `${head} · ${fl}` : fl
+      rows.push({ ...fd, field_label })
+    }
+    return rows
   }
 
   /** 沙箱卡片内展示的 diff 行：新建仅列表字段；修改仍展示全部；批量预览取 batch_results（nav.diff 仅单条时有值） */
@@ -1351,569 +985,11 @@ function isPlaceholderSessionTitle(title) {
     ) {
       const rows = []
       for (const br of nav.batch_results) {
-        rows.push(...getBatchItemSandboxDiffRows(br, nav.target))
+        rows.push(...getBatchItemSandboxDiffRows(br))
       }
       return rows
     }
-    return resolveSandboxDiffRowsForDisplay(nav)
-  }
-
-  /** Bug/卡片：优先级在沙箱里与表单一致；优先读 modifications / before.after，避免 diff 行「紧急→紧急」 */
-  const formatSandboxBugPriorityText = (raw) => {
-    if (raw == null || String(raw).trim() === '') return ''
-    const s = String(raw).trim().toLowerCase()
-    const map = { p1: 'P1 - 紧急', p2: 'P2 - 高', p3: 'P3 - 中', p4: 'P4 - 低' }
-    if (map[s]) return map[s]
-    return String(raw).trim()
-  }
-
-  /** 沙箱状态列：与列表 i18n 一致，避免英文枚举直接展示；未知值原样返回 */
-  const formatSandboxBugStatusText = (raw) => {
-    const s = String(raw ?? '')
-      .trim()
-      .toLowerCase()
-    if (!s) return ''
-    const keyMap = {
-      new: 'list.statusNew',
-      pending: 'list.statusPending',
-      resolved: 'list.statusResolved',
-      closed: 'list.statusClosed',
-      close: 'list.statusClosed',
-      hold: 'list.statusHold',
-      reopened: 'list.statusReopen',
-      reopen: 'list.statusReopen',
-      not_badcase: 'list.statusNotType',
-      draft: 'list.badcaseStatus.draft',
-      review: 'list.badcaseStatus.review',
-      active: 'list.badcaseStatus.active',
-      archived: 'list.badcaseStatus.archived'
-    }
-    const i18nKey = keyMap[s]
-    if (i18nKey) {
-      if (i18nKey === 'list.statusNotType') {
-        return t(i18nKey, { type: t('list.types.badcase') })
-      }
-      return t(i18nKey)
-    }
-    return String(raw).trim()
-  }
-
-  /** BadCase 行快照：兼容 snake/camel 与误用的 classification 键 */
-  const readBadcaseCaseCategoryFromRow = (row) => {
-    if (!row || typeof row !== 'object') return ''
-    const v = row.case_category ?? row.caseCategory ?? row.classification
-    return v != null ? String(v).trim() : ''
-  }
-
-  /** 模型/ diff 行字段名归一（与详情、modify 工具一致） */
-  const normalizeSandboxFieldKey = (fk, label = '', tgt = '') => {
-    const t = String(tgt || '')
-      .trim()
-      .toLowerCase()
-    if (t === 'testcase' || t === 'test_case') {
-      return normalizeTestcaseModifyFieldKey(fk, label)
-    }
-    const tcNk = normalizeTestcaseModifyFieldKey(fk, label)
-    if (TESTCASE_DETAIL_FIELDS.includes(tcNk) || TESTCASE_LIST_FIELDS.includes(tcNk)) {
-      return tcNk
-    }
-    const f = String(fk || '')
-      .trim()
-      .toLowerCase()
-      .replace(/-/g, '_')
-    const lab = String(label || '').trim()
-    if (f === 'precondition' || lab === 'precondition' || lab === '前置条件') return 'preconditions'
-    if (f === 'reproduce_steps' || f === 'steps_to_reproduce') return 'reproduction_steps'
-    if (lab === '复现步骤' || lab.includes('复现步骤')) return 'reproduction_steps'
-    if (t === 'bug' && f === 'steps') return 'reproduction_steps'
-    if (
-      t === 'bug' &&
-      (f === 'expected' ||
-        f === 'expected_result' ||
-        lab === '期望结果' ||
-        lab === '预期结果' ||
-        (lab.includes('期望') && lab.includes('结果')) ||
-        (lab.includes('预期') && lab.includes('结果')))
-    ) {
-      return 'expected_result'
-    }
-    if (
-      t === 'bug' &&
-      (f === 'actual' ||
-        f === 'actual_result' ||
-        lab === '实际结果' ||
-        (lab.includes('实际') && lab.includes('结果')))
-    ) {
-      return 'actual_result'
-    }
-    return f || lab
-  }
-
-  const readSandboxModifySideRaw = (ctx, fieldDiff, which) => {
-    const tgt = String(ctx?.target || '').toLowerCase()
-    let fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
-    const label = String(fieldDiff?.field_label || '')
-    const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
-    const lineNew = fieldDiff?.lines?.find((l) => l.type === 'add')?.content
-    const lineOld = fieldDiff?.lines?.find((l) => l.type === 'delete')?.content
-    const modExec = mods.execution_result
-    const modStatus = mods.status
-    const sampleNew =
-      (modExec && typeof modExec === 'object' ? modExec.new : null) ??
-      (modStatus && typeof modStatus === 'object' ? modStatus.new : null) ??
-      lineNew
-    const sampleOld =
-      (modExec && typeof modExec === 'object' ? modExec.old : null) ??
-      (modStatus && typeof modStatus === 'object' ? modStatus.old : null) ??
-      lineOld
-    if (tgt === 'testcase' || tgt === 'test_case') {
-      fk = remapMislabeledTestcaseSandboxFieldKey(
-        fk,
-        label,
-        which === 'old' ? sampleOld : sampleNew
-      )
-    }
-    const isPriority =
-      fk === 'priority' ||
-      fk === 'severity' ||
-      label.includes('优先级') ||
-      label.includes('严重程度') ||
-      label.includes('严重级别')
-    const isTcExecution =
-      (tgt === 'testcase' || tgt === 'test_case') &&
-      (fk === 'execution_result' ||
-        isTestcaseExecutionResultEnumValue(which === 'old' ? sampleOld : sampleNew))
-    const isStatus =
-      !isTcExecution &&
-      (fk === 'status' ||
-        (/状态/.test(label) && !/执行结果|test\s*result/i.test(label)))
-    if (isPriority && mods.priority && typeof mods.priority === 'object') {
-      const v = which === 'old' ? mods.priority.old : mods.priority.new
-      if (v != null && String(v).trim() !== '') return String(v).trim()
-    }
-    if (isStatus && mods.status && typeof mods.status === 'object') {
-      const v = which === 'old' ? mods.status.old : mods.status.new
-      if (v != null && String(v).trim() !== '') return String(v).trim()
-    }
-    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isPriority) {
-      const b = ctx?.before
-      const a = ctx?.after
-      if (which === 'old' && b?.priority != null && String(b.priority).trim() !== '') return String(b.priority).trim()
-      if (which === 'new' && a?.priority != null && String(a.priority).trim() !== '') return String(a.priority).trim()
-    }
-    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isStatus) {
-      const b = ctx?.before
-      const a = ctx?.after
-      if (which === 'old' && b?.status != null && String(b.status).trim() !== '') return String(b.status).trim()
-      if (which === 'new' && a?.status != null && String(a.status).trim() !== '') return String(a.status).trim()
-    }
-
-    const isBugRepro =
-      tgt === 'bug' &&
-      (fk === 'reproduction_steps' ||
-        fk === 'steps_to_reproduce' ||
-        fk === 'reproduce_steps' ||
-        fk === 'steps' ||
-        label.includes('复现步骤'))
-    if (isBugRepro) {
-      for (const mk of ['steps_to_reproduce', 'reproduction_steps', 'reproduce_steps']) {
-        const m = mods[mk]
-        if (m && typeof m === 'object') {
-          const v = which === 'old' ? m.old : m.new
-          if (v != null && String(v).trim() !== '') {
-            return formatBugReproductionStepsForDisplay(v)
-          }
-        }
-      }
-      const row = which === 'old' ? ctx?.before : ctx?.after
-      const fromRow = readBugReproductionStepsFromRow(row)
-      if (fromRow) return formatBugReproductionStepsForDisplay(fromRow)
-      if (which === 'old' && Array.isArray(messages.value)) {
-        const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-        if (tid) {
-          try {
-            const merged = getMergedPendingForTarget(messages.value, 'bug', tid)
-            const fromMerged = readBugReproductionStepsFromRow(merged?.before)
-            if (fromMerged) return formatBugReproductionStepsForDisplay(fromMerged)
-          } catch (_e) {
-            /* noop */
-          }
-        }
-      }
-    }
-
-    const isBugExpected =
-      tgt === 'bug' &&
-      (fk === 'expected_result' ||
-        fk === 'expected' ||
-        label === '期望结果' ||
-        label === '预期结果' ||
-        (label.includes('期望') && label.includes('结果')) ||
-        (label.includes('预期') && label.includes('结果')))
-    if (isBugExpected && (tgt === 'bug' || tgt === 'card')) {
-      for (const mk of [...BUG_EXPECTED_RESULT_KEYS, ...BUG_EXPECTED_PENDING_ALIASES]) {
-        const m = mods[mk]
-        if (m && typeof m === 'object') {
-          const v = which === 'old' ? m.old : m.new
-          if (v != null && String(v).trim() !== '') {
-            return formatBugExpectedResultForDisplay(v)
-          }
-        }
-      }
-      const row = which === 'old' ? ctx?.before : ctx?.after
-      const fromRow = readBugExpectedResultFromRow(row)
-      if (fromRow) return formatBugExpectedResultForDisplay(fromRow)
-      if (which === 'old' && Array.isArray(messages.value)) {
-        const tid = snowflakeIdStr(
-          tgt === 'card' ? ctx?.before?.source_id ?? ctx?.after?.source_id : null
-        ) ?? snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-        const nt = tgt === 'card' ? 'bug' : tgt
-        if (tid) {
-          try {
-            const merged = getMergedPendingForTarget(messages.value, nt, tid)
-            const fromMerged = readBugExpectedResultFromRow(merged?.before)
-            if (fromMerged) return formatBugExpectedResultForDisplay(fromMerged)
-          } catch (_e) {
-            /* noop */
-          }
-        }
-      }
-    }
-
-    /** 详情字段：diff delete 常为空，须读 modifications / before / 会话合并快照 */
-    const isTcDetail =
-      (tgt === 'testcase' || tgt === 'test_case') && isTestcaseDetailModifyField(fk, label)
-    const isOtherDetail =
-      (tgt !== 'testcase' && tgt !== 'test_case') && DETAIL_FIELDS.includes(fk) && !isBugRepro
-    if (isTcDetail || isOtherDetail) {
-      if (isTcDetail) {
-        const defectMap =
-          fk === 'related_defects' ? mergeSandboxDefectTitleMap(ctx) : null
-        const fromTc = readTestcaseModifySideValue(
-          ctx,
-          fk,
-          fieldDiff?.field,
-          label,
-          which,
-          mods,
-          t,
-          defectMap
-        )
-        if (fromTc) return fromTc
-      } else {
-        const modKeys = getTestcaseModifyModKeys(fk, fieldDiff?.field)
-        for (const mk of modKeys) {
-          const m = mods[mk]
-          if (m && typeof m === 'object') {
-            const v = which === 'old' ? m.old : m.new
-            const formatted = formatTestcaseModifyFieldValue(fk, v, { t })
-            if (formatted) return formatted
-          }
-        }
-        const row = which === 'old' ? ctx?.before : ctx?.after
-        const defectMapRow =
-          fk === 'related_defects' ? mergeSandboxDefectTitleMap(ctx) : null
-        const fromRow = readTestcaseModifySideValue(
-          ctx,
-          fk,
-          fieldDiff?.field,
-          label,
-          which,
-          {},
-          t,
-          defectMapRow
-        )
-        if (fromRow) return fromRow
-      }
-      const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-      const nt = tgt === 'test_case' ? 'testcase' : tgt
-      if (tid && which === 'old' && Array.isArray(messages.value)) {
-        try {
-          const merged = getMergedPendingForTarget(messages.value, nt, tid)
-          const snap = merged?.before && typeof merged.before === 'object' ? merged.before : null
-          if (isTcDetail) {
-            const defectMapMerged =
-              fk === 'related_defects'
-                ? mergeSandboxDefectTitleMap({ before: snap, after: null, modifications: mods })
-                : null
-            const fromMerged = readTestcaseModifySideValue(
-              { before: snap, after: null },
-              fk,
-              fieldDiff?.field,
-              label,
-              'old',
-              mods,
-              t,
-              defectMapMerged
-            )
-            if (fromMerged) return fromMerged
-          }
-        } catch (_e) {
-          /* noop */
-        }
-      }
-    }
-
-    /** BadCase：沙箱 diff 行可能用 classification，库字段为 case_category；补全旧值避免误显示「未设置」 */
-    const isBadcaseCaseCategory =
-      (tgt === 'badcase' || tgt === 'bad_case') &&
-      (fk === 'case_category' ||
-        fk === 'classification' ||
-        fk === 'category' ||
-        fk.includes('问题分类') ||
-        label.includes('问题分类'))
-    const ccMod =
-      isBadcaseCaseCategory &&
-      ((mods.case_category && typeof mods.case_category === 'object' && mods.case_category) ||
-        (mods.classification && typeof mods.classification === 'object' && mods.classification) ||
-        (mods.category && typeof mods.category === 'object' && mods.category) ||
-        null)
-    if (ccMod) {
-      const v = which === 'old' ? ccMod.old : ccMod.new
-      if (v != null && String(v).trim() !== '') return String(v).trim()
-    }
-    if (isBadcaseCaseCategory) {
-      const b = ctx?.before
-      const a = ctx?.after
-      if (which === 'old') {
-        const cv = readBadcaseCaseCategoryFromRow(b)
-        if (cv) return cv
-      } else {
-        const cv = readBadcaseCaseCategoryFromRow(a)
-        if (cv) return cv
-      }
-    }
-
-    // 分组/批量项上常缺 before：从本会话合并后的待采纳 payload 补 status（与列表、详情 reconcile 一致）
-    if (isStatus && (which === 'old' || which === 'new')) {
-      const tid = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-      const nt = tgt || 'bug'
-      if (tid && Array.isArray(messages.value)) {
-        try {
-          const merged = getMergedPendingForTarget(messages.value, nt, tid)
-          if (which === 'old') {
-            const b = merged?.before && typeof merged.before === 'object' ? merged.before : null
-            if (b?.status != null && String(b.status).trim() !== '') return String(b.status).trim()
-          } else {
-            const a = merged?.after && typeof merged.after === 'object' ? merged.after : null
-            if (a?.status != null && String(a.status).trim() !== '') return String(a.status).trim()
-          }
-        } catch (_e) {
-          /* noop */
-        }
-      }
-    }
-    // target=card 时 before 常缺 status（或沙箱库未联到 Bug）：用 source_id 或同会话中带 card_id 的源表快照补旧状态
-    if (isStatus && which === 'old' && tgt === 'card' && Array.isArray(messages.value)) {
-      const sid = snowflakeIdStr(ctx?.before?.source_id ?? ctx?.after?.source_id)
-      if (sid) {
-        for (const st of ['bug', 'badcase', 'testcase']) {
-          try {
-            const m = getMergedPendingForTarget(messages.value, st, sid)
-            const stv = m?.before && String(m.before.status ?? '').trim()
-            if (stv) return stv
-          } catch (_e2) {
-            /* noop */
-          }
-        }
-      }
-      const cardId = snowflakeIdStr(ctx?.target_id ?? ctx?.targetId ?? ctx?.id)
-      if (cardId) {
-        for (const msg of messages.value) {
-          if (!msg || msg.isUser) continue
-          const nav = msg.modifyNavigation
-          const blocks = []
-          if (nav?.batch_modify && Array.isArray(nav.batch_results)) {
-            blocks.push(...nav.batch_results)
-          } else if (nav && !nav.is_create) {
-            blocks.push(nav)
-          }
-          for (const block of blocks) {
-            const bb = block?.before
-            if (!bb || typeof bb !== 'object') continue
-            if (snowflakeIdStr(bb.card_id ?? bb.cardId) !== cardId) continue
-            const stv = String(bb.status ?? '').trim()
-            if (stv) return stv
-          }
-          for (const grp of msg.modifyGroups || []) {
-            for (const it of grp.items || []) {
-              const bb = it?.before
-              if (!bb || typeof bb !== 'object') continue
-              if (snowflakeIdStr(bb.card_id ?? bb.cardId) !== cardId) continue
-              const stv = String(bb.status ?? '').trim()
-              if (stv) return stv
-            }
-          }
-        }
-      }
-    }
-    const lineType = which === 'old' ? 'delete' : 'add'
-    const line = fieldDiff?.lines?.find((l) => l.type === lineType)
-    return line?.content != null ? String(line.content).trim() : ''
-  }
-
-  const formatSandboxModifySideDisplay = (ctx, fieldDiff, which) => {
-    const tgt = String(ctx?.target || '').toLowerCase()
-    let fk = normalizeSandboxFieldKey(fieldDiff?.field, fieldDiff?.field_label, tgt)
-    const label = String(fieldDiff?.field_label || '')
-    const mods = ctx?.modifications && typeof ctx.modifications === 'object' ? ctx.modifications : {}
-    const lineNew = fieldDiff?.lines?.find((l) => l.type === 'add')?.content
-    const lineOld = fieldDiff?.lines?.find((l) => l.type === 'delete')?.content
-    const modExec = mods.execution_result
-    const modStatus = mods.status
-    const sampleNew =
-      (modExec && typeof modExec === 'object' ? modExec.new : null) ??
-      (modStatus && typeof modStatus === 'object' ? modStatus.new : null) ??
-      lineNew
-    const sampleOld =
-      (modExec && typeof modExec === 'object' ? modExec.old : null) ??
-      (modStatus && typeof modStatus === 'object' ? modStatus.old : null) ??
-      lineOld
-    if (tgt === 'testcase' || tgt === 'test_case') {
-      fk = remapMislabeledTestcaseSandboxFieldKey(
-        fk,
-        label,
-        which === 'old' ? sampleOld : sampleNew
-      )
-    }
-    const isPriority =
-      fk === 'priority' ||
-      fk === 'severity' ||
-      label.includes('优先级') ||
-      label.includes('严重程度') ||
-      label.includes('严重级别')
-    const isTcExecution =
-      (tgt === 'testcase' || tgt === 'test_case') &&
-      (fk === 'execution_result' ||
-        isTestcaseExecutionResultEnumValue(which === 'old' ? sampleOld : sampleNew))
-    const isStatus =
-      !isTcExecution &&
-      (fk === 'status' ||
-        (/状态/.test(label) && !/执行结果|test\s*result/i.test(label)))
-    const raw = readSandboxModifySideRaw(ctx, fieldDiff, which)
-    if (raw === '') return ''
-    const isTcField = isTestcaseDetailModifyField(fk, label) || isTcExecution
-    if (isTcField && (isTestcaseSelectDetailField(fk) || isTcExecution)) {
-      return formatTestcaseSelectFieldLabel(fk, raw, t)
-    }
-    if (isTcField) {
-      const titleMap =
-        fk === 'related_defects' ? mergeSandboxDefectTitleMap(ctx) : undefined
-      return formatTestcaseModifyFieldValue(fk, raw, { t, titleMap })
-    }
-    if ((tgt === 'testcase' || tgt === 'test_case') && isPriority) {
-      return formatTestcaseModifyFieldValue('priority', raw)
-    }
-    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isPriority) {
-      return formatSandboxBugPriorityText(raw)
-    }
-    if ((tgt === 'bug' || tgt === 'badcase' || tgt === 'testcase' || tgt === 'card') && isStatus) {
-      return formatSandboxBugStatusText(raw)
-    }
-    return raw
-  }
-
-  /** 沙箱 diff 行标题：BadCase 常被标成「严重程度」，与详情里「优先级」表单一致 */
-  const sandboxFieldHeaderLabel = (fd, ctx, groupTargetFallback = null) => {
-    const fk = String(fd?.field || '').trim().toLowerCase()
-    const lab = String(fd?.field_label || '').trim()
-    const tgt = String((ctx && ctx.target) || groupTargetFallback || '')
-      .trim()
-      .toLowerCase()
-    const lineNew = fd?.lines?.find((l) => l.type === 'add')?.content
-    const lineOld = fd?.lines?.find((l) => l.type === 'delete')?.content
-    const tcNk = remapMislabeledTestcaseSandboxFieldKey(
-      normalizeTestcaseModifyFieldKey(fd?.field, lab),
-      lab,
-      lineNew ?? lineOld
-    )
-    if (
-      tgt === 'testcase' ||
-      tgt === 'test_case' ||
-      TESTCASE_DETAIL_FIELDS.includes(tcNk) ||
-      TESTCASE_LIST_FIELDS.includes(tcNk)
-    ) {
-      return getTestcaseFieldLabel(t, tcNk, lab)
-    }
-    if (tgt === 'badcase' || tgt === 'bad_case') {
-      if (
-        fk === 'base_problem' ||
-        fk === 'similar_questions' ||
-        fk === 'similar_question' ||
-        /相似问题/.test(lab)
-      ) {
-        return '相似问题'
-      }
-      if (
-        fk === 'reproduction_steps' ||
-        fk === 'reproduce_steps' ||
-        fk === 'steps_to_reproduce' ||
-        /复现步骤/.test(lab)
-      ) {
-        return 'BadCase复现步骤'
-      }
-      if (fk === 'case_category' || fk === 'classification' || fk === 'category' || lab.includes('问题分类')) {
-        return t('cardDetail.caseCategory')
-      }
-      if (fk === 'priority' || fk === 'severity' || /优先级|严重程度|严重级别/.test(lab)) {
-        return t('cardDetail.priority')
-      }
-    }
-    if (tgt === 'bug') {
-      const nkBug = normalizeSandboxFieldKey(fd?.field, lab, tgt)
-      if (nkBug === 'expected_result' || (lab.includes('期望') && lab.includes('结果')) || (lab.includes('预期') && lab.includes('结果'))) {
-        return '期望结果'
-      }
-      if (nkBug === 'actual_result' || (lab.includes('实际') && lab.includes('结果'))) {
-        return '实际结果'
-      }
-      if (fk === 'severity' || (/严重/.test(lab) && !lab.includes('优先级'))) return t('cardDetail.severity')
-      if (fk === 'priority' || lab.includes('优先级')) return t('cardDetail.priority')
-    }
-    const nk = normalizeSandboxFieldKey(fd?.field, lab, tgt)
-    const labelKeyByTarget = {
-      bug: {
-        title: 'cardDetail.title',
-        status: 'cardDetail.status',
-        assignee: 'cardDetail.assignee',
-        priority: 'cardDetail.priority',
-        severity: 'cardDetail.severity',
-        steps_to_reproduce: 'cardDetail.reproducer',
-        reproduction_steps: 'cardDetail.reproducer',
-        expected_result: 'cardDetail.expected',
-        actual_result: 'cardDetail.actual'
-      },
-      badcase: {
-        title: 'cardDetail.title',
-        status: 'cardDetail.status',
-        assignee: 'cardDetail.assignee',
-        priority: 'cardDetail.priority',
-        case_category: 'cardDetail.caseCategory',
-        base_problem: 'cardDetail.scenario',
-        reproduction_steps: 'cardDetail.reproducer',
-        answer: 'cardDetail.expected',
-        correct_answer: 'cardDetail.expected',
-        badcase_result: 'cardDetail.actual',
-        solution: 'cardDetail.description',
-        problem_reason: 'cardDetail.description'
-      },
-      bad_case: {
-        title: 'cardDetail.title',
-        status: 'cardDetail.status',
-        assignee: 'cardDetail.assignee',
-        priority: 'cardDetail.priority',
-        case_category: 'cardDetail.caseCategory',
-        reproduction_steps: 'cardDetail.reproducer'
-      }
-    }
-    const bucket = labelKeyByTarget[tgt]
-    if (bucket && bucket[nk]) {
-      const tr = t(bucket[nk])
-      if (tr && tr !== bucket[nk]) return tr
-    }
-    if (/^[\u4e00-\u9fff]/.test(lab)) return lab
-    if (lab && !/^[a-z][a-z0-9_]*$/i.test(lab)) return lab
-    return lab || nk || String(fd?.field || '') || ''
+    return nav.diff || []
   }
 
   /** 从批量预览项中取记录标题，用于「同一ID / 同标题」合并沙箱分组 */
@@ -2108,25 +1184,12 @@ const unwrapTextareaEl = (raw) => {
   return raw && raw.nodeType === 1 ? raw : null
 }
 const imageFileInputRef = ref(null)
-const inlineImageFileInputRef = ref(null)
 const pendingImages = ref([])
-/** 点击用户气泡进入的内联编辑：待发送图片，与底部主输入 pendingImages 分离 */
-const inlinePendingImages = ref([])
 const isDragOver = ref(false)
-const isInlineDragOver = ref(false)
 const imagePreviewSrc = ref(null)
-const imagePreviewFilename = ref('image.png')
 const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024
 const MAX_IMAGES = 5
-
-/** 选文件 / 拖拽用白名单；剪贴板截图常见无 type，仅在有扩展名或来自 paste 路径里单独放宽 */
-const isAllowedImageMime = (mime) => {
-  const t = (mime || '').trim().toLowerCase()
-  if (!t) return false
-  if (ACCEPTED_IMAGE_TYPES.includes(t)) return true
-  return t.startsWith('image/')
-}
 
 const triggerImageSelect = () => {
   imageFileInputRef.value?.click?.()
@@ -2143,26 +1206,17 @@ const handleImageDrop = (e) => {
   isDragOver.value = false
   const files = e.dataTransfer?.files
   if (!files?.length) return
-  addImageFiles(Array.from(files), pendingImages)
+  addImageFiles(Array.from(files))
 }
 
-const handleInlineImageDrop = (e) => {
-  isInlineDragOver.value = false
-  const files = e.dataTransfer?.files
-  if (!files?.length) return
-  addImageFiles(Array.from(files), inlinePendingImages)
-}
-
-const addImageFiles = async (files, targetRef = pendingImages, { allowEmptyMime = false } = {}) => {
+const addImageFiles = async (files) => {
   for (const file of files) {
-    if (targetRef.value.length >= MAX_IMAGES) break
-    const t = (file.type || '').trim().toLowerCase()
-    const mimeOk = isAllowedImageMime(file.type) || (allowEmptyMime && !t)
-    if (!mimeOk) continue
+    if (pendingImages.value.length >= MAX_IMAGES) break
+    if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) continue
     if (file.size > MAX_IMAGE_SIZE) continue
     try {
       const data = await fileToBase64(file)
-      targetRef.value.push({ data, filename: file.name })
+      pendingImages.value.push({ data, filename: file.name })
     } catch (err) {
       console.warn('图片读取失败:', err)
     }
@@ -2178,107 +1232,16 @@ const fileToBase64 = (file) => {
   })
 }
 
-const removePendingImage = (idx, targetRef = pendingImages) => {
-  targetRef.value = targetRef.value.filter((_, i) => i !== idx)
+const removePendingImage = (idx) => {
+  pendingImages.value = pendingImages.value.filter((_, i) => i !== idx)
 }
 
-const triggerInlineImageSelect = () => {
-  inlineImageFileInputRef.value?.click?.()
-}
-
-const handleInlineImageSelect = (e) => {
-  const files = e.target?.files
-  if (!files?.length) return
-  addImageFiles(Array.from(files), inlinePendingImages)
-  e.target.value = ''
-}
-
-/** 从剪贴板追加图片到指定待发送列表（仅处理图片文件，不挡纯文本粘贴） */
-const handleComposerPaste = (e, targetRef) => {
-  if (!targetRef) return
-  const files = []
-  const items = e.clipboardData?.items
-  if (items?.length) {
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i]
-      if (it.kind !== 'file') continue
-      const f = it.getAsFile()
-      if (f && (isAllowedImageMime(f.type) || !(f.type || '').trim())) files.push(f)
-    }
-  }
-  // Electron / 部分环境下截图只在 files 里暴露，items 无 file 项
-  const dtFiles = e.clipboardData?.files
-  if (dtFiles?.length && !files.length) {
-    for (let i = 0; i < dtFiles.length; i++) {
-      const f = dtFiles[i]
-      if (f && (isAllowedImageMime(f.type) || !(f.type || '').trim())) files.push(f)
-    }
-  }
-  if (!files.length) return
-  e.preventDefault()
-  void addImageFiles(files, targetRef, { allowEmptyMime: true })
-}
-
-/** 模板里 ref 会被自动解包，内联箭头若直接传 pendingImages 会变成裸数组，导致 .value 失效 */
-const onPasteMainComposer = (e) => handleComposerPaste(e, pendingImages)
-const onPasteInlineComposer = (e) => handleComposerPaste(e, inlinePendingImages)
-const removePendingInline = (idx) => removePendingImage(idx, inlinePendingImages)
-
-const guessFilenameFromDataUrl = (src) => {
-  const s = String(src || '')
-  const m = s.match(/^data:image\/([\w+.-]+);/i)
-  if (!m) return 'image.png'
-  const ext = m[1].toLowerCase().replace('jpeg', 'jpg').replace('svg+xml', 'svg')
-  return `image.${ext}`
-}
-
-const dataUrlToBlob = async (dataUrl) => {
-  const res = await fetch(dataUrl)
-  return res.blob()
-}
-
-const openImagePreview = (src, filename) => {
-  if (!src) return
-  imagePreviewSrc.value = src
-  const fn = filename != null && String(filename).trim() !== '' ? String(filename).trim() : ''
-  imagePreviewFilename.value = fn || guessFilenameFromDataUrl(src)
+const openImagePreview = (src) => {
+  if (src) imagePreviewSrc.value = src
 }
 
 const closeImagePreview = () => {
   imagePreviewSrc.value = null
-  imagePreviewFilename.value = 'image.png'
-}
-
-const copyPreviewImage = async () => {
-  const src = imagePreviewSrc.value
-  if (!src) return
-  try {
-    const blob = await dataUrlToBlob(src)
-    const type = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/png'
-    if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
-      await navigator.clipboard.write([new ClipboardItem({ [type]: blob })])
-      return
-    }
-    throw new Error('clipboard unsupported')
-  } catch (err) {
-    console.warn('[CHAT] 复制图片失败:', err)
-  }
-}
-
-const downloadPreviewImage = () => {
-  const src = imagePreviewSrc.value
-  if (!src) return
-  try {
-    const a = document.createElement('a')
-    a.href = src
-    a.download = imagePreviewFilename.value || 'image.png'
-    a.rel = 'noopener'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-  } catch (err) {
-    console.warn('[CHAT] 下载图片失败:', err)
-  }
 }
 
 const clearPendingImages = () => {
@@ -2292,94 +1255,17 @@ const handleDocumentPointerDown = (e) => {
   if (!target) return
   // 点击在内联编辑器内部则不处理
   if (target.closest && target.closest('.inline-composer')) return
-  if (target.closest && target.closest('.image-preview-overlay')) return
-  if (target.closest && target.closest('.pending-thumb')) return
   // 点到另一条用户气泡时不要在这里 cancel：同步卸载/重排会导致随后的 click 丢失，表现为“点了没反应”
   if (target.closest && target.closest('.user-message-bubble')) return
   cancelEditUserMessage()
 }
 const selectedAgent = ref('agent')
-
-/** 下拉选项：默认内置列表，onMounted 时由 GET /api/models 覆盖 */
-const FALLBACK_CHAT_MODEL_OPTIONS = [
-  { id: 'auto', label: 'Auto' },
-  { id: 'qwen3.5-plus', label: 'Qwen-3.5-Plus' },
-  { id: 'qwen3.6-flash', label: 'Qwen-3.6-Flash' },
-  { id: 'qwen3.6-plus', label: 'Qwen-3.6-Plus' },
-  { id: 'qwen-max-thinking', label: 'Qwen-Max' },
-  { id: 'deepseek-v4-pro', label: 'DeepSeek-V4-Pro' },
-  { id: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash' },
-  { id: 'glm-5', label: 'GLM-5' },
-]
-const chatModelOptions = ref([...FALLBACK_CHAT_MODEL_OPTIONS])
-const chatModelIds = computed(() => new Set(chatModelOptions.value.map((o) => o.id)))
-
-function normalizeSavedChatModel(saved) {
-  const s = (saved || '').trim()
-  if (chatModelIds.value.has(s)) return s
-  return 'auto'
-}
-
-async function loadChatModelsFromApi() {
-  try {
-    const resp = await fetch(`${BACKEND_BASE_URL}/api/models`, { credentials: 'include' })
-    if (!resp.ok) return
-    const data = await resp.json()
-    const models = data?.models
-    if (!data?.success || !Array.isArray(models) || !models.length) return
-    const opts = [{ id: 'auto', label: 'Auto' }]
-    for (const m of models) {
-      const id = (m?.id || '').trim()
-      if (!id) continue
-      opts.push({ id, label: (m?.label || id).trim() || id })
-    }
-    chatModelOptions.value = opts
-    const normalized = normalizeSavedChatModel(selectedModel.value)
-    if (normalized !== selectedModel.value) {
-      selectedModel.value = normalized
-      localStorage.setItem('selectedChatModel', normalized)
-    }
-    inlineEditSelectedModel.value = normalizeSavedChatModel(inlineEditSelectedModel.value)
-  } catch (e) {
-    console.warn('[MODEL] GET /api/models failed, using fallback list', e)
-  }
-}
-
-/** 历史用户消息无 llm_model 时，用紧随其后的助手消息的模型推断（与落库顺序一致） */
-function inferUserLlmModelFromFollowingAssistant(msgs, userIdx) {
-  if (!Array.isArray(msgs) || userIdx < 0) return null
-  for (let j = userIdx + 1; j < msgs.length; j++) {
-    const m = msgs[j]
-    if (!m || m.isUser) continue
-    const mid = m.llmModel ?? m.llm_model
-    if (mid != null && String(mid).trim()) return normalizeSavedChatModel(String(mid))
-    break
-  }
-  return null
-}
-
-// 从 localStorage 读取上次选择的模型；旧版文心/GLM-Flash 等已不在注册表，回退为 Auto
+// 从 localStorage 读取上次选择的模型，如果没有则使用默认值
 const savedModel = localStorage.getItem('selectedChatModel')
-const selectedModel = ref(normalizeSavedChatModel(savedModel))
-/** 内联编辑历史用户消息时的模型（与底部主输入 selectedModel 分离，勿改 localStorage） */
-const inlineEditSelectedModel = ref(normalizeSavedChatModel(savedModel))
-const inlineModelIsAuto = computed(() => inlineEditSelectedModel.value === 'auto')
-const inlineModelIsQwen = computed(
-  () => inlineEditSelectedModel.value && inlineEditSelectedModel.value.startsWith('qwen')
-)
-const inlineModelIsGlm = computed(
-  () => inlineEditSelectedModel.value && inlineEditSelectedModel.value.startsWith('glm')
-)
-const inlineModelIsDeepSeek = computed(
-  () => inlineEditSelectedModel.value && inlineEditSelectedModel.value.startsWith('deepseek')
-)
-if (savedModel != null && normalizeSavedChatModel(savedModel) !== savedModel) {
-  localStorage.setItem('selectedChatModel', selectedModel.value)
-}
-const isAutoModel = computed(() => selectedModel.value === 'auto')
+const selectedModel = ref(savedModel || 'auto')  // 默认 Auto；可选具体 qwen / ernie / deepseek / glm
 const isQwenModel = computed(() => selectedModel.value && selectedModel.value.startsWith('qwen'))
+const isErnieModel = computed(() => selectedModel.value && selectedModel.value.startsWith('ernie'))
 const isGlmModel = computed(() => selectedModel.value && selectedModel.value.startsWith('glm'))
-const isDeepSeekModel = computed(() => selectedModel.value && selectedModel.value.startsWith('deepseek'))
 const messagesContainer = ref(null)
 const textareaRef = ref(null)
 const isSending = ref(false)
@@ -2389,161 +1275,23 @@ const abortController = ref(null)  // 用于终止请求
 const reactSseReaderRef = ref(null)
 /** 与 SSE 信封 request_id 一致，停止时 POST /api/agent/react/cancel 让后端主循环合作退出 */
 const reactStreamRequestIdRef = ref(null)
-/** 刷新后续流：轮询 /api/agent/react/buffer（仅断线/F5；在线 SSE 不走 buffer） */
-const REACT_RESUME_POLL_MS = 1200
-/** 在线 SSE：仅记 lastSeq，避免每条 chunk 全量 JSON 快照拖慢主线程 */
-const REACT_STREAM_PATCH_SEQ_MS = 2500
-/** F5 续流 UI 壳：与 lastSeq 分键 + 降频（buffer 仍是主真相） */
-const REACT_AGENT_RUN_SNAPSHOT_MS = 10000
-/** 在线 SSE：stream 增量合并刷新上限（ms），约 30fps；工具/phase 仍立即 flush */
-const REACT_SSE_PAINT_MIN_MS = 32
-const reactResumePollTimerRef = ref(null)
-const reactResumeInFlightRef = ref(false)
-let draftSaveTimer = null
 const currentProjectId = ref(null)
-// 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`；>3 项默认收起，悬停显示上/下箭头
+// 沙箱预览展开状态：key = `${messageId}-${groupIdx}` 或 `${messageId}-single`，点击下三角切换
 const sandboxExpanded = ref({})
 const getSandboxKey = (messageId, groupIdx) => (groupIdx == null ? `${messageId}-single` : `${messageId}-${groupIdx}`)
-/** 新建/修改沙箱预览 diff 行数超过该值时默认收起（与深度思考区 reasoning-toggle 交互一致） */
-const SANDBOX_PREVIEW_COLLAPSE_OVER = 3
-
-const findChatMessageById = (messageId) => {
-  const idStr = String(messageId)
-  return messages.value.find((m) => m && String(m.id) === idStr) ?? null
-}
-
-/** 模板传入 message 对象或 id；避免 Teleport/响应式下仅 id 查找不到导致始终「展开」 */
-const resolveSandboxExpandMessage = (messageOrId) => {
-  if (messageOrId != null && typeof messageOrId === 'object' && 'id' in messageOrId) {
-    return messageOrId
-  }
-  return findChatMessageById(messageOrId)
-}
-
-const sandboxExpandMessageId = (messageOrId) => {
-  const msg = resolveSandboxExpandMessage(messageOrId)
-  return msg?.id ?? messageOrId
-}
-
-const getSandboxPreviewRowCount = (message, groupIdx) => {
-  if (!message) return 0
-  if (groupIdx != null) {
-    const group = message.modifyGroups?.[groupIdx]
-    return countGroupSandboxDisplayRows(group)
-  }
-  return getSandboxDiffRows(message).length
-}
-
-const sandboxPreviewNeedsCollapse = (message, groupIdx) =>
-  getSandboxPreviewRowCount(message, groupIdx) > SANDBOX_PREVIEW_COLLAPSE_OVER
-
-const shouldDefaultCollapseSandboxPreview = (message, groupIdx) =>
-  sandboxPreviewNeedsCollapse(message, groupIdx)
-
-const isSandboxExpanded = (messageOrId, groupIdx) => {
-  const msg = resolveSandboxExpandMessage(messageOrId)
-  const messageId = sandboxExpandMessageId(messageOrId)
+const isSandboxExpanded = (messageId, groupIdx) => sandboxExpanded.value[getSandboxKey(messageId, groupIdx)] !== false
+const toggleSandboxExpand = (messageId, groupIdx) => {
   const key = getSandboxKey(messageId, groupIdx)
-  const explicit = sandboxExpanded.value[key]
-  if (explicit === true) return true
-  if (explicit === false) return false
-  return !shouldDefaultCollapseSandboxPreview(msg, groupIdx)
+  sandboxExpanded.value = { ...sandboxExpanded.value, [key]: sandboxExpanded.value[key] === false }
 }
 
-const toggleSandboxExpand = (messageOrId, groupIdx) => {
-  const messageId = sandboxExpandMessageId(messageOrId)
-  const key = getSandboxKey(messageId, groupIdx)
-  sandboxExpanded.value = {
-    ...sandboxExpanded.value,
-    [key]: !isSandboxExpanded(messageOrId, groupIdx)
-  }
-}
-
-const isSandboxPreviewCollapsed = (messageOrId, groupIdx) =>
-  sandboxPreviewNeedsCollapse(resolveSandboxExpandMessage(messageOrId), groupIdx) &&
-  !isSandboxExpanded(messageOrId, groupIdx)
-
-/** 收起时仍展示前 N 项（与 Cursor 一致），而非整块隐藏 */
-const visibleSandboxPreviewRows = (messageOrId, groupIdx, sourceRows = null) => {
-  const msg = resolveSandboxExpandMessage(messageOrId)
-  if (!msg) return sourceRows || []
-  const rows = sourceRows ?? getSandboxDiffRows(msg)
-  if (!sandboxPreviewNeedsCollapse(msg, groupIdx)) return rows
-  if (isSandboxExpanded(msg, groupIdx)) return rows
-  return rows.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
-}
-
-const flattenGroupSandboxEntries = (message, groupIdx) => {
-  const group = message?.modifyGroups?.[groupIdx]
-  if (!group?.items?.length) return []
-  const out = []
-  const multi = group.items.length > 1
-  for (let gix = 0; gix < group.items.length; gix++) {
-    const git = group.items[gix]
-    if (!isSandboxModifyItemPending(git, message)) continue
-    const diffs = resolveSandboxDiffRowsForDisplay(git, group.target)
-    for (let rowIdx = 0; rowIdx < diffs.length; rowIdx++) {
-      out.push({
-        git,
-        gix,
-        rowIdx,
-        fieldDiff: diffs[rowIdx],
-        showRecordHeader: multi && (out.length === 0 || out[out.length - 1].gix !== gix)
-      })
-    }
-  }
-  return out
-}
-
-const visibleGroupSandboxEntries = (messageOrId, groupIdx) => {
-  const msg = resolveSandboxExpandMessage(messageOrId)
-  if (!msg) return []
-  const flat = flattenGroupSandboxEntries(msg, groupIdx)
-  if (!sandboxPreviewNeedsCollapse(msg, groupIdx)) return flat
-  if (isSandboxExpanded(msg, groupIdx)) return flat
-  return flat.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
-}
-
-const flattenBatchSandboxEntries = (message) => {
-  const nav = message?.modifyNavigation
-  if (!nav?.batch_modify || !Array.isArray(nav.batch_results) || !nav.batch_results.length) {
-    return []
-  }
-  const out = []
-  const multi = nav.batch_results.length > 1
-  for (let bix = 0; bix < nav.batch_results.length; bix++) {
-    const br = nav.batch_results[bix]
-    if (!isSandboxModifyItemPending(br, message)) continue
-    const diffs = getBatchItemSandboxDiffRows(br, nav.target)
-    for (let rowIdx = 0; rowIdx < diffs.length; rowIdx++) {
-      out.push({
-        br,
-        bix,
-        rowIdx,
-        fieldDiff: diffs[rowIdx],
-        showRecordHeader: multi && (out.length === 0 || out[out.length - 1].bix !== bix)
-      })
-    }
-  }
-  return out
-}
-
-const visibleBatchSandboxEntries = (messageOrId) => {
-  const msg = resolveSandboxExpandMessage(messageOrId)
-  if (!msg) return []
-  const flat = flattenBatchSandboxEntries(msg)
-  if (!sandboxPreviewNeedsCollapse(msg, null)) return flat
-  if (isSandboxExpanded(msg, null)) return flat
-  return flat.slice(0, SANDBOX_PREVIEW_COLLAPSE_OVER)
-}
-
-/** 最后一个含 modify/create 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
-const lastSandboxToolStepIndex = (steps) => {
+/** 最后一个标题含 modify 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
+const lastModifyToolStepIndex = (steps) => {
   if (!Array.isArray(steps)) return -1
   let last = -1
   for (let i = 0; i < steps.length; i++) {
     const title = String(steps[i]?.title || '').toLowerCase()
-    if (title.includes('modify') || title.includes('create')) last = i
+    if (title.includes('modify')) last = i
   }
   return last
 }
@@ -2554,13 +1302,14 @@ const lastSandboxToolStepIndex = (steps) => {
 const sandboxEmbedAfterModifyStepIndexFromSteps = (message, steps) => {
   if (!message || message.isUser) return -1
   if (message._placeholderSteps) return -1
-  const hasSandboxUi =
-    (message.modifyGroups && message.modifyGroups.length > 0) || !!message.modifyNavigation
-  if (!hasSandboxUi) return -1
+  const hasModifyUi =
+    (message.modifyGroups && message.modifyGroups.length > 0) ||
+    (message.modifyNavigation && !message.modifyNavigation.is_create)
+  if (!hasModifyUi) return -1
   if (!Array.isArray(steps) || steps.length < 2) return -1
-  const lastTool = lastSandboxToolStepIndex(steps)
-  if (lastTool < 0 || lastTool >= steps.length - 1) return -1
-  return lastTool
+  const lastMod = lastModifyToolStepIndex(steps)
+  if (lastMod < 0 || lastMod >= steps.length - 1) return -1
+  return lastMod
 }
 
 /** 剪枝步骤 + 嵌入下标（同一 tick 内可能对同一 message 读多次） */
@@ -2582,11 +1331,12 @@ const sandboxModifyTeleportTargetForMessage = (message) => {
   return `#sandbox-mod-below-${idPart}`
 }
 
-/** 检查 Teleport 目标锚点是否已挂载（与 #sandbox-mod-below-{id} 同条消息内联） */
+/** 检查 Teleport 目标元素是否存在，避免卸载时 patch 崩溃 */
 const sandboxTeleportTargetExists = (message) => {
-  if (message?.id == null || message?.id === undefined) return false
   try {
-    return !!document.getElementById(`sandbox-mod-below-${String(message.id)}`)
+    const selector = sandboxModifyTeleportTargetForMessage(message)
+    if (!selector) return false
+    return !!document.querySelector(selector)
   } catch {
     return false
   }
@@ -2627,6 +1377,7 @@ const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
   cancelTodosStreamTypewriter(aiMessage)
   aiMessage.todosStreamVisible = ''
   flushReasoningTypewriter(aiMessage)
+  finalizeMessageFirstThinkStream(aiMessage)
 }
 
 // 格式化消息内容（支持简单的markdown）
@@ -2639,24 +1390,6 @@ const formatMessage = (content) => {
 
 // 零宽字符（历史后端占位等）：不计入「是否有可见正文」判断
 const INVISIBLE_REASONING_CHARS = /[\u200B-\u200D\uFEFF\u2060]/g
-
-/**
- * reasoning 轨常见「三连以上换行」或通道残留；pre-wrap 会撑出大块空白（DeepSeek-V4-Flash 等尤甚）。
- * 与 AgentTaskRun.collapseThoughtDisplayNewlines / stripReasoningChannelArtifacts 对齐。
- */
-const squeezeReasoningVerticalWhitespace = (raw) => {
-  let t = stripReasoningChannelArtifacts(
-    String(raw || '')
-      .replace(/\r\n/g, '\n')
-      .replace(INVISIBLE_REASONING_CHARS, '')
-  )
-  for (let i = 0; i < 12; i++) {
-    const n = t.replace(/\n{3,}/g, '\n\n')
-    if (n === t) break
-    t = n
-  }
-  return t.trim()
-}
 /** 首轮 Agent 思考区是否展示：是否有实质可见文本（reasoningContent 为历史字段名，实为 THINK 阶段草稿缓冲） */
 const substantiveReasoning = (text) => {
   if (text == null || typeof text !== 'string') return false
@@ -2719,6 +1452,7 @@ const SHOW_FIRST_ROUND_THOUGHT_UI = true
 const showFirstThinkBlock = (m) => {
   if (!SHOW_FIRST_ROUND_THOUGHT_UI) return false
   if (!m || m.reactDirectChatReply) return false
+  if (m._firstThinkUiSealed) return false
   if (!substantiveThinkPhase(m)) return false
   return !!m.hadAgentThinkPhase
 }
@@ -2757,7 +1491,7 @@ marked.setOptions({ gfm: true, breaks: true })
 const formatReasoningMarkdown = (content) => {
   if (!content || typeof content !== 'string') return ''
   try {
-    let text = squeezeReasoningVerticalWhitespace(content)
+    let text = content.replace(INVISIBLE_REASONING_CHARS, '').trim()
     // 若模型未输出换行，在中文句号/分号后插入换行，便于展示段落
     if (!/\n/.test(text) && /[。；]/.test(text)) {
       text = text.replace(/([。；])/g, '$1\n')
@@ -2850,9 +1584,6 @@ const buildReactStepsFromTodoStrings = (todoData) => {
       thoughtTiming: null, // { durationMs, kind, segment, briefThresholdMs } Cursor 式耗时
       /** 首次收到本步 executing 时的 Date.now()：用于 Thought 墙钟勿把 grep/modify 整段算进「思考」*/
       thoughtPhaseEndAtMs: null,
-      toolExecStartedAt: null,
-      /** 后端 grep_perf_ms / 墙钟 tool 段，用于工具行秒数（勿用整步 stepDurationMs） */
-      toolExecDurationMs: null,
       /** phase_wait SSE：接收 decision_xml / result_xml 等等待中 */
       phaseWait: null
     }
@@ -3072,7 +1803,7 @@ const _runFastTypewriter = (msg) => {
 /** 流式阶段展示用纯文本（Vue 插值自动转义，不做 marked）*/
 const reasoningPlainForDisplay = (message) => {
   if (!message) return ''
-  return squeezeReasoningVerticalWhitespace(message.reasoningDisplayContent ?? '')
+  return message.reasoningDisplayContent ?? ''
 }
 
 /** 打字机纯文本轨：至少 2 个可见字符再渲染，避免「一个符 + 空槽」*/
@@ -3314,36 +2045,37 @@ const appendStepDetailLine = (step, line) => {
   step.detailLog = [...step.detailLog]
 }
 
-// 获取 diff 字段的旧值（多行 diff 须合并全部 delete 行）
+// 获取 diff 字段的旧值（兼容 delete 和 unchanged 类型）
 const getFieldOldValue = (fieldDiff) => {
   if (!fieldDiff || !fieldDiff.lines) return null
-  const deleteLines = fieldDiff.lines.filter((l) => l.type === 'delete')
-  if (deleteLines.length > 0) {
-    return deleteLines.map((l) => (l.content != null ? String(l.content) : '')).join('\n').trim() || null
-  }
-  const unchangedLine = fieldDiff.lines.find((l) => l.type === 'unchanged')
+  // 优先取 delete 类型
+  const deleteLine = fieldDiff.lines.find(l => l.type === 'delete')
+  if (deleteLine) return deleteLine.content
+  // 如果只有 unchanged，说明值没变，返回该值作为旧值
+  const unchangedLine = fieldDiff.lines.find(l => l.type === 'unchanged')
   if (unchangedLine) return unchangedLine.content
   return null
 }
 
-// 获取 diff 字段的新值（多行 diff 须合并全部 add 行）
+// 获取 diff 字段的新值（兼容 add 和 unchanged 类型）
 const getFieldNewValue = (fieldDiff) => {
   if (!fieldDiff || !fieldDiff.lines) return null
-  const addLines = fieldDiff.lines.filter((l) => l.type === 'add')
-  if (addLines.length > 0) {
-    return addLines.map((l) => (l.content != null ? String(l.content) : '')).join('\n').trim() || null
-  }
-  const unchangedLine = fieldDiff.lines.find((l) => l.type === 'unchanged')
+  // 优先取 add 类型
+  const addLine = fieldDiff.lines.find(l => l.type === 'add')
+  if (addLine) return addLine.content
+  // 如果只有 unchanged，说明值没变，返回该值作为新值
+  const unchangedLine = fieldDiff.lines.find(l => l.type === 'unchanged')
   if (unchangedLine) return unchangedLine.content
   return null
 }
 
 /**
- * 首轮 THINK 标题：与 AgentTaskRun 折叠头一致，文案一律来自 i18n（agentTask.*），勿硬编码。
+ * 首轮 THINK 标题：流式中用「思考中/Thinking」；结束后用「思考/Thought」（可带秒数）
  */
 const thoughtSummaryLabel = (message) => {
-  // 流式推理未结束：眉标固定为「思考中 / Thinking」，勿用「思考」（易被理解成已结束）
-  if (message?._reasoningPhaseLive) return t('agentTask.thinking')
+  if (message?._reasoningPhaseLive && !message._firstThinkUiSealed) {
+    return t('agentTask.thinking')
+  }
   const hasBody = substantiveThinkPhase(message)
   if (!hasBody) return t('agentTask.thinking')
   const ms = message.reasoningUiDurationMs
@@ -3370,16 +2102,6 @@ const hasUnifiedSummary = (message) => {
   return (r.findings && r.findings.length > 0) || r.execution_time != null || (r.steps_count != null && r.steps_count > 0)
 }
 
-/** 落库曾误把 done.summary 写成沙箱一句提示，历史消息需跳过该占位，改用 findings 等兜底 */
-const isLegacySandboxOnlySummaryText = (txt) => {
-  const s = String(txt || '').trim()
-  if (!s || s.length > 480) return false
-  if (/\n##\s/.test(s)) return false
-  return /沙箱预览完成|预览已生成|请确认是否应用|请确认变更|sandbox preview completed|preview completed|confirm whether to apply/i.test(
-    s
-  )
-}
-
 // 统一总结正文：优先流式草稿（summary_stream / running_summary_stream）；无草稿时取 summaryText 或 findings 兜底
 const getUnifiedSummaryBody = (message) => {
   const r = message.agentResult
@@ -3401,8 +2123,7 @@ const getUnifiedSummaryBody = (message) => {
     return _rsDraft
   }
   if (r?.summaryText && typeof r.summaryText === 'string' && r.summaryText.trim()) {
-    const st = r.summaryText.trim()
-    if (!isLegacySandboxOnlySummaryText(st)) return st
+    return r.summaryText.trim()
   }
   const lines = []
   if (r?.findings && r.findings.length > 0) {
@@ -3440,69 +2161,16 @@ const handleNavigation = (navigation) => {
   
   console.log('[NAV] 执行导航:', navigation)
 
-  const recordIdRaw = navigation.record_id ?? navigation.bug_id ?? navigation.id
-  const recordId =
-    snowflakeIdStr(recordIdRaw) ||
-    (recordIdRaw != null && String(recordIdRaw).trim() !== '' ? String(recordIdRaw).trim() : '')
-  const navTarget = (navigation.target || 'bug').toString().toLowerCase().replace(/-/g, '_')
-  let normalizedTarget = navTarget === 'test_case' || navTarget === 'testcase' ? 'testcase' : navTarget
-  if (normalizedTarget === 'bad_case' || normalizedTarget === 'badcase') normalizedTarget = 'badcase'
-  const cardIdRaw =
-    navigation.card_id != null && navigation.card_id !== ''
-      ? navigation.card_id
-      : normalizedTarget === 'card'
-        ? recordIdRaw
-        : undefined
-  const cardIdNav =
-    cardIdRaw != null && cardIdRaw !== ''
-      ? snowflakeIdStr(cardIdRaw) || String(cardIdRaw).trim()
-      : undefined
-
-  const mergedLegacyRaw =
-    navigation.merged_from_legacy != null && String(navigation.merged_from_legacy).trim() !== ''
-      ? String(navigation.merged_from_legacy).trim().toLowerCase().replace(/-/g, '_')
-      : null
-  const mergedLegacy =
-    mergedLegacyRaw === 'bad_case'
-      ? 'badcase'
-      : mergedLegacyRaw === 'test_case'
-        ? 'testcase'
-        : mergedLegacyRaw
-  const legacyRowIdRaw =
-    navigation.legacy_row_id != null && navigation.legacy_row_id !== ''
-      ? navigation.legacy_row_id
-      : navigation.source_id != null && navigation.source_id !== ''
-        ? navigation.source_id
-        : null
-  const legacyRowId =
-    legacyRowIdRaw != null && legacyRowIdRaw !== ''
-      ? snowflakeIdStr(legacyRowIdRaw) || String(legacyRowIdRaw).trim()
-      : null
-
-  // 发送自定义事件给父组件 ProjectDetail
+  const recordId = navigation.record_id ?? navigation.bug_id
+  const navTarget = (navigation.target || 'bug').toString().toLowerCase()
+  
+  // 发送自定义事件给父组件ProjectDetail
   const event = new CustomEvent('grep-navigate', {
     detail: {
       planId: navigation.plan_id,
-      plan_id: navigation.plan_id,
       bugId: recordId,
       recordId,
-      target: normalizedTarget,
-      title: navigation.title,
-      navTitle: navigation.navTitle ?? navigation.title,
-      ...(mergedLegacy
-        ? {
-            merged_from_legacy: mergedLegacy,
-            mergedFromLegacy: mergedLegacy
-          }
-        : {}),
-      ...(legacyRowId != null && legacyRowId !== ''
-        ? { legacy_row_id: legacyRowId, legacyRowId }
-        : {}),
-      ...(cardIdNav != null && cardIdNav !== '' ? { card_id: cardIdNav, cardId: cardIdNav } : {}),
-      /**
-       * 纯「卡片层」命中须留在迭代卡片表；grep 合并项（merged_from_legacy）要进子类型列表，勿标 prefer_card_layer。
-       */
-      ...(normalizedTarget === 'card' && !mergedLegacy ? { prefer_card_layer: true } : {})
+      target: navTarget === 'test_case' ? 'testcase' : navTarget
     }
   })
   window.dispatchEvent(event)
@@ -3546,9 +2214,7 @@ const handleConfirmModify = async (modifyData) => {
  * 用于 diff review：已采纳的不参与；后面对话对前面 diff 的合并形成新diff
  * @returns {{ modifications: {}, diff: [], plan_id, messageId } | null}
  */
-function getMergedPendingForTarget(msgs, target, targetIdRaw) {
-  const want = snowflakeIdStr(targetIdRaw)
-  if (!want) return null
+function getMergedPendingForTarget(msgs, target, targetId) {
   const items = []
   for (let i = 0; i < (msgs || []).length; i++) {
     const msg = msgs[i]
@@ -3556,8 +2222,8 @@ function getMergedPendingForTarget(msgs, target, targetIdRaw) {
     const msgIdx = i
     for (const group of msg.modifyGroups || []) {
       for (const item of group.items || []) {
-        const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
-        if (!tid || tid !== want) continue
+        const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
+        if (isNaN(tid) || tid !== targetId) continue
         if (item.target && item.target !== target) continue
         if (item.cancelled === true) continue
         const itTarget = item.target || group.target || target
@@ -3583,8 +2249,8 @@ function getMergedPendingForTarget(msgs, target, targetIdRaw) {
     const nav = msg.modifyNavigation
     if (nav?.batch_modify && nav.batch_results?.length) {
       for (const r of nav.batch_results) {
-        const tid = snowflakeIdStr(r.target_id)
-        if (!tid || tid !== want) continue
+        const tid = parseInt(r.target_id, 10)
+        if (isNaN(tid) || tid !== targetId) continue
         if (r.cancelled === true) continue
         if (r.target && r.target !== target) continue
         const itTarget = r.target || nav.target || target
@@ -3607,8 +2273,8 @@ function getMergedPendingForTarget(msgs, target, targetIdRaw) {
         })
       }
     } else if (nav && !nav.batch_modify && !nav.is_create && nav.cancelled !== true) {
-      const tid = snowflakeIdStr(nav.target_id ?? nav.targetId)
-      if (!tid || tid !== want || (nav.target || 'badcase') !== target) {
+      const tid = parseInt(nav.target_id ?? nav.targetId, 10)
+      if (isNaN(tid) || tid !== targetId || (nav.target || 'badcase') !== target) {
         continue
       }
       const pk = makePersistDiffKey(target, tid)
@@ -3627,9 +2293,7 @@ function getMergedPendingForTarget(msgs, target, targetIdRaw) {
           diff: nav.diff || [],
           plan_id: nav.plan_id ?? nav.preview?.plan_id,
           messageId: msg.id,
-          _msgIdx: msgIdx,
-          before: nav.before ?? null,
-          after: nav.after ?? null
+          _msgIdx: msgIdx
         })
       }
     }
@@ -3673,30 +2337,11 @@ function getMergedPendingForTarget(msgs, target, targetIdRaw) {
     ]
   }))
   const last = items[items.length - 1]
-  let pickBefore = last.before ?? null
-  let pickAfter = last.after ?? null
-  for (let i = items.length - 1; i >= 0; i--) {
-    const b = items[i].before
-    if (b && typeof b === 'object') {
-      pickBefore = b
-      if (b.status != null && String(b.status).trim() !== '') break
-    }
-  }
-  for (let i = items.length - 1; i >= 0; i--) {
-    const a = items[i].after
-    if (a && typeof a === 'object') {
-      pickAfter = a
-      break
-    }
-  }
   return {
     modifications: mergedMods,
     diff,
     plan_id: last.plan_id,
-    messageId: last.messageId,
-    /** 供列表跳转与沙箱补全：优先带 status 的 before；单条 modifyNavigation 也带上 nav.before/after */
-    before: pickBefore,
-    after: pickAfter
+    messageId: last.messageId
   }
 }
 
@@ -3710,17 +2355,14 @@ const getModifyJumpButtonLabel = (target) => {
 
 const makePersistDiffKey = (target, targetId) => {
   const nt = normalizeModifyTarget(target)
-  const tid = snowflakeIdStr(targetId)
-  if (!nt || !tid) return ''
+  const tid = Number(targetId)
+  if (!nt || !Number.isFinite(tid) || tid <= 0) return ''
   return `${nt}:${tid}`
 }
 
 const persistedPendingDiffKeys = ref(new Set())
 const persistedPendingLoaded = ref(false)
 let _persistedPendingLoadedAt = 0
-let _persistedPendingFetchInFlight = null
-let _persistedPendingEtag = ''
-let _persistedPendingForceFetchAt = 0
 
 /**
  * 是否仍应对列表派发「待确认」：
@@ -3746,113 +2388,44 @@ const resolveAlreadyProcessedByPersisted = (
  * @param {boolean} force
  * @param {{ emitListSync?: boolean }} opts emitListSync：是否派发 diff-review-sync。从沙箱/聊天侧即将 show-modify-in-list 时应为 false，否则左侧会再 restore 一次，diff 连闪且可能与合并后的 payload 不一致。
  */
-const applyPersistedKeysFromServerItems = (items) => {
-  const next = new Set()
-  ;(Array.isArray(items) ? items : []).forEach((it) => {
-    const key = makePersistDiffKey(it.target, it.target_id)
-    if (key) next.add(key)
-  })
-  persistedPendingDiffKeys.value = next
-  persistedPendingLoaded.value = true
-  _persistedPendingLoadedAt = Date.now()
-}
-
-const onDiffReviewPushForChat = (ev) => {
-  const { type, payload } = ev?.detail || {}
-  if (type === 'snapshot') {
-    applyPersistedKeysFromServerItems(payload?.items || [])
-    return
-  }
-  if (type === 'upsert' && payload) {
-    const key = makePersistDiffKey(payload.target, payload.target_id)
-    if (!key) return
-    const next = new Set(persistedPendingDiffKeys.value)
-    next.add(key)
-    persistedPendingDiffKeys.value = next
-    persistedPendingLoaded.value = true
-    _persistedPendingLoadedAt = Date.now()
-    return
-  }
-  if (type === 'resolve' && payload) {
-    const key = makePersistDiffKey(payload.target, payload.target_id)
-    if (!key) return
-    const next = new Set(persistedPendingDiffKeys.value)
-    next.delete(key)
-    persistedPendingDiffKeys.value = next
-  }
-}
-
 const refreshPersistedPendingDiffKeys = async (force = false, opts = {}) => {
   const emitListSync = opts.emitListSync !== false
-  const allowNetworkWhenPushOk = opts.allowNetworkWhenPushOk === true
   try {
     if (!props.projectId) return
     const now = Date.now()
     if (!force && now - _persistedPendingLoadedAt < 1500) return
-    const pushOk =
-      diffReviewPushShared.connected.value &&
-      now - (diffReviewPushShared.lastEventAt.value || 0) < 120000
-    if (pushOk && !allowNetworkWhenPushOk) return
-    if (force && now - _persistedPendingForceFetchAt < 5000) return
-    if (_persistedPendingFetchInFlight) return _persistedPendingFetchInFlight
-    _persistedPendingForceFetchAt = force ? now : _persistedPendingForceFetchAt
-    _persistedPendingFetchInFlight = (async () => {
-      const headers = {}
-      if (_persistedPendingEtag) headers['If-None-Match'] = _persistedPendingEtag
-      const resp = await fetch(
-        `${BACKEND_BASE_URL}/api/projects/${props.projectId}/diff-reviews?status=pending`,
-        { credentials: 'include', headers }
-      )
-      if (resp.status === 304) {
-        persistedPendingLoaded.value = true
-        _persistedPendingLoadedAt = now
-        return
-      }
-      if (!resp.ok) return
-      const et = resp.headers.get('ETag')
-      if (et) _persistedPendingEtag = et.replace(/^"|"$/g, '')
-      const data = await resp.json()
-      const items = Array.isArray(data?.items) ? data.items : []
-      const next = new Set()
-      items.forEach((it) => {
-        const key = makePersistDiffKey(it.target, it.target_id)
-        if (key) next.add(key)
-      })
-      persistedPendingDiffKeys.value = next
-      persistedPendingLoaded.value = true
-      _persistedPendingLoadedAt = now
-      if (emitListSync) {
-        window.dispatchEvent(new CustomEvent('diff-review-sync', { bubbles: true }))
-      }
-    })()
-    await _persistedPendingFetchInFlight
-    return
+    const resp = await fetch(
+      `${BACKEND_BASE_URL}/api/projects/${props.projectId}/diff-reviews?status=pending`,
+      { credentials: 'include' }
+    )
+    if (!resp.ok) return
+    const data = await resp.json()
+    const items = Array.isArray(data?.items) ? data.items : []
+    const next = new Set()
+    items.forEach((it) => {
+      const key = makePersistDiffKey(it.target, it.target_id)
+      if (key) next.add(key)
+    })
+    persistedPendingDiffKeys.value = next
+    persistedPendingLoaded.value = true
+    _persistedPendingLoadedAt = now
+    if (emitListSync) {
+      window.dispatchEvent(new CustomEvent('diff-review-sync', { bubbles: true }))
+    }
   } catch (e) {
     persistedPendingLoaded.value = false
     console.warn('[DIFF] 刷新持久化 pending keys 失败:', e)
-  } finally {
-    _persistedPendingFetchInFlight = null
   }
 }
 
 const hasDetailFieldInPreview = (diffRows, mods) => {
-  const diffRowImpliesDetail = (fd) => {
-    const fk = String(fd?.field || '').trim().toLowerCase()
-    if (fk && DETAIL_FIELDS.includes(fk)) return true
-    const lab = String(fd?.field_label || '')
-    return /优先级|严重程度|严重级别|用例类型|测试类型|问题分类|相似问题|复现|正确答案|答案|原因|描述|步骤|备注|评论|追加评论|基线/i.test(lab)
-  }
-  const diffHasDetail = Array.isArray(diffRows) && diffRows.some(diffRowImpliesDetail)
+  const diffHasDetail = Array.isArray(diffRows) && diffRows.some((fd) => {
+    const f = (fd?.field || fd?.field_label || '').toString()
+    return DETAIL_FIELDS.includes(f)
+  })
   if (diffHasDetail) return true
   if (mods && typeof mods === 'object') {
-    return Object.keys(mods).some((k) => {
-      const nk = String(k).trim().toLowerCase()
-      return (
-        DETAIL_FIELDS.includes(nk) ||
-        TESTCASE_DETAIL_FIELDS.includes(nk) ||
-        /优先级|严重程度|用例类型|测试类型|问题分类/.test(String(k))
-      )
-    })
+    return Object.keys(mods).some((k) => DETAIL_FIELDS.includes(k))
   }
   return false
 }
@@ -3880,8 +2453,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
   const messageIsHistorical = !!(msgObj && msgObj.isHistorical)
 
   const peerTargetIds = group.items
-    .map((it) => snowflakeIdStr(it?.target_id ?? it?.targetId ?? it?.id))
-    .filter((id) => !!id)
+    .map((it) => parseInt(it?.target_id ?? it?.targetId ?? it?.id))
+    .filter((id) => !isNaN(id))
 
   const batchItems = []
   /** 已采纳：合并为一次 grep-navigate，避免逐条异步定位造成「一行行」闪高亮 */
@@ -3893,8 +2466,8 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
       console.warn('[MODIFY] 跳过无效 item:', item)
       continue
     }
-    const idStr = snowflakeIdStr(rawId)
-    if (!idStr) {
+    const intTargetId = parseInt(rawId)
+    if (isNaN(intTargetId)) {
       console.warn('[MODIFY] 跳过无效 target_id:', rawId)
       continue
     }
@@ -3903,74 +2476,40 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
     alreadyProcessed = resolveAlreadyProcessedByPersisted(
       alreadyProcessed,
       tgt,
-      idStr,
+      intTargetId,
       messageIsHistorical
     )
-    const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, idStr) : null
+    const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
     const payload = merged
-      ? {
-          diff: merged.diff,
-          modifications: merged.modifications,
-          plan_id: merged.plan_id ?? group.plan_id,
-          messageId: merged.messageId,
-          before: merged.before ?? null,
-          after: merged.after ?? null
-        }
-      : {
-          diff: item.diff || [],
-          modifications: item.modifications || {},
-          plan_id: group.plan_id,
-          messageId,
-          before: item.before ?? null,
-          after: item.after ?? null
-        }
+      ? { diff: merged.diff, modifications: merged.modifications, plan_id: merged.plan_id ?? group.plan_id, messageId: merged.messageId }
+      : { diff: item.diff || [], modifications: item.modifications || {}, plan_id: group.plan_id, messageId }
 
     if (alreadyProcessed) {
       const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
-      const navCidAdopted =
-        item.card_id ??
-        item.cardId ??
-        payload.before?.card_id ??
-        payload.before?.cardId ??
-        payload.after?.card_id ??
-        payload.after?.cardId
-      const navCidAdoptedStr =
-        navCidAdopted != null && String(navCidAdopted).trim() !== ''
-          ? snowflakeIdStr(navCidAdopted) || String(navCidAdopted).trim()
-          : null
       adoptedNav.push({
-        intTargetId: idStr,
+        intTargetId,
         tgt,
         openDetail,
-        planId: payload.plan_id ?? group.plan_id ?? null,
-        ...(navCidAdoptedStr ? { navCardId: navCidAdoptedStr } : {})
+        planId: payload.plan_id ?? group.plan_id ?? null
       })
     } else {
-      const gCardNav = (() => {
-        const c = item.card_id ?? item.cardId ?? item.before?.card_id ?? item.before?.cardId
-        if (c == null || String(c).trim() === '') return null
-        return snowflakeIdStr(c) || String(c).trim()
-      })()
       batchItems.push({
-        targetId: idStr,
+        targetId: intTargetId,
         target: tgt,
+        ...(item?.card_id ? { card_id: item.card_id } : {}),
         diff: payload.diff,
         modifications: payload.modifications,
         plan_id: payload.plan_id,
         executed: false,
         messageId: payload.messageId,
         batchIndex: index,
-        peerTargetIds,
-        before: payload.before ?? null,
-        after: payload.after ?? null,
-        ...(gCardNav ? { card_id: gCardNav } : {})
+        peerTargetIds
       })
     }
   }
   if (adoptedNav.length > 0) {
     const detailFirst = adoptedNav.find((x) => x.openDetail)
     const planId = adoptedNav[0].planId ?? group.plan_id ?? null
-    const cardFromAdopted = adoptedNav.find((x) => x.navCardId)?.navCardId
     window.dispatchEvent(
       new CustomEvent('grep-navigate', {
         detail: {
@@ -3980,8 +2519,7 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
           openDetail: !!detailFirst,
           ...(detailFirst
             ? { recordId: detailFirst.intTargetId, bugId: detailFirst.intTargetId }
-            : {}),
-          ...(cardFromAdopted ? { card_id: cardFromAdopted, cardId: cardFromAdopted } : {})
+            : {})
         },
         bubbles: true
       })
@@ -4015,18 +2553,11 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   if (modifyData.navigate_to_existing && modifyData.created_id != null) {
     const pv = modifyData.preview || {}
     const planId = modifyData.plan_id ?? pv.plan_id ?? pv.planId
-    const cidNav = pv.card_id ?? pv.cardId ?? modifyData.card_id ?? modifyData.cardId
-    const cidStr =
-      cidNav != null && String(cidNav).trim() !== ''
-        ? snowflakeIdStr(cidNav) || String(cidNav).trim()
-        : null
     window.dispatchEvent(new CustomEvent('grep-navigate', {
       detail: {
         planId,
         bugId: modifyData.created_id,
-        recordId: modifyData.created_id,
-        target: modifyData.target || 'bug',
-        ...(cidStr ? { card_id: cidStr, cardId: cidStr } : {})
+        target: modifyData.target || 'bug'
       },
       bubbles: true
     }))
@@ -4037,8 +2568,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   if (modifyData.batch_modify && modifyData.batch_results && Array.isArray(modifyData.batch_results) && modifyData.batch_results.length > 0) {
     console.log('[MODIFY] 批量修改，合并为单次列表事件')
     const peerTargetIds = modifyData.batch_results
-      .map((r) => snowflakeIdStr(r?.target_id))
-      .filter((id) => !!id)
+      .map((r) => parseInt(r.target_id))
+      .filter((id) => !isNaN(id))
     const batchItems = []
     const adoptedNavBatch = []
     for (let index = 0; index < modifyData.batch_results.length; index++) {
@@ -4047,8 +2578,8 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         console.warn('[MODIFY] 跳过无效 result:', result)
         continue
       }
-      const idStr = snowflakeIdStr(result.target_id)
-      if (!idStr) {
+      const intTargetId = parseInt(result.target_id)
+      if (isNaN(intTargetId)) {
         console.warn('[MODIFY] 跳过无效 target_id:', result.target_id)
         continue
       }
@@ -4057,66 +2588,42 @@ const handleShowModifyInList = async (modifyData, messageId) => {
       alreadyProcessed = resolveAlreadyProcessedByPersisted(
         alreadyProcessed,
         tgt,
-        idStr,
+        intTargetId,
         messageIsHistorical
       )
-      const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, idStr) : null
+      const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
       const payload = merged || {
         diff: result.diff || [],
         modifications: result.modifications || {},
         plan_id: result.plan_id,
-        messageId,
-        before: result.before ?? null,
-        after: result.after ?? null
+        messageId
       }
       if (alreadyProcessed) {
         const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
         adoptedNavBatch.push({
-          intTargetId: idStr,
+          intTargetId,
           tgt,
           openDetail,
           planId: payload.plan_id ?? result.plan_id ?? modifyData.plan_id ?? null
         })
       } else {
-        const cardNavStr = (() => {
-          const c = result.card_id ?? result.cardId ?? result.before?.card_id ?? result.before?.cardId
-          if (c == null || String(c).trim() === '') return null
-          return snowflakeIdStr(c) || String(c).trim()
-        })()
         batchItems.push({
-          targetId: idStr,
+          targetId: intTargetId,
           target: tgt,
+          ...(result?.card_id ? { card_id: result.card_id } : {}),
           diff: payload.diff,
           modifications: payload.modifications,
           plan_id: payload.plan_id ?? result.plan_id,
           executed: false,
           messageId: payload.messageId ?? messageId,
           batchIndex: index,
-          peerTargetIds,
-          before: payload.before ?? null,
-          after: payload.after ?? null,
-          ...(cardNavStr ? { card_id: cardNavStr } : {})
+          peerTargetIds
         })
       }
     }
     if (adoptedNavBatch.length > 0) {
       const detailFirst = adoptedNavBatch.find((x) => x.openDetail)
       const planId = adoptedNavBatch[0].planId ?? modifyData.plan_id ?? null
-      const cardFromBatch = (() => {
-        for (const br of modifyData.batch_results || []) {
-          const c =
-            br?.card_id ??
-            br?.cardId ??
-            br?.before?.card_id ??
-            br?.before?.cardId ??
-            br?.after?.card_id ??
-            br?.after?.cardId
-          if (c != null && String(c).trim() !== '') {
-            return snowflakeIdStr(c) || String(c).trim()
-          }
-        }
-        return null
-      })()
       window.dispatchEvent(
         new CustomEvent('grep-navigate', {
           detail: {
@@ -4126,8 +2633,7 @@ const handleShowModifyInList = async (modifyData, messageId) => {
             openDetail: !!detailFirst,
             ...(detailFirst
               ? { recordId: detailFirst.intTargetId, bugId: detailFirst.intTargetId }
-              : {}),
-            ...(cardFromBatch ? { card_id: cardFromBatch, cardId: cardFromBatch } : {})
+              : {})
           },
           bubbles: true
         })
@@ -4166,21 +2672,11 @@ const handleShowModifyInList = async (modifyData, messageId) => {
 
   // 单个修改
   const rawId = modifyData.target_id ?? modifyData.targetId ?? modifyData.id
-  const targetIdStr = snowflakeIdStr(rawId)
-  if (!targetIdStr) {
+  const intTargetId = parseInt(rawId)
+  if (isNaN(intTargetId)) {
     console.error('[MODIFY] 无效的 target_id:', rawId)
     return
   }
-
-  const navCardStr = (() => {
-    const c =
-      modifyData.card_id ??
-      modifyData.cardId ??
-      modifyData.before?.card_id ??
-      modifyData.before?.cardId
-    if (c == null || String(c).trim() === '') return null
-    return snowflakeIdStr(c) || String(c).trim()
-  })()
   
   let alreadyProcessed =
     modifyData.cancelled === true ||
@@ -4189,79 +2685,43 @@ const handleShowModifyInList = async (modifyData, messageId) => {
   alreadyProcessed = resolveAlreadyProcessedByPersisted(
     alreadyProcessed,
     tgt,
-    targetIdStr,
+    intTargetId,
     messageIsHistorical
   )
-  const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, targetIdStr) : null
+  const merged = !alreadyProcessed ? getMergedPendingForTarget(messages.value, tgt, intTargetId) : null
   const payload = merged || {
     diff: modifyData.diff || [],
     modifications: modifyData.modifications || {},
     plan_id: modifyData.plan_id || modifyData.before?.plan_id || null,
-    messageId,
-    before: modifyData.before ?? null,
-    after: modifyData.after ?? null
+    messageId
   }
   if (alreadyProcessed) {
     const openDetail = hasDetailFieldInPreview(payload.diff, payload.modifications)
-    const grepCardStr = (() => {
-      const c =
-        modifyData.card_id ??
-        modifyData.cardId ??
-        payload.before?.card_id ??
-        payload.before?.cardId ??
-        payload.after?.card_id ??
-        payload.after?.cardId
-      if (c == null || String(c).trim() === '') return null
-      return snowflakeIdStr(c) || String(c).trim()
-    })()
     window.dispatchEvent(new CustomEvent('grep-navigate', {
       detail: {
         planId: payload.plan_id ?? modifyData.plan_id ?? null,
-        recordId: targetIdStr,
-        bugId: targetIdStr,
+        recordId: intTargetId,
+        bugId: intTargetId,
         target: tgt,
-        openDetail,
-        ...(grepCardStr ? { card_id: grepCardStr, cardId: grepCardStr } : {})
+        openDetail
       },
       bubbles: true
     }))
   } else {
     const event = new CustomEvent('show-modify-in-list', {
       detail: {
-        targetId: targetIdStr,
+        targetId: intTargetId,
         target: tgt,
+        ...(modifyData?.card_id ? { card_id: modifyData.card_id } : {}),
         diff: payload.diff,
         modifications: payload.modifications,
         plan_id: payload.plan_id,
         executed: alreadyProcessed,
-        messageId: payload.messageId ?? messageId,
-        before: payload.before ?? null,
-        after: payload.after ?? null,
-        ...(navCardStr ? { card_id: navCardStr } : {})
+        messageId: payload.messageId ?? messageId
       },
       bubbles: true
     })
     window.dispatchEvent(event)
-  }
-}
-
-/** 将本会话内仍待确认的 create 预览同步到左侧列表（无需先点沙箱卡片） */
-const syncPendingCreatePreviewsToWorkbench = async () => {
-  for (const msg of messages.value) {
-    if (!msg || msg.isUser || !msg.modifyNavigation) continue
-    const nav = msg.modifyNavigation
-    if (
-      nav.is_create !== true ||
-      nav.navigate_to_existing ||
-      nav.confirmation_required === false
-    ) {
-      continue
-    }
-    try {
-      await handleShowModifyInList(nav, msg.id)
-    } catch (e) {
-      console.warn('[CREATE] 同步待确认新建到列表失败:', e)
-    }
   }
 }
 
@@ -4409,45 +2869,6 @@ const scrollAgentStepLogIntoView = (messageId, stepIndex) => {
   })
 }
 
-/** 是否已是可用的 modify 沙箱导航（单条或批量）；勿因缺少 batch_results 就覆盖为「新建预览」 */
-const isValidModifySandboxNavigation = (nav) => {
-  if (!nav || typeof nav !== 'object') return false
-  if (nav.is_create === true || nav.target_id === 'new' || nav.targetId === 'new') return false
-  if (nav.batch_modify === true && Array.isArray(nav.batch_results) && nav.batch_results.length > 0) {
-    return true
-  }
-  const tid = snowflakeIdStr(nav.target_id ?? nav.targetId)
-  if (!tid) return false
-  const hasDiff = Array.isArray(nav.diff) && nav.diff.length > 0
-  const hasMods =
-    nav.modifications &&
-    typeof nav.modifications === 'object' &&
-    Object.keys(nav.modifications).filter((k) => !String(k).startsWith('_')).length > 0
-  return hasDiff || hasMods || nav.before != null || nav.after != null
-}
-
-/** execution_results 内单条 observation 是否像 modify 沙箱（有 preview 的是 create，不能仅凭 diff 误判） */
-const looksLikeModifyToolObservation = (toolData) => {
-  if (!toolData || typeof toolData !== 'object') return false
-  if (toolData.created_id != null && toolData.created_id !== '') return false
-  if (toolData.batch_modify === true) return true
-  if (Array.isArray(toolData.batch_results) && toolData.batch_results.length > 0) return true
-  if (Array.isArray(toolData.results) && toolData.results.length > 0) return true
-  const tid = snowflakeIdStr(toolData.target_id ?? toolData.targetId)
-  if (!tid || tid === 'new') return false
-  const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
-  if (!hasDiff) return false
-  if (toolData.preview && typeof toolData.preview === 'object' && Object.keys(toolData.preview).length > 0) {
-    return false
-  }
-  return (
-    toolData.before != null ||
-    toolData.after != null ||
-    toolData.confirmation_required === true ||
-    toolData.sandbox_preview != null
-  )
-}
-
 /**
  * 从流式阶段写入的 executionResults 中恢复 modify 批量预览（应因 observation 未写入 modifyNavigation 的旧消息）
  * 注意：executionResults 的 step 常为步骤标题（中文），不能要求 step === 'modify'
@@ -4467,22 +2888,6 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
   const fromToolData = (toolData, topTarget) => {
     if (!toolData || typeof toolData !== 'object') return null
     const tgt = toolData.target || topTarget || 'badcase'
-    if (looksLikeModifyToolObservation(toolData)) {
-      const tid = snowflakeIdStr(toolData.target_id ?? toolData.targetId)
-      if (tid && tid !== 'new') {
-        return {
-          target: tgt,
-          target_id: tid,
-          diff: Array.isArray(toolData.diff) ? toolData.diff : [],
-          modifications: toolData.modifications || {},
-          confirmation_required: toolData.confirmation_required !== false,
-          before: toolData.before ?? null,
-          after: toolData.after ?? null,
-          plan_id: toolData.plan_id ?? toolData.before?.plan_id ?? null,
-          success: toolData.success === true
-        }
-      }
-    }
     if (Array.isArray(toolData.batch_results) && toolData.batch_results.length > 0) {
       return {
         batch_modify: true,
@@ -4495,11 +2900,10 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
       const batch_results_flat = []
       for (const r of toolData.results) {
         const obs = r && r.result && typeof r.result === 'object' ? r.result : {}
-        const tid = r?.id ?? r?.target_id ?? obs.target_id
-        const tidStr = snowflakeIdStr(tid)
-        if (!tidStr) continue
+        const tid = r?.target_id ?? obs.target_id ?? r?.id
+        if (tid == null || !Number.isFinite(Number(tid))) continue
         batch_results_flat.push({
-          target_id: tidStr,
+          target_id: Number(tid),
           plan_id: r?.plan_id ?? obs.plan_id ?? null,
           target: tgt || obs.target || 'badcase',
           diff: obs.diff || [],
@@ -4536,31 +2940,8 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
     }
     if (!td || typeof td !== 'object') continue
     const inner = td.data && typeof td.data === 'object' ? td.data : td
-    const tryCreatePreview = (toolData, topTarget) => {
-      if (!toolData || typeof toolData !== 'object') return null
-      if (looksLikeModifyToolObservation(toolData)) return null
-      const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
-      const hasPreview =
-        toolData.preview &&
-        typeof toolData.preview === 'object' &&
-        Object.keys(toolData.preview).length > 0
-      if (toolData.success === false || toolData.created_id) return null
-      if (!hasPreview) return null
-      const tgt = toolData.target || topTarget || 'bug'
-      return {
-        target: tgt,
-        target_id: 'new',
-        diff: hasDiff ? toolData.diff : [],
-        preview: toolData.preview,
-        modifications: toolData.preview || {},
-        confirmation_required: toolData.confirmation_required !== false,
-        is_create: true
-      }
-    }
-    const hitModify = fromToolData(inner, td.target) || fromToolData(td, td.target)
-    if (hitModify) return hitModify
-    const hitCreate = tryCreatePreview(inner, td.target) || tryCreatePreview(td, td.target)
-    if (hitCreate) return hitCreate
+    const hit = fromToolData(inner, td.target) || fromToolData(td, td.target)
+    if (hit) return hit
   }
   return null
 }
@@ -4579,8 +2960,8 @@ const rebuildModifyGroupsFromBatchNav = (modifyNav, mergeFn) => {
   const normalizedItems = modifyNav.batch_results
     .map((r, idx) => {
       const rawId = r?.target_id ?? r?.targetId ?? r?.id
-      const tid = snowflakeIdStr(rawId)
-      if (!tid) return null
+      const tid = Number(rawId)
+      if (!Number.isFinite(tid)) return null
       return {
         ...r,
         target_id: tid,
@@ -4649,58 +3030,23 @@ function scheduleIdle(fn) {
   }
 }
 
-/** 解析落库的 images 字段（JSON 字符串或数组）为编辑/展示用的 { data, filename }[] */
-function parseStoredMessageImages(raw) {
-  if (raw == null || raw === '') return []
-  let parsed = raw
-  if (typeof raw === 'string') {
-    const s = raw.trim()
-    if (!s) return []
-    try {
-      parsed = JSON.parse(s)
-    } catch {
-      return []
-    }
-  }
-  if (!Array.isArray(parsed)) return []
-  const out = []
-  for (const item of parsed) {
-    if (!item || typeof item !== 'object') continue
-    let data = item.data ?? item.url ?? item.base64 ?? ''
-    if (typeof data !== 'string' || !data.trim()) continue
-    data = data.trim()
-    if (!data.startsWith('data:') && /^[A-Za-z0-9+/=\s]+$/.test(data.replace(/\s/g, '').slice(0, 80))) {
-      data = `data:image/png;base64,${data.replace(/\s/g, '')}`
-    }
-    out.push({
-      data,
-      filename: item.filename || item.name || 'image.png',
-    })
-  }
-  return out
-}
-
 /** 从 GET /api/chat-sessions/:id 单条消息转为 UI 结构（与原先 map 逻辑一致） */
 function rawApiMessageToUi(msg) {
   if (msg.is_user) {
-    const lm =
-      msg.llm_model != null && String(msg.llm_model).trim() !== ''
-        ? normalizeSavedChatModel(String(msg.llm_model))
-        : null
-    const histImages = parseStoredMessageImages(msg.images)
     return {
       id: msg.id,
       isUser: true,
       content: msg.content,
       time: new Date(msg.created_at).toLocaleTimeString(),
-      isHistorical: true,
-      llmModel: lm,
-      images: histImages.length > 0 ? histImages : undefined,
+      isHistorical: true
     }
   }
   let modifyNav = msg.modify_navigation ? JSON.parse(msg.modify_navigation) : null
   let modifyGroups = msg.modify_groups ? JSON.parse(msg.modify_groups) : null
-  if (!isValidModifySandboxNavigation(modifyNav) && msg.execution_results) {
+  if (
+    (!modifyNav || !Array.isArray(modifyNav.batch_results) || modifyNav.batch_results.length === 0) &&
+    msg.execution_results
+  ) {
     const recovered = recoverModifyNavigationFromExecutionResults(msg.execution_results)
     if (recovered) modifyNav = recovered
   }
@@ -4762,10 +3108,6 @@ function rawApiMessageToUi(msg) {
     Array.isArray(_histAgent.react_plan_steps) && _histAgent.react_plan_steps.length > 0
       ? _histAgent.react_plan_steps
       : null
-  const assistantLlm =
-    msg.llm_model != null && String(msg.llm_model).trim() !== ''
-      ? normalizeSavedChatModel(String(msg.llm_model))
-      : null
   return {
     id: msg.id,
     isUser: false,
@@ -4786,8 +3128,7 @@ function rawApiMessageToUi(msg) {
     modifyGroups: modifyGroups,
     finalResponse: _histFr || msg.final_response || '',
     time: new Date(msg.created_at).toLocaleTimeString(),
-    isHistorical: true,
-    llmModel: assistantLlm,
+    isHistorical: true
   }
 }
 
@@ -4832,23 +3173,14 @@ const loadSessionMessages = async () => {
         await nextTick()
         if (i === 0) scrollToBottom()
       }
-      for (let k = 0; k + 1 < accumulated.length; k++) {
-        const u = accumulated[k]
-        const a = accumulated[k + 1]
-        if (u?.isUser && u.llmModel == null && a && !a.isUser && a.llmModel) u.llmModel = a.llmModel
-      }
-      messages.value = accumulated.slice()
       scrollToBottom()
 
       // 与后端 diff_review pending 对齐（沙箱是否待确认、列表黄条由 GET 结果驱动）
       scheduleIdle(async () => {
         try {
           await refreshPersistedPendingDiffKeys(true)
-          await syncPendingCreatePreviewsToWorkbench()
           await nextTick()
           scrollToBottom()
-          restoreInputDraftForSession()
-          await resolveSessionRecoveryOnLoad()
         } catch (e) {
           console.error('[MODIFY] 刷新 diff pending 失败', e)
         }
@@ -4881,13 +3213,7 @@ async function loadOlderHistoryIfNeeded() {
       const raw = resp.data.session?.messages || []
       const uiMsgs = raw.map(rawApiMessageToUi)
       if (uiMsgs.length > 0) {
-        const merged = [...uiMsgs, ...messages.value]
-        for (let k = 0; k + 1 < merged.length; k++) {
-          const u = merged[k]
-          const a = merged[k + 1]
-          if (u?.isUser && u.llmModel == null && a && !a.isUser && a.llmModel) u.llmModel = a.llmModel
-        }
-        messages.value = merged
+        messages.value = [...uiMsgs, ...messages.value]
         historyHasMore.value = !!resp.data.session?.has_more
         historyBeforeId.value = resp.data.session?.next_before_id ?? (raw?.[0]?.id ?? historyBeforeId.value)
         await nextTick()
@@ -4929,17 +3255,8 @@ const normalizeModifyTarget = (target) => {
 const isSandboxModifyItemPending = (item, message = null) => {
   if (!item || typeof item !== 'object') return false
   if (item.cancelled === true) return false
-  if (
-    item.is_create === true ||
-    item.target_id === 'new' ||
-    item.targetId === 'new'
-  ) {
-    if (item.confirmation_required === false) return false
-    if (message?.isHistorical) return item.confirmation_required !== false
-    return true
-  }
-  const tid = snowflakeIdStr(item.target_id ?? item.targetId ?? item.id)
-  if (!tid) return false
+  const tid = parseInt(item.target_id ?? item.targetId ?? item.id, 10)
+  if (Number.isNaN(tid)) return false
   const tgt = normalizeModifyTarget(item.target || 'badcase')
   const pk = makePersistDiffKey(tgt, tid)
   if (persistedPendingLoaded.value && pk) {
@@ -4973,8 +3290,7 @@ const messageHasPendingSandboxConfirm = (message) => {
         confirmation_required: nav.confirmation_required,
         success: nav.success,
         target_id: nav.target_id ?? nav.targetId,
-        target: nav.target,
-        is_create: nav.is_create === true
+        target: nav.target
       },
       message
     )
@@ -4989,8 +3305,8 @@ const messageHasPendingSandboxConfirm = (message) => {
 const handleRequestPendingModifyForPlan = async (event) => {
   const planId = event.detail?.planId
   const suppressAutoOpenDetail = event.detail?.suppressAutoOpenDetail === true
-  const planKey = snowflakeIdStr(planId)
-  if (!planKey) return
+  const pid = Number(planId)
+  if (!Number.isFinite(pid)) return
   await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
   const hasBackendPendingRow = (target, targetId) => {
     if (!persistedPendingLoaded.value) return false
@@ -5005,24 +3321,24 @@ const handleRequestPendingModifyForPlan = async (event) => {
 
     if (msg.modifyGroups?.length) {
       for (const group of msg.modifyGroups) {
-        if (snowflakeIdStr(group.plan_id) !== planKey) continue
+        if (Number(group.plan_id) !== pid) continue
         const peerTargetIds = (group.items || [])
-          .map((it) => snowflakeIdStr(it?.target_id ?? it?.targetId ?? it?.id))
-          .filter((id) => !!id)
+          .map((it) => parseInt(it?.target_id ?? it?.targetId ?? it?.id, 10))
+          .filter((id) => !isNaN(id))
         for (const item of group.items || []) {
           const rawId = item?.target_id ?? item?.targetId ?? item?.id
-          const idStr = snowflakeIdStr(rawId)
-          if (!idStr) continue
+          const intTargetId = parseInt(rawId, 10)
+          if (isNaN(intTargetId)) continue
           const tgt = item.target || 'badcase'
           if (item.cancelled === true) continue
-          if (!hasBackendPendingRow(tgt, idStr)) continue
-          const key = `${tgt}:${idStr}`
+          if (!hasBackendPendingRow(tgt, intTargetId)) continue
+          const key = `${tgt}:${intTargetId}`
           if (seen.has(key)) continue
           seen.add(key)
-          const merged = getMergedPendingForTarget(messages.value, tgt, idStr)
+          const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
           if (!merged) continue
           batchItems.push({
-            targetId: idStr,
+            targetId: intTargetId,
             target: tgt,
             diff: merged.diff,
             modifications: merged.modifications,
@@ -5031,10 +3347,7 @@ const handleRequestPendingModifyForPlan = async (event) => {
             messageId: merged.messageId,
             batchIndex: 0,
             peerTargetIds,
-            suppressAutoOpenDetail,
-            restoreHydrateOnly: suppressAutoOpenDetail === true,
-            before: merged.before ?? null,
-            after: merged.after ?? null
+            suppressAutoOpenDetail
           })
         }
       }
@@ -5045,23 +3358,23 @@ const handleRequestPendingModifyForPlan = async (event) => {
 
     if (nav.batch_modify && nav.batch_results?.length) {
       const peerTargetIds = nav.batch_results
-        .map((r) => snowflakeIdStr(r?.target_id))
-        .filter((id) => !!id)
+        .map((r) => parseInt(r.target_id, 10))
+        .filter((id) => !isNaN(id))
       for (const result of nav.batch_results) {
         const tplPid = result.plan_id ?? nav.plan_id
-        if (snowflakeIdStr(tplPid) !== planKey) continue
-        const idStr = snowflakeIdStr(result.target_id)
-        if (!idStr) continue
+        if (Number(tplPid) !== pid) continue
+        const intTargetId = parseInt(result.target_id, 10)
+        if (isNaN(intTargetId)) continue
         const tgt = result.target || 'badcase'
         if (result.cancelled === true) continue
-        if (!hasBackendPendingRow(tgt, idStr)) continue
-        const key = `${tgt}:${idStr}`
+        if (!hasBackendPendingRow(tgt, intTargetId)) continue
+        const key = `${tgt}:${intTargetId}`
         if (seen.has(key)) continue
         seen.add(key)
-        const merged = getMergedPendingForTarget(messages.value, tgt, idStr)
+        const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
         if (!merged) continue
         batchItems.push({
-          targetId: idStr,
+          targetId: intTargetId,
           target: tgt,
           diff: merged.diff,
           modifications: merged.modifications,
@@ -5070,23 +3383,8 @@ const handleRequestPendingModifyForPlan = async (event) => {
           messageId: merged.messageId,
           batchIndex: 0,
           peerTargetIds,
-          suppressAutoOpenDetail,
-          restoreHydrateOnly: suppressAutoOpenDetail === true,
-          before: merged.before ?? null,
-          after: merged.after ?? null
+          suppressAutoOpenDetail
         })
-      }
-      continue
-    }
-
-    if (nav.is_create) {
-      const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
-      if (snowflakeIdStr(tplPid) !== planKey) continue
-      if (nav.navigate_to_existing || nav.confirmation_required === false) continue
-      try {
-        await handleShowModifyInList(nav, msg.id)
-      } catch (e) {
-        console.warn('[CREATE] 计划切换同步新建预览失败:', e)
       }
       continue
     }
@@ -5094,29 +3392,26 @@ const handleRequestPendingModifyForPlan = async (event) => {
     if (!nav.batch_modify && !nav.is_create) {
       if (nav.cancelled === true) continue
       const tplPid = nav.plan_id ?? nav.preview?.plan_id ?? nav.preview?.planId
-      if (snowflakeIdStr(tplPid) !== planKey) continue
-      const idStr = snowflakeIdStr(nav.target_id ?? nav.targetId)
-      if (!idStr) continue
+      if (Number(tplPid) !== pid) continue
+      const intTargetId = parseInt(nav.target_id ?? nav.targetId, 10)
+      if (isNaN(intTargetId)) continue
       const tgt = nav.target || 'badcase'
-      if (!hasBackendPendingRow(tgt, idStr)) continue
-      const key = `${tgt}:${idStr}`
+      if (!hasBackendPendingRow(tgt, intTargetId)) continue
+      const key = `${tgt}:${intTargetId}`
       if (seen.has(key)) continue
       seen.add(key)
-      const merged = getMergedPendingForTarget(messages.value, tgt, idStr)
+      const merged = getMergedPendingForTarget(messages.value, tgt, intTargetId)
       if (!merged) continue
       batchItems.push({
-        targetId: idStr,
+        targetId: intTargetId,
         target: tgt,
         diff: merged.diff,
         modifications: merged.modifications,
         plan_id: merged.plan_id ?? tplPid,
         executed: false,
         messageId: merged.messageId,
-        peerTargetIds: [idStr],
-        suppressAutoOpenDetail,
-        restoreHydrateOnly: suppressAutoOpenDetail === true,
-        before: merged.before ?? null,
-        after: merged.after ?? null
+        peerTargetIds: [intTargetId],
+        suppressAutoOpenDetail
       })
     }
   }
@@ -5140,290 +3435,6 @@ const safeJsonForDb = (val, label = 'json') => {
     console.error(`[CHAT] ${label} 序列化失败`, e)
     return 'null'
   }
-}
-
-const newReactRunId = () => {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID()
-    }
-  } catch {
-    /* ignore */
-  }
-  return `react-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-/** 流式草稿由 buffer 重放即可，不必进 sessionStorage */
-const REACT_RESUME_SNAPSHOT_OMIT_KEYS = new Set([
-  'thinkReasoningDraft',
-  'thinkContentDraft',
-  'runningSummaryDraft',
-  'summaryStreamDraft'
-])
-
-const snapshotReactMessageForResume = (aiMessage) => {
-  if (!aiMessage) return null
-  try {
-    const raw = toRaw(aiMessage)
-    return JSON.parse(
-      JSON.stringify(raw, (k, v) => {
-        if (k.startsWith('_') || REACT_RESUME_SNAPSHOT_OMIT_KEYS.has(k)) return undefined
-        return v
-      })
-    )
-  } catch {
-    return null
-  }
-}
-
-let lastAgentRunSnapshotTs = 0
-const maybePatchAgentRunSnapshot = (projectId, sessionId, aiMessage, { force = false } = {}) => {
-  if (!projectId || !sessionId || !aiMessage) return
-  const now = Date.now()
-  if (!force && now - lastAgentRunSnapshotTs < REACT_AGENT_RUN_SNAPSHOT_MS) return
-  lastAgentRunSnapshotTs = now
-  const snap = snapshotReactMessageForResume(aiMessage)
-  if (snap) patchAgentRunSnapshot(projectId, sessionId, snap)
-}
-
-const flushAgentRunSnapshotOnPageHide = () => {
-  if (!isSending.value && reactStreamRequestIdRef.value == null) return
-  const pid = currentProjectId.value || props.projectId
-  const sid = props.sessionId
-  if (!pid || !sid) return
-  const runMeta = getAgentRun(pid, sid)
-  if (!runMeta?.runId || runMeta.status !== 'streaming') return
-  let aiMessage = null
-  const cid = runMeta.clientMessageId
-  if (cid != null) aiMessage = findChatMessageById(cid)
-  if (!aiMessage) {
-    const last = messages.value[messages.value.length - 1]
-    if (last && !last.isUser) aiMessage = last
-  }
-  if (aiMessage) maybePatchAgentRunSnapshot(pid, sid, aiMessage, { force: true })
-}
-
-const applyReactSnapshotToMessage = (aiMessage, snap) => {
-  if (!aiMessage || !snap || typeof snap !== 'object') return
-  const keys = [
-    'understanding',
-    'steps',
-    'finalResponse',
-    'reasoningContent',
-    'thinkReasoningDraft',
-    'thinkContentDraft',
-    'executionResults',
-    'modifyNavigation',
-    'modifyGroups',
-    'agentResult',
-    'evidences',
-    'reactPlanSteps',
-    'runningSummaryDraft',
-    'summaryStreamDraft',
-    'reactDirectChatReply',
-    'lastReactPhase'
-  ]
-  for (const k of keys) {
-    if (snap[k] !== undefined) aiMessage[k] = snap[k]
-  }
-}
-
-const buildReactSseConsumeCtx = () => ({
-  scrollToBottom,
-  isDebugReactThinkSSE,
-  buildReactStepsFromTodoStrings,
-  thinkCtx: {
-    resolveStreamStepIndex,
-    scheduleReasoningTypewriter,
-    scheduleTodosStreamTypewriter,
-    sseIsReactThinkPhase,
-    logReactThinkStepDetail
-  },
-  engineCtx: {
-    flushReasoningTypewriter,
-    cancelTodosStreamTypewriter,
-    buildReactStepsFromTodoStrings,
-    resolveStreamStepIndex,
-    appendStepDetailLine,
-    scrollAgentStepLogIntoView,
-    handleShowGroupInList,
-    handleShowModifyInList,
-    projectId: props.projectId,
-    handleNavigation,
-    nextTick
-  }
-})
-
-const stopReactResumePoll = () => {
-  if (reactResumePollTimerRef.value) {
-    clearInterval(reactResumePollTimerRef.value)
-    reactResumePollTimerRef.value = null
-  }
-}
-
-const persistReactAssistantMessage = async (aiMessage, modelUsed) => {
-  let modifyNavForSave = aiMessage.modifyNavigation
-  if (!isValidModifySandboxNavigation(modifyNavForSave) && aiMessage.executionResults?.length) {
-    const recovered = recoverModifyNavigationFromExecutionResults(aiMessage.executionResults)
-    if (recovered) {
-      modifyNavForSave = recovered
-      aiMessage.modifyNavigation = recovered
-    }
-  }
-  if (
-    modifyNavForSave &&
-    modifyNavForSave.batch_modify === true &&
-    (!aiMessage.modifyGroups || !Array.isArray(aiMessage.modifyGroups) || aiMessage.modifyGroups.length === 0)
-  ) {
-    const rebuilt = rebuildModifyGroupsFromBatchNav(modifyNavForSave, shouldMergeModifyPreviewItems)
-    if (rebuilt?.length) {
-      aiMessage.modifyGroups = Object.freeze([...rebuilt])
-      await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
-      for (const grp of rebuilt) {
-        if (grp.items && grp.items.length > 0) {
-          await handleShowGroupInList(grp, aiMessage.id, { skipPersistedRefresh: true })
-        }
-      }
-    }
-  }
-  if (
-    modifyNavForSave?.is_create === true &&
-    modifyNavForSave.confirmation_required !== false &&
-    !modifyNavForSave.navigate_to_existing
-  ) {
-    await syncPendingCreatePreviewsToWorkbench()
-  }
-
-  const _persistAgent = { ...(aiMessage.agentResult || {}) }
-  const _persistRunning = String(aiMessage.runningSummaryDraft || '').trim()
-  const _persistSummaryStream = String(aiMessage.summaryStreamDraft || '').trim()
-  if (_persistRunning) _persistAgent.summaryText = _persistRunning
-  else if (_persistSummaryStream) _persistAgent.summaryText = _persistSummaryStream
-  if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
-  else delete _persistAgent.direct_chat_reply
-  _persistAgent.react_plan_panel_suppressed = !!aiMessage.reactPlanPanelSuppressed
-  if (Array.isArray(aiMessage.reactPlanSteps) && aiMessage.reactPlanSteps.length > 0) {
-    _persistAgent.react_plan_steps = aiMessage.reactPlanSteps
-  } else {
-    try {
-      delete _persistAgent.react_plan_steps
-    } catch {
-      /* ignore */
-    }
-  }
-  if (aiMessage.agentResult?.status) {
-    _persistAgent.status = aiMessage.agentResult.status
-  }
-  if (aiMessage.agentResult?.interrupt_reason) {
-    _persistAgent.interrupt_reason = aiMessage.agentResult.interrupt_reason
-  }
-
-  await saveMessageToDb({
-    is_user: false,
-    content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
-    understanding: aiMessage.understanding,
-    reasoning: aiMessage.reasoningContent || '',
-    steps: safeJsonForDb(aiMessage.steps, 'steps'),
-    execution_results: safeJsonForDb(aiMessage.executionResults || [], 'execution_results'),
-    agent_result: safeJsonForDb(_persistAgent, 'agent_result'),
-    evidences: safeJsonForDb(aiMessage.evidences || [], 'evidences'),
-    navigation: safeJsonForDb(aiMessage.navigation ?? null, 'navigation'),
-    modify_navigation: safeJsonForDb(aiMessage.modifyNavigation ?? null, 'modify_navigation'),
-    modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
-    final_response: aiMessage.finalResponse,
-    llm_model: modelUsed
-  })
-}
-
-const findUserInputBeforeAssistant = (aiMessage) => {
-  const idx = messages.value.findIndex((m) => m && String(m.id) === String(aiMessage?.id))
-  for (let i = idx - 1; i >= 0; i--) {
-    const m = messages.value[i]
-    if (m?.isUser) return String(m.content || '').trim()
-  }
-  return ''
-}
-
-const fetchReactRunStatus = async (reactRequestId) => {
-  const rid = (reactRequestId || '').trim()
-  if (!rid) return { running: false, status: 'unknown' }
-  try {
-    const resp = await fetch(
-      `${BACKEND_BASE_URL}/api/agent/react/run-status?request_id=${encodeURIComponent(rid)}`,
-      { credentials: 'include' }
-    )
-    if (!resp.ok) return { running: false, status: 'unknown' }
-    const data = await resp.json().catch(() => ({}))
-    if (!data?.success) return { running: false, status: 'unknown' }
-    return {
-      running: !!(data.running || data.status === 'running'),
-      status: data.status || 'unknown'
-    }
-  } catch {
-    return { running: false, status: 'unknown' }
-  }
-}
-
-/** §5.2.1：仅 SSE 续流；§5.2.2 任务延续暂缓（性能优化 + DAG 后再做） */
-const resolveSessionRecoveryOnLoad = async () => {
-  const pid = currentProjectId.value || props.projectId
-  const sid = props.sessionId
-  if (!sid || !pid || reactResumeInFlightRef.value || isSending.value) return
-
-  const runMeta = getAgentRun(pid, sid)
-  if (!runMeta?.runId || runMeta.status !== 'streaming') return
-
-  const st = await fetchReactRunStatus(runMeta.runId)
-  if (st.running) {
-    await tryResumeReactStreamAfterLoad()
-  } else {
-    clearAgentRun(pid, sid)
-  }
-}
-
-const flushDraftSaveTimer = () => {
-  if (draftSaveTimer) {
-    clearTimeout(draftSaveTimer)
-    draftSaveTimer = null
-  }
-}
-
-const scheduleDraftSave = () => {
-  const pid = currentProjectId.value || props.projectId
-  const sid = props.sessionId
-  if (!pid || !sid) return
-  flushDraftSaveTimer()
-  draftSaveTimer = setTimeout(() => {
-    draftSaveTimer = null
-    saveDraft(pid, sid, inputMessage.value)
-  }, 600)
-}
-
-/** §5.1.5：切会话时同步落盘旧草稿，再恢复新会话草稿（不等防抖） */
-const onSessionIdChangeForDraft = (newId, oldId) => {
-  const pid = currentProjectId.value || props.projectId
-  if (!pid) return
-  flushDraftSaveTimer()
-  if (oldId != null && oldId !== '') {
-    saveDraft(pid, oldId, inputMessage.value)
-  }
-  if (newId != null && newId !== '') {
-    inputMessage.value = getDraft(pid, newId) || ''
-    nextTick(() => autoResize())
-  } else {
-    inputMessage.value = ''
-    nextTick(() => autoResize())
-  }
-}
-
-const restoreInputDraftForSession = () => {
-  const pid = currentProjectId.value || props.projectId
-  const sid = props.sessionId
-  if (!pid || !sid) return
-  if (inputMessage.value.trim()) return
-  const d = getDraft(pid, sid)
-  inputMessage.value = d || ''
-  nextTick(() => autoResize())
 }
 
 const formatReactStreamError = (err) => {
@@ -5450,44 +3461,34 @@ const saveMessageToDb = async (messageData) => {
   }
 }
 
-const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
-  const { consumeMainPending = false, clearInlinePending = false, requestModel: requestModelOpt } = sendOptions
+const sendText = async (rawText, imagesToSend = null) => {
   const text = (rawText || '').trim()
-  const images = Array.isArray(imagesToSend) ? imagesToSend : pendingImages.value
+  const images = imagesToSend ?? pendingImages.value
   const hasImages = images && images.length > 0
   if ((!text && !hasImages) || isSending.value) return
 
   const effectiveText = text || (hasImages ? '请根据这张图片描述内容并处理我的意图' : '')
   const imagesPayload = hasImages ? images.map(({ data, filename }) => ({ data, filename })) : []
 
-  const requestModel = normalizeSavedChatModel(
-    requestModelOpt != null && String(requestModelOpt).trim() !== '' ? String(requestModelOpt) : selectedModel.value
-  )
-
   abortController.value = new AbortController()
   isSending.value = true
 
   try {
-    if (hasImages) {
-      if (consumeMainPending) clearPendingImages()
-      if (clearInlinePending) inlinePendingImages.value = []
-    }
+    if (hasImages) clearPendingImages()
 
     const userMessage = {
       id: Date.now(),
       content: effectiveText,
       isUser: true,
       time: new Date().toLocaleTimeString(),
-      images: hasImages ? images : undefined,
-      llmModel: requestModel,
+      images: hasImages ? images : undefined
     }
     messages.value.push(userMessage)
 
     await saveMessageToDb({
       is_user: true,
       content: userMessage.content,
-      images: hasImages ? JSON.stringify(imagesPayload) : undefined,
-      llm_model: requestModel,
+      images: hasImages ? JSON.stringify(imagesPayload) : undefined
     })
 
     // 默认标题（如 newchat）时根据首条/当前用户消息生成标题；后端曾因 await async chat 导致失败
@@ -5521,8 +3522,6 @@ const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
       inputMessage.value = ''
       autoResize()
     })
-    const pidDraft = currentProjectId.value || props.projectId
-    if (pidDraft && props.sessionId) clearDraft(pidDraft, props.sessionId)
 
     scrollToBottom()
 
@@ -5540,11 +3539,9 @@ const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
 
     // Agent 模式一律走后端 /api/agent/react，由后端统一做意图识别与分流
     if (selectedAgent.value === 'agent') {
-      await handleReactAgentMode(messageContent, imagesPayload, {
-        model: requestModel
-      })
+      await handleReactAgentMode(messageContent, imagesPayload)
     } else {
-      await handleChatMode(messageContent, imagesPayload, { model: requestModel })
+      await handleChatMode(messageContent, imagesPayload)
     }
   } catch (e) {
     console.error('[CHAT] sendText 流程异常:', e)
@@ -5559,32 +3556,15 @@ const sendText = async (rawText, imagesToSend = null, sendOptions = {}) => {
 const handleSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
-  // 续流或上一轮 SSE 未复位时 isSending=true，发送钮会变成停止钮且 sendText 直接 return
-  if (isSending.value) {
-    handleStop()
-    stopReactResumePoll()
-    reactResumeInFlightRef.value = false
-    await nextTick()
-  }
   const text = inputMessage.value
   const imgs = [...pendingImages.value]
-  await sendText(text, imgs, { consumeMainPending: true })
+  await sendText(text, imgs)
 }
 
 const beginEditUserMessage = (msg) => {
   if (!msg) return
   editingUserMessageId.value = msg.id
   inlineInputMessage.value = msg.content || ''
-  inlinePendingImages.value = parseStoredMessageImages(msg.images)
-  const idx = messages.value.findIndex((m) => m && String(m.id) === String(msg.id))
-  const fromMsg =
-    msg.llmModel != null && String(msg.llmModel).trim() !== ''
-      ? normalizeSavedChatModel(String(msg.llmModel))
-      : msg.llm_model != null && String(msg.llm_model).trim() !== ''
-        ? normalizeSavedChatModel(String(msg.llm_model))
-        : null
-  const inferred = fromMsg ?? (idx >= 0 ? inferUserLlmModelFromFollowingAssistant(messages.value, idx) : null)
-  inlineEditSelectedModel.value = normalizeSavedChatModel(inferred ?? selectedModel.value)
   nextTick(() => {
     try {
       unwrapTextareaEl(inlineTextareaRef.value)?.focus?.()
@@ -5609,40 +3589,18 @@ const onUserBubblePointerDown = (e, msg) => {
 const cancelEditUserMessage = () => {
   editingUserMessageId.value = null
   inlineInputMessage.value = ''
-  inlinePendingImages.value = []
-}
-
-/** 内联发送前：把编辑内容写回气泡并退出编辑态，避免 isSending 期间仍挂着空 textarea */
-const finishInlineEditBeforeSend = (text, imgs) => {
-  const editId = editingUserMessageId.value
-  if (editId != null) {
-    const idx = messages.value.findIndex((m) => m && String(m.id) === String(editId))
-    if (idx >= 0) {
-      const m = messages.value[idx]
-      const trimmed = (text || '').trim()
-      if (trimmed) m.content = trimmed
-      if (imgs && imgs.length > 0) {
-        m.images = imgs.map(({ data, filename }) => ({ data, filename }))
-      } else {
-        m.images = undefined
-      }
-    }
-  }
-  editingUserMessageId.value = null
-  inlineInputMessage.value = ''
-  inlinePendingImages.value = []
 }
 
 const handleInlineSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
-  const text = inlineInputMessage.value
-  const imgs = [...inlinePendingImages.value]
-  const trimmed = (text || '').trim()
-  if (!trimmed && imgs.length === 0) return
-  finishInlineEditBeforeSend(text, imgs)
+  const text = (inlineInputMessage.value || '').trim()
+  if (!text) return
+  inlineInputMessage.value = ''
+  // 先退出编辑态再 sendText：避免对话进行中历史编辑框空白且误显示「停止」
+  editingUserMessageId.value = null
   await nextTick()
-  await sendText(text, imgs, { clearInlinePending: true, requestModel: inlineEditSelectedModel.value })
+  await sendText(text)
 }
 
 const addNewLineInline = (e) => {
@@ -5652,151 +3610,7 @@ const addNewLineInline = (e) => {
 
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown, true)
-  window.addEventListener('diff-review-push', onDiffReviewPushForChat)
 })
-
-/** F5 / 断线后：从 bcd:ss:agent + 后端 SSE 缓冲续流（仅由 resolveSessionRecoveryOnLoad P1 触发） */
-const tryResumeReactStreamAfterLoad = async () => {
-  const pid = currentProjectId.value || props.projectId
-  const sid = props.sessionId
-  if (!pid || !sid || reactResumeInFlightRef.value || isSending.value) return
-
-  const runMeta = getAgentRun(pid, sid)
-  if (!runMeta?.runId || runMeta.status !== 'streaming') return
-
-  let stResp
-  try {
-    stResp = await fetch(
-      `${BACKEND_BASE_URL}/api/agent/react/run-status?request_id=${encodeURIComponent(runMeta.runId)}`,
-      { credentials: 'include' }
-    )
-  } catch {
-    return
-  }
-  if (!stResp.ok) return
-  const stJson = await stResp.json().catch(() => ({}))
-  if (!stJson?.success) return
-  if (!stJson.running && stJson.status !== 'running') {
-    clearAgentRun(pid, sid)
-    return
-  }
-
-  reactResumeInFlightRef.value = true
-  isSending.value = true
-  stopReactResumePoll()
-
-  let resumeFailed = false
-  let aiMessage = null
-  const cid = runMeta.clientMessageId
-  if (cid != null) {
-    aiMessage = findChatMessageById(cid)
-  }
-  if (!aiMessage) {
-    const last = messages.value[messages.value.length - 1]
-    if (last && !last.isUser && last.agentResult?.status === 'running') {
-      aiMessage = last
-    }
-  }
-  if (!aiMessage) {
-    aiMessage = reactive(createReactAiMessageState(runMeta.clientMessageId || Date.now() + 1))
-    if (runMeta.uiSnapshot) applyReactSnapshotToMessage(aiMessage, runMeta.uiSnapshot)
-    messages.value.push(aiMessage)
-    scrollToBottom()
-  } else if (runMeta.uiSnapshot) {
-    applyReactSnapshotToMessage(aiMessage, runMeta.uiSnapshot)
-  }
-
-  reactStreamRequestIdRef.value = runMeta.runId
-  let sinceSeq = Number(runMeta.lastSeq) || 0
-  const modelUsed = runMeta.llmModel || selectedModel.value
-  const sseCtx = buildReactSseConsumeCtx()
-  const uiPaintResume = createSseUiPaintScheduler(nextTick, { minIntervalMs: REACT_SSE_PAINT_MIN_MS })
-  let finished = false
-
-  const pollOnce = async () => {
-    if (finished) return
-    try {
-      const resp = await fetch(
-        `${BACKEND_BASE_URL}/api/agent/react/buffer?request_id=${encodeURIComponent(runMeta.runId)}&since_seq=${sinceSeq}`,
-        { credentials: 'include' }
-      )
-      if (!resp.ok) return
-      const data = await resp.json().catch(() => ({}))
-      if (!data?.success) return
-      const events = Array.isArray(data.events) ? data.events : []
-      let maxSeq = sinceSeq
-      let needsImmediatePaint = false
-      for (const chunk of events) {
-        try {
-          const seq = Number(chunk?.seq)
-          if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq
-          consumeAgentSseV1Chunk(chunk, aiMessage, sseCtx)
-          if (sseChunkNeedsImmediatePaint(chunk)) needsImmediatePaint = true
-        } catch (e) {
-          console.error('[CHAT-RESUME] chunk:', e)
-        }
-      }
-      sinceSeq = maxSeq
-      if (events.length > 0) {
-        if (needsImmediatePaint) await uiPaintResume.flushNow()
-        else uiPaintResume.schedule()
-        await uiPaintResume.drain()
-        patchAgentRunSeq(pid, sid, {
-          runId: runMeta.runId,
-          status: 'streaming',
-          clientMessageId: aiMessage.id,
-          lastSeq: sinceSeq,
-          llmModel: modelUsed
-        })
-        maybePatchAgentRunSnapshot(pid, sid, aiMessage)
-      }
-
-      const run = data.run || {}
-      if (!run.running && run.status !== 'running') {
-        finished = true
-        stopReactResumePoll()
-        flushReasoningTypewriter(aiMessage)
-        reconcileReactMessageAfterSseClose(aiMessage)
-        await uiPaintResume.flushNow()
-        await persistReactAssistantMessage(aiMessage, modelUsed)
-        clearAgentRun(pid, sid)
-        reactStreamRequestIdRef.value = null
-        isSending.value = false
-        reactResumeInFlightRef.value = false
-        uiPaintResume.dispose()
-        scrollToBottom()
-      }
-    } catch (e) {
-      console.warn('[CHAT-RESUME] poll failed', e)
-    }
-  }
-
-  try {
-    await pollOnce()
-    reactResumePollTimerRef.value = setInterval(() => {
-      void pollOnce()
-    }, REACT_RESUME_POLL_MS)
-
-    const staleMs = Date.now() - (runMeta.updatedAt || runMeta.startedAt || 0)
-    if (staleMs > AGENT_RUN_STALE_MS * 3) {
-      patchAgentRunSeq(pid, sid, { status: 'stale', runId: runMeta.runId })
-      stopReactResumePoll()
-      isSending.value = false
-      reactResumeInFlightRef.value = false
-      uiPaintResume.dispose()
-    }
-  } catch (e) {
-    resumeFailed = true
-    console.warn('[CHAT-RESUME] aborted', e)
-    stopReactResumePoll()
-    isSending.value = false
-    reactResumeInFlightRef.value = false
-    clearAgentRun(pid, sid)
-    uiPaintResume.dispose()
-  }
-  if (resumeFailed) return
-  /** 续流结束由 pollOnce 内 finished 分支 dispose；此处仅兜底 */
-}
 
 // 停止生成
 const handleStop = () => {
@@ -5832,47 +3646,24 @@ const handleStop = () => {
     abortController.value = null
   }
   isSending.value = false
-  const pid = currentProjectId.value || props.projectId
-  if (pid && props.sessionId) {
-    patchAgentRunSeq(pid, props.sessionId, { status: 'cancelled', runId: rid || undefined })
-  }
-  stopReactResumePoll()
 }
 
 // ReAct Agent 模式 - 调用后端 ReAct 接口 (流式处理)
-const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
-  const modelUsed = normalizeSavedChatModel(opts?.model ?? selectedModel.value)
-  console.log('[MODEL-DEBUG] 当前选择的模型', modelUsed)
+const handleReactAgentMode = async (userMessage, images = []) => {
+  console.log('[MODEL-DEBUG] 当前选择的模型', selectedModel.value)
   
   const aiMessage = reactive(createReactAiMessageState(Date.now() + 1))
   
   messages.value.push(aiMessage)
   scrollToBottom()
 
-  const reactRunId = newReactRunId()
-  const pid = currentProjectId.value || props.projectId
-  if (pid && props.sessionId) {
-    patchAgentRunSeq(pid, props.sessionId, {
-      runId: reactRunId,
-      status: 'streaming',
-      clientMessageId: aiMessage.id,
-      lastSeq: 0,
-      llmModel: modelUsed,
-      startedAt: Date.now()
-    })
-    patchAgentRunSnapshot(pid, props.sessionId, null)
-    lastAgentRunSnapshotTs = 0
-  }
-  let lastAgentRunPatchTs = 0
-  let streamLastSeq = 0
-
   const stopSignal = abortController.value?.signal
   reactSseReaderRef.value = null
-  reactStreamRequestIdRef.value = reactRunId
+  reactStreamRequestIdRef.value = null
   
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
-    console.log('[MODEL-DEBUG] 请求参数 model:', modelUsed)
+    console.log('[MODEL-DEBUG] 请求参数 model:', selectedModel.value)
     const response = await fetch(`${BACKEND_BASE_URL}/api/agent/react`, {
       method: 'POST',
       headers: {
@@ -5882,7 +3673,7 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
       signal: stopSignal,
       body: JSON.stringify({
         user_input: userMessage,
-        model: modelUsed,
+        model: selectedModel.value,
         stream: true,
         project_id: currentProjectId.value || props.projectId,
         images: images || [],
@@ -5890,13 +3681,7 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
         ...(String(props.projectDisplayName || '').trim()
           ? { project_display_name: String(props.projectDisplayName).trim() }
           : {}),
-        ...(props.planId != null && String(props.planId).trim() !== ''
-          ? { plan_id: String(props.planId).trim() }
-          : {}),
-        request_id: reactRunId,
-        ...(props.sessionId ? { chat_session_id: String(props.sessionId) } : {}),
-        ...longMemoryContextForReact(),
-        ...agentUiContextForReact()
+        ...longMemoryContextForReact()
       })
     })
     
@@ -5909,8 +3694,30 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
     const decoder = new TextDecoder()
     let buffer = ''
 
-    const sseV1ConsumeCtx = buildReactSseConsumeCtx()
-    const uiPaint = createSseUiPaintScheduler(nextTick, { minIntervalMs: REACT_SSE_PAINT_MIN_MS })
+    const sseV1ConsumeCtx = {
+      scrollToBottom,
+      isDebugReactThinkSSE,
+      buildReactStepsFromTodoStrings,
+      thinkCtx: {
+        resolveStreamStepIndex,
+        scheduleReasoningTypewriter,
+        scheduleTodosStreamTypewriter,
+        sseIsReactThinkPhase,
+        logReactThinkStepDetail
+      },
+      engineCtx: {
+        flushReasoningTypewriter,
+        cancelTodosStreamTypewriter,
+        buildReactStepsFromTodoStrings,
+        resolveStreamStepIndex,
+        appendStepDetailLine,
+        scrollAgentStepLogIntoView,
+        handleShowGroupInList,
+        projectId: props.projectId,
+        handleNavigation,
+        nextTick
+      }
+    }
 
     try {
       while (true) {
@@ -5922,59 +3729,25 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
         const folded = foldAgentSseText(buffer, chunkText)
         buffer = folded.nextBuffer
 
-        let maxSeq = 0
-        let breakLoop = false
-        let needsImmediatePaint = false
+        // 每条完整 SSE JSON（fold 后的一行 data:）消费完即让出帧：nextTick 刷 Vue，rAF 给浏览器 paint。一包一渲染。
         for (const chunk of folded.chunks) {
           try {
             if (chunk && chunk.request_id) {
               reactStreamRequestIdRef.value = String(chunk.request_id)
             }
             const r = consumeAgentSseV1Chunk(chunk, aiMessage, sseV1ConsumeCtx)
-            if (r && r.breakChunkLoop) {
-              breakLoop = true
-              break
-            }
-            const seq = Number(chunk?.seq)
-            if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq
-            if (sseChunkNeedsImmediatePaint(chunk)) needsImmediatePaint = true
+            if (r && r.breakChunkLoop) break
+            await yieldAgentSseUiFrame(nextTick)
           } catch (e) {
             console.error('[CHAT-STREAM] 解析失败:', e, chunk)
           }
         }
-        if (maxSeq > streamLastSeq) streamLastSeq = maxSeq
-        if (needsImmediatePaint) {
-          await uiPaint.flushNow()
-        } else if (folded.chunks.length > 0) {
-          uiPaint.schedule()
-        }
-        const now = Date.now()
-        if (
-          pid &&
-          props.sessionId &&
-          streamLastSeq > 0 &&
-          now - lastAgentRunPatchTs > REACT_STREAM_PATCH_SEQ_MS
-        ) {
-          lastAgentRunPatchTs = now
-          patchAgentRunSeq(pid, props.sessionId, {
-            runId: reactStreamRequestIdRef.value || reactRunId,
-            status: 'streaming',
-            clientMessageId: aiMessage.id,
-            lastSeq: streamLastSeq,
-            llmModel: modelUsed
-          })
-          maybePatchAgentRunSnapshot(pid, props.sessionId, aiMessage)
-        }
-        if (breakLoop) break
       }
     } finally {
       reactSseReaderRef.value = null
       reactStreamRequestIdRef.value = null
     }
     flushReasoningTypewriter(aiMessage)
-    reconcileReactMessageAfterSseClose(aiMessage)
-    await uiPaint.flushNow()
-    uiPaint.dispose()
   } catch (error) {
     console.error('ReAct 执行失败:', error)
     // 如果用户已点过停止（我们已在 handleStop 里收敛 UI），这里不要再覆盖成错误
@@ -6000,15 +3773,69 @@ const handleReactAgentMode = async (userMessage, images = [], opts = {}) => {
     }
   }
 
-  if (pid && props.sessionId) {
-    clearAgentRun(pid, props.sessionId)
+  // 流式结束时若未写入 modify 沙箱字段，从 executionResults 回填，避免历史落库丢失预览
+  let modifyNavForSave = aiMessage.modifyNavigation
+  if (
+    (!modifyNavForSave ||
+      !Array.isArray(modifyNavForSave.batch_results) ||
+      modifyNavForSave.batch_results.length === 0) &&
+    aiMessage.executionResults?.length
+  ) {
+    const recovered = recoverModifyNavigationFromExecutionResults(aiMessage.executionResults)
+    if (recovered) {
+      modifyNavForSave = recovered
+      aiMessage.modifyNavigation = recovered
+    }
   }
   if (
-    aiMessage?.agentResult?.status !== 'cancelled' &&
-    aiMessage?.agentResult?.status !== 'failed'
+    modifyNavForSave &&
+    modifyNavForSave.batch_modify === true &&
+    (!aiMessage.modifyGroups || !Array.isArray(aiMessage.modifyGroups) || aiMessage.modifyGroups.length === 0)
   ) {
-    await persistReactAssistantMessage(aiMessage, modelUsed)
+    const rebuilt = rebuildModifyGroupsFromBatchNav(modifyNavForSave, shouldMergeModifyPreviewItems)
+    if (rebuilt?.length) {
+      aiMessage.modifyGroups = Object.freeze([...rebuilt])
+      nextTick(async () => {
+        await refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+        for (const grp of rebuilt) {
+          if (grp.items && grp.items.length > 0) {
+            await handleShowGroupInList(grp, aiMessage.id, { skipPersistedRefresh: true })
+          }
+        }
+      })
+    }
   }
+
+  // 保存最终结果到数据库（纯对话路径写入 direct_chat_reply，便于刷新后仍走气泡而非「总结」）
+  const _persistAgent = { ...(aiMessage.agentResult || {}) }
+  if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
+  else delete _persistAgent.direct_chat_reply
+  _persistAgent.react_plan_panel_suppressed = !!aiMessage.reactPlanPanelSuppressed
+  if (Array.isArray(aiMessage.reactPlanSteps) && aiMessage.reactPlanSteps.length > 0) {
+    _persistAgent.react_plan_steps = aiMessage.reactPlanSteps
+  } else {
+    try {
+      delete _persistAgent.react_plan_steps
+    } catch {
+      // ignore
+    }
+  }
+
+  // 保存最终结果到数据库（toRaw + 安全 stringify，避免 reactive 循环引用导致整段失败）
+  await saveMessageToDb({
+    is_user: false,
+    content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
+    understanding: aiMessage.understanding,
+    reasoning: aiMessage.reasoningContent || '',
+    steps: safeJsonForDb(aiMessage.steps, 'steps'),
+    execution_results: safeJsonForDb(aiMessage.executionResults || [], 'execution_results'),
+    agent_result: safeJsonForDb(_persistAgent, 'agent_result'),
+    evidences: safeJsonForDb(aiMessage.evidences || [], 'evidences'),
+    navigation: safeJsonForDb(aiMessage.navigation ?? null, 'navigation'),
+    modify_navigation: safeJsonForDb(aiMessage.modifyNavigation ?? null, 'modify_navigation'),
+    modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
+    final_response: aiMessage.finalResponse
+  })
 }
 
 // Agent 模式 - 调用后端 Agent 接口
@@ -6100,15 +3927,13 @@ const handleAgentMode = async (userMessage) => {
     content: aiMessage.finalResponse || aiMessage.understanding || '正在处理...', // 可按需补全落库字段
     understanding: aiMessage.understanding,
     steps: JSON.stringify(aiMessage.steps),
-    final_response: aiMessage.finalResponse,
-    llm_model: selectedModel.value,
+    final_response: aiMessage.finalResponse
   })
   
   scrollToBottom()
 }
 
-const handleChatMode = async (userMessage, images = [], opts = {}) => {
-  const modelUsed = normalizeSavedChatModel(opts?.model ?? selectedModel.value)
+const handleChatMode = async (userMessage, images = []) => {
   const aiMessage = {
     id: Date.now() + 1,
     isUser: false,
@@ -6135,11 +3960,10 @@ const handleChatMode = async (userMessage, images = [], opts = {}) => {
       signal: chatStopSignal,
       body: JSON.stringify({
         inputMessage: userMessage,
-        model: modelUsed,
+        model: selectedModel.value,
+        projectId: currentProjectId.value || props.projectId,
         images: images || [],
-        locale: localeForApi(),
-        projectId: currentProjectId.value || props.projectId || null,
-        ...(props.sessionId ? { sessionId: String(props.sessionId) } : {}),
+        locale: localeForApi()
       })
     })
     
@@ -6225,8 +4049,7 @@ const handleChatMode = async (userMessage, images = [], opts = {}) => {
     content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
     understanding: aiMessage.understanding,
     steps: JSON.stringify(aiMessage.steps),
-    final_response: aiMessage.finalResponse,
-    llm_model: modelUsed,
+    final_response: aiMessage.finalResponse
   })
 }
 
@@ -6249,6 +4072,7 @@ const handleSaveBugs = async (agentResult) => {
       title: bug.title,
       severity: bug.severity || 'medium',
       priority: bug.priority || 'medium',
+      description: bug.description,
       steps_to_reproduce: bug.steps_to_reproduce || '',
       expected: bug.expected || '',
       actual: bug.actual || '',
@@ -6319,182 +4143,7 @@ watch(
   }
 )
 
-watch(inputMessage, () => {
-  scheduleDraftSave()
-})
-
-watch(() => props.sessionId, onSessionIdChangeForDraft)
-
-const _normAdoptTargetType = (t) =>
-  String(t || 'bug')
-    .toLowerCase()
-    .replace(/-/g, '_')
-
-const navRecordIdMatchesAdoptTarget = (item, targetNorm, want) => {
-  if (!item || typeof item !== 'object') return false
-  const tt = _normAdoptTargetType(item.target || 'bug')
-  if (tt !== targetNorm) return false
-  let rid = item.record_id
-  if (rid == null) {
-    if (targetNorm === 'bug') rid = item.bug_id
-    else if (targetNorm === 'badcase' || targetNorm === 'testcase') rid = item.source_id
-    else if (targetNorm === 'card') rid = item.card_id ?? item.id
-  }
-  return rid != null && snowflakeIdStr(rid) === want
-}
-
-const patchGrepNavItemsForAdoptTitle = (items, targetNorm, want, newTitle) => {
-  if (!Array.isArray(items) || !newTitle) return false
-  let changed = false
-  for (const it of items) {
-    if (!navRecordIdMatchesAdoptTarget(it, targetNorm, want)) continue
-    it.title = newTitle
-    if (targetNorm === 'bug') it.bug_title = newTitle
-    changed = true
-  }
-  return changed
-}
-
-const patchExecutionResultsTitlesForAdopt = (obj, targetNorm, want, newTitle) => {
-  if (!newTitle) return false
-  let changed = false
-  if (Array.isArray(obj)) {
-    for (const x of obj) {
-      if (patchExecutionResultsTitlesForAdopt(x, targetNorm, want, newTitle)) changed = true
-    }
-    return changed
-  }
-  if (obj && typeof obj === 'object') {
-    const tid = obj.target_id != null ? obj.target_id : obj.targetId
-    if (tid != null && snowflakeIdStr(tid) === want) {
-      const ot = _normAdoptTargetType(obj.target || '')
-      if (!ot || ot === targetNorm || (targetNorm === 'bug' && ot === 'bug')) {
-        for (const side of ['before', 'after']) {
-          const sub = obj[side]
-          if (sub && typeof sub === 'object' && 'title' in sub) {
-            sub.title = newTitle
-            changed = true
-          }
-        }
-      }
-    }
-    for (const v of Object.values(obj)) {
-      if (patchExecutionResultsTitlesForAdopt(v, targetNorm, want, newTitle)) changed = true
-    }
-  }
-  return changed
-}
-
-/** 列表采纳改标题后：同步本条助手消息里的「定位结果」grep 文案与沙箱/执行结果里的 before.after.title，避免刷新前 UI 陈旧 */
-const patchMessageLocateTitlesAfterAdopt = (msg, want, targetType, newTitle) => {
-  const nt = String(newTitle || '').trim()
-  if (!nt || !want) return false
-  const tn = _normAdoptTargetType(targetType)
-  let touched = false
-  const nav = msg.navigation
-  if (nav && nav.type === 'multiple' && Array.isArray(nav.items)) {
-    if (patchGrepNavItemsForAdoptTitle(nav.items, tn, want, nt)) touched = true
-  }
-  const steps = msg.steps
-  if (Array.isArray(steps)) {
-    for (const s of steps) {
-      const gn = s && s.grepNavigation
-      if (gn && gn.type === 'multiple' && Array.isArray(gn.items)) {
-        if (patchGrepNavItemsForAdoptTitle(gn.items, tn, want, nt)) touched = true
-      }
-    }
-  }
-  const er = msg.executionResults
-  if (er != null && patchExecutionResultsTitlesForAdopt(er, tn, want, nt)) touched = true
-
-  const patchModifyShape = (navObj) => {
-    if (!navObj || snowflakeIdStr(navObj.target_id ?? navObj.targetId) !== want) return
-    for (const side of ['before', 'after']) {
-      const sub = navObj[side]
-      if (sub && typeof sub === 'object' && 'title' in sub) {
-        sub.title = nt
-        touched = true
-      }
-    }
-  }
-  const mn = msg.modifyNavigation
-  if (mn) {
-    if (mn.batch_modify && Array.isArray(mn.batch_results)) {
-      for (const br of mn.batch_results) patchModifyShape(br)
-    } else {
-      patchModifyShape(mn)
-    }
-  }
-  if (msg.modifyGroups && Array.isArray(msg.modifyGroups)) {
-    for (const g of msg.modifyGroups) {
-      const items = g && g.items
-      if (!Array.isArray(items)) continue
-      for (const it of items) {
-        patchModifyShape(it)
-      }
-    }
-  }
-  return touched
-}
-
-const onChatTempCardProposal = (event) => {
-  const d = event?.detail || {}
-  if (!d.scopeKey) return
-  const ix = tempCardProposals.value.findIndex((p) => p.scopeKey === d.scopeKey)
-  const entry = { ...d }
-  if (ix >= 0) {
-    const next = [...tempCardProposals.value]
-    next[ix] = entry
-    tempCardProposals.value = next
-  } else {
-    tempCardProposals.value = [...tempCardProposals.value, entry]
-  }
-}
-
-const dismissTempCardProposal = (scopeKey) => {
-  tempCardProposals.value = tempCardProposals.value.filter((p) => p.scopeKey !== scopeKey)
-}
-
-const isCreateAwaitingTempCard = (messageId) => {
-  if (messageId == null || messageId === undefined) return false
-  return createAwaitingTempCardMessageIds.value.includes(String(messageId))
-}
-
-const tempCardProposalForMessage = (messageId) => {
-  if (messageId == null || messageId === undefined) return null
-  const id = String(messageId)
-  return tempCardProposals.value.find((p) => p.messageId != null && String(p.messageId) === id) ?? null
-}
-
-const onCreateAwaitingTempCard = (event) => {
-  const { messageId, active } = event?.detail || {}
-  if (messageId == null || messageId === undefined) return
-  const id = String(messageId)
-  let arr = [...createAwaitingTempCardMessageIds.value]
-  if (active) {
-    if (!arr.includes(id)) arr.push(id)
-  } else {
-    arr = arr.filter((x) => x !== id)
-  }
-  createAwaitingTempCardMessageIds.value = arr
-}
-
-const approveTempCardProposal = (p) => {
-  window.dispatchEvent(
-    new CustomEvent('temp-card-approve', { detail: { scopeKey: p.scopeKey }, bubbles: true })
-  )
-  dismissTempCardProposal(p.scopeKey)
-}
-
-const rejectTempCardProposal = (p) => {
-  window.dispatchEvent(
-    new CustomEvent('temp-card-reject', { detail: { scopeKey: p.scopeKey }, bubbles: true })
-  )
-  dismissTempCardProposal(p.scopeKey)
-}
-
 onMounted(() => {
-  void loadChatModelsFromApi()
   scrollToBottom()
   // 初始化textarea高度
   nextTick(() => {
@@ -6507,9 +4156,6 @@ onMounted(() => {
   window.addEventListener('modify-cancelled', handleModifyCancelled)
   window.addEventListener('modify-confirmed', handleModifyConfirmed)
   window.addEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
-  window.addEventListener('chat-temp-card-proposal', onChatTempCardProposal)
-  window.addEventListener('create-awaiting-temp-card', onCreateAwaitingTempCard)
-  window.addEventListener('pagehide', flushAgentRunSnapshotOnPageHide)
 
   // 历史消息：滚动到顶部时按需加载更早内容（先出最新一屏）
   nextTick(() => {
@@ -6522,9 +4168,9 @@ onMounted(() => {
 // 处理修改取消事件
 const handleModifyCancelled = (event) => {
   const { targetId } = event.detail
-  const want = snowflakeIdStr(targetId)
-  console.log('[MODIFY] 收到取消事件，targetId:', want)
-  if (!want) return
+  const intTargetId = parseInt(targetId)
+  console.log('[MODIFY] 收到取消事件，targetId:', intTargetId)
+  if (isNaN(intTargetId)) return
 
   // 与确认事件保持一致：同步标记 modifyGroups / batch_results / modifyNavigation
   messages.value.forEach((msg, msgIdx) => {
@@ -6534,7 +4180,7 @@ const handleModifyCancelled = (event) => {
       msg.modifyGroups.forEach((group) => {
         if (!group.items || !Array.isArray(group.items)) return
         const itemIdx = group.items.findIndex(
-          (i) => snowflakeIdStr(i.target_id ?? i.targetId ?? i.id) === want
+          (i) => Number(i.target_id ?? i.targetId ?? i.id) === intTargetId
         )
         if (itemIdx !== -1) {
           const newItem = {
@@ -6552,7 +4198,7 @@ const handleModifyCancelled = (event) => {
     if (msg.modifyNavigation) {
       if (msg.modifyNavigation.batch_modify && Array.isArray(msg.modifyNavigation.batch_results)) {
         const resultIdx = msg.modifyNavigation.batch_results.findIndex(
-          (r) => snowflakeIdStr(r.target_id ?? r.targetId ?? r.id) === want
+          (r) => Number(r.target_id ?? r.targetId ?? r.id) === intTargetId
         )
         if (resultIdx !== -1) {
           msg.modifyNavigation.batch_results.splice(resultIdx, 1, {
@@ -6563,7 +4209,7 @@ const handleModifyCancelled = (event) => {
           })
           updated = true
         }
-      } else if (snowflakeIdStr(msg.modifyNavigation.target_id ?? msg.modifyNavigation.targetId) === want) {
+      } else if (Number(msg.modifyNavigation.target_id ?? msg.modifyNavigation.targetId) === intTargetId) {
         msg.modifyNavigation = {
           ...msg.modifyNavigation,
           cancelled: true,
@@ -6576,38 +4222,34 @@ const handleModifyCancelled = (event) => {
 
     if (updated) {
       messages.value[msgIdx] = { ...messages.value[msgIdx] }
-      console.log('[MODIFY] 已标记消息为已更新', msg.id, 'targetId:', want)
+      console.log('[MODIFY] 已标记消息为已更新', msg.id, 'targetId:', intTargetId)
     }
   })
-  void refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+  void refreshPersistedPendingDiffKeys(true)
 }
 
 // 处理修改确认事件
 const handleModifyConfirmed = (event) => {
-  const detail = event.detail || {}
-  const { targetId, newTitle: evNewTitle, oldTitle: evOldTitle, targetType: evTargetType } = detail
-  const want = snowflakeIdStr(targetId)
-  const newTitle = typeof evNewTitle === 'string' ? evNewTitle.trim() : ''
-  const oldTitle = typeof evOldTitle === 'string' ? evOldTitle.trim() : ''
-  const targetType = evTargetType || 'bug'
-  console.log('[MODIFY] 收到确认事件，targetId:', want, 'newTitle:', newTitle)
-
-  if (!want) {
+  const { targetId } = event.detail
+  const intTargetId = parseInt(targetId)
+  console.log('[MODIFY] 收到确认事件，targetId:', intTargetId)
+  
+  if (isNaN(intTargetId)) {
     console.error('[MODIFY] 无效的 targetId:', targetId)
     return
   }
-
+  
   // 找到对应的 modifyNavigation / modifyGroups 并标记为已执行
   messages.value.forEach((msg, msgIdx) => {
     let updated = false
-
+    
     // 处理 modifyGroups
     if (msg.modifyGroups && Array.isArray(msg.modifyGroups)) {
       msg.modifyGroups.forEach((group, groupIdx) => {
         if (!group.items || !Array.isArray(group.items)) return
-
+        
         const itemIdx = group.items.findIndex(
-          (i) => snowflakeIdStr(i.target_id ?? i.targetId) === want
+          (i) => Number(i.target_id ?? i.targetId) === intTargetId
         )
         if (itemIdx !== -1) {
           // 创建新对象触发响应式更新
@@ -6619,8 +4261,8 @@ const handleModifyConfirmed = (event) => {
           // 替换数组中的项
           group.items.splice(itemIdx, 1, newItem)
           updated = true
-          console.log('[MODIFY] modifyGroups 中标记项为已执行:', want)
-
+          console.log('[MODIFY] modifyGroups 中标记项为已执行:', intTargetId)
+          
           // 检查组内是否全部确认完成
           const allGroupConfirmed = group.items.every(
             (i) => i.confirmation_required === false || i.cancelled === true
@@ -6631,13 +4273,13 @@ const handleModifyConfirmed = (event) => {
         }
       })
     }
-
+    
     // 处理 modifyNavigation
     if (msg.modifyNavigation) {
       // 批量修改：标记 batch_results 中对应的项
       if (msg.modifyNavigation.batch_modify && msg.modifyNavigation.batch_results) {
         const resultIdx = msg.modifyNavigation.batch_results.findIndex(
-          (r) => snowflakeIdStr(r.target_id) === want
+          (r) => Number(r.target_id) === intTargetId
         )
         if (resultIdx !== -1) {
           // 创建新对象触发响应式更新
@@ -6647,8 +4289,8 @@ const handleModifyConfirmed = (event) => {
             success: true
           })
           updated = true
-          console.log('[MODIFY] 批量修改中标记项为已执行:', want)
-
+          console.log('[MODIFY] 批量修改中标记项为已执行:', intTargetId)
+          
           // 检查是否所有项都已确认
           const allConfirmed = msg.modifyNavigation.batch_results.every(
             (r) => r.confirmation_required === false || r.cancelled === true
@@ -6659,7 +4301,7 @@ const handleModifyConfirmed = (event) => {
         }
       }
       // 单个修改：标记整个 modifyNavigation
-      else if (snowflakeIdStr(msg.modifyNavigation.target_id) === want) {
+      else if (Number(msg.modifyNavigation.target_id) === intTargetId) {
         msg.modifyNavigation = {
           ...msg.modifyNavigation,
           success: true,
@@ -6669,26 +4311,13 @@ const handleModifyConfirmed = (event) => {
         console.log('[MODIFY] 已标记消息为已执行', msg.id)
       }
     }
-
-    if (newTitle && patchMessageLocateTitlesAfterAdopt(msg, want, targetType, newTitle)) {
-      updated = true
-    }
-
+    
     // 触发响应式更新
     if (updated) {
       messages.value[msgIdx] = { ...messages.value[msgIdx] }
     }
   })
-
-  if (oldTitle && newTitle && oldTitle !== newTitle) {
-    const cur = String(sessionTitleRef.value || '')
-    if (cur.includes(oldTitle)) {
-      sessionTitleRef.value = cur.split(oldTitle).join(newTitle)
-    }
-  }
-
-  // 列表侧 confirmModify 已 refreshActiveWorkbenchList；勿再 diff-review-sync 触发二次 restore/拉表
-  void refreshPersistedPendingDiffKeys(true, { emitListSync: false })
+  void refreshPersistedPendingDiffKeys(true)
 }
 
 // 大图预览：Escape 关闭（与下方 watch 成对注册/移除）
@@ -6706,9 +4335,7 @@ watch(imagePreviewSrc, (src) => {
 // 组件卸载：统一移除监听、中断请求、清理 rAF（须在 imagePreviewEscapeHandler 定义之后）
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
-  window.removeEventListener('diff-review-push', onDiffReviewPushForChat)
   document.removeEventListener('keydown', imagePreviewEscapeHandler)
-  stopReactResumePoll()
 
   if (reactSseReaderRef.value) {
     try {
@@ -6736,12 +4363,8 @@ onUnmounted(() => {
   } catch (e) {}
 
   window.removeEventListener('modify-cancelled', handleModifyCancelled)
-  window.removeEventListener('chat-temp-card-proposal', onChatTempCardProposal)
-  window.removeEventListener('create-awaiting-temp-card', onCreateAwaitingTempCard)
   window.removeEventListener('modify-confirmed', handleModifyConfirmed)
   window.removeEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
-  window.removeEventListener('pagehide', flushAgentRunSnapshotOnPageHide)
-  flushAgentRunSnapshotOnPageHide()
 
   const root = messagesContainer.value
   if (root) root.removeEventListener('scroll', loadOlderHistoryIfNeeded)
@@ -6766,9 +4389,6 @@ watch(() => props.sessionId, (newSessionId) => {
   }
   isSending.value = false
   historyLoading.value = false
-  stopReactResumePoll()
-  reactResumeInFlightRef.value = false
-  reactInterruptedHint.value = null
 
   try {
     messages.value.forEach((msg) => {
@@ -6838,54 +4458,6 @@ watch(() => props.sessionId, (newSessionId) => {
 .agent-local-proxy-hint-dismiss:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
-}
-
-.react-recovery-banner {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 12px;
-  font-size: 12px;
-  line-height: 1.45;
-  color: #b3e5fc;
-  background: rgba(3, 169, 244, 0.1);
-  border-top: 1px solid rgba(3, 169, 244, 0.22);
-}
-
-.react-recovery-banner-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.react-recovery-banner-actions {
-  display: flex;
-  flex-shrink: 0;
-  gap: 6px;
-}
-
-.react-recovery-btn {
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: transparent;
-  color: #d4d4d4;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.react-recovery-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.react-recovery-btn--primary {
-  border-color: rgba(3, 169, 244, 0.45);
-  color: #81d4fa;
-}
-
-.react-recovery-btn--primary:hover {
-  background: rgba(3, 169, 244, 0.18);
 }
 
 .messages-container {
@@ -7102,8 +4674,7 @@ watch(() => props.sessionId, (newSessionId) => {
 
 /* 深度思考：与 .simple-chat-panel 同色底，无边框；正文为 Cursor 系灰字，区别于普通回复 */
 .cursor-reasoning-wrap {
-  /* 与下方 AgentTaskRun/正文保留小幅间距；过大易被误认为「思考」与正文脱节 */
-  margin: 6px 0 12px;
+  margin: 6px 0 8px;
   max-width: 100%;
 }
 .cursor-reasoning-block {
@@ -7117,7 +4688,7 @@ watch(() => props.sessionId, (newSessionId) => {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 2px 0 4px;
+  padding: 4px 0 8px;
   margin: 0;
   border: none;
   background: transparent;
@@ -7572,84 +5143,49 @@ watch(() => props.sessionId, (newSessionId) => {
   cursor: pointer;
 }
 
-/* 图片大图预览弹层（须高于 ProjectWorkspaceShell 顶栏 10100） */
+/* 图片大图预览弹层 */
 .image-preview-overlay {
   position: fixed;
   inset: 0;
-  z-index: 120000;
-  background: rgba(0, 0, 0, 0.88);
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.85);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 48px 24px 24px;
+  padding: 40px;
   cursor: zoom-out;
 }
 
-.image-preview-stage {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  max-width: min(96vw, 1400px);
-  max-height: min(88vh, 900px);
-  cursor: default;
-}
-
-.image-preview-toolbar {
+.image-preview-close {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-  border-radius: 8px;
-  background: rgba(30, 30, 30, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
-  pointer-events: auto;
-}
-
-.image-preview-tool-btn {
-  width: 32px;
-  height: 32px;
+  top: 16px;
+  right: 16px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #e8e8e8;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.2s;
 }
 
-.image-preview-tool-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
-}
-
-.image-preview-tool-btn--close:hover {
-  background: rgba(220, 80, 80, 0.35);
-}
-
-.image-preview-tool-icon {
-  width: 18px;
-  height: 18px;
-  display: block;
+.image-preview-close:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
 
 .image-preview-full {
-  display: block;
-  max-width: min(96vw, 1400px);
-  max-height: min(88vh, 900px);
-  width: auto;
-  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
-  border-radius: 6px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  cursor: default;
 }
 
 .message-input {
@@ -8122,64 +5658,24 @@ watch(() => props.sessionId, (newSessionId) => {
   opacity: 0.95;
 }
 
-/* Cursor 风格：展开条在卡片底边居中，悬停整张卡片才显示 */
-.sandbox-card--has-expand {
-  position: relative;
-}
-
-.sandbox-preview-body {
-  position: relative;
-}
-
-.sandbox-preview-body--collapsed {
-  padding-bottom: 4px;
-}
-
-.sandbox-preview-fade {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 28px;
-  pointer-events: none;
-  background: linear-gradient(to bottom, transparent, rgba(15, 23, 42, 0.88));
-}
-
-.sandbox-expand-bar {
-  position: relative;
+.sandbox-toggle {
+  width: 10px;
+  height: 10px;
   display: block;
-  width: 100%;
-  height: 20px;
-  margin: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
+  flex-shrink: 0;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  overflow: visible;
-}
-
-.sandbox-card--has-expand:hover .sandbox-expand-bar {
-  opacity: 1;
-}
-
-/*  chevron 骑在底边线上（与 Cursor diff 块一致） */
-.sandbox-expand-chevron {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  width: 14px;
-  height: 14px;
-  display: block;
-  transform: translate(-50%, -50%);
+  /* 让 chevron 图片呈现灰白（深色背景下接近 Qoder 风格） */
   filter: brightness(0) saturate(100%) invert(73%) sepia(11%) saturate(326%) hue-rotate(176deg) brightness(90%) contrast(86%);
-  transition: transform 0.12s ease;
-  pointer-events: none;
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
 }
 
-.sandbox-expand-bar.expanded .sandbox-expand-chevron {
-  transform: translate(-50%, -50%) rotate(180deg);
+.sandbox-header:hover .sandbox-toggle {
+  opacity: 0.95;
+}
+
+.sandbox-toggle.expanded {
+  opacity: 0.95;
 }
 
 .group-item-target {
@@ -8872,55 +6368,5 @@ watch(() => props.sessionId, (newSessionId) => {
   width: 16px;
   height: 16px;
 }
-
-.temp-card-proposal-bar--inline {
-  margin: 8px 0 10px;
-}
-
-.temp-card-proposal-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  margin: 0 12px 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(59, 130, 246, 0.35);
-  border-radius: 8px;
-  background: rgba(59, 130, 246, 0.1);
-  font-size: 12px;
-  color: #e2e8f0;
-  line-height: 1.45;
-}
-
-.temp-card-proposal-text {
-  flex: 1;
-  min-width: 200px;
-}
-
-.temp-card-proposal-actions {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.temp-card-proposal-btn {
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.temp-card-proposal-btn--approve {
-  color: #052e16;
-  background: #4ade80;
-  border-color: #22c55e;
-}
-
-.temp-card-proposal-btn--reject {
-  color: #fecaca;
-  background: transparent;
-  border-color: rgba(248, 113, 113, 0.45);
-}
 </style>
+

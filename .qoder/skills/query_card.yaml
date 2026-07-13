@@ -1,0 +1,39 @@
+name: query_card
+description: 查询迭代卡片 Card（按标题、类型、计划等）
+trigger:
+  intents: [查询, 搜索, 查找, 查看, 列出, 显示]
+  entities: [card, 卡片, 迭代卡片]
+  patterns:
+    - 查询卡片
+    - 搜索卡片
+    - 查看迭代里的卡片
+    - 列出卡片
+    - 卡片列表
+
+tools:
+  - name: grep
+    purpose: 查询 Card
+    params:
+      target: card
+      mode: locate
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+      plan_id: ${plan_id}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: grep 查询 Card（target=card）
+    depends_on: null
+
+examples:
+  - 查询当前迭代下的所有卡片
+  - 搜索标题包含登录的卡片
+  - 列出这个计划里的 bug 卡片
+
+metadata:
+  category: card_management
+  priority: medium
+  version: 1.0.0
+  created_at: 2026-07-04
+  author: BadCase Doctor Team

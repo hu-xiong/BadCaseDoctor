@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security"
+      lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>王者农场浇水计算器</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>王者农场浇水计算器</h1>
+        <p>记录播种时间，科学安排浇水，不错过每次加速窗口</p>
+        <div class="header-links">
+            <a th:href="@{/profile}" class="link-btn">个人中心</a>
+            <a th:href="@{/logout}" class="link-btn">退出</a>
+        </div>
+    </div>
+
+    <div class="form-section">
+        <h2>新建种植</h2>
+        <form th:action="@{/plant}" method="post" class="plant-form">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="cropType">作物种类</label>
+                    <select id="cropType" name="cropType" required>
+                        <option value="">请选择作物</option>
+                        <option th:each="crop : ${cropTypes}"
+                                th:value="${crop.name()}"
+                                th:text="${crop.displayName + ' (' + crop.growthHours + 'h, ' + crop.unlockLevel + '级解锁)'}">
+                        </option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="sowingTime">播种时间</label>
+                    <input type="datetime-local" id="sowingTime" name="sowingTime" required>
+                </div>
+            </div>
+            <button type="submit" class="btn-primary">播种</button>
+        </form>
+    </div>
+
+    <div class="plantations-section">
+        <h2>我的种植记录</h2>
+
+        <div th:if="${#lists.isEmpty(plantations)}" class="empty-state">
+            还没有种植记录，快去播种吧！
+        </div>
+
+        <div th:each="p : ${plantations}" class="plantation-card" th:classappend="'status-' + ${p.status.name().toLowerCase()}">
+            <div class="card-header">
+                <span class="crop-name" th:text="${p.cropType.displayName}"></span>
+                <span class="crop-status" th:text="${p.status.name() == 'GROWING' ? '生长中' : (p.status.name() == 'HARVESTED' ? '已收获' : '错过浇水')}"></span>
+            </div>
+            <div class="card-body">
+                <div class="info-row">
+                    <span class="label">播种时间</span>
+                    <span class="value" th:text="${#temporals.format(p.sowingTime, 'MM-dd HH:mm')}"></span>
+                </div>
+                <div class="info-row">
+                    <span class="label">原周期</span>
+                    <span class="value" th:text="${p.cropType.growthHours + '小时'}"></span>
+                </div>
+                <div class="info-row">
+                    <span class="label">浇水次数</span>
+                    <span class="value" th:text="${p.wateredCount + '/4'}"></span>
+                </div>
+                <div class="info-row" th:if="${p.nextWateringTime != null}">
+                    <span class="label">下次浇水</span>
+                    <span class="value highlight" th:text="${#temporals.format(p.nextWateringTime, 'MM-dd HH:mm')}"></span>
+                </div>
+
+                <!-- 浇水节点进度条 -->
+                <div class="progress-bar" th:if="${p.status.name() == 'GROWING'}">
+                    <div class="progress-dot" th:classappend="${p.wateredCount >= 1} ? 'filled'" th:title="'第1次: ' + ${p.cropType.getNodeLabel(0)}">1</div>
+                    <div class="progress-line" th:classappend="${p.wateredCount >= 1} ? 'filled'"></div>
+                    <div class="progress-dot" th:classappend="${p.wateredCount >= 2} ? 'filled'" th:title="'第2次: ' + ${p.cropType.getNodeLabel(1)}">2</div>
+                    <div class="progress-line" th:classappend="${p.wateredCount >= 2} ? 'filled'"></div>
+                    <div class="progress-dot" th:classappend="${p.wateredCount >= 3} ? 'filled'" th:title="'第3次: ' + ${p.cropType.getNodeLabel(2)}">3</div>
+                    <div class="progress-line" th:classappend="${p.wateredCount >= 3} ? 'filled'"></div>
+                    <div class="progress-dot" th:classappend="${p.wateredCount >= 4} ? 'filled'" th:title="'第4次: ' + ${p.cropType.getNodeLabel(3)}">4</div>
+                </div>
+
+                <!-- 浇水节点时间 -->
+                <div class="schedule-info" th:if="${p.status.name() == 'GROWING'}">
+                    <details>
+                        <summary>查看浇水时间表</summary>
+                        <div class="schedule-list">
+                            <div th:each="i : ${#numbers.sequence(0, 3)}" class="schedule-item">
+                                <span th:text="'第' + (i+1) + '次浇水：'"></span>
+                                <span th:text="${p.cropType.getNodeLabel(i)}"></span>
+                                <span th:text="' (' + ${#temporals.format(p.sowingTime.plusMinutes(p.cropType.wateringNodes[i]), 'MM-dd HH:mm')} + ')'"></span>
+                            </div>
+                            <div class="schedule-item">
+                                <span>最短成熟：</span>
+                                <span th:text="${p.cropType.minWateredMinutes + '分钟'}"></span>
+                                <span th:text="' (' + ${#temporals.format(p.sowingTime.plusMinutes(p.cropType.minWateredMinutes), 'MM-dd HH:mm')} + ')'"></span>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+            </div>
+            <div class="card-actions" th:if="${p.status.name() == 'GROWING'}">
+                <form th:action="@{/water/{id}(id=${p.id})}" method="post" style="display:inline">
+                    <button type="submit" class="btn-water" th:disabled="${p.wateredCount >= 4}">
+                        浇水
+                    </button>
+                </form>
+                <form th:action="@{/harvest/{id}(id=${p.id})}" method="post" style="display:inline">
+                    <button type="submit" class="btn-harvest" th:disabled="${p.wateredCount < 4}">
+                        收获
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

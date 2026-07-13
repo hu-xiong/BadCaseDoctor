@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
-
 interface BreadcrumbItem {
   title: string
   path?: string
@@ -10,7 +8,6 @@ defineProps<{
   items: BreadcrumbItem[]
 }>()
 
-const router = useRouter()
 </script>
 
 <template>

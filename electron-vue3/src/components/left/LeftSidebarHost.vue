@@ -28,6 +28,13 @@
       :pendingDeletePlanId="pendingDeletePlanId"
       :confirmDelete="confirmDelete"
       :cancelPendingDelete="cancelModify"
+      :pendingPlanCreates="pendingPlanCreates"
+      :confirmCreate="confirmCreate"
+      :cancelCreate="cancelCreate"
+      :isLastInCreateCluster="isLastInCreateCluster"
+      :getCreateClusterSize="getCreateClusterSize"
+      :confirmConsecutiveCreateGroup="confirmConsecutiveCreateGroup"
+      :cancelConsecutiveCreateGroup="cancelConsecutiveCreateGroup"
     />
 
     <SearchPanel
@@ -112,9 +119,16 @@ defineProps({
   archivePlan: { type: Function, required: true },
   deletePlan: { type: Function, required: true },
   pinPlan: { type: Function, required: true },
-  pendingDeletePlanId: { type: Number, default: null },
+  pendingDeletePlanId: { type: [String, Number], default: null },
   confirmDelete: { type: Function, default: null },
-  cancelModify: { type: Function, default: null }
+  cancelModify: { type: Function, default: null },
+  pendingPlanCreates: { type: Array, default: () => [] },
+  confirmCreate: { type: Function, default: null },
+  cancelCreate: { type: Function, default: null },
+  isLastInCreateCluster: { type: Function, default: null },
+  getCreateClusterSize: { type: Function, default: null },
+  confirmConsecutiveCreateGroup: { type: Function, default: null },
+  cancelConsecutiveCreateGroup: { type: Function, default: null }
 })
 </script>
 

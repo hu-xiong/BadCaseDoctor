@@ -1,0 +1,63 @@
+name: delete_plan
+description: 删除迭代计划 Plan（须先预览；删的是计划节点本身，不是计划内卡片）
+trigger:
+  intents: [删除, 删掉, 移除, 去掉, 清除]
+  entities: [plan, 迭代计划, 迭代, 计划, sprint]
+  patterns:
+    - 删除迭代计划
+    - 删掉这个计划
+    - 移除迭代
+    - 删除计划
+
+tools:
+  - name: delete
+    purpose: 预览待删迭代计划
+    params:
+      target: plan
+      plan_id: ${plan_id}
+      project_id: ${project_id}
+      confirm: false
+
+  - name: delete
+    purpose: 用户确认后执行删除
+    params:
+      target: plan
+      plan_id: ${plan_id}
+      project_id: ${project_id}
+      confirm: true
+
+workflow:
+  - step: 1
+    tool: delete
+    description: delete 预览迭代计划（target=plan，plan_id 用侧栏当前迭代或 grep 的 first_plan_id；confirm=false）
+    depends_on: null
+
+  - step: 2
+    tool: delete
+    description: 用户确认后 delete(target=plan, confirm=true)；禁止未预览直接落库
+    depends_on: step_1
+
+examples:
+  - 帮忙删除这个迭代计划2
+  - 删掉迭代计划 Sprint-1
+
+prompt_template: |
+  你正在执行 **delete_plan** 技能：删除 **迭代计划 Plan 节点本身**（Plan 表记录）。
+
+  **工作流：**
+  1. **delete**：`target=plan`，`plan_id` 来自侧栏当前迭代或上一步 grep 的 `first_plan_id`；**confirm=false** 仅预览计划摘要（name/id）。
+  2. 用户确认后 **delete** 同参数且 **confirm=true** 落库。
+
+  **必守：**
+  - 用户说的是「迭代计划/计划」→ **target 必须是 plan**，禁止写成 badcase/bug/card。
+  - **禁止**在回复里列举计划内的 Bug/卡片/用例让用户「确认删卡片」；删计划与删卡片是不同 target。
+  - 侧栏已选中目标计划且用户说「这个/当前迭代计划」时，可直接 delete 预览，**不必**先 grep。
+  - 仅当 plan_id 不确定、需按名称定位时，才先 **grep(target=plan, keywords=计划名)**。
+  - 默认计划、含子计划时工具会拒绝删除，须如实转述错误信息。
+
+metadata:
+  category: plan_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-06-14
+  author: BadCaseDoctor Team

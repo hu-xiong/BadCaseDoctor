@@ -1,6 +1,16 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import NavBar from './components/NavBar.vue'
 import Footer from './components/Footer.vue'
+import { useAuthStore } from '@/stores/auth'
+
+const authStore = useAuthStore()
+
+onMounted(() => {
+  if (authStore.token && !authStore.user) {
+    authStore.fetchCurrentUser()
+  }
+})
 </script>
 
 <template>

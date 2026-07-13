@@ -1,0 +1,25 @@
+﻿将测试 13 个 embedding 模型（repeats=2）…
+
+文本 (32 字): '问登录问题答的不好 复现步骤修改为 提问登录问题即可234456'
+
+模型                                             耗时(ms)     维度 API                状态    
+----------------------------------------------------------------------------------------
+text-embedding-v1                               192.6   1536 openai_compatible  OK    
+text-embedding-v3                               271.1   1024 openai_compatible  OK    
+text-embedding-v2                               302.9   1536 openai_compatible  OK    
+tongyi-embedding-vision-plus                    586.7   1152 multimodal         OK    
+multimodal-embedding-v1                         614.3   1024 multimodal         OK    
+tongyi-embedding-vision-plus-2026-03-06         640.7   1152 multimodal         OK    
+qwen2.5-vl-embedding                            667.0   1024 multimodal         OK    
+qwen3-vl-embedding                              691.3   2560 multimodal         OK    
+tongyi-embedding-vision-flash                   694.1    768 multimodal         OK    
+tongyi-embedding-vision-flash-2026-03-06       1142.9    768 multimodal         OK    
+text-embedding-v4                              1765.1   1024 openai_compatible  OK    
+text-embedding-async-v1                             -      - openai_compatible  FAIL  
+  └─ Error code: 404 - {'error': {'message': 'Unsupported model `text-embedding-async-v1` for OpenAI compatibility mode.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_supported'}, 'r
+text-embedding-async-v2                             -      - openai_compatible  FAIL  
+  └─ Error code: 404 - {'error': {'message': 'Unsupported model `text-embedding-async-v2` for OpenAI compatibility mode.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_supported'}, 'r
+
+最快: text-embedding-v1 (192.6 ms, dims=1536)
+
+完成: 11/13 成功

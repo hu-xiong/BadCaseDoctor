@@ -1,0 +1,57 @@
+name: delete_badcase
+description: 删除 BadCase 记录（须先定位再预览删除）
+trigger:
+  intents: [删除, 删掉, 移除, 去掉, 清除]
+  entities: [badcase, 问题用例, 错误用例]
+  patterns:
+    - 删除 badcase
+    - 删掉错误用例
+    - 移除问题用例
+
+tools:
+  - name: grep
+    purpose: 定位要删除的 BadCase
+    params:
+      target: badcase
+      mode: locate
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+
+  - name: delete
+    purpose: 预览/确认删除
+    params:
+      target: badcase
+      target_id: ${grep_result.first_badcase_id}
+      project_id: ${project_id}
+      confirm: false
+
+workflow:
+  - step: 1
+    tool: grep
+    description: grep 定位 BadCase（target=badcase，keywords 用标题或 record_id）
+    depends_on: null
+
+  - step: 2
+    tool: delete
+    description: delete 预览待删记录（confirm=false）；用户确认后再 confirm=true
+    depends_on: step_1
+
+examples:
+  - 删除这个 badcase
+  - 删掉标题为登录失败的错误用例
+
+prompt_template: |
+  你正在执行 **delete_badcase** 技能。
+
+  **工作流：**
+  1. **grep**：target=badcase，先定位记录
+  2. **delete**：target=badcase，target_id 来自 grep；**confirm=false** 仅预览摘要
+
+  首轮只能 grep；禁止未检索直接 delete。参数见 get_tool_description("delete")。
+
+metadata:
+  category: badcase_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-05-29
+  author: BadCaseDoctor Team

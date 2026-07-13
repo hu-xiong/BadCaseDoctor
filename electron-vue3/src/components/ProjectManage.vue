@@ -102,6 +102,8 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getProjects, deleteProject as deleteProjectApi } from '../api.js'
 import api from '../api.js'
+import { ensureUserDefaultProject } from '../utils/ensureUserDefaultProject.js'
+import { setLastProjectId } from '../utils/lastProject.js'
 
 export default {
   name: 'ProjectManage',
@@ -255,8 +257,13 @@ export default {
     }
 
     const viewProject = (project) => {
-      // 发出项目选择事件，让父组件处理跳转逻辑
       emit('projectSelected', project)
+      const id = project?.id
+      if (id != null && String(id).trim() !== '') {
+        const sid = String(id).trim()
+        setLastProjectId(sid)
+        router.push(`/project-detail/${encodeURIComponent(sid)}`)
+      }
     }
 
     const editProject = (project) => {
@@ -334,7 +341,22 @@ export default {
     }
 
     onMounted(() => {
-      fetchProjects()
+      void ensureUserDefaultProject(router).finally(() => {
+        fetchProjects().then(() => {
+          const route = router.currentRoute.value
+          const onManage =
+            route?.name === 'ProjectManage' ||
+            String(route?.path || '').includes('project-manage')
+          if (!onManage) return
+          const stillOnManage =
+            router.currentRoute.value?.name === 'ProjectManage' ||
+            String(router.currentRoute.value?.path || '').includes('project-manage')
+          if (!stillOnManage) return
+          if (projects.value.length === 1 && projects.value[0]?.id != null) {
+            viewProject(projects.value[0])
+          }
+        })
+      })
     })
     
     // 组件卸载时清理缓存

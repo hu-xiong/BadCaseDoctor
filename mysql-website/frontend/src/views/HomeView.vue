@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import HeroSection from '@/components/HeroSection.vue'
 import SectionHeader from '@/components/SectionHeader.vue'
 import FeatureCard from '@/components/FeatureCard.vue'
 import NewsCard from '@/components/NewsCard.vue'
+import { getLatestNews, type NewsItem } from '@/api/news'
+import { formatDate } from '@/utils/format'
 
 const features = [
   {
@@ -51,32 +53,30 @@ const stats = [
   { value: '99.99%', label: 'Uptime Guarantee' }
 ]
 
-const news = ref([
-  {
-    id: 1,
-    title: 'MySQL 8.4 LTS Released',
-    summary: 'The new Long Term Support release brings enhanced performance, new features, and extended support.',
-    date: '2024-04-15',
-    category: 'Release',
-    image: 'https://picsum.photos/400/200'
-  },
-  {
-    id: 2,
-    title: 'MySQL Tech Talk Series',
-    summary: 'Join our monthly webinars covering best practices, new features, and real-world use cases.',
-    date: '2024-04-10',
-    category: 'Event',
-    image: 'https://picsum.photos/400/201'
-  },
-  {
-    id: 3,
-    title: 'MySQL Community Awards 2024',
-    summary: 'Recognizing outstanding contributions from our global community of developers and contributors.',
-    date: '2024-04-05',
-    category: 'Community',
-    image: 'https://picsum.photos/400/202'
+const news = ref<Array<{
+  id: number
+  title: string
+  summary: string
+  date: string
+  category: string
+  image: string
+}>>([])
+
+onMounted(async () => {
+  try {
+    const items = await getLatestNews(3)
+    news.value = items.map((item: NewsItem) => ({
+      id: item.id,
+      title: item.title,
+      summary: item.summary,
+      date: formatDate(item.created_at),
+      category: 'News',
+      image: item.image_url || `https://picsum.photos/seed/mysql${item.id}/400/200`
+    }))
+  } catch {
+    news.value = []
   }
-])
+})
 
 const cases = ref([
   {

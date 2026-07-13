@@ -12,15 +12,15 @@ const formRef = ref()
 const loading = computed(() => authStore.loading)
 
 const form = ref({
-  username: '',
+  email: '',
   password: '',
   remember: false
 })
 
 const rules = {
-  username: [
-    { required: true, message: 'Please enter username', trigger: 'blur' },
-    { min: 3, max: 20, message: 'Username must be 3-20 characters', trigger: 'blur' }
+  email: [
+    { required: true, message: 'Please enter email', trigger: 'blur' },
+    { type: 'email', message: 'Please enter a valid email', trigger: 'blur' }
   ],
   password: [
     { required: true, message: 'Please enter password', trigger: 'blur' },
@@ -33,7 +33,7 @@ const handleLogin = async () => {
   if (!valid) return
 
   const result = await authStore.loginAction({
-    username: form.value.username,
+    email: form.value.email,
     password: form.value.password
   })
 
@@ -66,10 +66,10 @@ const handleLogin = async () => {
           class="auth-form"
           @submit.prevent="handleLogin"
         >
-          <el-form-item prop="username">
+          <el-form-item prop="email">
             <el-input
-              v-model="form.username"
-              placeholder="Username or Email"
+              v-model="form.email"
+              placeholder="Email address"
               size="large"
               prefix-icon="User"
             />

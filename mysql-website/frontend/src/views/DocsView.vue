@@ -1,98 +1,67 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, onMounted, watch } from 'vue'
+import LoadingSpinner from '@/components/LoadingSpinner.vue'
+import { getDocCategories, getDocPages, getDocPage, searchDocs, type DocCategory, type DocPage } from '@/api/docs'
 
 interface DocNode {
   id: string
+  docId?: number
   title: string
   children?: DocNode[]
 }
 
 const searchQuery = ref('')
-const expandedNodes = ref<Set<string>>(new Set(['getting-started']))
-
-const docsTree = ref<DocNode[]>([
-  {
-    id: 'getting-started',
-    title: 'Getting Started',
-    children: [
-      { id: 'introduction', title: 'Introduction to MySQL' },
-      { id: 'installation', title: 'Installation' },
-      { id: 'quick-start', title: 'Quick Start Guide' },
-      { id: 'connecting', title: 'Connecting to MySQL' }
-    ]
-  },
-  {
-    id: 'tutorials',
-    title: 'Tutorials',
-    children: [
-      { id: 'tutorial-basics', title: 'MySQL Basics' },
-      { id: 'tutorial-sql', title: 'SQL Statements' },
-      { id: 'tutorial-optimization', title: 'Query Optimization' }
-    ]
-  },
-  {
-    id: 'reference',
-    title: 'Reference',
-    children: [
-      { id: 'ref-data-types', title: 'Data Types' },
-      { id: 'ref-functions', title: 'Functions' },
-      { id: 'ref-commands', title: 'SQL Commands' },
-      { id: 'ref-config', title: 'Configuration Options' }
-    ]
-  },
-  {
-    id: 'administration',
-    title: 'Administration',
-    children: [
-      { id: 'admin-users', title: 'User Management' },
-      { id: 'admin-backup', title: 'Backup & Recovery' },
-      { id: 'admin-replication', title: 'Replication' },
-      { id: 'admin-security', title: 'Security' }
-    ]
-  },
-  {
-    id: 'dev-guide',
-    title: 'Developer Guide',
-    children: [
-      { id: 'dev-connectors', title: 'MySQL Connectors' },
-      { id: 'dev-apis', title: 'APIs' },
-      { id: 'dev-best-practices', title: 'Best Practices' }
-    ]
-  }
-])
-
+const loading = ref(true)
+const docsTree = ref<DocNode[]>([])
+const expandedNodes = ref<Set<string>>(new Set())
 const currentDoc = ref({
-  id: 'introduction',
-  title: 'Introduction to MySQL',
-  content: `
-# Introduction to MySQL
-
-MySQL is the world's most popular open-source relational database management system (RDBMS). 
-
-## Key Features
-
-- **High Performance**: MySQL delivers lightning-fast performance with optimized query processing.
-- **Scalability**: From embedded applications to data warehouses serving millions of requests.
-- **Reliability**: Proven technology with extensive testing and robust transaction support.
-- **Security**: Enterprise-grade security features including SSL encryption and granular permissions.
-- **ACID Compliance**: Full ACID transaction support for critical data operations.
-- **Cross-Platform**: Runs on Windows, Linux, macOS, and many other platforms.
-
-## MySQL Editions
-
-MySQL is available in several editions:
-
-1. **MySQL Community Edition**: Free, open-source version with core database features.
-2. **MySQL Enterprise Edition**: Commercial edition with advanced features, tools, and support.
-3. **MySQL Cluster**: Distributed database combining linear scalability and high availability.
-
-## Getting Help
-
-- [Official Documentation](/docs)
-- [MySQL Forums](https://forums.mysql.com/)
-- [Stack Overflow](https://stackoverflow.com/questions/tagged/mysql)
-  `
+  id: '',
+  title: 'Documentation',
+  content: 'Select a topic from the sidebar to view documentation.'
 })
+
+function buildTree(categories: DocCategory[], pages: DocPage[]): DocNode[] {
+  const pagesByCategory = new Map<number, DocPage[]>()
+  for (const page of pages) {
+    const list = pagesByCategory.get(page.category_id) || []
+    list.push(page)
+    pagesByCategory.set(page.category_id, list)
+  }
+
+  return categories.map(category => ({
+    id: `cat-${category.id}`,
+    title: category.name,
+    children: (pagesByCategory.get(category.id) || []).map(page => ({
+      id: `doc-${page.id}`,
+      docId: page.id,
+      title: page.title
+    }))
+  }))
+}
+
+async function loadDocs() {
+  loading.value = true
+  try {
+    const [categories, pagesData] = await Promise.all([
+      getDocCategories(),
+      getDocPages({ page: 1, page_size: 100 })
+    ])
+    docsTree.value = buildTree(categories, pagesData.list)
+    if (docsTree.value.length) {
+      expandedNodes.value.add(docsTree.value[0].id)
+      const firstDoc = docsTree.value[0].children?.[0]
+      if (firstDoc?.docId) {
+        await selectDoc(firstDoc.id, firstDoc.docId, firstDoc.title)
+      }
+    }
+  } catch {
+    docsTree.value = []
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(loadDocs)
 
 const toggleNode = (nodeId: string) => {
   if (expandedNodes.value.has(nodeId)) {
@@ -102,18 +71,49 @@ const toggleNode = (nodeId: string) => {
   }
 }
 
-const selectDoc = (nodeId: string, title: string) => {
-  currentDoc.value = {
-    id: nodeId,
-    title,
-    content: `# ${title}\n\nContent for this documentation page is being loaded...`
+const selectDoc = async (nodeId: string, docId: number, title: string) => {
+  currentDoc.value = { id: nodeId, title, content: 'Loading...' }
+  try {
+    const page = await getDocPage(docId)
+    currentDoc.value = {
+      id: nodeId,
+      title: page.title,
+      content: page.content
+    }
+  } catch {
+    currentDoc.value = {
+      id: nodeId,
+      title,
+      content: 'Failed to load document content.'
+    }
   }
 }
+
+watch(searchQuery, async (keyword) => {
+  if (!keyword.trim()) {
+    await loadDocs()
+    return
+  }
+  try {
+    const results = await searchDocs(keyword.trim())
+    docsTree.value = [{
+      id: 'search-results',
+      title: 'Search Results',
+      children: results.map(item => ({
+        id: `doc-${item.id}`,
+        docId: item.id,
+        title: item.title
+      }))
+    }]
+    expandedNodes.value = new Set(['search-results'])
+  } catch {
+    docsTree.value = []
+  }
+})
 </script>
 
 <template>
   <div class="docs-page">
-    <!-- Sidebar -->
     <aside class="docs-sidebar">
       <div class="search-box">
         <el-input
@@ -123,8 +123,9 @@ const selectDoc = (nodeId: string, title: string) => {
           clearable
         />
       </div>
-      
-      <nav class="docs-nav">
+
+      <LoadingSpinner v-if="loading" />
+      <nav v-else class="docs-nav">
         <div
           v-for="section in docsTree"
           :key="section.id"
@@ -138,14 +139,14 @@ const selectDoc = (nodeId: string, title: string) => {
             <span>{{ section.title }}</span>
             <i :class="expandedNodes.has(section.id) ? 'el-icon-arrow-down' : 'el-icon-arrow-right'"></i>
           </div>
-          
+
           <div v-if="expandedNodes.has(section.id) && section.children" class="doc-children">
             <div
               v-for="child in section.children"
               :key="child.id"
               class="doc-item"
               :class="{ 'is-active': currentDoc.id === child.id }"
-              @click="selectDoc(child.id, child.title)"
+              @click="child.docId && selectDoc(child.id, child.docId, child.title)"
             >
               {{ child.title }}
             </div>
@@ -154,26 +155,17 @@ const selectDoc = (nodeId: string, title: string) => {
       </nav>
     </aside>
 
-    <!-- Main Content -->
     <main class="docs-content">
       <div class="docs-breadcrumb">
         <span>Documentation</span>
         <span class="separator">/</span>
         <span>{{ currentDoc.title }}</span>
       </div>
-      
+
       <article class="docs-article">
-        <div class="markdown-body" v-html="currentDoc.content"></div>
+        <h1>{{ currentDoc.title }}</h1>
+        <div class="markdown-body">{{ currentDoc.content }}</div>
       </article>
-      
-      <aside class="docs-toc">
-        <h4>On This Page</h4>
-        <ul>
-          <li><a href="#key-features">Key Features</a></li>
-          <li><a href="#mysql-editions">MySQL Editions</a></li>
-          <li><a href="#getting-help">Getting Help</a></li>
-        </ul>
-      </aside>
     </main>
   </div>
 </template>
@@ -283,61 +275,22 @@ export default {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
 }
 
+.docs-article h1 {
+  font-size: 32px;
+  margin-bottom: 24px;
+}
+
 .markdown-body {
   line-height: 1.8;
-}
-
-.markdown-body :deep(h1) {
-  font-size: 32px;
-  font-weight: 700;
-  margin-bottom: 24px;
-  color: var(--text-primary);
-}
-
-.markdown-body :deep(h2) {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 32px 0 16px;
-  color: var(--text-primary);
-}
-
-.markdown-body :deep(p) {
-  margin-bottom: 16px;
   color: var(--text-secondary);
-}
-
-.docs-toc {
-  margin-top: 32px;
-  padding: 20px;
-  background: var(--bg-light);
-  border-radius: 8px;
-}
-
-.docs-toc h4 {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 12px;
-}
-
-.docs-toc ul {
-  list-style: none;
-  padding: 0;
-}
-
-.docs-toc li {
-  margin-bottom: 8px;
-}
-
-.docs-toc a {
-  font-size: 13px;
-  color: var(--mysql-blue);
+  white-space: pre-wrap;
 }
 
 @media (max-width: 992px) {
   .docs-sidebar {
     display: none;
   }
-  
+
   .docs-content {
     padding: 24px;
   }

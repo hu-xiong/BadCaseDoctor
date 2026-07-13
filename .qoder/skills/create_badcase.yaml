@@ -1,0 +1,44 @@
+name: create_badcase
+description: 创建新的 BadCase 记录
+trigger:
+  intents: [创建, 新建, 添加, 增加, 新增]
+  entities: [badcase, bad case, 问题用例, 错误用例]
+  patterns:
+    - 创建 badcase
+    - 新建 badcase
+    - 新增问题用例
+    - 添加 badcase
+    - 提一个 badcase
+
+tools:
+  - name: create
+    purpose: 创建新的 BadCase 记录
+    params:
+      target: badcase
+      fields: ${user_fields}
+      project_id: ${project_id}
+      plan_id: ${plan_id}
+      confirm: false
+      natural_query: ${user_input}
+
+workflow:
+  - step: 1
+    tool: create
+    description: 使用 create 工具创建 BadCase（confirm=false 预览）
+    depends_on: null
+
+examples:
+  - 创建一个登录问答不好的 BadCase
+  - 新建 badcase，标题是支付接口超时
+  - 添加一个问题用例，基础问题是用户无法登录
+
+prompt_template: |
+  你正在执行 **create_badcase** 技能：单步 **create**（target=badcase，confirm=false 预览后确认落库）。
+  从用户话提取 title/base_problem/answer 等 fields；参数见 get_tool_description("create")。
+
+metadata:
+  category: badcase_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-07-04
+  author: BadCase Doctor Team

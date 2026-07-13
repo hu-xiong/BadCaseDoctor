@@ -9,6 +9,7 @@ import (
 	"mysql-website-backend/routes"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
@@ -191,5 +192,60 @@ func initDefaultData() {
 		models.DB.Create(&n)
 	}
 
+	initDemoCommunityData()
+
 	log.Println("Default data initialized successfully")
+}
+
+func initDemoCommunityData() {
+	var postCount int64
+	models.DB.Model(&models.Post{}).Count(&postCount)
+	if postCount > 0 {
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("demo123456"), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("Failed to hash demo password: %v", err)
+		return
+	}
+
+	demoUser := models.User{
+		Email:        "demo@mysql-website.local",
+		PasswordHash: string(hashedPassword),
+		Username:     "demo_user",
+		Status:       1,
+	}
+	if err := models.DB.Where("email = ?", demoUser.Email).FirstOrCreate(&demoUser).Error; err != nil {
+		log.Printf("Failed to create demo user: %v", err)
+		return
+	}
+
+	posts := []models.Post{
+		{
+			UserID:   demoUser.ID,
+			Title:    "Best practices for MySQL query optimization",
+			Content:  "Share your tips for indexing, EXPLAIN plans, and avoiding full table scans in production workloads.",
+			Category: "tutorials",
+			Status:   1,
+		},
+		{
+			UserID:   demoUser.ID,
+			Title:    "MySQL 8.4 LTS - First impressions",
+			Content:  "Just upgraded to MySQL 8.4 LTS. What are your favorite changes so far?",
+			Category: "general",
+			Status:   1,
+		},
+		{
+			UserID:   demoUser.ID,
+			Title:    "Help: Replication lag issues",
+			Content:  "Looking for advice on diagnosing replication lag in a multi-region deployment.",
+			Category: "help",
+			Status:   1,
+		},
+	}
+
+	for _, post := range posts {
+		models.DB.Create(&post)
+	}
 }

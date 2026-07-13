@@ -7,8 +7,8 @@
         :key="'l-' + i"
         class="agent-step-wrap"
       >
-        <div v-if="showPendingNextCue(i)" class="agent-between-steps-cue" role="status">
-          {{ t('agentTask.preparingNextStep') }}
+        <div v-if="showPreparingNextCue(i)" class="agent-between-steps-cue" role="status">
+          {{ preparingNextCueText(i) }}
         </div>
         <div v-show="showLogBlock(s, i)" class="agent-step-outer">
         <div v-if="i > 0" class="agent-step-divider agent-step-divider--between" />
@@ -67,14 +67,25 @@
                 aria-hidden="true"
               />
               <span class="agent-step-fold-main">
+                <span class="agent-step-fold-label-row">
+                  <span
+                    class="agent-step-fold-label"
+                    :class="{ 'agent-step-fold-label--thought-shimmer': thoughtHeaderShimmer(s) }"
+                  >{{ thoughtFoldLeftLabel(s) }}</span>
+                  <span
+                    v-if="thoughtFoldShowSpinner(s)"
+                    class="agent-step-fold-spinner"
+                    aria-hidden="true"
+                  />
+                  <span
+                    v-else-if="thoughtFoldDurationRight(s)"
+                    class="agent-step-fold-duration"
+                  >{{ thoughtFoldDurationRight(s) }}</span>
+                </span>
                 <span
-                  class="agent-step-fold-label"
-                  :class="{ 'agent-step-fold-label--thought-shimmer': thoughtHeaderShimmer(s) }"
-                >{{ thoughtFoldLeftLabel(s) }}</span>
-                <span
-                  v-if="thoughtFoldDurationRight(s)"
-                  class="agent-step-fold-duration"
-                >{{ thoughtFoldDurationRight(s) }}</span>
+                  v-if="thoughtSummaryVisible(s)"
+                  class="agent-step-think-summary"
+                >{{ thoughtSummaryText(s) }}</span>
               </span>
               <span class="agent-step-fold-chevron" aria-hidden="true">{{ thoughtOpen(i) ? '▾' : '▸' }}</span>
             </button>
@@ -134,6 +145,14 @@
               </div>
             </div>
           </div>
+        </div>
+
+        <div
+          v-if="isPreparingNextStepWait(s) && !showPreparingNextCue(i)"
+          class="agent-between-steps-cue agent-between-steps-cue--inline"
+          role="status"
+        >
+          {{ preparingNextCueText(i) }}
         </div>
 
         <!-- 规划备忘：仅展示后端下发的计划行（planMemoRows），与执行 steps 解耦 -->
@@ -209,14 +228,31 @@
                 class="agent-step-fold-icon-tint"
                 :style="copyToolIconMaskStyle"
               />
+              <img
+                v-else-if="execToolKind(s) === 'cdp'"
+                class="agent-step-fold-icon-img"
+                :src="cdpIcon"
+                alt=""
+                aria-hidden="true"
+              />
               <template v-else>{{ toolFoldIcon(s) }}</template>
             </span>
             <span class="agent-step-fold-main">
-              <span
-                class="agent-step-fold-label"
-                :class="{ 'agent-step-fold-label--thought-shimmer': toolExecRunning(s) }"
-              >{{ toolFoldDisplayName(s) }}</span>
-              <span v-if="toolFoldDuration(s)" class="agent-step-fold-duration">{{ toolFoldDuration(s) }}</span>
+              <span class="agent-step-fold-label-row">
+                <span
+                  class="agent-step-fold-label"
+                  :class="{ 'agent-step-fold-label--thought-shimmer': toolExecRunning(s) }"
+                >{{ toolFoldDisplayName(s) }}</span>
+                <span
+                  v-if="toolFoldShowSpinner(s)"
+                  class="agent-step-fold-spinner"
+                  aria-hidden="true"
+                />
+                <span
+                  v-else-if="toolFoldDuration(s)"
+                  class="agent-step-fold-duration"
+                >{{ toolFoldDuration(s) }}</span>
+              </span>
             </span>
             <span class="agent-step-fold-chevron" aria-hidden="true">{{ toolExecOpen(i) ? '▾' : '▸' }}</span>
           </button>
@@ -280,6 +316,14 @@
               </div>
             </details>
           </div>
+
+          <div
+            v-else-if="execToolKind(s) === 'grep' && s.toolCall && !(s.grepNavigation?.items?.length)"
+            class="agent-step-section agent-step-grep-nav agent-step-grep-empty"
+          >
+            <div class="agent-step-label">{{ t('agentTask.locateResults') }}</div>
+            <p class="agent-grep-empty-summary">{{ grepEmptyStepSummary(s) }}</p>
+          </div>
         </div>
 
         <!-- 决策观察内容：去标题、纯内容无缝衔接，视觉与对话面板统一 -->
@@ -322,8 +366,13 @@ import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
 import toolDeleteIcon from '../assets/tool-delete.png'
 import toolCopyIcon from '../assets/tool-copy.png'
+import cdpIcon from '../assets/cdp-icon.png'
 import { mergedThoughtReasoningProseFromStep } from '../composables/thoughtSnapshot.js'
 import { stripReasoningChannelArtifacts } from '../utils/stripReasoningChannelArtifacts.js'
+import {
+  isInternalMacroThoughtSummary,
+  sanitizeThoughtSummaryForDisplay
+} from '../utils/macroThoughtSummary.js'
 
 /** 与 .agent-step-fold-head--tool 文案色一致（#7dd3fc），mask 上色使 PNG 与「思考」图标同色系 */
 const deleteToolIconMaskStyle = {
@@ -442,6 +491,12 @@ const grepNavSectionTitle = (items) => {
 }
 
 const grepNavItemTitle = (navItem) => (navItem && (navItem.title || navItem.bug_title)) || ''
+
+const grepEmptyStepSummary = (s) => {
+  const rs = String(s?.resultSummary || '').trim()
+  if (rs && !/grep_empty_hits/i.test(rs)) return rs
+  return t('chat.stepGrepEmptyHits')
+}
 
 /** 步骤内 grep 导航：条数多时默认收起 + 底部渐变，与 SimpleChatPanel 一致 */
 const GREP_NAV_COLLAPSE_AFTER = 5
@@ -583,7 +638,15 @@ const showThoughtContentBlock = (s) => {
  * 尚无≥2 字有意义正文时：不显示孤零零的「思考」标题（仅 pill、无下文），改与 phase_wait 一致只显示三点。
  * 覆盖：本步已 running 且已记 stepStartedAt，但 decide/Thought 流尚未到达的前置间隙（原会先闪一帧 agentTask.thought）。
  */
+const isPreparingNextStepWait = (s) => {
+  if (!s?.phaseWait?.active) return false
+  const k = String(s.phaseWait.kind || '').toLowerCase()
+  return k === 'preparing_next_step' || k === 'macro_params_llm'
+}
+
 const thoughtUiDotsOnly = (s) => {
+  if (s?.macroExecOnly) return false
+  if (isPreparingNextStepWait(s)) return false
   if (thoughtBodySubstantive(s)) return false
   if (s.phaseWait && s.phaseWait.active) return true
   if (s.status === 'running' && s.stepStartedAt != null && !hasReasoningBody(s)) return true
@@ -597,15 +660,18 @@ const stepEyebrowLabel = (i) => {
 
 /** 执行步骤按工具分子类（摘要/日志消毒） */
 const execToolKind = (s) => {
-  const t = String(s.title || '').toLowerCase()
-  if (t.includes('grep')) return 'grep'
-  if (t.includes('modify')) return 'modify'
-  if (t.includes('delete') || t.includes('删除')) return 'delete'
-  if (t.includes('copy') || t.includes('复制')) return 'copy'
-  if (t.includes('create')) return 'create'
-  if (t.includes('search')) return 'search'
-  if (t.includes('database')) return 'database'
-  if (t.includes('terminal')) return 'terminal'
+  const fromCall = String(s?.toolCall?.name || '').toLowerCase()
+  const t = String(s?.title || '').toLowerCase()
+  const blob = `${fromCall} ${t}`
+  if (blob.includes('grep')) return 'grep'
+  if (blob.includes('modify')) return 'modify'
+  if (blob.includes('delete') || blob.includes('删除')) return 'delete'
+  if (blob.includes('copy') || blob.includes('复制')) return 'copy'
+  if (blob.includes('create')) return 'create'
+  if (blob.includes('search')) return 'search'
+  if (blob.includes('database')) return 'database'
+  if (blob.includes('terminal')) return 'terminal'
+  if (blob.includes('cdp') || blob.includes('browser_test')) return 'cdp'
   return 'other'
 }
 
@@ -658,13 +724,15 @@ const sanitizeBatchModifyLineInExecLog = (s, text) => {
   return tx
 }
 
-/** 思考可见正文是否已结束流式阶段：未结束前眉标不显示「X 秒」，避免正文还在涨、秒数已跳 */
+/** 思考可见正文是否已结束流式阶段：running 且无快照/未进工具前一律视为仍在思考中 */
 const thoughtProseStreamFinished = (s) => {
   if (!s) return false
   if (s.thoughtReasoningSnapshot || s.thoughtContentSnapshot) return true
-  if (s.thoughtPhaseEndAtMs != null) return true
   const st = s.status
   if (st === 'completed' || st === 'failed' || st === 'skipped' || st === 'error') return true
+  if (s.toolExecStartedAt != null || s.toolCall) return true
+  if (st === 'running' || st === 'pending') return false
+  if (s.thoughtPhaseEndAtMs != null) return true
   return false
 }
 
@@ -676,11 +744,41 @@ const thoughtFoldLeftLabel = (s) => {
   return t('agentTask.thought')
 }
 
+const thoughtSummaryText = (s) => {
+  if (!s) return ''
+  if (s.thoughtSummarySnapshot) return sanitizeThoughtSummaryForDisplay(s.thoughtSummarySnapshot)
+  return sanitizeThoughtSummaryForDisplay(String(s.thoughtSummaryDraft || '').replace(/\s+/g, ' ').trim())
+}
+
+const thoughtSummaryVisible = (s) => {
+  const tx = thoughtSummaryText(s)
+  if (!tx || isInternalMacroThoughtSummary(tx)) return false
+  return tx.length >= 2 && /[\u4e00-\u9fa5A-Za-z0-9]/.test(tx)
+}
+
 const thoughtHeaderShimmer = (s) =>
   !!s &&
   !thoughtProseStreamFinished(s) &&
   (s.status === 'running' || s.status === 'pending') &&
-  (hasReasoningBody(s) || thoughtBodySubstantive(s) || (s.phaseWait && s.phaseWait.active))
+  (hasReasoningBody(s) ||
+    thoughtBodySubstantive(s) ||
+    thoughtSummaryVisible(s) ||
+    (s.phaseWait && s.phaseWait.active))
+
+const STEP_SPINNER_DELAY_MS = 300
+
+const stepWallClockElapsedMs = (s, startAt) => {
+  if (!s || startAt == null) return 0
+  void thoughtUiTick.value
+  return Math.max(0, Date.now() - startAt)
+}
+
+/** 思考执行中且已超过阈值：右侧转圈（CDP 类工具在 tool 行单独处理） */
+const thoughtFoldShowSpinner = (s) => {
+  if (!s || thoughtProseStreamFinished(s)) return false
+  if (s.status !== 'running' && s.status !== 'pending') return false
+  return stepWallClockElapsedMs(s, s.stepStartedAt) >= STEP_SPINNER_DELAY_MS
+}
 
 /** 思考结束后右侧显示耗时（沿用简要思考不展示时间的阈值） */
 const thoughtFoldDurationRight = (s) => {
@@ -715,12 +813,24 @@ const toolFoldDisplayName = (s) => {
     create: 'create',
     search: 'search',
     database: 'database_query',
-    terminal: 'terminal'
+    terminal: 'terminal',
+    cdp: 'cdp'
   }
   if (map[k]) return map[k]
   const title = String(s.title || '').trim()
   if (title) return title.length > 28 ? `${title.slice(0, 26)}…` : title
   return 'tool'
+}
+
+const TOOL_SPINNER_IMMEDIATE_KINDS = new Set(['cdp', 'grep', 'modify', 'delete'])
+
+/** 工具执行中：cdp/grep/modify/delete 立即 spinner；其它工具超过 0.3s 后显示 */
+const toolFoldShowSpinner = (s) => {
+  if (!toolExecRunning(s)) return false
+  if (TOOL_SPINNER_IMMEDIATE_KINDS.has(execToolKind(s))) return true
+  const start =
+    typeof s.toolExecStartedAt === 'number' ? s.toolExecStartedAt : s.stepStartedAt
+  return stepWallClockElapsedMs(s, start) >= STEP_SPINNER_DELAY_MS
 }
 
 const toolFoldDuration = (s) => {
@@ -766,10 +876,19 @@ const toggleToolExec = (i) => {
   toolPanelOpen.value = { ...toolPanelOpen.value, [k]: !toolExecOpen(i) }
 }
 
-const hasStepThought = (s) =>
-  hasReasoningBody(s) ||
-  !!(s.phaseWait && s.phaseWait.active) ||
-  (s.status === 'running' && s.stepStartedAt != null)
+const hasStepThought = (s) => {
+  if (s?.macroExecOnly) {
+    if (isInternalMacroThoughtSummary(s.thoughtSummarySnapshot || s.thoughtSummaryDraft)) {
+      return hasReasoningBody(s) || isPreparingNextStepWait(s)
+    }
+    return hasReasoningBody(s) || thoughtSummaryVisible(s) || isPreparingNextStepWait(s)
+  }
+  return (
+    hasReasoningBody(s) ||
+    !!(s.phaseWait && s.phaseWait.active) ||
+    (s.status === 'running' && s.stepStartedAt != null)
+  )
+}
 
 const thoughtOpen = (i) => {
   const k = String(i)
@@ -800,6 +919,34 @@ const showPendingNextCue = (i) => {
   if (!cur || cur.status !== 'pending') return false
   if (i === 0) return false
   return props.steps[i - 1]?.status === 'completed'
+}
+
+/** 宏路径连续执行：上一步已完成、本步为执行-only，或 phase_wait=preparing_next_step */
+const showPreparingNextCue = (i) => {
+  const cur = props.steps[i]
+  const prev = i > 0 ? props.steps[i - 1] : null
+  if (isPreparingNextStepWait(cur)) {
+    // grep 完成后 phase_wait 仍挂在已完成步上：衔接提示应出现在下一步前，勿插在本步「思考」上方
+    if (cur.status === 'completed' || cur.status === 'skipped' || execPhaseFinished(cur)) {
+      return false
+    }
+    return true
+  }
+  if (
+    prev &&
+    isPreparingNextStepWait(prev) &&
+    (prev.status === 'completed' || prev.status === 'skipped' || execPhaseFinished(prev))
+  ) {
+    return true
+  }
+  return showPendingNextCue(i)
+}
+
+const preparingNextCueText = (i) => {
+  const cur = props.steps[i]
+  const prev = i > 0 ? props.steps[i - 1] : null
+  const msg = (cur?.phaseWait?.message || prev?.phaseWait?.message || '').trim()
+  return msg || t('agentTask.preparingNextStep')
 }
 
 const planLineText = (s, i) => {
@@ -979,13 +1126,26 @@ const showDecisionBlock = (s) => {
 
 /** 执行区：工具过程 + 一行结果摘要 */
 const showExecBlock = (s) => !!(streamText(s) || String(displayStepResultSummary(s) || '').trim())
+/** 工具已启动后不再占「思考中」位，否则 grep 执行区长期被挡住 */
 const thoughtStillRunning = (s) =>
-  !!(s && s.status === 'running' && hasStepThought(s) && s.thoughtPhaseEndAtMs == null)
-const showToolExecCard = (s) =>
-  !thoughtStillRunning(s) &&
-  (showExecBlock(s) ||
+  !!(
+    s &&
+    s.status === 'running' &&
+    hasStepThought(s) &&
+    s.thoughtPhaseEndAtMs == null &&
+    s.toolExecStartedAt == null &&
+    !s.toolCall
+  )
+const showToolExecCard = (s) => {
+  if (thoughtStillRunning(s)) return false
+  if (s?.toolCall && (s.status === 'running' || s.status === 'pending')) return true
+  return (
+    showExecBlock(s) ||
     !!(s.grepNavigation && s.grepNavigation.type === 'multiple' && s.grepNavigation.items?.length) ||
-    (s.stepDurationMs != null && s.stepDurationMs >= 0))
+    (execToolKind(s) === 'grep' && s.toolCall) ||
+    (s.stepDurationMs != null && s.stepDurationMs >= 0)
+  )
+}
 
 const runStreamTypewriters = () => {
   if (props.instantPlan || props.realtimeStream) return
@@ -1183,6 +1343,10 @@ const showLogBlock = (s, i = 0) => {
   padding: 6px 2px 8px;
   margin: 0 0 2px;
   letter-spacing: 0.02em;
+}
+
+.agent-between-steps-cue--inline {
+  margin: 4px 0 8px;
 }
 
 /* ReAct Thought：深度思考 reasoning（浅）/ content（亮） */
@@ -1582,7 +1746,12 @@ const showLogBlock = (s, i = 0) => {
 }
 .agent-step-fold-icon {
   flex-shrink: 0;
-  width: 1.15em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
   text-align: center;
   font-size: 14px;
   line-height: 1;
@@ -1592,6 +1761,16 @@ const showLogBlock = (s, i = 0) => {
 }
 .agent-step-fold-head--tool .agent-step-fold-icon {
   color: #7dd3fc;
+}
+/* 彩色 PNG 工具图标：固定槽位，避免 em 宽度导致折叠行抖动 */
+.agent-step-fold-icon-img {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: block;
+  object-fit: contain;
+  object-position: center;
+  opacity: 0.95;
 }
 /* delete 工具 PNG → 与思考图标同档青蓝（背景色与工具标题一致，形状由 mask 决定） */
 .agent-step-fold-icon-tint {
@@ -1608,13 +1787,32 @@ const showLogBlock = (s, i = 0) => {
   -webkit-mask-position: center;
   mask-position: center;
 }
+.agent-step-fold-label-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.agent-step-think-summary {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: rgba(186, 230, 253, 0.82);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
 .agent-step-fold-main {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
 }
 .agent-step-fold-label {
   font-size: 13px;
@@ -1644,10 +1842,26 @@ const showLogBlock = (s, i = 0) => {
 }
 .agent-step-fold-duration {
   margin-left: auto;
+  flex-shrink: 0;
   font-size: 12px;
   font-weight: 500;
   color: #94a3b8;
   font-variant-numeric: tabular-nums;
+}
+.agent-step-fold-spinner {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(148, 163, 184, 0.28);
+  border-top-color: #7dd3fc;
+  border-radius: 50%;
+  animation: agentStepFoldSpin 0.72s linear infinite;
+}
+@keyframes agentStepFoldSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .agent-step-fold-chevron {
   flex-shrink: 0;
@@ -1927,6 +2141,13 @@ const showLogBlock = (s, i = 0) => {
 .agent-step-grep-nav {
   margin-top: 4px;
   padding-left: 24px;
+}
+
+.agent-step-grep-empty .agent-grep-empty-summary {
+  margin: 4px 0 2px;
+  font-size: 12px;
+  color: #e2e8f0;
+  line-height: 1.5;
 }
 
 .agent-grep-nav-details {

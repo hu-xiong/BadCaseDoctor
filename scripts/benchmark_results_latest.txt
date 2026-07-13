@@ -1,0 +1,75 @@
+# DashScope Embedding 基准 + 8/80 阈值 + E2E Grep
+# 文本(32字): 问登录问题答的不好 复现步骤修改为 提问登录问题即可234456
+# 时间: 本地实测 (repeats=2 取中位)
+
+## 一、8/80 阈值策略（Config 默认 GREP_QUERY_EMBED_MIN_CHARS=8, FULL=80）
+
+| 输入 | 字数 | 模式 | 调 embedding |
+|------|------|------|--------------|
+| 登录 | 2 | bm25_only | 否 |
+| 用户改 BadCase 整句 | 32 | hybrid | 是 |
+| 79 个 x | 79 | hybrid | 是 |
+| 80 个 x | 80 | vector_only | 是（无 BM25 文本） |
+
+## 二、各模型单条 embedding 耗时（中位 ms, repeats=2）
+
+| 模型 | 耗时(ms) | 维度 | API | 状态 |
+|------|---------|------|-----|------|
+| text-embedding-v1 | 193 | 1536 | openai | OK |
+| text-embedding-v3 | 271 | 1024 | openai | OK |
+| text-embedding-v2 | 303 | 1536 | openai | OK |
+| tongyi-embedding-vision-flash-2026-03-06 | 565 | 768 | multimodal | OK |
+| tongyi-embedding-vision-plus | 597 | 1152 | multimodal | OK |
+| qwen2.5-vl-embedding | 604 | 1024 | multimodal | OK |
+| tongyi-embedding-vision-flash | 623 | 768 | multimodal | OK |
+| tongyi-embedding-vision-plus-2026-03-06 | 681 | 1152 | multimodal | OK |
+| multimodal-embedding-v1 | 686 | 1024 | multimodal | OK |
+| qwen3-vl-embedding | 719 | 2560 | multimodal | OK |
+| text-embedding-v4 | 1451 | 1024 | openai | OK |
+| text-embedding-async-v1/v2 | - | - | - | FAIL 404 非 compatible-mode |
+
+当前 Config 模型 plus-2026-03-06 三次: 972 / 599 / 740 ms（波动大）
+
+## 三、E2E Grep project=1（真实 ES）
+
+### 3.1 keywords=登录（2字）→ bm25_only
+- total ≈ 79 ms
+- query_embed = 0
+- es_hybrid_search ≈ 79 ms
+- 召回 1 条 badcase（标题「问登录问题答的不好」）
+
+### 3.2 整句 32 字 → hybrid（Config 用 plus 1152 维 query）
+- query_embed ≈ 858 ms（首次）
+- ES 报错: query vector 1152 维 ≠ 索引向量 1024 维
+- hybrid KNN 失败，回落 SQL，列表为空
+- total ≈ 1412 ms（含失败）
+
+### 3.3 同句第二次（进程内 embedding 缓存）
+- query_embed ≈ 0 ms（缓存命中）
+- ES 仍维度不匹配，total ≈ 158 ms
+
+## 四、选型结论（测试驱动）
+
+1. **阈值 8/80：保持** — 与预期一致。
+
+2. **模型必须与 ES 索引维度一致（当前索引=1024）**
+   - Config 默认 plus → query 1152 → **hybrid 向量检索不可用**
+   - 与「数据按 Qwen 建库」一致时，索引更像 **text-embedding-v3/v4 或 qwen2.5-vl（1024）**
+
+3. **若暂不重建索引（推荐先修生产）**
+   - GREP_EMBEDDING_MODEL=text-embedding-v3（或确认建库用的确切模型）
+   - 预期 hybrid: embed ~270ms + ES ~330ms ≈ **0.6s**
+
+4. **若坚持用 vision-plus-2026-03-06（1152）**
+   - 必须 **全量 re-embed + 新物理索引**，否则 hybrid 只有 BM25 或走 SQL 回落
+
+5. **flash（768）/ v1（1536）/ qwen3-vl（2560）** 均与当前 1024 索引不兼容
+
+6. **最快且需换库**: text-embedding-v1 ~193ms 但 dims=1536，仍要重建索引
+
+## 五、建议 .env（对齐 1024 索引 + 8 字阈值）
+
+GREP_EMBEDDING_BACKEND=dashscope
+GREP_EMBEDDING_MODEL=text-embedding-v3
+GREP_QUERY_EMBED_MIN_CHARS=8
+GREP_QUERY_FULL_VECTOR_MIN_CHARS=80

@@ -2,7 +2,12 @@
   <div class="sidebar-content" v-show="!planCollapsed">
     <div class="sidebar-header">
       <div class="header-top">
-        <button class="action-icon-btn" @click="onShowCreatePlanModal" :title="t('project.addPlan')">
+        <button
+          class="action-icon-btn"
+          @click="onShowCreatePlanModal"
+          :title="t('project.addPlan')"
+          aria-label="新建迭代"
+        >
           <span class="icon">➕</span>
           <span class="btn-text">新建迭代</span>
         </button>
@@ -21,10 +26,49 @@
         </div>
 
         <div v-else class="plan-list">
+          <!-- 待确认新建迭代（create 沙箱）：暗绿名称 + ✓/✗ -->
+          <div
+            v-for="pc in (pendingPlanCreates || [])"
+            :key="pc?.tempId"
+            :data-create-id="pc?.tempId"
+            class="plan-item pending-plan-create"
+            :class="{ 'sub-plan': pc?.preview?.parent_id != null }"
+            @click.stop
+          >
+            <span class="expand-placeholder"></span>
+            <span class="plan-icon">➕</span>
+            <span class="plan-name create-new-only">{{ pc.preview?.name || t('list.newPending') }}</span>
+            <span class="plan-date">{{ t('list.pendingConfirm') }}</span>
+            <div
+              v-if="confirmCreate && cancelCreate && isLastInCreateCluster?.(pc?.tempId)"
+              class="plan-row-delete-actions"
+              @click.stop
+            >
+              <span v-if="(getCreateClusterSize?.(pc?.tempId) || 0) > 1" class="batch-count">
+                {{ t('common.nItems', { n: getCreateClusterSize(pc.tempId) }) }}
+              </span>
+              <button
+                type="button"
+                class="plan-action-icon plan-action-approve"
+                :title="t('list.approveCreate')"
+                @click="confirmConsecutiveCreateGroup?.(pc.tempId)"
+              >
+                ✓
+              </button>
+              <button
+                type="button"
+                class="plan-action-icon plan-action-reject"
+                :title="t('list.reject')"
+                @click="cancelConsecutiveCreateGroup?.(pc.tempId)"
+              >
+                ✗
+              </button>
+            </div>
+          </div>
           <template v-for="plan in activePlans" :key="plan.id">
             <div
               class="plan-item"
-              :data-plan-id="plan.id"
+              :data-plan-id="String(plan.id)"
               :class="{ 'active': selectedPlan === plan.id }"
               @click="onSelectPlan(plan.id)"
               @mouseenter="onShowPlanActions(plan.id)"
@@ -42,7 +86,7 @@
               <span class="plan-date">{{ formatDate(plan.created_at) }}</span>
 
               <div
-                v-if="pendingDeletePlanId != null && Number(pendingDeletePlanId) === Number(plan.id)"
+                v-if="pendingDeletePlanId != null && String(pendingDeletePlanId) === String(plan.id)"
                 class="plan-row-delete-actions"
                 @click.stop
               >
@@ -122,7 +166,7 @@
                 v-for="childPlan in plan.children"
                 :key="childPlan.id"
                 class="plan-item sub-plan"
-                :data-plan-id="childPlan.id"
+                :data-plan-id="String(childPlan.id)"
                 :class="{ 'active': selectedPlan === childPlan.id }"
                 @click="onSelectPlan(childPlan.id)"
                 @mouseenter="onShowPlanActions(childPlan.id)"
@@ -134,7 +178,7 @@
                 <span class="plan-date">{{ formatDate(childPlan.created_at) }}</span>
 
                 <div
-                  v-if="pendingDeletePlanId != null && Number(pendingDeletePlanId) === Number(childPlan.id)"
+                  v-if="pendingDeletePlanId != null && String(pendingDeletePlanId) === String(childPlan.id)"
                   class="plan-row-delete-actions"
                   @click.stop
                 >
@@ -242,9 +286,16 @@ defineProps({
   onArchivePlan: { type: Function, required: true },
   onDeletePlan: { type: Function, required: true },
   onPinPlan: { type: Function, required: true },
-  pendingDeletePlanId: { type: Number, default: null },
+  pendingDeletePlanId: { type: [String, Number], default: null },
   confirmDelete: { type: Function, default: null },
-  cancelPendingDelete: { type: Function, default: null }
+  cancelPendingDelete: { type: Function, default: null },
+  pendingPlanCreates: { type: Array, default: () => [] },
+  confirmCreate: { type: Function, default: null },
+  cancelCreate: { type: Function, default: null },
+  isLastInCreateCluster: { type: Function, default: null },
+  getCreateClusterSize: { type: Function, default: null },
+  confirmConsecutiveCreateGroup: { type: Function, default: null },
+  cancelConsecutiveCreateGroup: { type: Function, default: null }
 })
 </script>
 
@@ -339,6 +390,22 @@ defineProps({
 
 .plan-action-reject:hover {
   background: rgba(244, 67, 54, 0.12);
+}
+
+.pending-plan-create {
+  background: rgba(46, 125, 50, 0.08);
+  border: 1px dashed rgba(46, 125, 50, 0.45);
+}
+
+.pending-plan-create .create-new-only {
+  color: #2e7d32;
+  font-weight: 600;
+}
+
+.batch-count {
+  font-size: 11px;
+  color: #666;
+  margin-right: 2px;
 }
 
 .plan-item:hover {

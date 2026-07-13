@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import SectionHeader from '@/components/SectionHeader.vue'
 import FeatureCard from '@/components/FeatureCard.vue'
 
@@ -45,7 +44,6 @@ const products = [
   }
 ]
 
-const activeProduct = ref(0)
 </script>
 
 <template>
@@ -70,7 +68,7 @@ const activeProduct = ref(0)
         
         <div class="products-grid">
           <div
-            v-for="(product, index) in products"
+            v-for="product in products"
             :key="product.name"
             class="product-card card"
             :class="{ 'product-highlight': product.highlight }"

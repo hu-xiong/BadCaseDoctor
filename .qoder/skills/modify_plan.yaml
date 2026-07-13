@@ -1,0 +1,57 @@
+name: modify_plan
+description: 修改迭代计划 Plan（名称、日期、描述等）
+trigger:
+  intents: [修改, 更新, 编辑, 调整, 改, 改成, 设为]
+  entities: [plan, 迭代计划, 迭代, sprint, 计划]
+  patterns:
+    - 修改迭代计划
+    - 更新计划名称
+    - 编辑计划
+    - 改计划日期
+    - 调整 sprint
+
+tools:
+  - name: grep
+    purpose: 定位目标 Plan
+    params:
+      target: plan
+      mode: locate
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+
+  - name: modify
+    purpose: 修改 Plan 字段
+    params:
+      target: plan
+      target_id: ${grep_result.first_plan_id}
+      modifications: ${user_modifications}
+      project_id: ${project_id}
+      confirm: false
+
+workflow:
+  - step: 1
+    tool: grep
+    description: grep 定位 Plan（target=plan；侧栏已有 plan_id 时可跳过）
+    depends_on: null
+
+  - step: 2
+    tool: modify
+    description: modify 修改 Plan（target=plan，confirm=false 预览）
+    depends_on: step_1
+
+examples:
+  - 把迭代计划 2 改名为 Sprint-2
+  - 修改当前迭代的结束日期
+  - 更新计划描述
+
+prompt_template: |
+  你正在执行 **modify_plan** 技能。
+  1. **grep** target=plan 定位（侧栏已选当前迭代且用户说「这个计划」时可省略 grep，直接用 plan_id）
+  2. **modify** target=plan，target_id=first_plan_id，modifications 嵌套字段，confirm=false
+
+metadata:
+  category: plan_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-07-04
+  author: BadCase Doctor Team

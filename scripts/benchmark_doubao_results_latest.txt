@@ -1,0 +1,14 @@
+豆包 Ark 多模态向量 benchmark（doubao-embedding-vision-251215）
+端点: POST {DOUBAO_API_BASE_URL}/embeddings/multimodal
+repeats=5，连接池预热后
+
+文本 (7 字): '天很蓝，海很深'
+模型                                       耗时(ms)   维度   API
+doubao-embedding-vision-251215              172.1   2048   ark_multimodal  (纯文本)
+doubao-embedding-vision-251215+image          414.0   2048   ark_multimodal  (text + 官方示例图)
+
+文本 (32 字): '问登录问题答的不好 复现步骤修改为 提问登录问题即可234456'
+doubao-embedding-vision-251215             1093.8   2048   ark_multimodal  (冷启动首轮，repeats=3)
+doubao-embedding-vision-251215+image        325.5   2048   ark_multimodal  (同上，次轮已复用连接)
+
+说明: 首次请求可能含 TLS/连接建立，建议以预热后纯文本耗时为准；图文比纯文本慢属正常。

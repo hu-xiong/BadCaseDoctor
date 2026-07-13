@@ -1,4 +1,19 @@
 /**
+ * Format file size in bytes to human readable string
+ */
+export function formatFileSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = bytes
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+/**
  * Format date to readable string
  */
 export function formatDate(date: string | Date, format: 'short' | 'long' = 'short'): string {

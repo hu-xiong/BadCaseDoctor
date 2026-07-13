@@ -1,0 +1,45 @@
+name: create_plan
+description: 创建新的迭代计划 Plan
+trigger:
+  intents: [创建, 新建, 添加, 增加, 新增]
+  entities: [plan, 迭代计划, 迭代, sprint, 计划]
+  patterns:
+    - 创建迭代计划
+    - 新建计划
+    - 新增迭代
+    - 添加 sprint
+    - 创建一个计划
+
+tools:
+  - name: create
+    purpose: 创建迭代计划
+    params:
+      target: plan
+      fields: ${user_fields}
+      name: ${plan_name}
+      project_id: ${project_id}
+      confirm: false
+      natural_query: ${user_input}
+
+workflow:
+  - step: 1
+    tool: create
+    description: 使用 create 工具创建 Plan（name 必填，confirm=false 预览）
+    depends_on: null
+
+examples:
+  - 创建一个迭代计划叫 Sprint-2
+  - 新建迭代计划，开始日期 2026-07-01
+  - 添加一个名为「迭代 3」的计划
+
+prompt_template: |
+  你正在执行 **create_plan** 技能：单步 **create**（target=plan）。
+  **name**（计划名称）必填；start_date/end_date 可缺省由服务端补默认。
+  confirm=false 预览后再确认落库；参数见 get_tool_description("create")。
+
+metadata:
+  category: plan_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-07-04
+  author: BadCase Doctor Team

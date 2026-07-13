@@ -1,0 +1,46 @@
+name: create_card
+description: 创建迭代卡片 Card（列表层记录，可关联 Bug/BadCase/TestCase 或纯卡片）
+trigger:
+  intents: [创建, 新建, 添加, 增加, 新增]
+  entities: [card, 卡片, 迭代卡片]
+  patterns:
+    - 创建卡片
+    - 新建卡片
+    - 新增迭代卡片
+    - 添加一张卡片
+    - 在迭代里新建卡片
+
+tools:
+  - name: create
+    purpose: 创建 Card 行
+    params:
+      target: card
+      fields: ${user_fields}
+      project_id: ${project_id}
+      plan_id: ${plan_id}
+      confirm: false
+      natural_query: ${user_input}
+
+workflow:
+  - step: 1
+    tool: create
+    description: 使用 create 工具创建 Card（confirm=false 预览）
+    depends_on: null
+
+examples:
+  - 在当前迭代新建一张卡片
+  - 创建卡片，标题是登录回归
+  - 添加一张类型为 bug 的卡片
+
+prompt_template: |
+  你正在执行 **create_card** 技能：单步 **create**（target=card）。
+  Card 是迭代列表层记录；若用户要复制已有卡片可用 copy_from_card_id。
+  若用户实际要建 Bug/BadCase/TestCase 源表记录，应改用对应 create_* 技能。
+  confirm=false 预览；参数见 get_tool_description("create")。
+
+metadata:
+  category: card_management
+  priority: high
+  version: 1.0.0
+  created_at: 2026-07-04
+  author: BadCase Doctor Team

@@ -1,41 +1,57 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { recordDownload } from '@/api/downloads'
+import { useAuthStore } from '@/stores/auth'
 
 interface Props {
+  downloadId: number
+  name: string
   version: string
   type: 'enterprise' | 'community' | 'cluster'
   date: string
   size: string
   platforms: string[]
   sha256?: string
+  filePath?: string
 }
 
 const props = defineProps<Props>()
-
+const authStore = useAuthStore()
 const isExpanded = ref(false)
 
-const typeLabel = computed(() => {
-  const labels = {
-    enterprise: 'Enterprise',
-    community: 'Community',
-    cluster: 'Cluster'
-  }
-  return labels[props.type]
-})
+const typeLabel = {
+  enterprise: 'Enterprise',
+  community: 'Community',
+  cluster: 'Cluster'
+}[props.type]
 
-const typeClass = computed(() => `type-${props.type}`)
+const handleDownload = async () => {
+  if (authStore.isAuthenticated) {
+    try {
+      await recordDownload(props.downloadId)
+    } catch {
+      // 记录失败不阻断下载
+    }
+  }
+  if (props.filePath) {
+    window.open(props.filePath, '_blank')
+  } else {
+    ElMessage.info('Download link is not available yet')
+  }
+}
 </script>
 
 <template>
   <div class="download-card card">
     <div class="card-header">
       <div class="version-info">
-        <span class="version-badge" :class="typeClass">{{ typeLabel }}</span>
-        <h3 class="version-name">MySQL Community Server {{ version }}</h3>
+        <span class="version-badge" :class="`type-${type}`">{{ typeLabel }}</span>
+        <h3 class="version-name">{{ name }} {{ version }}</h3>
       </div>
       <span class="release-date">Released: {{ date }}</span>
     </div>
-    
+
     <div class="card-body">
       <div class="platforms">
         <span class="label">Platforms:</span>
@@ -59,10 +75,10 @@ const typeClass = computed(() => `type-${props.type}`)
     </div>
 
     <div class="card-footer">
-      <a href="#" class="btn btn-primary">
+      <button type="button" class="btn btn-primary" @click="handleDownload">
         <i class="el-icon-download"></i>
         Download
-      </a>
+      </button>
       <router-link to="/downloads" class="btn btn-outline">
         View All Versions
       </router-link>

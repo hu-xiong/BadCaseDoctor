@@ -37,10 +37,10 @@ func SetupRoutes(router *gin.Engine) {
 		downloads := v1.Group("/downloads")
 		{
 			downloads.GET("", downloadHandler.List)
-			downloads.GET("/:id", downloadHandler.Detail)
-			downloads.POST("/:id/record", middleware.AuthMiddleware(), downloadHandler.Record)
 			downloads.GET("/edition/:edition", downloadHandler.GetByEdition)
 			downloads.GET("/os/:os", downloadHandler.GetByOS)
+			downloads.GET("/:id", downloadHandler.Detail)
+			downloads.POST("/:id/record", middleware.AuthMiddleware(), downloadHandler.Record)
 		}
 
 		// 文档路由

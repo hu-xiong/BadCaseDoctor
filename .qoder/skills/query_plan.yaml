@@ -1,0 +1,38 @@
+name: query_plan
+description: 查询迭代计划 Plan（按名称、关键词等）
+trigger:
+  intents: [查询, 搜索, 查找, 查看, 列出, 显示]
+  entities: [plan, 迭代计划, 迭代, sprint, 计划]
+  patterns:
+    - 查询迭代计划
+    - 搜索计划
+    - 查看有哪些迭代
+    - 列出所有计划
+    - 计划列表
+
+tools:
+  - name: grep
+    purpose: 查询 Plan
+    params:
+      target: plan
+      mode: locate
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: grep 查询 Plan（target=plan）
+    depends_on: null
+
+examples:
+  - 查询所有迭代计划
+  - 搜索名叫 Sprint 的计划
+  - 查看当前项目有哪些迭代
+
+metadata:
+  category: plan_management
+  priority: medium
+  version: 1.0.0
+  created_at: 2026-07-04
+  author: BadCase Doctor Team

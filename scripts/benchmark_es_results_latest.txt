@@ -1,0 +1,21 @@
+远端 ES 压测（117.72.33.38:19200，alias=bdc_dev_work_item）
+条件: repeats=30, warmup=5, project_id=1, 32字关键词
+时间: 本地实测
+
+| 操作 | mean | median | min | p95 | max |
+|------|------|--------|-----|-----|-----|
+| cluster.info | 62.2ms | 64.6ms | 49.2 | 75.0 | 91.1 |
+| indices.exists(alias) | 63.9ms | 65.8ms | 50.8 | 75.0 | 80.3 |
+| alias_exists(进程缓存) | ~0ms | — | — | — | — |
+| hybrid_search bm25_only | 83.4ms | 80.1ms | 64.6 | 114.9 | 119.6 |
+| hybrid_search knn+bm25 (Grep) | 207.4ms | 183.4ms | 122.6 | 400.7 | 524.1 |
+
+参考: 同次脚本内豆包 query embed 单次 634ms（压测开头，偏冷）
+
+结论:
+- 连接池预热后，Grep 典型 ES 段 knn+bm25 平均约 200ms（中位 ~183ms），不是稳定 600ms。
+- 进程内首次 hybrid_search 仍可能 500~650ms（冷连接），与 [GREP-HYBRID-PERF] es_hybrid_search≈612ms 一致。
+- 短关键词仅 BM25 时 ES 约 80ms 均值。
+- 完整 Grep hybrid ≈ embed(150~800ms 波动) + ES(200~600ms 冷/热) + rerank(0~1s 视条数)。
+
+复测: python scripts/benchmark_remote_es.py --repeats 30 --quiet
