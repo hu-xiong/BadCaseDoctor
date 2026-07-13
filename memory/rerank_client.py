@@ -1,4 +1,4 @@
-"""Grep 用 rerank 路由：默认千帆 BCE，可选 DashScope VL-rerank。"""
+"""Grep 用 rerank 路由：默认通义 qwen3-vl-rerank，可选千帆 BCE。"""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,7 +22,7 @@ def rerank_documents(
         except Exception:
             cfg = None
     backend = (
-        str(getattr(cfg, "GREP_RERANK_BACKEND", "qianfan") or "qianfan")
+        str(getattr(cfg, "GREP_RERANK_BACKEND", "dashscope") or "dashscope")
         .strip()
         .lower()
     )

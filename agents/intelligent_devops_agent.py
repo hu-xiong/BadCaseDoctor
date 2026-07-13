@@ -11,10 +11,10 @@ from typing import Any, Dict, Optional
 
 from .react_simplified import SimplifiedReActEngine
 from .tool_registry import ToolRegistry
-from .tools import BrowserTestTool, LogAnalyzerTool, AccuracyTesterTool
 from .tools.search_tool import SearchTool
 from .tools.login_state_tool import LoginStateTool
-from .tools.layered_tool_factory import LayeredToolFactory
+from .tools.log_analyzer_tool import LogAnalyzerTool
+from .tools.accuracy_tester_tool import AccuracyTesterTool
 
 class ConversationMemory:
     """对话记忆管理"""
@@ -72,8 +72,6 @@ def register_core_builtin_tools(
         registry.register(tool, quiet=quiet)
 
     if llm is not None:
-        if BrowserTestTool is not None:
-            _reg(BrowserTestTool(llm))
         _reg(LogAnalyzerTool(llm))
         _reg(AccuracyTesterTool(llm))
         _reg(SearchTool(llm))
@@ -105,9 +103,13 @@ def register_core_builtin_tools(
 
     _reg(DeleteTool(db_session))
 
-    layered_tools = LayeredToolFactory.create_all_tools()
-    for _tool_name, tool in layered_tools.items():
-        _reg(tool)
+    try:
+        from agents.tools.cdp_tool import CdpTool
+
+        _reg(CdpTool())
+    except Exception as e:
+        if os.getenv("QUIET_LOG") != "1":
+            print(f"[REGISTRY] CDP 工具未注册: {e}")
 
     if react_engine is not None:
         from agents.tools.skill_tool import SkillExecutorTool
@@ -203,6 +205,7 @@ class IntelligentDevOpsAgent:
             llm=llm,
             tool_registry=self.tool_registry
         )
+        self.react_engine.db = db_session
         if perf:
             print(f"[PERF][agent] react_engine_init_ms={(time.perf_counter()-t_engine0)*1000:.1f}")
 
@@ -226,8 +229,6 @@ class IntelligentDevOpsAgent:
             return
         if self.tool_registry.has_tool("search"):
             return
-        if BrowserTestTool is not None:
-            self.tool_registry.register(BrowserTestTool(self.llm))
         self.tool_registry.register(LogAnalyzerTool(self.llm))
         self.tool_registry.register(AccuracyTesterTool(self.llm))
         self.tool_registry.register(SearchTool(self.llm))
@@ -272,6 +273,8 @@ class IntelligentDevOpsAgent:
     def set_db_session(self, db_session):
         """允许复用 Agent 实例时更新 db session 引用。"""
         self.db = db_session
+        if getattr(self, "react_engine", None) is not None:
+            self.react_engine.db = db_session
         try:
             for tool_name in ("modify", "create", "copy"):
                 tool = self.tool_registry.get(tool_name)
@@ -290,6 +293,7 @@ class IntelligentDevOpsAgent:
         locale: str = None,
         pending_diff_context: list = None,
         agent_session_id: str = None,
+        chat_session_id: int = None,
         long_memory_context: dict = None,
         hint_project_name: str = None,
         hint_plan_name: str = None,
@@ -342,11 +346,13 @@ class IntelligentDevOpsAgent:
             locale=locale,
             pending_diff_context=pending_diff_context,
             agent_session_id=agent_session_id,
+            chat_session_id=chat_session_id,
             long_memory_prefetch=long_memory_context,
             hint_project_name=hint_project_name,
             hint_plan_name=hint_plan_name,
             client_shell=client_shell if isinstance(client_shell, dict) else None,
             images=images if isinstance(images, list) else None,
+            raw_user_input=user_input,
             ui_context=ui_context if isinstance(ui_context, dict) else None,
         ):
             yield pkt

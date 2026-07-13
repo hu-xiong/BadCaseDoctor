@@ -29,7 +29,33 @@ def test_qianfan_rerank_parses_results():
     assert hits[0] == RerankHit(index=1, score=0.88)
 
 
-def test_rerank_router_uses_qianfan_by_default():
+def test_rerank_router_uses_dashscope_by_default():
+    from memory import rerank_client as rc
+
+    fake_resp = type(
+        "R",
+        (),
+        {
+            "status_code": 200,
+            "output": {"results": [{"index": 0, "relevance_score": 0.9}]},
+            "usage": None,
+        },
+    )()
+
+    class Cfg:
+        GREP_RERANK_BACKEND = "dashscope"
+        GREP_RERANK_MODEL = "qwen3-vl-rerank"
+        GREP_RERANK_API_KEY = "ds-key"
+        DASHSCOPE_API_KEY = "ds-fallback"
+
+    with patch("dashscope.TextReRank.call", return_value=fake_resp):
+        hits, meta = rc.rerank_documents("q", ["a"], cfg=Cfg())
+    assert meta.get("status") == "ok"
+    assert meta.get("backend") == "dashscope"
+    assert len(hits) == 1
+
+
+def test_rerank_router_qianfan_explicit():
     from memory import rerank_client as rc
 
     with patch(

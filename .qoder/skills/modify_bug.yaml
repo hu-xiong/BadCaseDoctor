@@ -8,6 +8,14 @@ trigger:
     - 缺陷更新
     - 问题编辑
     - 调整 bug
+    - 修改期望结果
+    - 修改预期结果
+    - 改复现步骤
+    - 更新标题
+    - 修改优先级
+    - 修改状态
+    - 把 bug 改成
+    - 将缺陷
 
 tools:
   - name: grep
@@ -25,7 +33,7 @@ tools:
       target_id: ${target_id}
       modifications: ${user_modifications}
       project_id: ${project_id}
-      confirm: true
+      confirm: false
 
 workflow:
   - step: 1
@@ -44,6 +52,18 @@ examples:
   - 更新Bug123的描述信息
   - 修改登录相关的Bug状态
   - 将缺陷123分配给我的团队成员
+
+prompt_template: |
+  你正在执行 **modify_bug（修改 Bug）** 技能。
+
+  **工作流（必须按顺序，一轮一个工具）：**
+  1. **grep**：target=bug（或 all 定位后再选），keywords 用标题/关键词；须带 project_id
+  2. **modify**：target=bug，target_id 取 grep 的 first_bug_id；modifications 嵌套要改的字段；confirm=false 沙箱预览
+
+  **规则：**
+  - 首轮**只能 grep**，禁止跳过检索直接 modify
+  - 按用户要改的字段选 target（改 status/步骤等仍用 bug，勿误设为 card）
+  - 参数不确定 → get_tool_description("modify")
 
 metadata:
   category: bug_management

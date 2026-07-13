@@ -44,6 +44,15 @@ examples:
   - 更新测试用例状态为resolved
   - 修改测试用例负责人为33
 
+prompt_template: |
+  你正在执行 **modify_testcase（修改测试用例）** 技能。
+
+  **工作流：**
+  1. **grep**：target=testcase，keywords 定位用例
+  2. **modify**：target=testcase，target_id=first_testcase_id，modifications 嵌套字段，confirm=false
+
+  首轮只能 grep；参数细节见 get_tool_description。
+
 metadata:
   category: testcase_management
   priority: high

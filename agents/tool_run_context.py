@@ -1,10 +1,7 @@
 """
-同一次 ReAct 对话内工具共享的运行时存储。
+同一次 ReAct 对话内工具共享的运行时存储（主要为 grep recent_created 等 meta）。
 
 主线程/async：挂在 result_context["_tool_run_store"]（ToolRunStore 实例）。
-线程池工具（modify）：经 params["tool_run_ctx"] 传入 snapshot，返回 tool_run_ctx_patch 回写。
-
-ContextVar 仅适合单线程内微缓存（如 modify 单次 execute 内复用），不能替代本模块做跨线程共享。
 """
 from __future__ import annotations
 
@@ -148,62 +145,3 @@ def merge_tool_run_patch_from_observation(
     get_tool_run_store(result_context).merge_patch(patch)
 
 
-def _row_id_from_grep_item(item: Dict[str, Any], target: str) -> Optional[int]:
-    if not isinstance(item, dict):
-        return None
-    keys = ("id", f"{target}_id", "source_id", "pk")
-    for k in keys:
-        v = item.get(k)
-        if v is None or v == "":
-            continue
-        try:
-            i = int(v)
-            if i > 0:
-                return i
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def seed_tool_run_store_from_grep_context(
-    result_context: Dict[str, Any],
-    *,
-    project_id: Optional[int] = None,
-) -> None:
-    """
-    grep 合并进 result_context 后，把导航列表里的行快照写入 ToolRunStore，
-    供后续 modify 经 tool_run_ctx 带入线程池，减少重复 ORM。
-    """
-    if not isinstance(result_context, dict):
-        return
-    pid = project_id
-    if pid is None:
-        try:
-            pid = int(result_context.get("project_id") or 0) or None
-        except (TypeError, ValueError):
-            pid = None
-    if not pid:
-        return
-    st = get_tool_run_store(result_context)
-    pairs: List[Tuple[str, str]] = [
-        ("bug", "bug_list"),
-        ("badcase", "badcase_list"),
-        ("testcase", "testcase_list"),
-    ]
-    for target, list_key in pairs:
-        for item in result_context.get(list_key) or []:
-            if not isinstance(item, dict):
-                continue
-            rid = _row_id_from_grep_item(item, target)
-            if rid:
-                st.put_row(target, rid, int(pid), item)
-    for item in result_context.get("card_list") or []:
-        if not isinstance(item, dict):
-            continue
-        cid = item.get("id") or item.get("card_id")
-        try:
-            cid_i = int(cid) if cid is not None else 0
-        except (TypeError, ValueError):
-            cid_i = 0
-        if cid_i > 0:
-            st.cards[str(cid_i)] = dict(item)

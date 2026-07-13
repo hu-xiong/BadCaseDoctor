@@ -40,6 +40,7 @@ export function createReactAiMessageState(id) {
     planUpdateReason: '',
     reactPlanPanelSuppressed: false,
     hadAgentThinkPhase: false,
+    _firstThinkUiSealed: false,
     /** 规划备忘显隐：先给“正在生成任务规划…”占位，稍后再揭示 AgentTaskRun 顶部计划区 */
     _planMemoRevealReady: false,
     /** 曾收到 suppress 的 plan_init：后续 plan_update 不得抢先揭示规划备忘，须等 THINK 正文 */

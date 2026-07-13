@@ -51,14 +51,9 @@ class ZhipuLLM:
 
     async def chat(self, prompt: str, history: list = None) -> str:
         """对话接口"""
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({
-                    "role": msg.get("role", "user"), 
-                    "content": msg.get("content", "")
-                })
-        messages.append({"role": "user", "content": prompt})
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history)
 
         payload = {
             "model": self.model,
@@ -115,15 +110,10 @@ class ZhipuLLM:
         """流式对话（逐 token 字符串）"""
         from agents.locale_prompts import wrap_general_user_prompt
 
+        from llm.chat_messages import prompt_to_messages
+
         p = wrap_general_user_prompt(prompt, locale)
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", "")
-                })
-        messages.append({"role": "user", "content": p})
+        messages = prompt_to_messages(p, history=history)
 
         payload = {
             "model": self.model,
@@ -197,14 +187,9 @@ class ZhipuLLM:
 
     def chat_stream_fallback_chunks(self, prompt: str, history: list = None) -> Iterator[Dict[str, Any]]:
         """非流式整段后分块 yield（与 parse_intent 解耦）；同步 HTTP，避免事件循环嵌套。"""
-        messages = []
-        if history:
-            for msg in history:
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", ""),
-                })
-        messages.append({"role": "user", "content": prompt})
+        from llm.chat_messages import prompt_to_messages
+
+        messages = prompt_to_messages(prompt, history=history)
         payload = {
             "model": self.model,
             "messages": messages,

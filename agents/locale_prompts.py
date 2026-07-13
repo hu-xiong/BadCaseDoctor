@@ -202,6 +202,15 @@ def react_unified_grep_no_repeat_message(locale: Optional[str], *, reason: str) 
     return "不再重复检索。"
 
 
+def react_unified_modify_requires_grep_first(locale: Optional[str]) -> str:
+    if is_english_locale(locale):
+        return (
+            "modify/delete requires a prior grep in this run to locate the target record. "
+            "Running grep first, then retry modify."
+        )
+    return "modify/delete 前须先在本轮执行 grep 定位目标记录；将先执行 grep，再重试 modify。"
+
+
 def react_unified_duplicate_action_stall_message(
     locale: Optional[str],
     *,
@@ -731,11 +740,25 @@ def modify_message_sandbox_done(locale: Optional[str]) -> str:
     )
 
 
-def modify_summary_preview(target: str, target_id: int, mod_summary: str, locale: Optional[str]) -> str:
+def modify_summary_preview(
+    target: str,
+    target_id: int,
+    mod_summary: str,
+    locale: Optional[str],
+    *,
+    record_title: Optional[str] = None,
+) -> str:
     name = modify_target_display_name(target, locale)
+    title = str(record_title or "").strip()
     if is_english_locale(locale):
-        return f"Preview change to {name} (ID={target_id}): {mod_summary}"
-    return f"预览修改{name}(ID={target_id})：{mod_summary}"
+        base = f"Preview change to {name} (ID={target_id})"
+        if title:
+            base += f" «{title[:120]}»"
+        return f"{base}: {mod_summary}"
+    base = f"预览修改{name}(ID={target_id})"
+    if title:
+        base += f"「{title[:120]}」"
+    return f"{base}：{mod_summary}"
 
 
 def modify_message_apply_ok(target: str, target_id: int, locale: Optional[str]) -> str:
@@ -1022,6 +1045,15 @@ def react_summarize_grep_done_empty(locale: Optional[str]) -> str:
     return "grep 完成：未命中相关记录。调度建议：收窄/改写关键词，或切换 target 后重查。"
 
 
+def react_modify_blocked_after_empty_grep(locale: Optional[str]) -> str:
+    if is_english_locale(locale):
+        return (
+            "grep found no matching records; modify/delete was skipped. "
+            "Adjust keywords or target and try again."
+        )
+    return "grep 未命中任何记录，已跳过 modify/delete。请改写关键词或确认 target 后重试。"
+
+
 def react_summarize_grep_done_hits(n: int, bug_n: int, bc_n: int, tc_n: int, locale: Optional[str]) -> str:
     if is_english_locale(locale):
         return (
@@ -1032,6 +1064,24 @@ def react_summarize_grep_done_hits(n: int, bug_n: int, bc_n: int, tc_n: int, loc
         f"grep 完成：命中约 {n} 条（bug {bug_n} / badcase {bc_n} / testcase {tc_n}）。"
         "调度将据此定位下一步 modify/create。"
     )
+
+
+def react_summarize_modify_failed(
+    err: Optional[str],
+    confirmation_required: Any,
+    diff_n: int,
+    locale: Optional[str],
+) -> str:
+    e = str(err or "").strip()[:400]
+    if is_english_locale(locale):
+        base = "modify failed"
+        if e:
+            base += f": {e}"
+        return f"{base} (confirmation_required={confirmation_required}, ~{diff_n} diff group(s))"
+    base = "modify 失败"
+    if e:
+        base += f"：{e}"
+    return f"{base}（需确认={confirmation_required}，变更项约 {diff_n} 条）"
 
 
 def react_summarize_modify_done(ok: Any, confirmation_required: Any, diff_n: int, locale: Optional[str]) -> str:
@@ -1051,6 +1101,301 @@ def react_summarize_tool_done_ok(tool: Optional[str], ok: Any, locale: Optional[
     if is_english_locale(locale):
         return f"{t} finished: success={ok}"
     return f"{t} 执行完成：success={ok}"
+
+
+def _cdp_page_route_label(url: str, locale: Optional[str]) -> str:
+    u = (url or "").lower()
+    if "/login" in u or "#/login" in u:
+        return "Login page" if is_english_locale(locale) else "登录页"
+    if "project-detail" in u:
+        return "Project detail page" if is_english_locale(locale) else "项目详情页"
+    if "project-manage" in u:
+        return "Project management" if is_english_locale(locale) else "项目管理页"
+    return ""
+
+
+def _format_element_inventory_labels(
+    inventory: Any,
+    *,
+    title: str = "",
+    limit: int = 12,
+) -> List[str]:
+    """将 explore 的 element_inventory 格式化为 @eN (role/name) 列表。"""
+    from agents.cdp.evidence import format_ref_label
+
+    out: List[str] = []
+    if not isinstance(inventory, list):
+        return out
+    title_s = (title or "").strip()
+    skip_names = {title_s, "Vite + Vue"}
+    for item in inventory:
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            continue
+        role = str(item.get("role") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if name in skip_names and not role:
+            continue
+        label = format_ref_label(ref, role=role or None, name=name or None)
+        if not label or label in out:
+            continue
+        out.append(label)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _cdp_meaningful_node_names(
+    nodes: Any,
+    *,
+    title: str = "",
+    limit: int = 6,
+) -> List[str]:
+    out: List[str] = []
+    title_s = (title or "").strip()
+    skip_names = {title_s, "Vite + Vue"}
+    if not isinstance(nodes, list):
+        return out
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        name = str(n.get("name") or "").strip()
+        if not name or name in skip_names:
+            continue
+        role = str(n.get("role") or "").strip()
+        ref = str(n.get("ref") or "").strip()
+        label = f"{ref} ({role}/{name})" if ref and role else (f"{role}/{name}" if role else name)
+        if label not in out:
+            out.append(label)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def react_summarize_cdp_done(observation: Dict[str, Any], locale: Optional[str]) -> str:
+    """CDP 步骤自然语言摘要：突出页面路由与关键控件，避免只复述页面 title。"""
+    if not isinstance(observation, dict):
+        return "cdp" if is_english_locale(locale) else "cdp 执行完成"
+
+    page = observation.get("page") if isinstance(observation.get("page"), dict) else {}
+    url = str(observation.get("url") or page.get("url") or "").strip()
+    title = str(observation.get("title") or page.get("title") or "").strip()
+    action = str(observation.get("action") or observation.get("tool") or "").strip().lower()
+    ok = observation.get("success")
+    route = _cdp_page_route_label(url, locale)
+    url_short = url[:160] if url else ""
+
+    if action in ("create", "session"):
+        if is_english_locale(locale):
+            base = "Browser session opened"
+            if route:
+                base += f", now on {route}"
+            if url_short:
+                base += f" ({url_short})"
+            return base + "."
+        base = "已打开浏览器会话"
+        if route:
+            base += f"，当前位于{route}"
+        if url_short:
+            base += f"（{url_short}）"
+        return base
+
+    if "snapshot" in action or observation.get("snapshot_id"):
+        stats = observation.get("stats") if isinstance(observation.get("stats"), dict) else {}
+        count = stats.get("exported")
+        nodes = observation.get("nodes")
+        if count is None and isinstance(nodes, list):
+            count = len(nodes)
+        try:
+            count_i = int(count or 0)
+        except (TypeError, ValueError):
+            count_i = 0
+        names = _cdp_meaningful_node_names(nodes, title=title)
+        if is_english_locale(locale):
+            parts = [f"Page snapshot: {count_i} interactive element(s)"]
+            if route:
+                parts.append(route)
+            if url_short:
+                parts.append(url_short)
+            if names:
+                parts.append("controls: " + "; ".join(names[:8]))
+            return " · ".join(parts)
+        parts = [f"页面快照 {count_i} 个可交互元素"]
+        if route:
+            parts.append(route)
+        if url_short:
+            parts.append(f"（{url_short}）")
+        if names:
+            parts.append("控件：" + "；".join(names[:8]))
+        return " · ".join(parts)
+
+    if action == "explore":
+        phase = str(observation.get("phase") or "").strip().lower()
+        inventory = observation.get("element_inventory")
+        count = observation.get("element_count")
+        try:
+            count_i = int(count or 0)
+        except (TypeError, ValueError):
+            count_i = 0
+        nodes = observation.get("nodes")
+        labels = _format_element_inventory_labels(inventory, title=title, limit=12)
+        if not labels:
+            labels = _cdp_meaningful_node_names(nodes, title=title, limit=12)
+
+        clicks = observation.get("exploration_clicks")
+        issues_n = observation.get("issues_found")
+        issue_list = observation.get("exploration_issues")
+        issue_msgs: List[str] = []
+        if isinstance(issue_list, list):
+            for iss in issue_list[:5]:
+                if isinstance(iss, dict):
+                    msg = str(iss.get("message") or "").strip()
+                    if msg:
+                        issue_msgs.append(msg[:100])
+
+        if phase == "inventory":
+            if is_english_locale(locale):
+                parts = [f"UI inventory: {count_i or len(labels)} interactive element(s)"]
+                if route:
+                    parts.append(route)
+                if labels:
+                    parts.append("controls: " + "; ".join(labels))
+                return " · ".join(parts)
+            parts = [f"界面元素清单：共 {count_i or len(labels)} 个可交互控件"]
+            if route:
+                parts.append(route)
+            if labels:
+                parts.append("控件：" + "；".join(labels))
+            return " · ".join(parts)
+
+        if is_english_locale(locale):
+            parts = [f"CDP explore finished: success={ok}"]
+            if count_i:
+                parts.append(f"{count_i} interactive element(s)")
+            if route:
+                parts.append(route)
+            if labels:
+                parts.append("controls: " + "; ".join(labels))
+            if clicks is not None:
+                parts.append(f"clicks={clicks}")
+            if issues_n is not None:
+                parts.append(f"issues={issues_n}")
+            if issue_msgs:
+                parts.append("problems: " + " | ".join(issue_msgs))
+            return " · ".join(parts)
+
+        parts = [f"CDP 探测完成：success={ok}"]
+        if count_i:
+            parts.append(f"共 {count_i} 个可交互控件")
+        if route:
+            parts.append(route)
+        if labels:
+            parts.append("控件：" + "；".join(labels))
+        if clicks is not None:
+            parts.append(f"点击 {clicks} 次")
+        if issues_n is not None:
+            parts.append(f"记录问题 {issues_n} 个")
+        if issue_msgs:
+            parts.append("问题：" + " | ".join(issue_msgs))
+        return " · ".join(parts)
+
+    if action == "login" and observation.get("login_success"):
+        msg = "Login succeeded" if is_english_locale(locale) else "登录成功"
+        if route:
+            msg += f" ({route})" if is_english_locale(locale) else f"，已进入{route}"
+        return msg
+
+    if is_english_locale(locale):
+        return f"cdp {action or 'step'} finished: success={ok}" + (f", {route}" if route else "")
+    return f"cdp {action or '步骤'} 完成：success={ok}" + (f"，{route}" if route else "")
+
+
+def enrich_nl_observation_for_incremental_summary_llm(
+    tool: str,
+    nl_observation: str,
+    observation: Optional[Dict[str, Any]],
+    locale: Optional[str],
+) -> str:
+    """为增量运行总览 LLM 补充 CDP 结构化线索；其他工具原样返回 nl_observation。"""
+    base = (nl_observation or "").strip()
+    if (tool or "").strip().lower() != "cdp" or not isinstance(observation, dict):
+        return base
+
+    parts: List[str] = []
+    if base:
+        parts.append(base)
+
+    action = str(observation.get("action") or observation.get("tool") or "").strip().lower()
+    page = observation.get("page") if isinstance(observation.get("page"), dict) else {}
+    title = str(observation.get("title") or page.get("title") or "").strip()
+
+    stats = observation.get("stats") if isinstance(observation.get("stats"), dict) else {}
+    count = stats.get("exported")
+    nodes = observation.get("nodes")
+    if count is None and isinstance(nodes, list):
+        count = len(nodes)
+
+    inventory = observation.get("element_inventory")
+    element_count = observation.get("element_count")
+    inv_labels = _format_element_inventory_labels(inventory, title=title, limit=20)
+    if not inv_labels and action == "explore":
+        inv_labels = _cdp_meaningful_node_names(nodes, title=title, limit=20)
+
+    if element_count is not None:
+        parts.append(f"[explore.element_count] {element_count}")
+    elif action == "explore" and inv_labels:
+        parts.append(f"[explore.element_count] {len(inv_labels)}")
+
+    if inv_labels:
+        parts.append("[explore.inventory] " + "；".join(inv_labels))
+    elif count is not None:
+        parts.append(f"[snapshot.interactive_count] {count}")
+
+    names = _cdp_meaningful_node_names(nodes, title=title)
+    if names and not inv_labels:
+        parts.append("[snapshot.elements] " + "；".join(names))
+
+    issue_list = observation.get("exploration_issues")
+    if isinstance(issue_list, list) and issue_list:
+        issue_lines: List[str] = []
+        for iss in issue_list[:8]:
+            if isinstance(iss, dict):
+                msg = str(iss.get("message") or "").strip()
+                if msg:
+                    issue_lines.append(msg[:150])
+        if issue_lines:
+            parts.append("[explore.issues] " + " | ".join(issue_lines))
+
+    clicks = observation.get("exploration_clicks")
+    if clicks is not None:
+        parts.append(f"[explore.clicks] {clicks}")
+
+    url = str(observation.get("url") or page.get("url") or "").strip()
+    route = _cdp_page_route_label(url, locale)
+    if route:
+        parts.append(f"[page.route] {route}")
+
+    if action == "explore" or inv_labels:
+        if is_english_locale(locale):
+            parts.append(
+                "This step is CDP UI exploration. Confirmed MUST list concrete controls from "
+                "[explore.inventory]; do NOT cite grep/database hits or invent controls not in inventory."
+            )
+        else:
+            parts.append(
+                "本步为 CDP 界面探测。已确认须逐条列出 [explore.inventory] 中的控件（@eN role/name）；"
+                "禁止引用 grep/数据库检索，禁止编造清单外的界面元素。"
+            )
+    elif is_english_locale(locale):
+        parts.append(
+            "Do not only write «cdp succeeded»; include page route, element count, and key control names."
+        )
+    else:
+        parts.append("勿只写「cdp 成功」；须写清页面类型、可交互元素数量与关键控件名称。")
+
+    return "\n".join(parts)
 
 
 def react_executing_modify_about_to(
@@ -1199,6 +1544,18 @@ def incremental_running_summary_prompt(
     todo = (todo_text or "").strip()[:2000]
     tool_s = str(tool or "").strip()
     step_n = int(step_index) + 1
+    cdp_hint_en = ""
+    cdp_hint_zh = ""
+    if tool_s.lower() == "cdp":
+        cdp_hint_en = (
+            "- **When the tool is `cdp`**: Confirmed MUST list UI controls from "
+            "[explore.inventory] or observation controls (ref/role/name). "
+            "Do NOT cite grep/database results in this step.\n"
+        )
+        cdp_hint_zh = (
+            "- **cdp 工具**：已确认须列出观察中的界面控件（@eN role/name，见 [explore.inventory]）；"
+            "本步禁止写 grep/数据库检索结论。\n"
+        )
 
     if is_english_locale(locale):
         prev_block = prev if prev else "(No prior summary)"
@@ -1216,7 +1573,7 @@ Required format:
 - Keep facts, no invention.
 - **When the tool is `modify`**: any entity name (Bug / BadCase / test case / Card) in Confirmed must match the **fact line** `target` below; do **not** write BadCase just because the product name contains "BadCase"; IDs must match `target_id`.
 - **Comments (Bug/BadCase/TestCase)**: use `append_comment` only (no remark field). For "add comment", only say done if `comment_records` contains that text.
-
+{cdp_hint_en}
 Previous summary:
 {prev_block}
 
@@ -1243,7 +1600,7 @@ Output only the new summary."""
 - 忠实合并，不编造。
 - **modify 工具**：若观察摘要或待办中出现「Bug / BadCase / 测试用例」等实体名，**必须与下方「事实行」中的 target 一致**；**禁止**因产品名含「BadCase」就把 Bug 写成 BadCase；ID 须与 target_id 一致。
 - **评论（Bug/BadCase/TestCase）**：无 remark 字段；留言用 append_comment。仅当 comment_records 中已有该正文才可写「评论已存在」。
-
+{cdp_hint_zh}
 已有总览：
 {prev_block}
 

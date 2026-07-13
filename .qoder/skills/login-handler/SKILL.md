@@ -15,7 +15,7 @@ description: 处理browser-use测试时的登录问题。当浏览器访问页�
 
 ## 登录凭证获取优先级
 
-1. **浏览器已保存的凭证** - 从浏览器自动填充中获取
+1. **项目网站登录配置** - `project.login_configs`（url/username/password）
 2. **本地凭证文件** - 读取 `tmp/login_states/credentials.json`
 3. **用户手动输入** - 提示用户填写后保存到凭证文件
 
@@ -33,20 +33,33 @@ description: 处理browser-use测试时的登录问题。当浏览器访问页�
    - 检查URL是否包含登录路径
    - 检查页面是否存在登录表单元素
 
-2. **执行登录**
+2. **执行登录（CDP `action=login`）**
    ```
-   - 定位用户名输入框 (input[type="text"], input[name="username"], #username)
-   - 定位密码输入框 (input[type="password"], input[name="password"], #password)
-   - 填入凭证
-   - 点击登录按钮 (button[type="submit"], .login-btn, #login-btn)
+   - cdp session create + url
+   - cdp action=login（自动读项目 login_configs 填账号密码）
+   - 若返回 await_verification_code=true：暂停，请用户在对话发送验证码
+   - 用户回复验证码后：cdp action=login + verification_code（同一 session_id）
+   - 登录成功后继续 snapshot/click 等测试步骤
    ```
 
-3. **验证登录成功**
+3. **验证码 / 图形码 / 滑块**
+   - 短信/邮箱验证码：**必须**等用户发码，不可猜测
+   - 可先自动点击「发送验证码」
+   - 返回 `await_verification_code=true` 后暂停；pending 会写入 `tmp/login_states/pending/` 与浏览器 session
+   - 用户下一条消息发纯数字验证码 → 自动 `cdp login+verification_code` 续登（无需 LLM 猜）
+   - 图形验证码/滑块：提示用户手动完成或发码后继续
+
+4. **验证登录成功**
    - 等待页面跳转
    - 确认URL不再是登录页面
    - 如果仍在登录页，检查是否有错误提示
 
-4. **登录失败处理**
+5. **断言失败 → 自动落库预览（D4）**
+   - `cdp assert` 失败后系统自动 `create(target=bug, confirm=false)` 预览
+   - 复现步骤/实际结果来自 `cdp_test_evidence`
+   - 用户在侧栏确认后落库；勿重复调用 create
+
+6. **登录失败处理**
    - 记录错误信息
    - 提示用户手动登录
    - 等待用户确认后继续

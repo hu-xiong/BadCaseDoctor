@@ -172,6 +172,15 @@ def remap_card_layer_modification_keys(modifications: Dict[str, Any]) -> Dict[st
     return out
 
 
+def remap_entity_modification_keys(
+    target: str, modifications: Dict[str, Any]
+) -> Dict[str, Any]:
+    """按 target 源表 remap 跨实体误用字段并剔除不可写列（实现见 modify_field_schema）。"""
+    from agents.modify_field_schema import remap_entity_modification_keys as _impl
+
+    return _impl(target, modifications)
+
+
 def find_card_id_for_bug_source_id(
     card_rows: Optional[List[Dict[str, Any]]],
     bug_id: int,

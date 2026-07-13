@@ -76,6 +76,68 @@ def _ui_record_for_target(ui_context: Optional[dict], target: str) -> Optional[i
     )
 
 
+def ui_record_for_grep_target(
+    ui_context: Optional[dict], grep_target: str
+) -> Optional[int]:
+    """界面聚焦记录：grep target=all/空时回退到 ui_context.target。"""
+    gt = (grep_target or "all").strip().lower()
+    rid = _ui_record_for_target(ui_context, gt)
+    if rid is not None:
+        return rid
+    if gt in ("all", "", "*"):
+        if not isinstance(ui_context, dict):
+            return None
+        ut = str(ui_context.get("target") or "").strip().lower()
+        if ut in ("bug", "badcase", "testcase", "card", "plan"):
+            return _ui_record_for_target(ui_context, ut)
+    return None
+
+
+def inject_ui_record_into_grep_params(
+    tool_params: dict, ui_context: Optional[dict]
+) -> Optional[int]:
+    """仅附带 ui_context；不再把雪花 id 写入 grep keywords（检索走语义/BM25）。"""
+    if not isinstance(tool_params, dict) or not isinstance(ui_context, dict):
+        return None
+    tool_params.setdefault("ui_context", ui_context)
+    tt = str(tool_params.get("target") or "all").strip().lower()
+    return ui_record_for_grep_target(ui_context, tt)
+
+
+def seed_grep_result_context_from_ui_record(
+    result_ctx: dict,
+    ui_context: dict,
+    *,
+    grep_target: str = "bug",
+) -> bool:
+    """grep 无命中时，用界面 record_id 填充 result_context，供后续 modify。"""
+    if not isinstance(result_ctx, dict) or not isinstance(ui_context, dict):
+        return False
+    rid = ui_record_for_grep_target(ui_context, grep_target)
+    if rid is None:
+        return False
+    ut = str(ui_context.get("target") or grep_target or "bug").strip().lower()
+    title = str(ui_context.get("title") or "").strip()
+    stub = {"id": rid, "title": title or f"#{rid}"}
+    gr = result_ctx.setdefault("grep_result", {})
+    key_map = {
+        "bug": ("bug_list", "grep_modify_raw_bug_list", "first_bug_id"),
+        "badcase": ("badcase_list", "grep_modify_raw_badcase_list", "first_badcase_id"),
+        "testcase": ("testcase_list", "grep_modify_raw_testcase_list", "first_testcase_id"),
+        "card": ("card_list", "grep_modify_raw_card_list", "first_card_id"),
+    }
+    keys = key_map.get(ut)
+    if not keys:
+        return False
+    list_k, raw_k, first_k = keys
+    result_ctx[list_k] = [stub]
+    result_ctx[raw_k] = [stub]
+    gr[first_k] = rid
+    result_ctx[first_k] = rid
+    result_ctx["_grep_seeded_from_ui_context"] = True
+    return True
+
+
 def _first_id_from_grep(target: str, grep_result: dict, result_context: dict) -> Optional[int]:
     gr = grep_result if isinstance(grep_result, dict) else {}
     rc = result_context if isinstance(result_context, dict) else {}
@@ -185,7 +247,20 @@ def sanitize_tool_entity_ids(
                 tool_params.pop("target_id", None)
             else:
                 tool_params["target_id"] = tid
-        if not tool_params.get("target_id"):
-            sid = _ui_record_for_target(ui_context, tt) or _first_id_from_grep(tt, gr, rc)
-            if sid is not None:
-                tool_params["target_id"] = sid
+        uq = str(
+            tool_params.pop("_resolve_user_input", None)
+            or tool_params.get("natural_query")
+            or ""
+        ).strip()
+        from agents.modify_target_resolve import resolve_modify_target_id
+
+        sid = resolve_modify_target_id(
+            tt,
+            grep_result=gr,
+            result_context=rc,
+            ui_context=ui_context,
+            user_input=uq,
+            explicit_target_id=tool_params.get("target_id"),
+        )
+        if sid is not None:
+            tool_params["target_id"] = sid

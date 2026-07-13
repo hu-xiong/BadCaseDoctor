@@ -30,28 +30,10 @@ def _now_ts() -> float:
 
 
 def _mk_es_client(cfg: ESConfig):
-    try:
-        from elasticsearch import Elasticsearch
-    except Exception as e:
-        raise RuntimeError(f"缺少依赖 elasticsearch：请先安装 requirements.txt（elasticsearch）。{e}")
+    """进程内复用 ES 客户端 + connections_per_node 连接池（见 memory/es_client_pool.py）。"""
+    from memory.es_client_pool import get_es_client
 
-    url = (cfg.url or "").strip()
-    if url:
-        kwargs: Dict[str, Any] = {"hosts": [url], "verify_certs": bool(cfg.verify_certs)}
-    else:
-        host = (cfg.host or "").strip()
-        if not host:
-            raise RuntimeError("ES 未配置：请设置 ES_URL 或 ES_HOST。")
-        kwargs = {
-            "hosts": [{"scheme": "http", "host": host, "port": int(cfg.port)}],
-            "verify_certs": bool(cfg.verify_certs),
-        }
-
-    if cfg.api_key:
-        kwargs["api_key"] = cfg.api_key
-    elif cfg.username:
-        kwargs["basic_auth"] = (cfg.username, cfg.password or "")
-    return Elasticsearch(**kwargs)
+    return get_es_client(cfg)
 
 
 class ESLongMemoryStore:

@@ -59,6 +59,10 @@ def observation_body_is_tool_failure(body: Any) -> bool:
     """是否应按工具失败走 ``tool`` + ``op=error``（含仅有 ``error`` 而无 ``success`` 的旧包）。"""
     if not isinstance(body, dict):
         return False
+    _code = str(body.get("code") or body.get("error") or "").strip()
+    # grep 零命中：检索已执行，仅无记录可跳转，UI 应走 tool end 而非 error
+    if _code == "grep_empty_hits":
+        return False
     if body.get("success") is False:
         return True
     return _meaningful_error(body.get("error"))

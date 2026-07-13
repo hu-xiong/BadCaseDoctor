@@ -37,9 +37,9 @@ def _fake_models():
             pricing=ModelPricing(2, 4),
         ),
         ModelSpec(
-            id="qwen3.6-flash",
-            label="Flash",
-            provider="qwen",
+            id="deepseek-v4-flash",
+            label="DS Flash",
+            provider="deepseek",
             enabled=True,
             vision=False,
             priority=58,
@@ -89,7 +89,7 @@ def test_auto_downgrade_simple_chat():
         has_images=False,
     )
     r = resolve_request_model(ctx)
-    assert r.business_model_id == "qwen3.6-flash"
+    assert r.business_model_id == "deepseek-v4-flash"
     assert "downgrade" in r.route_reason
 
 
@@ -100,7 +100,7 @@ def test_auto_escalate_after_failure():
         1,
         "s1",
         attribution=__import__("llm.failure_attribution", fromlist=["FailureAttribution"]).FailureAttribution.INFERENCE_FAILURE,
-        failed_model_id="qwen3.6-flash",
+        failed_model_id="deepseek-v4-flash",
     )
     ctx = RouteContext(
         raw_model="auto",
@@ -112,18 +112,18 @@ def test_auto_escalate_after_failure():
     )
     r = resolve_request_model(ctx)
     assert r.business_model_id == "qwen3.6-plus"
-    assert r.escalated_from == "qwen3.6-flash"
+    assert r.escalated_from == "deepseek-v4-flash"
     assert "escalate" in r.route_reason
     clear_escalation("u1", 1, "s1")
 
 
 def test_pick_cheapest_not_deepseek():
     bid = model_scheduler.pick_cheapest_enabled()
-    assert bid == "qwen3.6-flash"
+    assert bid == "deepseek-v4-flash"
 
 
 def test_pick_next_higher_priority_min_tier():
-    nxt = model_scheduler.pick_next_higher_priority("qwen3.6-flash")
+    nxt = model_scheduler.pick_next_higher_priority("deepseek-v4-flash")
     assert nxt == "qwen3.6-plus"
 
 

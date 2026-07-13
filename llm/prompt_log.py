@@ -4,6 +4,7 @@
 
 启用（改 .env 后须重启 python app.py）：
   LLM_LOG_PROMPTS=1          # 请求：messages / tools / payload
+  REACT_PROMPT_LOG=1         # ReAct 组装后的可读 prompt（grep/modify/skill 校对）；未设时随 LLM_LOG_PROMPTS
   LLM_LOG_RESPONSE=1         # 响应；未设置时随 LLM_LOG_PROMPTS=1 一并开启
   PowerShell：$env:LLM_LOG_PROMPTS='1'; $env:LLM_LOG_RESPONSE='1'
 
@@ -14,11 +15,12 @@
   或 LLM_LOG_PROMPTS_FILE=logs/llm_io.jsonl
 
 可选：
+  REACT_PROMPT_LOG_ROUNDS=all  # 或 1,2,3；默认 all（每轮 unified prompt）
   LLM_LOG_PROMPTS_MAX_CHARS=200000
   LLM_LOG_PROMPTS_INCLUDE_TOOLS=1    # 请求里打印完整 tools 定义
   LLM_LOG_STREAM_OUTPUT=1            # 流式结束后打印拼接正文（默认随 LLM_LOG_RESPONSE）
 
-标签：[LLM_PROMPT] 输入  [LLM_RESPONSE] 输出
+标签：[LLM_PROMPT] 输入  [LLM_RESPONSE] 输出  [REACT_PROMPT] 组装 prompt
 """
 from __future__ import annotations
 
@@ -26,10 +28,76 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Dict, Iterator, List, Optional
 
 _logger = logging.getLogger("badcase.llm_prompt")
 _file_lock = threading.Lock()
+_llm_prompt_tag_ctx: ContextVar[str] = ContextVar("llm_prompt_tag", default="")
+
+
+@contextmanager
+def llm_prompt_tag_scope(tag: str) -> Iterator[None]:
+    """ReAct 阶段标签：底层 LLM 请求日志 tag 会附带此前缀。"""
+    token = _llm_prompt_tag_ctx.set(str(tag or "").strip())
+    try:
+        yield
+    finally:
+        _llm_prompt_tag_ctx.reset(token)
+
+
+def get_llm_prompt_tag() -> str:
+    return str(_llm_prompt_tag_ctx.get() or "").strip()
+
+
+def react_prompt_log_enabled() -> bool:
+    v = (os.getenv("REACT_PROMPT_LOG") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    try:
+        from config import Config
+
+        if getattr(Config, "REACT_PROMPT_LOG", False):
+            return True
+    except Exception:
+        pass
+    return llm_prompt_log_enabled()
+
+
+def react_prompt_log_rounds_1based() -> Optional[set]:
+    """
+    哪些 unified 轮次打印组装 prompt（1-based）。
+    默认 all；0/off 关闭轮次过滤（等同不打印 unified，仍可通过 phase 单独打）。
+    """
+    raw = (os.getenv("REACT_PROMPT_LOG_ROUNDS") or "all").strip().lower()
+    if raw in ("0", "off", "false", "no", ""):
+        return None
+    if raw == "all":
+        return set()  # 空 set 表示不过滤
+    out: set = set()
+    for part in raw.replace(";", ",").split(","):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            out.add(int(p))
+        except ValueError:
+            continue
+    return out if out else None
+
+
+def should_log_react_round(round_idx_0based: int) -> bool:
+    if not react_prompt_log_enabled():
+        return False
+    allowed = react_prompt_log_rounds_1based()
+    if allowed is None:
+        return False
+    if not allowed:
+        return True
+    return (int(round_idx_0based) + 1) in allowed
 
 
 def llm_prompt_log_enabled() -> bool:
@@ -267,6 +335,63 @@ def maybe_log_llm_stream_assembled(
     maybe_log_llm_response_body(provider, body, tag=tag, model=model)
 
 
+def maybe_log_agent_prompt(
+    phase: str,
+    prompt: str,
+    *,
+    round_idx_0based: Optional[int] = None,
+    request_id: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """打印 ReAct/Skill 组装后的可读 prompt（便于 grep/modify 技能校对）。"""
+    if not react_prompt_log_enabled():
+        return
+    if round_idx_0based is not None and not should_log_react_round(int(round_idx_0based)):
+        return
+    try:
+        body = prompt if isinstance(prompt, str) else str(prompt or "")
+        body = _truncate_json_text(body)
+        meta_parts: List[str] = []
+        if round_idx_0based is not None:
+            meta_parts.append(f"round={int(round_idx_0based) + 1}")
+        if request_id:
+            meta_parts.append(f"request_id={request_id}")
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if v is None or v == "":
+                    continue
+                meta_parts.append(f"{k}={v}")
+        meta = " ".join(meta_parts)
+        header = f"[REACT_PROMPT] phase={phase or '-'}" + (f" {meta}" if meta else "")
+        to_console = react_prompt_log_enabled()
+        to_file = llm_prompt_log_file_path()
+        _emit_llm_block(header, body, to_console=to_console, to_file_path=to_file)
+    except Exception as e:
+        print(f"[REACT_PROMPT] log_failed: {e}", flush=True)
+
+
+def maybe_log_skill_workflow(
+    skill_name: str,
+    workflow_text: str,
+    *,
+    score: Optional[float] = None,
+    user_input: str = "",
+) -> None:
+    if not react_prompt_log_enabled():
+        return
+    extra = {"skill": skill_name}
+    if score is not None:
+        extra["score"] = f"{score:.2f}"
+    maybe_log_agent_prompt(
+        "skill_workflow",
+        workflow_text,
+        extra={
+            **extra,
+            "user_input_preview": (user_input or "")[:200],
+        },
+    )
+
+
 def maybe_log_llm_chat_kwargs(
     provider: str,
     kwargs: Dict[str, Any],
@@ -290,8 +415,12 @@ def maybe_log_llm_chat_kwargs(
                 else:
                     snap["tools"] = "<omitted>"
         raw = _truncate_json_text(json.dumps(snap, ensure_ascii=False, default=str))
+        ctx_tag = get_llm_prompt_tag()
+        eff_tag = tag or "-"
+        if ctx_tag:
+            eff_tag = f"{ctx_tag}|{eff_tag}" if eff_tag != "-" else ctx_tag
         header = (
-            f"[LLM_PROMPT] provider={provider} tag={tag or '-'} "
+            f"[LLM_PROMPT] provider={provider} tag={eff_tag} "
             f"model={snap.get('model')!r} stream={snap.get('stream', False)!r}"
         )
         _emit_llm_block(

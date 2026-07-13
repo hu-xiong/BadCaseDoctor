@@ -85,6 +85,10 @@ class SkillIntegration:
         """获取技能提示词"""
         return self.skill_loader.get_skill_prompt(skill_name)
 
+    def get_skills_catalog_for_prompt(self) -> str:
+        """统一流 prompt：技能目录（由 LLM 在 thinking 中选用，非规则硬匹配）。"""
+        return self.skill_loader.build_skills_catalog_for_prompt()
+
     def execute_skill_workflow(self, skill: Skill, context: Dict[str, Any], tool_executor: Callable) -> Dict[str, Any]:
         """执行技能工作流"""
         results = {

@@ -2,6 +2,7 @@
  * ReAct SSE 协议 v1 — UI 状态补丁（与后端 type: plan | step | tail 对齐）
  */
 import {
+  finalizeMessageFirstThinkStream,
   mergeMessageThinkDraftsIntoReactStepZero,
   maybeRevealPlanMemoAfterThink
 } from './applyReactThinkSSEStepEvent.js'
@@ -43,6 +44,7 @@ function replacePlanTodoStepsPreservingThinkClock(aiMessage, todoStrings, buildR
   aiMessage._placeholderSteps = false
   mergeBuiltStepsPreservingPlaceholderThinkClock(prevSteps, aiMessage.steps, hadPh)
   mergeMessageThinkDraftsIntoReactStepZero(aiMessage)
+  finalizeMessageFirstThinkStream(aiMessage)
 }
 
 export function applyPlanPayloadV1(aiMessage, payload, buildReactStepsFromTodoStrings) {

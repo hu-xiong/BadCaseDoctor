@@ -31,3 +31,24 @@ def test_sanitize_create_strips_invalid_copy_from_bug_id():
     gr = {"first_bug_id": 1745123456789012999}
     sanitize_tool_entity_ids("create", params, grep_result=gr, result_context=gr)
     assert fields["copy_from_bug_id"] == 1745123456789012999
+
+
+def test_inject_ui_record_does_not_rewrite_keywords_to_snowflake_id():
+    from utils.entity_id import inject_ui_record_into_grep_params
+
+    ui = {"target": "bug", "record_id": "714020812427890688"}
+    params = {"target": "bug", "keywords": "714020812427890888"}
+    rid = inject_ui_record_into_grep_params(params, ui)
+    assert rid == 714020812427890688
+    assert params["keywords"] == "714020812427890888"
+    assert params.get("ui_context") is ui
+
+
+def test_seed_grep_context_from_ui_record():
+    from utils.entity_id import seed_grep_result_context_from_ui_record
+
+    ui = {"target": "bug", "record_id": "714020812427890688", "title": "登录bug"}
+    ctx = {}
+    assert seed_grep_result_context_from_ui_record(ctx, ui, grep_target="bug") is True
+    assert ctx["grep_result"]["first_bug_id"] == 714020812427890688
+    assert ctx["bug_list"][0]["id"] == 714020812427890688

@@ -7,6 +7,7 @@ __pycache__/
 *.pyo
 *.pyc
 *.log
+observability/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -37,6 +38,8 @@ go-local-proxy/badcase-local-proxy.exe
 go-local-proxy/go-local-proxy.exe
 
 king-farm-calculator/target/
+
+electron-vue3/nul
 
 client_binaries/*
 !client_binaries/.gitkeep

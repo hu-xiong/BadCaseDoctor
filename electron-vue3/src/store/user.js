@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { getCurrentUser } from '../api.js'
+import { clearLastProjectId } from '../utils/lastProject.js'
 
 const user = ref(null)
 
@@ -28,9 +29,8 @@ export function setUser(u) {
 
 export function logout() {
   user.value = null
-  // 清除localStorage中的用户信息
   localStorage.removeItem('user')
-  // 可清除token等
+  clearLastProjectId()
 }
 
 export default user 

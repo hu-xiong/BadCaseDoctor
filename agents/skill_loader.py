@@ -142,7 +142,49 @@ class SkillLoader:
             }
             for skill in self.skills.values()
         ]
-    
+
+    def build_skills_catalog_for_prompt(
+        self,
+        *,
+        max_skills: int = 20,
+        desc_chars: int = 220,
+    ) -> str:
+        """供统一流 LLM 在 thinking 中自选 workflow；不做关键词硬匹配。"""
+        if not self.skills:
+            self.load_all()
+        try:
+            max_skills = max(1, min(int(max_skills), 32))
+        except (TypeError, ValueError):
+            max_skills = 20
+        try:
+            desc_chars = max(60, min(int(desc_chars), 400))
+        except (TypeError, ValueError):
+            desc_chars = 220
+
+        rows: List[str] = []
+        for skill in sorted(self.skills.values(), key=lambda s: str(s.name or "")):
+            if len(rows) >= max_skills:
+                break
+            desc = " ".join(str(skill.description or "").split())
+            if len(desc) > desc_chars:
+                desc = desc[:desc_chars].rstrip() + "…"
+            wf = sorted(getattr(skill, "workflow", None) or [], key=lambda s: getattr(s, "step", 0))
+            wf_str = " → ".join(
+                str(getattr(s, "tool", "") or "").strip()
+                for s in wf
+                if str(getattr(s, "tool", "") or "").strip()
+            )
+            tools = ", ".join(skill.get_tool_names())
+            rows.append(
+                f'  <skill name="{skill.name}" tools="{tools}">\n'
+                f"    <description>{desc}</description>\n"
+                f"    <workflow>{wf_str or '（见 description）'}</workflow>\n"
+                f"  </skill>"
+            )
+        if not rows:
+            return ""
+        return "<available_skills>\n" + "\n".join(rows) + "\n</available_skills>"
+
     def match_skill(self, user_input: str, context: Dict[str, Any] = None) -> Tuple[Optional[Skill], float]:
         """
         根据用户输入匹配合适的技能
@@ -165,6 +207,13 @@ class SkillLoader:
         # 提取意图和实体（简化版，后续可集成NLP模型）
         extracted_intents = self._extract_intents(user_input_lower)
         extracted_entities = self._extract_entities(user_input_lower)
+
+        if context:
+            _ui = context.get("ui_context")
+            if isinstance(_ui, dict):
+                _ut = str(_ui.get("target") or "").strip().lower()
+                if _ut in ("bug", "badcase", "testcase", "card", "plan") and _ut not in extracted_entities:
+                    extracted_entities.append(_ut)
         
         try:
             from .intent_guards import intent_bucket
@@ -172,6 +221,14 @@ class SkillLoader:
             intent_bucket = lambda _u: "unclear"  # type: ignore
 
         bucket = intent_bucket(user_input)
+
+        try:
+            from .intent_guards import user_text_implies_plan_entity_type
+        except ImportError:
+            user_text_implies_plan_entity_type = lambda _u: False  # type: ignore
+
+        _implies_plan = user_text_implies_plan_entity_type(user_input)
+        _delete_intent = "删除" in extracted_intents
 
         # 计算每个技能的匹配分数；create_* 按意图桶软降权（不再整表过滤到空）
         skill_scores = []
@@ -193,6 +250,22 @@ class SkillLoader:
                             f"[SKILL_MATCHER] 软降权 create_*（意图模糊，可由 ReAct 仲裁）: {skill.name} "
                             f"{orig:.2f} → {score:.2f}"
                         )
+                elif _implies_plan and _delete_intent:
+                    if sn.startswith("delete_") and sn not in ("delete_plan",):
+                        orig = score
+                        score *= 0.12
+                        print(
+                            f"[SKILL_MATCHER] 软降权 delete_*（用户明确删迭代计划）: {skill.name} "
+                            f"{orig:.2f} → {score:.2f}"
+                        )
+                    elif sn == "delete_plan":
+                        orig = score
+                        score = min(1.0, score * 1.15)
+                        if score != orig:
+                            print(
+                                f"[SKILL_MATCHER] 加权 delete_plan（删迭代计划）: {skill.name} "
+                                f"{orig:.2f} → {score:.2f}"
+                            )
                 skill_scores.append((skill, score))
 
         if not skill_scores:
@@ -211,6 +284,19 @@ class SkillLoader:
         
         if best_score >= 0.3:  # 阈值
             print(f"[SKILL_MATCHER] ✅ 选择技能: {best_skill.name} (分数: {best_score:.2f})")
+            try:
+                from llm.prompt_log import maybe_log_skill_workflow
+
+                wf = best_skill.get_workflow_prompt() if hasattr(best_skill, "get_workflow_prompt") else ""
+                if wf:
+                    maybe_log_skill_workflow(
+                        best_skill.name,
+                        wf,
+                        score=best_score,
+                        user_input=user_input,
+                    )
+            except Exception as _sk_log_ex:
+                print(f"[REACT_PROMPT] skill_workflow log skip: {_sk_log_ex}", flush=True)
             return best_skill, best_score
         else:
             print(f"[SKILL_MATCHER] ⚠️  无合适技能 (最高分: {best_score:.2f})")
@@ -248,7 +334,7 @@ class SkillLoader:
             'bug': ['bug', '缺陷', '问题', '错误', 'bug', '虫'],
             'badcase': ['badcase', 'bad case', 'bad-case', '问题用例', '错误用例'],
             'testcase': ['测试用例', 'testcase', 'test case', '用例'],
-            'plan': ['计划', '迭代', 'sprint', '版本'],
+            'plan': ['迭代计划', '计划', '迭代', 'sprint', '版本'],
             '优先级': ['优先级', '优先', '紧急', '重要'],
             '状态': ['状态', '进展情况', '处理情况']
         }

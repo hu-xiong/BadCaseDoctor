@@ -11,6 +11,33 @@ import {
   normalizeTestcaseModifyFieldKey,
   isTestcaseDetailModifyField
 } from '../utils/testcaseModifyFields.js'
+import { looksLikeDeleteToolPreview } from '../utils/deletePreviewUtils.js'
+
+/** 计划/实体主键：禁止 parseInt/Number，避免雪花 ID 精度丢失 */
+function normalizePlanIdStr(raw) {
+  if (raw == null || raw === '') return null
+  const s = snowflakeIdStr(raw) || String(raw).trim()
+  return s && /^\d+$/.test(s) ? s : null
+}
+
+/** delete 预览主键：plan 优先 plan_id，其余优先 target_id */
+function pickDeletePreviewTargetId(tgt, rec, flat, toolData) {
+  const t = String(tgt || '').toLowerCase()
+  const fromWire =
+    normalizePlanIdStr(flat.target_id ?? toolData?.target_id) ||
+    normalizePlanIdStr(flat.plan_id ?? toolData?.plan_id)
+  if (fromWire) return fromWire
+  if (t === 'plan') {
+    if (typeof rec?.id === 'string') return normalizePlanIdStr(rec.id)
+    // 数字 id 可能已被 JS 截断；仍写入占位，由 show-delete-in-list 按名称纠正
+    return normalizePlanIdStr(rec?.id)
+  }
+  return (
+    normalizePlanIdStr(rec?.id ?? flat.target_id ?? toolData?.target_id) ||
+    String(rec?.id ?? flat.target_id ?? toolData?.target_id ?? '').trim() ||
+    null
+  )
+}
 
 /** modify 预览：从工具结果或 before 快照取关联 Card.id，供列表跳转（与 Bug 源表 id 区分） */
 function pickModifyNavCardId(rr, r, toolData) {
@@ -214,10 +241,20 @@ export const extractToolName = (title) => {
   if (t.includes('modify')) return 'modify'
   if (t.includes('delete') || t.includes('删除')) return 'delete'
   if (t.includes('create')) return 'create'
-  if (t.includes('browser_test')) return 'browser_test'
+  if (t.includes('cdp') || t.includes('browser_test')) return 'cdp'
   if (t.includes('log_analyzer')) return 'log_analyzer'
   if (t.includes('search')) return 'search'
   return ''
+}
+
+/** grep 零命中（向量/BM25 已跑但无记录可跳转） */
+export function isGrepEmptyHitsPayload(outer, toolName) {
+  const tool = String(toolName || outer?.tool || '').toLowerCase()
+  if (tool !== 'grep') return false
+  const code = String(
+    outer?.code || outer?.error || outer?.data?.code || outer?.data?.error || ''
+  ).trim()
+  return code === 'grep_empty_hits'
 }
 
 /** 从 observation 生成人类可读的一行结果摘要 */
@@ -231,6 +268,13 @@ export const buildStepResultSummary = (outputData, toolName, toolData) => {
     (typeof d.error === 'string' && d.error.trim()) ||
     (typeof outer.error === 'string' && outer.error.trim()) ||
     ''
+  if (isGrepEmptyHitsPayload(outer, tool) || (tool === 'grep' && combinedErr === 'grep_empty_hits')) {
+    const summary =
+      (typeof d.summary === 'string' && d.summary.trim()) ||
+      (typeof outer.summary === 'string' && outer.summary.trim()) ||
+      ''
+    return summary || t('chat.stepGrepEmptyHits')
+  }
   if (combinedErr) return t('chat.stepErr', { msg: combinedErr })
   if (tool === 'grep' || d.testcase_location || d.bug_location || d.badcase_analysis || d.card_location || d.plan_tree) {
     const tc = d.testcase_location?.length ?? 0
@@ -321,7 +365,21 @@ export const pruneTrailingPhantomAgentSteps = (steps) => {
 }
 
 /**
- * ``resolveStreamStepIndex`` 要求 ``steps[n]`` 已存在；若未收到 todos/todo_start 扩行，工具事件会绑不到 UI 步骤。
+ * 工具/观察类 SSE：优先用后端 1-based ``step_id``（对齐规划备忘 grep→modify），
+ * 勿用 ``round_idx`` 作 ``index``（首轮 think 占 round 0 时 grep 在 round 1 会误绑到 modify 步）。
+ */
+export function resolveStreamStepIndexFromEvent(stepEvent, steps, resolveStreamStepIndex) {
+  const sid = stepEvent?.step_id ?? stepEvent?.stepId
+  if (sid != null && sid !== '') {
+    const n = Number(sid)
+    if (Number.isFinite(n) && n >= 1 && Array.isArray(steps) && steps[n - 1]) {
+      return n - 1
+    }
+  }
+  return resolveStreamStepIndex(stepEvent?.stepIndex ?? stepEvent?.index, steps)
+}
+
+/**
  * 按 SSE 的 0-based index 补齐占位行：中间隙标已完成，目标行为 running。
  */
 export function ensureReactStepsForStreamIndex(aiMessage, raw, buildReactStepsFromTodoStrings) {
@@ -366,6 +424,8 @@ export function ensureReactStepsForStreamIndex(aiMessage, raw, buildReactStepsFr
  */
 export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) {
   const resolveStreamStepIndex = ctx.resolveStreamStepIndex
+  const resolveStreamStepIndexFromEventFn =
+    ctx.resolveStreamStepIndexFromEvent || resolveStreamStepIndexFromEvent
   const appendStepDetailLine = ctx.appendStepDetailLine
   const buildReactStepsFromTodoStrings = ctx.buildReactStepsFromTodoStrings
   const tick = ctx.nextTick || nextTick
@@ -375,9 +435,14 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   const handleNavigation = ctx.handleNavigation
 
   console.log('[CHAT-STREAM] === 触发 observation 事件 ===')
+  const _obsPlanIdx = resolveStreamStepIndexFromEventFn(
+    stepEvent,
+    aiMessage.steps,
+    resolveStreamStepIndex
+  )
   ensureReactStepsForStreamIndex(
     aiMessage,
-    stepEvent.stepIndex ?? stepEvent.index,
+    _obsPlanIdx ?? stepEvent.stepIndex ?? stepEvent.index,
     buildReactStepsFromTodoStrings
   )
   const outputData = stepEvent.data
@@ -395,7 +460,11 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
 
   aiMessage.allObservations.push(outputData)
 
-  const _obsIdx = resolveStreamStepIndex(stepEvent.stepIndex ?? stepEvent.index, aiMessage.steps)
+  const _obsIdx = resolveStreamStepIndexFromEventFn(
+    stepEvent,
+    aiMessage.steps,
+    resolveStreamStepIndex
+  )
   let runningStep = null
   if (_obsIdx != null) {
     runningStep = aiMessage.steps[_obsIdx]
@@ -473,7 +542,10 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
 
   freezeThoughtSnapshotForStep(runningStep)
   const od = typeof outputData === 'object' && outputData !== null ? outputData : {}
-  runningStep.status = od.success === false ? 'failed' : 'completed'
+  const _obsToolEarly =
+    observationTool || (outputData && outputData.tool) || extractToolName(runningStep.title)
+  const _grepEmptyObs = isGrepEmptyHitsPayload(od, _obsToolEarly)
+  runningStep.status = od.success === false && !_grepEmptyObs ? 'failed' : 'completed'
   const humanMsg = od.message || od.summary || (od.data && (od.data.message || od.data.summary))
   runningStep.description =
     humanMsg && String(humanMsg).trim() ? String(humanMsg).trim().slice(0, 200) : '已完成'
@@ -533,6 +605,13 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     if (typeof td0 === 'object' && td0 !== null) {
       runningStep.resultSummary = buildStepResultSummary(outputData, resolvedTool, td0)
       appendStepDetailLine(runningStep, `── 结果 ──\n${runningStep.resultSummary}`)
+      const sumDraft = String(runningStep.thoughtSummaryDraft || '').replace(/\s+/g, ' ').trim()
+      if (sumDraft.length < 2 && runningStep.resultSummary) {
+        const rs = String(runningStep.resultSummary).replace(/\s+/g, ' ').trim().slice(0, 40)
+        if (rs.length >= 2 && /[\u4e00-\u9fa5A-Za-z0-9]/.test(rs)) {
+          runningStep.thoughtSummaryDraft = rs
+        }
+      }
     }
   }
 
@@ -863,6 +942,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
     }
 
     if (toolName === 'create' && toolData && typeof toolData === 'object') {
+      if (!looksLikeDeleteToolPreview(toolData)) {
       const hasDiff = Array.isArray(toolData.diff) && toolData.diff.length > 0
       const hasPreview = toolData.preview && typeof toolData.preview === 'object' && Object.keys(toolData.preview).length > 0
       const looksLikePreview =
@@ -896,11 +976,42 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           return 'bug'
         }
         const resolvedTarget = inferCreateTarget()
-        const adoptedId =
-          projectId != null
+        const adoptedPlanHint =
+          projectId != null && resolvedTarget === 'plan'
             ? getStableCreatedId(projectId, resolvedTarget, pv)
             : null
-        if (adoptedId != null) {
+        const adoptedId =
+          projectId != null && resolvedTarget !== 'plan'
+            ? getStableCreatedId(projectId, resolvedTarget, pv)
+            : null
+        if (resolvedTarget === 'plan' && projectId != null) {
+          aiMessage.modifyNavigation = {
+            target: resolvedTarget,
+            target_id: 'new',
+            diff: hasDiff ? toolData.diff : [],
+            preview: toolData.preview,
+            modifications: toolData.preview || {},
+            confirmation_required: true,
+            is_create: true,
+            _awaitStableVerify: true
+          }
+          tick(() => {
+            window.dispatchEvent(
+              new CustomEvent('verify-stable-create-id', {
+                detail: {
+                  messageId: aiMessage.id,
+                  projectId,
+                  target: resolvedTarget,
+                  preview: pv,
+                  adoptedId: adoptedPlanHint,
+                  toolPreview: toolData.preview,
+                  diff: hasDiff ? toolData.diff : []
+                },
+                bubbles: true
+              })
+            )
+          })
+        } else if (adoptedId != null) {
           const planIdNav = pv.plan_id ?? pv.planId
           aiMessage.modifyNavigation = {
             target: resolvedTarget,
@@ -943,6 +1054,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         if (
           handleShowModifyInList &&
           navCreate?.is_create === true &&
+          !navCreate._awaitStableVerify &&
           navCreate.confirmation_required !== false &&
           !navCreate.navigate_to_existing
         ) {
@@ -968,6 +1080,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           toolDataKeys: Object.keys(toolData),
           hint
         })
+      }
       }
     }
 
@@ -1010,12 +1123,11 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
                 ? { ...pvRaw, record: recRaw }
                 : { target: flat.target || toolData.target || 'bug', record: recRaw }
           const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
-          let planId = recRaw.plan_id ?? flat.plan_id ?? toolData.plan_id
-          if (planId != null && planId !== '') planId = parseInt(planId, 10)
+          let planId = normalizePlanIdStr(recRaw.plan_id ?? flat.plan_id ?? toolData.plan_id)
           aiMessage.deleteNavigation = {
             target: tgt || 'bug',
             target_id: delId,
-            plan_id: Number.isFinite(planId) ? planId : null,
+            plan_id: planId,
             preview: pv,
             confirmation_required: false,
             success: true,
@@ -1044,28 +1156,35 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
               : { target: flat.target || toolData.target || 'bug', record: recRaw }
         const rec = recRaw
         const tgt = String(pv.target || flat.target || toolData.target || '').toLowerCase()
-        const rid =
-          snowflakeIdStr(rec.id ?? flat.target_id ?? toolData.target_id) ||
-          String(rec.id ?? flat.target_id ?? toolData.target_id ?? '').trim()
-        let planId = rec.plan_id ?? flat.plan_id ?? toolData.plan_id
-        if (planId != null && planId !== '') planId = parseInt(planId, 10)
+        const rid = pickDeletePreviewTargetId(tgt, rec, flat, toolData)
+        let planId = normalizePlanIdStr(rec.plan_id ?? flat.plan_id ?? toolData.plan_id)
+        if (tgt === 'plan' && rid) planId = rid
         if (rid && /^\d+$/.test(rid)) {
           aiMessage.deleteNavigation = {
             target: tgt || 'bug',
             target_id: rid,
-            plan_id: Number.isFinite(planId) ? planId : null,
-            preview: pv,
+            plan_id: planId,
+            preview: { ...pv, record: { ...rec, id: rid } },
             confirmation_required: true
           }
           console.log('[DELETE] 已写入 deleteNavigation', aiMessage.deleteNavigation)
+          if (
+            aiMessage.modifyNavigation?.is_create === true &&
+            looksLikeDeleteToolPreview(flat)
+          ) {
+            aiMessage.modifyNavigation = null
+          }
           tick(() => {
             window.dispatchEvent(
               new CustomEvent('show-delete-in-list', {
                 detail: {
                   target: tgt || 'bug',
                   target_id: rid,
-                  plan_id: Number.isFinite(planId) ? planId : null,
-                  preview: pv,
+                  plan_id: planId,
+                  preview: {
+                    ...pv,
+                    record: { ...rec, id: rid }
+                  },
                   messageId: aiMessage.id
                 },
                 bubbles: true
@@ -1085,35 +1204,62 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
       console.log('[GREP-DEBUG] toolData keys:', Object.keys(toolData))
 
       let summaryText = ''
+      const tdFlat =
+        toolData.data && typeof toolData.data === 'object' ? toolData.data : toolData
 
-      const summary = toolData.summary || toolData.data?.summary
-      if (summary) {
-        summaryText = summary
+      if (isGrepEmptyHitsPayload(outputData, 'grep')) {
+        summaryText = buildStepResultSummary(outputData, 'grep', tdFlat)
       } else {
-        const parts = []
-        if (toolData.plan_tree) {
-          parts.push(`📊 计划树: ${toolData.plan_tree.total_plans || 0}个计划`)
+        const summary = toolData.summary || toolData.data?.summary
+        if (summary) {
+          summaryText = summary
+        } else {
+          const parts = []
+          if (toolData.plan_tree) {
+            parts.push(`📊 计划树: ${toolData.plan_tree.total_plans || 0}个计划`)
+          }
+          if (toolData.badcase_analysis) {
+            parts.push(`🐛 BadCase: ${toolData.badcase_analysis.length || 0}条`)
+          }
+          if (toolData.bug_location) {
+            parts.push(`🔍 Bug: ${toolData.bug_location.length || 0}条`)
+          }
+          if (toolData.testcase_location?.length) {
+            parts.push(`📋 用例: ${toolData.testcase_location.length}条`)
+          }
+          if (toolData.card_location?.length) {
+            parts.push(`🗂️ 卡片: ${toolData.card_location.length}条`)
+          }
+          summaryText = parts.join(' | ')
         }
-        if (toolData.badcase_analysis) {
-          parts.push(`🐛 BadCase: ${toolData.badcase_analysis.length || 0}条`)
-        }
-        if (toolData.bug_location) {
-          parts.push(`🔍 Bug: ${toolData.bug_location.length || 0}条`)
-        }
-        if (toolData.testcase_location?.length) {
-          parts.push(`📋 用例: ${toolData.testcase_location.length}条`)
-        }
-        if (toolData.card_location?.length) {
-          parts.push(`🗂️ 卡片: ${toolData.card_location.length}条`)
-        }
-        summaryText = parts.join(' | ')
+      }
+      if (!String(summaryText).trim()) {
+        summaryText = buildStepResultSummary(outputData, 'grep', tdFlat)
       }
 
       aiMessage.executionResults.push({
         step: runningStep.title,
         text: summaryText,
-        success: outputData.success || toolData.success
+        success: isGrepEmptyHitsPayload(outputData, 'grep')
+          ? true
+          : outputData.success || toolData.success
       })
+
+      const _giNav = resolveStreamStepIndexFromEvent(
+        stepEvent,
+        aiMessage.steps,
+        resolveStreamStepIndex
+      )
+      let _grepStepForMeta =
+        _giNav != null
+          ? aiMessage.steps[_giNav]
+          : [...(aiMessage.steps || [])].reverse().find(
+              (s) => s && (s.title === 'grep' || (s.title && String(s.title).includes('grep')))
+            )
+      if (!_grepStepForMeta && runningStep) _grepStepForMeta = runningStep
+      if (_grepStepForMeta && isGrepEmptyHitsPayload(outputData, 'grep')) {
+        _grepStepForMeta.grepEmptyHits = true
+      }
 
       console.log('[GREP-NAV] outputData:', outputData)
       console.log('[GREP-NAV] toolData:', toolData)
@@ -1127,7 +1273,11 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         aiMessage.navigation = navigationData
         console.log('[GREP-NAV] 已存储navigation到aiMessage:', aiMessage.navigation)
         if (navigationData.type === 'multiple') {
-          const _gi = resolveStreamStepIndex(stepEvent.stepIndex ?? stepEvent.index, aiMessage.steps)
+          const _gi = resolveStreamStepIndexFromEvent(
+            stepEvent,
+            aiMessage.steps,
+            resolveStreamStepIndex
+          )
           let grepStep =
             _gi != null
               ? aiMessage.steps[_gi]

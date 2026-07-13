@@ -38,6 +38,9 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
         const n = Number(pl.processType)
         if (!Number.isNaN(n)) ev.processType = n
       }
+      if (pl.think_summary_delta != null && String(pl.think_summary_delta)) {
+        ev.think_summary_delta = String(pl.think_summary_delta)
+      }
       return ev
     }
     return {
@@ -142,6 +145,7 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
         event: 'executing',
         tool: p.name,
         index: p.index,
+        step_id: p.step_id,
         message: p.message,
         params: p.params,
         reason: p.reason,

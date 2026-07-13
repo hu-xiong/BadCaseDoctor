@@ -17,14 +17,15 @@ _openai_clients: Dict[Tuple[str, str], Any] = {}
 
 
 def _pool_limits():
+    """httpx 连接池：max_connections=总上限，max_keepalive=空闲 keep-alive 核心连接数。"""
     try:
         keep = int(os.getenv("QIANFAN_HTTP_POOL_MAX_KEEPALIVE", "50"))
     except (TypeError, ValueError):
         keep = 50
     try:
-        total = int(os.getenv("QIANFAN_HTTP_POOL_MAX_CONNECTIONS", "400"))
+        total = int(os.getenv("QIANFAN_HTTP_POOL_MAX_CONNECTIONS", "500"))
     except (TypeError, ValueError):
-        total = 400
+        total = 500
     keep = max(2, keep)
     total = max(keep, total)
     return keep, total
@@ -98,21 +99,23 @@ def qianfan_post_json(
 
 
 def get_openai_compatible_client(api_key: str, base_url: Optional[str] = None, *, timeout: float = 30.0):
-    """千帆 / 其他 OpenAI 兼容 embedding 端点：复用 OpenAI SDK（内部 httpx 连接池）。"""
+    """千帆 / 其他 OpenAI 兼容 embedding 端点：OpenAI SDK + 进程内 httpx 连接池（与 rerank 共用）。"""
     from openai import OpenAI
 
     ak = (api_key or "").strip()
-    bu = (base_url or "").strip().rstrip("/")
+    bu = (base_url or "").strip().rstrip("/") or "https://qianfan.baidubce.com/v2"
     cache_key = (ak, bu)
     with _openai_lock:
         client = _openai_clients.get(cache_key)
         if client is not None:
             return client
+        http_client = get_qianfan_httpx_client(bu, timeout=timeout)
         client = OpenAI(
             api_key=ak,
-            base_url=bu or None,
+            base_url=bu,
             max_retries=1,
             timeout=timeout,
+            http_client=http_client,
         )
         _openai_clients[cache_key] = client
         return client

@@ -50,7 +50,13 @@ class ChitchatTool(BaseTool):
             "你是 BadCase Doctor 产品里的助手。用户当前在「项目 Agent」模式下发起了一段与具体缺陷操作无关的对话。"
             "请用简洁、友好的中文直接回答；不要输出 XML、不要假装调用了 grep/modify；不要编造本系统未提供的功能。"
         )
-        prompt = f"{system_hint}\n\n用户说：\n{t}"
+        prompt = f"""<system>
+{system_hint}
+</system>
+
+用户说：
+{t}
+"""
         return prompt, None
 
     async def stream_execute(

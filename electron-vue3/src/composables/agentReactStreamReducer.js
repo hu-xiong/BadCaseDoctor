@@ -17,7 +17,10 @@ export function applyAgentSseV1PhaseChunk(aiMessage, payload) {
 /** @param {object} aiMessage */
 export function applyAgentSseV1HelloChunk(aiMessage) {
   if (!aiMessage) return
-  if (!aiMessage.understanding) aiMessage.understanding = '...'
+  // 收到 hello 即表示 SSE 已连通；勿保持 '...' 三点（用户会误以为卡死）
+  if (!aiMessage.understanding || aiMessage.understanding === '...') {
+    aiMessage.understanding = ''
+  }
 }
 
 /**

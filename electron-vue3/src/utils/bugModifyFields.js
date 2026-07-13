@@ -167,7 +167,70 @@ function readBugModSide(mods, field, which) {
   return undefined
 }
 
-/** Bug/Card 沙箱：补全 diff delete 为空时的旧值行（与测例 enrichTestcaseSandboxDiffRows 对齐） */
+function normalizeBugSandboxFieldKey(field, fieldLabel) {
+  const f = String(field || '')
+    .trim()
+    .toLowerCase()
+  const lab = String(fieldLabel || '').trim()
+  if (
+    f === 'expected_result' ||
+    f === 'expected' ||
+    lab === '期望结果' ||
+    lab === '预期结果' ||
+    (lab.includes('期望') && lab.includes('结果')) ||
+    (lab.includes('预期') && lab.includes('结果'))
+  ) {
+    return 'expected_result'
+  }
+  if (f === 'actual_result' || lab === '实际结果' || (lab.includes('实际') && lab.includes('结果'))) {
+    return 'actual_result'
+  }
+  if (
+    f === 'steps_to_reproduce' ||
+    BUG_REPRO_PENDING_ALIASES.includes(f) ||
+    f === 'steps' ||
+    lab.includes('复现步骤')
+  ) {
+    return 'steps_to_reproduce'
+  }
+  if (BUG_SANDBOX_DETAIL_FIELDS.includes(f)) return f
+  return f || null
+}
+
+/** modifications 的 key 是否属于本次 Bug 详情字段变更 */
+function bugModKeysForSandboxField(field) {
+  if (field === 'expected_result') return [field, ...BUG_EXPECTED_PENDING_ALIASES, 'expected']
+  if (field === 'steps_to_reproduce') return [field, ...BUG_REPRO_PENDING_ALIASES, 'steps']
+  if (field === 'actual_result') return [field, 'actual']
+  return [field]
+}
+
+function collectBugSandboxPreviewFieldKeys(baseRows, mods) {
+  const keys = new Set()
+  for (const r of baseRows || []) {
+    const fk = normalizeBugSandboxFieldKey(r?.field, r?.field_label)
+    if (fk) keys.add(fk)
+  }
+  if (mods && typeof mods === 'object') {
+    for (const rawKey of Object.keys(mods)) {
+      const fk = normalizeBugSandboxFieldKey(rawKey, rawKey)
+      if (fk && BUG_SANDBOX_DETAIL_FIELDS.includes(fk)) keys.add(fk)
+    }
+  }
+  return keys
+}
+
+function bugSandboxFieldLabel(field) {
+  if (field === 'expected_result') return '期望结果'
+  if (field === 'actual_result') return '实际结果'
+  if (field === 'steps_to_reproduce') return '复现步骤'
+  return field
+}
+
+/**
+ * Bug/Card 沙箱：只展示本次预览里出现的字段（后端 diff + modifications）。
+ * 仅对已有行补全 delete 为空时的旧值；不再扫描 before/after 把未改动的详情字段画进沙箱。
+ */
 export function enrichBugSandboxDiffRows(nav, baseRows) {
   const tgt = String(nav?.target || '')
     .trim()
@@ -179,18 +242,16 @@ export function enrichBugSandboxDiffRows(nav, baseRows) {
   const before = nav?.before
   const after = nav?.after
   const mods = nav?.modifications
-  const seen = new Set(
-    rows.map((r) => String(r?.field || '').trim().toLowerCase())
-  )
 
   const upsert = (field, bo, ao) => {
     const oldD = formatBugSandboxFieldDisplay(field, bo)
     const newD = formatBugSandboxFieldDisplay(field, ao)
-    if (!oldD && !newD) return
-    const idx = rows.findIndex((r) => String(r?.field || '').trim().toLowerCase() === field)
+    if (!oldD && !newD) return false
+    if (bugSandboxFieldValuesEqual(field, bo, ao)) return false
+    const idx = rows.findIndex((r) => normalizeBugSandboxFieldKey(r?.field, r?.field_label) === field)
     const entry = {
       field,
-      field_label: field === 'expected_result' ? '期望结果' : field === 'actual_result' ? '实际结果' : '复现步骤',
+      field_label: bugSandboxFieldLabel(field),
       lines: [
         { type: 'delete', content: oldD, line_no: 0 },
         { type: 'add', content: newD, line_no: 0 }
@@ -198,10 +259,12 @@ export function enrichBugSandboxDiffRows(nav, baseRows) {
     }
     if (idx >= 0) rows[idx] = entry
     else rows.push(entry)
-    seen.add(field)
+    return true
   }
 
-  for (const field of BUG_SANDBOX_DETAIL_FIELDS) {
+  const previewFields = collectBugSandboxPreviewFieldKeys(rows, mods)
+
+  for (const field of previewFields) {
     const bo =
       readBugModSide(mods, field, 'old') ??
       readBugSandboxFieldRaw(before, field)
@@ -209,14 +272,29 @@ export function enrichBugSandboxDiffRows(nav, baseRows) {
       readBugModSide(mods, field, 'new') ??
       readBugSandboxFieldRaw(after, field)
     if (bo === undefined && ao === undefined) continue
-    const existing = rows.find((r) => String(r?.field || '').trim().toLowerCase() === field)
-    const del = existing?.lines?.find((l) => l.type === 'delete')?.content
-    if (existing && del != null && String(del).trim() !== '') continue
-    if (bugSandboxFieldValuesEqual(field, bo, ao) && !formatBugSandboxFieldDisplay(field, ao)) continue
     upsert(field, bo, ao)
   }
 
-  return rows
+  return rows.filter((r) => {
+    const fk = normalizeBugSandboxFieldKey(r?.field, r?.field_label)
+    if (!fk || !BUG_SANDBOX_DETAIL_FIELDS.includes(fk)) return true
+    const bo =
+      readBugModSide(mods, fk, 'old') ??
+      readBugSandboxFieldRaw(before, fk)
+    const ao =
+      readBugModSide(mods, fk, 'new') ??
+      readBugSandboxFieldRaw(after, fk)
+    if (bo === undefined && ao === undefined) {
+      const del = r?.lines?.find((l) => l.type === 'delete')?.content
+      const add = r?.lines?.find((l) => l.type === 'add')?.content
+      return (
+        (del != null && String(del).trim() !== '') ||
+        (add != null && String(add).trim() !== '') ||
+        r?.lines?.some((l) => l.type === 'unchanged')
+      )
+    }
+    return !bugSandboxFieldValuesEqual(fk, bo, ao)
+  })
 }
 
 export function resolveBugExpectedResultOldDisplay(modEntry, loadedFormValue, beforeRow) {

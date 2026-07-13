@@ -31,6 +31,10 @@ examples:
   - 添加一个测试用例，优先级高，负责人是33
   - 新建测试用例，标题叫支付成功回调校验
 
+prompt_template: |
+  你正在执行 **create_testcase** 技能：单步 **create**（confirm=false 预览，用户确认后再落库）。
+  从用户话提取 title/步骤/预期等 fields；参数见 get_tool_description("create")。
+
 metadata:
   category: testcase_management
   priority: high

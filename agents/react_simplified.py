@@ -58,12 +58,23 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 - REACT_CHAT_REPLY_STREAM=1（默认）：纯对话路径用 ``summary_stream`` 分块输出；``REACT_CHAT_REPLY_STREAM_CHARS`` 每块字符数（默认 2）
 - REACT_SUMMARY_STREAM_GAP_MS：``summary_stream`` / 统一总结 LLM 流等分片之间的暂停毫秒数（默认 22；``0`` 关闭）。单靠 ``asyncio.sleep(0)`` 易与单次 TCP/读缓冲合并，前端像「一次性整块」
 - REACT_RUNNING_SUMMARY_STREAM_GAP_MS：终局 ``running_summary_stream`` 分片间隔；**未设置**时与 ``REACT_SUMMARY_STREAM_GAP_MS`` 相同
-- REACT_INCREMENTAL_SUMMARY：每步 observation 后合并「增量运行总览」Markdown。**默认开**；``0``/``false``/``off`` 关闭。``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``（默认 512）；``REACT_INCREMENTAL_SUMMARY_RULE_FAST=1``（默认，单步短观察本地拼总览免 LLM）；``REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL=1``（默认）时终局不再跑统一总结 LLM
+- REACT_INCREMENTAL_SUMMARY：每步 observation 后合并「增量运行总览」Markdown。**默认开**；``0``/``false``/``off`` 关闭。``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``（默认 512）；``REACT_INCREMENTAL_SUMMARY_REPLACE_FINAL=1``（默认）时终局不再跑统一总结 LLM
 - REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT：主循环结束时等待**后台增量总结线程**的最长秒数（默认 **90**）。旧逻辑仅等 3s 即读队列，LLM 仍在输出时会把「关键发现」裁成半句；可调大或配合 ``REACT_INCREMENTAL_SUMMARY_MAX_TOKENS``
+- REACT_BACKGROUND_SUMMARY_JOIN_FAST=1（默认）：有后台 LLM 时 join 上限 ``REACT_BACKGROUND_SUMMARY_JOIN_FAST_S``（默认 2.5s），超时保留已有正文、不再长 grace 轮询
+- unified gather：请求体 ``project_display_name``/``plan_display_name`` 或 ``ui_context`` 带齐名称时跳过 Redis/DB 查名；无 pending diff 时跳过 ``_relevant_pending_for_llm`` 线程
 - REACT_INCREMENTAL_SUMMARY_STREAM_SSE（默认 ``1``）：仅影响 **主循环结束后** 下发运行总览的方式。``1``：发 ``running_summary_done`` 整块（与 REPLACE_FINAL 等配合）；``0``：走 ``final_wire`` 切片重放 ``running_summary_stream``。**中途**每步合并一律 asyncio 后台队列 + 静默 LLM，不阻塞「准备下一步」、不向中途 SSE 推流（函数 ``_merge_running_summary_incremental_to_sse`` 保留供专项实验，主路径不再调用）
 - REACT_INCREMENTAL_SUMMARY_BLOCK_LOOP：``1`` 时每步在主循环内 ``await`` 静默合并（排障/复现卡顿用）。**默认 ``0``：后台 worker 串行合并**
 - REACT_DECIDE_FC_STREAM=1（默认）：decide 步在支持 ``chat_completion_with_tools_stream`` 的 LLM 上走**流式 FC**（边收 content/tool_calls delta 边 ``agent_thought``）；失败回退整包 ``chat_completion_with_tools``。设为 ``0`` 强制整包 FC。
 - REACT_DECIDE_FC_INSTANT_HINT=1（默认）：整包 FC 时在 ``await chat_completion_with_tools`` 前先 ``agent_thought`` 占位；**流式 FC 时仍以真实 delta 为主**，占位可关。设为 ``0`` 关闭占位。
+- REACT_UNIFIED_FC_DECIDE=1（默认）：统一流方案 C——单请求 ``content`` 内 observation/thinking XML + ``tool_calls`` 决策；失败回退三段 XML。``0`` 关闭。
+- REACT_UNIFIED_FC_EARLY_EXECUTE=1（默认）：``tool_calls.arguments`` JSON 合法后立即中断收流并进入工具执行（不等待正文结束）。
+- REACT_UNIFIED_FC_MAX_TOKENS：方案 C 流式 FC 输出上限；未设则回落 ``REACT_DECIDE_FC_MAX_TOKENS`` / ``REACT_DECIDE_MAX_TOKENS``。
+- REACT_MACRO_AUTO=1（默认）：首轮 task_plan≥2 步时自动推理/执行分离（冻结宏、grep 后跳过第二轮 think/decide）。
+- REACT_MACRO_GREP_MODIFY=1：强制开；=0 强制关（覆盖 AUTO）。
+- REACT_MACRO_SKIP_INTER_DECIDE=1（默认）：宏步骤之间不跑 unified decide（无三段式 XML）。
+- REACT_MACRO_SKIP_GREP_OBSERVE=1（默认）：宏路径不额外跑 grep observe LLM。
+- REACT_MACRO_PARAMS_LLM=1（默认）：**有依赖的后继步骤**用轻量 LLM 仅解析该步工具 params JSON。
+- REACT_MACRO_PARAMS_MAX_TOKENS：步骤参数 LLM 输出上限（默认 512）。
 
 - REACT_GREP_RESULT_CACHE_TTL：>0 时对本引擎内 grep 成功结果做内存缓存（秒，按 project_id/keywords/target/mode/plan_id/userId 键）；短 TTL 内重复查询可省 DB；默认 0 关闭；数据变更后短时内可能读到旧结果
 进一步提速方向（需产品/架构取舍，不单靠开关）：
@@ -92,7 +103,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, Any, Iterator, List, Optional, AsyncIterator, Tuple, Union
 
 #原依赖
-from .prompts import ReactPromptTemplates, format_tools_for_prompt
+from .prompts import ReactPromptTemplates, format_tools_for_prompt, filter_tools_for_unified_prompt
 from .prompts import (
     parse_xml_todos,
     parse_xml_decision,
@@ -100,6 +111,7 @@ from .prompts import (
     parse_react_json_plan,
     parse_opening_decision,
     parse_unified_response,
+    parse_unified_fc_content,
 )
 from .react_function_call import (
     use_react_decide_function_call,
@@ -107,11 +119,36 @@ from .react_function_call import (
     FcStreamAccumulator,
     use_react_observe_fc,
     use_react_decide_xml_fallback,
+    use_react_unified_fc_decide,
+    use_react_unified_fc_early_execute,
+    build_unified_fc_tools_from_registry,
+    decision_from_assistant_message,
 )
 from .self_correction import SelfCorrectionEngine
 from .evidence_extractor import EvidenceExtractor, _json_safe_tool_params, deep_sse_json_safe
 from llm.multimodal_content import openai_style_user_content
-from utils.entity_id import coerce_plausible_entity_pk, sanitize_tool_entity_ids
+from llm.chat_messages import prompt_to_messages
+from utils.entity_id import (
+    coerce_plausible_entity_pk,
+    inject_ui_record_into_grep_params,
+    sanitize_tool_entity_ids,
+    seed_grep_result_context_from_ui_record,
+    ui_record_for_grep_target,
+)
+from .intent_guards import (
+    react_context_has_grep_for_mutate,
+    react_delete_plan_may_skip_grep,
+    react_grep_before_modify_coerce,
+    react_require_grep_before_modify,
+)
+from .react_macro import (
+    clear_frozen_macro,
+    macro_execution_separation_enabled,
+    macro_next_step_spec,
+    macro_params_phase_wait_message,
+    schedule_macro_next_step_decision,
+    try_freeze_macro_from_plan,
+)
 
 # 与 SSE 信封 request_id（agent_session_id）对齐：前端停止时合作式打断主循环
 _REACT_STREAM_CANCEL_EVENTS: Dict[str, threading.Event] = {}
@@ -169,8 +206,8 @@ from .locale_prompts import (
     react_findings_bulleted_summary_prompt,
     react_unified_final_summary_prompt,
     react_unified_sse_xml_markers,
+    enrich_nl_observation_for_incremental_summary_llm,
     incremental_running_summary_prompt,
-    try_rule_based_incremental_running_summary,
     wrap_react_user_prompt,
     modify_modifications_kv_summary,
     react_batch_modify_preview_message,
@@ -188,12 +225,15 @@ from .locale_prompts import (
     react_summarize_grep_done_hits,
     enrich_grep_observation_nl_with_plan_names,
     react_summarize_modify_done,
+    react_summarize_cdp_done,
     react_summarize_tool_done_ok,
     react_executing_modify_about_to,
     react_executing_grep_about_to,
     react_executing_create_about_to,
     react_executing_database_query_about_to,
     react_retry_grep_for_modify,
+    react_unified_modify_requires_grep_first,
+    react_modify_blocked_after_empty_grep,
     react_modify_progress_wait,
     react_modify_executing_fallback_reason,
     react_modify_single_record_reason,
@@ -410,6 +450,41 @@ def _unified_first_round_task_plan_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def _truncate_unified_think_summary_line(text: str, max_len: int = 40) -> str:
+    s = " ".join((text or "").split()).strip()
+    s = re.sub(r"<[^>]+>", "", s).strip()
+    if len(s) > max_len:
+        return s[:max_len]
+    return s
+
+
+def _is_internal_macro_think_summary(text: str) -> bool:
+    return bool(re.match(r"^frozen_macro_step_\d+$", (text or "").strip(), re.I))
+
+
+def _unified_think_summary_fallback(parsed: Dict[str, Any]) -> str:
+    """流式未下发 think_summary 时，从解析结果或 decision.reason 生成一行摘要。"""
+    ts = (parsed.get("think_summary") or "").strip()
+    if ts and not _is_internal_macro_think_summary(ts):
+        return _truncate_unified_think_summary_line(ts)
+    think = (parsed.get("thinking") or "").strip()
+    if think:
+        lines = [ln.strip() for ln in think.split("\n") if ln.strip()]
+        if lines:
+            last = _truncate_unified_think_summary_line(lines[-1])
+            if len(last) >= 2 and re.search(r"[\u4e00-\u9fa5A-Za-z0-9]", last):
+                return last
+    dec = parsed.get("decision")
+    if isinstance(dec, dict):
+        reason = str(dec.get("reason") or "").strip()
+        if reason and not _is_internal_macro_think_summary(reason):
+            return _truncate_unified_think_summary_line(reason)
+        tool = str(dec.get("tool") or "").strip()
+        if tool:
+            return _truncate_unified_think_summary_line(f"执行 {tool}")
+    return ""
 
 
 def _cap_unified_task_plan_steps(steps: List[str]) -> List[str]:
@@ -673,6 +748,28 @@ def _print_unified_round_prompt_snapshot(
             print(f"[REACT-UNIFIED][snapshot] prev_action 摘要失败: {ex}", flush=True)
 
 
+def _log_react_prompt(
+    phase: str,
+    prompt: str,
+    *,
+    round_idx_0based: Optional[int] = None,
+    engine: Any = None,
+    **extra: Any,
+) -> None:
+    try:
+        from llm.prompt_log import maybe_log_agent_prompt
+
+        maybe_log_agent_prompt(
+            phase,
+            prompt,
+            round_idx_0based=round_idx_0based,
+            request_id=getattr(engine, "_agent_session_id", None) if engine is not None else None,
+            extra=extra or None,
+        )
+    except Exception as ex:
+        print(f"[REACT_PROMPT] skip log phase={phase}: {ex}", flush=True)
+
+
 def _iter_direct_chat_reply_stream_chunks(text: str):
     """纯对话回复按小块产出，走 summary_stream 车道供前端拼接 finalResponse（打字机）。"""
     s = text if isinstance(text, str) else ""
@@ -816,6 +913,15 @@ def _grep_observation_empty_lists(observation: Dict[str, Any]) -> bool:
     return n == 0
 
 
+def _react_strict_plan_fail_enabled() -> bool:
+    return (os.getenv("REACT_STRICT_PLAN_FAIL", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _sync_plan_single_in_progress(plan_rows: List[Dict[str, Any]], current_index: int) -> None:
     """全局仅一个 in_progress，其余非终态为 pending。"""
     for j, row in enumerate(plan_rows):
@@ -925,6 +1031,69 @@ def _get_redis_client_for_cache():
         return get_redis_client()
     except Exception:
         return None
+
+
+def _resolved_gather_name_hints(
+    hint_project_name: Optional[str],
+    hint_plan_name: Optional[str],
+    ui_context: Optional[Dict[str, Any]],
+) -> Tuple[str, str]:
+    """合并请求体 hint 与 ui_context 中的展示名，供 gather 跳过 Redis/DB。"""
+    hp = (str(hint_project_name).strip() if hint_project_name else "") or ""
+    hpl = (str(hint_plan_name).strip() if hint_plan_name else "") or ""
+    uc = ui_context if isinstance(ui_context, dict) else {}
+    if not hp:
+        for k in ("project_display_name", "project_name", "context_project_name"):
+            v = uc.get(k)
+            if v is not None and str(v).strip():
+                hp = str(v).strip()
+                break
+    if not hpl:
+        for k in ("plan_display_name", "plan_name", "context_plan_name", "plan_title"):
+            v = uc.get(k)
+            if v is not None and str(v).strip():
+                hpl = str(v).strip()
+                break
+    return hp, hpl
+
+
+def _gather_skip_project_plan_lookup(
+    project_id: Optional[int],
+    plan_id: Optional[int],
+    hint_project_name: str,
+    hint_plan_name: str,
+) -> bool:
+    """客户端/上下文已带齐名称时，gather 不再起线程查 Redis/DB。"""
+    try:
+        pid = int(project_id) if project_id is not None else 0
+    except (TypeError, ValueError):
+        pid = 0
+    try:
+        plid = int(plan_id) if plan_id is not None else 0
+    except (TypeError, ValueError):
+        plid = 0
+    if plid <= 0 and (plan_id is None or str(plan_id).strip() in ("", "0", "None", "null")):
+        plid = 0
+    if pid <= 0 and plid <= 0:
+        return True
+    need_p = pid > 0
+    need_pl = plid > 0
+    hp = (hint_project_name or "").strip()
+    hpl = (hint_plan_name or "").strip()
+    return (not need_p or bool(hp)) and (not need_pl or bool(hpl))
+
+
+def _background_summary_join_fast_enabled() -> bool:
+    v = (os.getenv("REACT_BACKGROUND_SUMMARY_JOIN_FAST", "1") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _background_summary_join_fast_s() -> float:
+    try:
+        v = float((os.getenv("REACT_BACKGROUND_SUMMARY_JOIN_FAST_S") or "2.5").strip())
+    except Exception:
+        v = 2.5
+    return max(0.3, min(v, 30.0))
 
 
 def _sync_load_project_plan_names(
@@ -1229,6 +1398,11 @@ def prefer_nl_observe_summary(tool: Optional[str], observation: Any) -> bool:
     # 否则会在「决策与观察」阶段引入显著等待（常见 10s+）。
     if t == "grep":
         return True
+    if t == "cdp":
+        if d.get("await_verification_code") or d.get("await_user_credentials"):
+            return True
+        if d.get("login_success") or d.get("action") == "login":
+            return True
     # 通用兜底：只要出现 sandbox 预览结构，也优先直出
     if d.get("sandbox_preview") or dd.get("sandbox_preview"):
         return True
@@ -1714,7 +1888,16 @@ def _build_direct_chat_prompt(user_message: str) -> tuple:
         "你是 BadCase Doctor 产品里的助手。用户当前在「项目 Agent」模式下发起了一段与具体缺陷操作无关的对话。"
         "请用简洁、友好的中文直接回答；不要输出 XML、不要假装调用了 grep/modify；不要编造本系统未提供的功能。"
     )
-    return f"{system_hint}\n\n用户说：\n{t}", None
+    return (
+        f"""<system>
+{system_hint}
+</system>
+
+用户说：
+{t}
+""",
+        None,
+    )
 
 
 _DIRECT_CHAT_STREAM_END = object()
@@ -1793,6 +1976,13 @@ def _unified_chitchat_fallback_summary(llm_response: str, parsed_thinking: str) 
     return "（模型未按统一协议返回决策；请重试或更换模型。）"
 
 
+def _unified_done_status(had_tool_failure: bool, *, preview_await: bool = False) -> str:
+    """统一流终局 status：有工具失败且非「待用户确认预览」时标 partial。"""
+    if preview_await:
+        return "success"
+    return "partial" if had_tool_failure else "success"
+
+
 def _unified_finding_line(tool_name: str, observation: Any) -> str:
     """统一流 ``done.findings`` 单行摘要（非 LLM）。"""
     if not isinstance(observation, dict):
@@ -1800,6 +1990,10 @@ def _unified_finding_line(tool_name: str, observation: Any) -> str:
     if observation.get("success") is False:
         err = observation.get("error") or observation.get("message") or "失败"
         return f"{tool_name}：{err}"
+    if (tool_name or "").lower() == "cdp":
+        if isinstance(observation.get("summary"), str) and observation["summary"].strip():
+            return f"cdp：{observation['summary'].strip()[:800]}"
+        return f"cdp：{react_summarize_cdp_done(observation, None)}"
     summ = observation.get("summary") or observation.get("message")
     if isinstance(summ, str) and summ.strip():
         return f"{tool_name}：{summ.strip()[:800]}"
@@ -2271,6 +2465,7 @@ class SimplifiedReActEngine:
         """
         import inspect
 
+        prompt = self._prepare_llm_prompt(prompt, phase="stream", fc_stream=True)
         imgs = self._react_vision_images_for_llm()
         fn = getattr(self.llm, "chat_stream_with_reasoning", None)
         if callable(fn):
@@ -2421,21 +2616,26 @@ class SimplifiedReActEngine:
             f"LLM {type(self.llm).__name__} 须实现 chat_stream 或 chat_stream_with_reasoning"
         )
 
-    async def _collect_llm_text(self, prompt: str) -> str:
+    async def _collect_llm_text(self, prompt: str, *, tag: str = "react_llm_collect") -> str:
         """
         仅聚合正文（不向前端 yield），用于内部 JSON/参数提取等。
         与界面同源：只走 _resolve_chat_stream_iter（禁止 parse_intent）。
         """
+        prompt = self._prepare_llm_prompt(prompt, phase=tag, fc_stream=False)
+
         def _sync_collect():
+            from llm.prompt_log import llm_prompt_tag_scope
+
             parts: List[str] = []
             try:
-                for item in self._resolve_chat_stream_iter(prompt):
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get('type') == 'content_delta':
-                        d = item.get('delta') or ''
-                        if d:
-                            parts.append(d)
+                with llm_prompt_tag_scope(tag):
+                    for item in self._resolve_chat_stream_iter(prompt):
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get('type') == 'content_delta':
+                            d = item.get('delta') or ''
+                            if d:
+                                parts.append(d)
             except Exception as e:
                 return f'Error: {e}'
             return ''.join(parts).strip()
@@ -2591,23 +2791,26 @@ class SimplifiedReActEngine:
         main_loop = asyncio.get_running_loop()
 
         def _sync_producer():
+            from llm.prompt_log import llm_prompt_tag_scope
+
             try:
-                for item in self._resolve_chat_stream_iter(prompt):
-                    if not isinstance(item, dict):
-                        continue
-                    t = item.get("type")
-                    if t == "content_delta":
-                        d = item.get("delta") or ""
-                        if d:
-                            asyncio.run_coroutine_threadsafe(
-                                q.put({"type": "content", "delta": str(d)}), main_loop
-                            )
-                    elif t == "reasoning_delta":
-                        d = item.get("delta")
-                        if isinstance(d, str) and d:
-                            asyncio.run_coroutine_threadsafe(
-                                q.put({"type": "reasoning", "delta": d}), main_loop
-                            )
+                with llm_prompt_tag_scope("react_unified_round_stream"):
+                    for item in self._resolve_chat_stream_iter(prompt):
+                        if not isinstance(item, dict):
+                            continue
+                        t = item.get("type")
+                        if t == "content_delta":
+                            d = item.get("delta") or ""
+                            if d:
+                                asyncio.run_coroutine_threadsafe(
+                                    q.put({"type": "content", "delta": str(d)}), main_loop
+                                )
+                        elif t == "reasoning_delta":
+                            d = item.get("delta")
+                            if isinstance(d, str) and d:
+                                asyncio.run_coroutine_threadsafe(
+                                    q.put({"type": "reasoning", "delta": d}), main_loop
+                                )
             except Exception as e:
                 asyncio.run_coroutine_threadsafe(
                     q.put({"type": "error", "message": f"{e}"}), main_loop
@@ -2624,22 +2827,226 @@ class SimplifiedReActEngine:
             if isinstance(item, dict):
                 yield item
 
+    def _unified_fc_max_tokens(self, *, prev_tool: Optional[str] = None) -> Optional[int]:
+        for _k in (
+            "REACT_UNIFIED_FC_MAX_TOKENS",
+            "REACT_DECIDE_FC_MAX_TOKENS",
+            "REACT_DECIDE_MAX_TOKENS",
+        ):
+            _raw = (os.getenv(_k) or "").strip()
+            if _raw.isdigit():
+                _v = int(_raw)
+                if _v > 0:
+                    return _v
+        if str(prev_tool or "").strip().lower() == "grep":
+            _ag = (
+                (os.getenv("REACT_DECIDE_AFTER_GREP_FC_MAX_TOKENS") or "").strip()
+                or (os.getenv("REACT_DECIDE_AFTER_GREP_MAX_TOKENS") or "").strip()
+            )
+            if _ag.isdigit():
+                _v_ag = int(_ag)
+                if _v_ag > 0:
+                    return _v_ag
+        return None
+
+    def _react_tools_version(self) -> str:
+        try:
+            from memory.prompt_page_pipeline import tools_version_from_names
+
+            return tools_version_from_names(list((self.tools or {}).keys()))
+        except Exception:
+            return "default"
+
+    def _prepare_llm_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        phase: str = "decide",
+        round_idx: Optional[int] = None,
+        fc_stream: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from memory.prompt_page_pipeline import prepare_llm_messages
+
+            _template = (
+                "macro_compact"
+                if getattr(self, "_macro_pending_decision", None)
+                else "full"
+            )
+            return prepare_llm_messages(
+                messages,
+                session_id=getattr(self, "_agent_session_id", None) or "",
+                request_id=getattr(self, "_agent_session_id", None) or "",
+                template=_template,
+                phase=phase,
+                round_idx=round_idx,
+                locale=normalize_locale(getattr(self, "_ui_locale", None)) or "",
+                tools_version=self._react_tools_version(),
+                project_id=str(getattr(self, "project_id", None) or ""),
+                fc_stream=fc_stream,
+            )
+        except Exception as _ppt_exc:
+            if os.getenv("PROMPT_PAGE_TABLE_STRICT", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ):
+                raise
+            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                print(f"[PROMPT-PAGES] prepare skipped: {_ppt_exc}", flush=True)
+            return messages
+
+    def _prepare_llm_prompt(
+        self,
+        prompt: str,
+        *,
+        phase: str = "decide",
+        round_idx: Optional[int] = None,
+        fc_stream: Optional[bool] = None,
+    ) -> str:
+        if not prompt:
+            return prompt
+        try:
+            from memory.prompt_page_pipeline import use_canonical_assemble
+            from memory.canonical_messages import messages_to_prompt
+
+            _fc_imgs = self._react_vision_images_for_llm()
+            msgs = prompt_to_messages(prompt, images=_fc_imgs)
+            prepared = self._prepare_llm_messages(
+                msgs,
+                phase=phase,
+                round_idx=round_idx,
+                fc_stream=fc_stream,
+            )
+            if use_canonical_assemble():
+                return messages_to_prompt(prepared)
+        except Exception:
+            pass
+        return prompt
+
+    def _llm_stream_timer(
+        self,
+        *,
+        fc_stream: bool = True,
+        round_idx: Optional[int] = None,
+    ):
+        from memory.prompt_page_pipeline import LlmStreamTimer
+
+        timer = LlmStreamTimer(
+            getattr(self, "_agent_session_id", None) or "",
+            request_id=getattr(self, "_agent_session_id", None) or "",
+            fc_stream=fc_stream,
+            round_idx=round_idx,
+        )
+        self._active_llm_stream_timer = timer
+        return timer
+
+    def _record_fc_sync_engine_cache(
+        self,
+        raw: Any,
+        *,
+        tag: str = "",
+        round_idx: Optional[int] = None,
+    ) -> None:
+        try:
+            from memory.prompt_page_pipeline import record_engine_prefix_cache
+
+            usage = getattr(raw, "usage", None)
+            if usage is None and isinstance(raw, dict):
+                usage = raw.get("usage")
+            record_engine_prefix_cache(
+                getattr(self, "_agent_session_id", None) or "",
+                usage,
+                request_id=getattr(self, "_agent_session_id", None) or "",
+                tag=tag,
+                round_idx=round_idx,
+            )
+        except Exception:
+            pass
+
+    async def _iter_unified_fc_stream_chunks(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: Any = "auto",
+    ) -> AsyncIterator[Any]:
+        """异步迭代 chat_completion_with_tools_stream 的 chunk（线程池拉取）。"""
+        import inspect
+
+        messages = self._prepare_llm_messages(
+            messages, phase="unified_fc", fc_stream=True
+        )
+        llm = self.llm
+        stream_fn = getattr(llm, "chat_completion_with_tools_stream", None)
+        if stream_fn is None:
+            raise RuntimeError("LLM 无 chat_completion_with_tools_stream")
+        parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        _fc_kw: Dict[str, Any] = {
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel,
+        }
+        max_tok = self._unified_fc_max_tokens(
+            prev_tool=(getattr(self, "_unified_fc_prev_tool", None) or None)
+        )
+        if max_tok is not None:
+            try:
+                if "max_tokens" in inspect.signature(stream_fn).parameters:
+                    _fc_kw["max_tokens"] = max_tok
+            except (TypeError, ValueError):
+                pass
+        it = stream_fn(messages, tools, **_fc_kw)
+        loop = asyncio.get_event_loop()
+        timer = self._llm_stream_timer(fc_stream=True)
+        _last_usage = None
+
+        def _next_or_stop(gen):
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+
+        try:
+            while True:
+                chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
+                if chunk is None:
+                    break
+                timer.on_fc_chunk(chunk)
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    _last_usage = u
+                yield chunk
+        finally:
+            if _last_usage is not None:
+                timer.on_stream_usage(_last_usage, tag="unified_fc")
+            self._active_llm_stream_timer = None
+
     async def _collect_llm_text_content_only(
-        self, prompt: str, max_tokens: Optional[int] = None
+        self, prompt: str, max_tokens: Optional[int] = None, *, tag: str = "react_llm_collect_content"
     ) -> str:
         """与 observe 流式同源：仅正文 + 可选 max_tokens（Qwen chat_stream 等）。用于同步 run() observe。"""
+        prompt = self._prepare_llm_prompt(prompt, phase=tag, fc_stream=False)
+
         def _sync_collect():
+            from llm.prompt_log import llm_prompt_tag_scope
+
             parts: List[str] = []
             try:
-                for item in self._resolve_chat_stream_iter_content_only(
-                    prompt, None, max_tokens
-                ):
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("type") == "content_delta":
-                        d = item.get("delta") or ""
-                        if d:
-                            parts.append(d)
+                with llm_prompt_tag_scope(tag):
+                    for item in self._resolve_chat_stream_iter_content_only(
+                        prompt, None, max_tokens
+                    ):
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") == "content_delta":
+                            d = item.get("delta") or ""
+                            if d:
+                                parts.append(d)
             except Exception as e:
                 return f"Error: {e}"
             return "".join(parts).strip()
@@ -2799,7 +3206,10 @@ class SimplifiedReActEngine:
             + "）"
         )
         _fc_imgs = self._react_vision_images_for_llm()
-        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
+        messages = prompt_to_messages(prompt_fc, images=_fc_imgs)
+        messages = self._prepare_llm_messages(
+            messages, phase="decide_fc", round_idx=step_index, fc_stream=False
+        )
         llm = self.llm
         tool_choice = self._parse_react_fc_tool_choice()
         parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
@@ -2848,6 +3258,7 @@ class SimplifiedReActEngine:
                     self._tool_executor,
                     functools.partial(fn, messages, tools, **_fc_kw),
                 )
+            self._record_fc_sync_engine_cache(raw, tag="decide_fc_sync", round_idx=step_index)
         except Exception as e:
             print(
                 f"[REACT-FC] step={step_index} chat_completion_with_tools 失败，回退流式+XML: {e}"
@@ -3033,7 +3444,10 @@ class SimplifiedReActEngine:
             + "）"
         )
         _fc_imgs = self._react_vision_images_for_llm()
-        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
+        messages = prompt_to_messages(prompt_fc, images=_fc_imgs)
+        messages = self._prepare_llm_messages(
+            messages, phase="decide_fc", round_idx=step_index, fc_stream=True
+        )
         llm = self.llm
         tool_choice = self._parse_react_fc_tool_choice()
         parallel = os.getenv("REACT_FC_PARALLEL_TOOL_CALLS", "0").strip().lower() in (
@@ -3076,6 +3490,8 @@ class SimplifiedReActEngine:
         it = stream_fn(messages, tools, **_fc_kw)
         acc = FcStreamAccumulator()
         loop = asyncio.get_event_loop()
+        timer = self._llm_stream_timer(fc_stream=True, round_idx=step_index)
+        _last_usage = None
 
         def _next_or_stop(gen):
             try:
@@ -3083,13 +3499,22 @@ class SimplifiedReActEngine:
             except StopIteration:
                 return None
 
-        while True:
-            chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
-            if chunk is None:
-                break
-            piece = acc.feed(chunk)
-            if piece:
-                yield {"event": "agent_thought", "delta": piece, "index": step_index}
+        try:
+            while True:
+                chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
+                if chunk is None:
+                    break
+                timer.on_fc_chunk(chunk)
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    _last_usage = u
+                piece = acc.feed(chunk)
+                if piece:
+                    yield {"event": "agent_thought", "delta": piece, "index": step_index}
+        finally:
+            if _last_usage is not None:
+                timer.on_stream_usage(_last_usage, tag="decide_fc_stream")
+            self._active_llm_stream_timer = None
 
         msg = acc.build_assistant_message()
         msg = self._fc_normalize_assistant_message(msg)
@@ -3172,8 +3597,17 @@ class SimplifiedReActEngine:
             observe_prompt
             + "\n\n（必须 function calling 调用 submit_observe_analysis；不要输出 <result>。）"
         )
+        _log_react_prompt(
+            "react_observe_fc",
+            prompt_fc,
+            engine=self,
+            step_index=step_index,
+        )
         _fc_imgs = self._react_vision_images_for_llm()
-        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
+        messages = prompt_to_messages(prompt_fc, images=_fc_imgs)
+        messages = self._prepare_llm_messages(
+            messages, phase="observe_fc", round_idx=step_index, fc_stream=True
+        )
         stream_fn = getattr(self.llm, "chat_completion_with_tools_stream", None)
         if stream_fn is None:
             raise RuntimeError("LLM 无 chat_completion_with_tools_stream")
@@ -3203,6 +3637,8 @@ class SimplifiedReActEngine:
         it = stream_fn(messages, tools, **_fc_kw)
         acc = FcStreamAccumulator()
         loop = asyncio.get_event_loop()
+        timer = self._llm_stream_timer(fc_stream=True, round_idx=step_index)
+        _last_usage = None
 
         def _next_or_stop(gen):
             try:
@@ -3210,18 +3646,27 @@ class SimplifiedReActEngine:
             except StopIteration:
                 return None
 
-        while True:
-            chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
-            if chunk is None:
-                break
-            piece = acc.feed(chunk)
-            if piece:
-                yield {
-                    "event": "reasoning_step",
-                    "content": piece,
-                    "segment": "observe",
-                    "index": step_index,
-                }
+        try:
+            while True:
+                chunk = await loop.run_in_executor(self._tool_executor, _next_or_stop, it)
+                if chunk is None:
+                    break
+                timer.on_fc_chunk(chunk)
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    _last_usage = u
+                piece = acc.feed(chunk)
+                if piece:
+                    yield {
+                        "event": "reasoning_step",
+                        "content": piece,
+                        "segment": "observe",
+                        "index": step_index,
+                    }
+        finally:
+            if _last_usage is not None:
+                timer.on_stream_usage(_last_usage, tag="observe_fc_stream")
+            self._active_llm_stream_timer = None
 
         msg = acc.build_assistant_message()
         msg = self._fc_normalize_assistant_message(msg)
@@ -3257,7 +3702,10 @@ class SimplifiedReActEngine:
             + "\n\n（必须 function calling 调用 submit_observe_analysis；不要输出 <result>。）"
         )
         _fc_imgs = self._react_vision_images_for_llm()
-        messages = [{"role": "user", "content": openai_style_user_content(prompt_fc, _fc_imgs)}]
+        messages = prompt_to_messages(prompt_fc, images=_fc_imgs)
+        messages = self._prepare_llm_messages(
+            messages, phase="observe_fc", fc_stream=False
+        )
         fn = getattr(self.llm, "chat_completion_with_tools", None)
         if fn is None:
             return {"findings": [], "context_update": {}, "next_step": ""}
@@ -3286,6 +3734,7 @@ class SimplifiedReActEngine:
                     self._tool_executor,
                     functools.partial(fn, messages, tools, **_fc_kw),
                 )
+            self._record_fc_sync_engine_cache(raw, tag="observe_fc_sync")
         except Exception as _e:
             print(f"[REACT-OBSERVE-FC] sync FC 失败: {_e}")
             return {"findings": [], "context_update": {}, "next_step": ""}
@@ -3672,6 +4121,7 @@ class SimplifiedReActEngine:
         """
         观察阶段两阶段：先自然语言分析（reasoning_step segment=observe），再 <result>...</result> 供 parse_xml_findings。
         """
+        _log_react_prompt("react_observe", prompt, engine=self, step_index=step_index)
         _res_open = re.compile(r"<\s*result\b", re.IGNORECASE)
         _res_close = re.compile(r"<\s*/\s*result\s*>", re.IGNORECASE)
         q: "queue.Queue[object]" = queue.Queue()
@@ -3899,6 +4349,9 @@ class SimplifiedReActEngine:
         旧实现只 busy-wait 约 3s 后对队列 ``get_nowait`` 一轮；此时 LLM 往往仍在输出，
         ``running_summary_state["text"]`` 会变成半句（例如停在括号前）。现改为
         ``thread.join(timeout)``（默认 90s，``REACT_BACKGROUND_SUMMARY_JOIN_TIMEOUT``）后再排空队列直至 ``DONE``。
+
+        ``REACT_BACKGROUND_SUMMARY_JOIN_FAST=1``（默认）：有后台线程时 join 上限为
+        ``REACT_BACKGROUND_SUMMARY_JOIN_FAST_S``（默认 2.5s），超时保留已有正文、不再长 grace 轮询。
         """
         _last_thread = state.get("_last_summary_thread")
         if not _last_thread:
@@ -3937,19 +4390,24 @@ class SimplifiedReActEngine:
             except Exception:
                 max_wait = 90.0
         max_wait = max(5.0, min(max_wait, 600.0))
+        _join_budget = max_wait
+        _fast_join = _background_summary_join_fast_enabled()
+        if _fast_join:
+            _join_budget = min(max_wait, _background_summary_join_fast_s())
 
         loop = asyncio.get_running_loop()
 
         def _join_worker() -> None:
-            _thr.join(timeout=max_wait)
+            _thr.join(timeout=_join_budget)
 
         await loop.run_in_executor(None, _join_worker)
 
         _full_parts: List[str] = _drain_queue_parts()
 
-        # join 超时后线程仍可能在收尾；短轮询补取尾部 delta（最多再等 ~30s）
-        if _thr.is_alive():
-            _grace_until = time.time() + 30.0
+        # join 超时后线程仍可能在收尾；fast 模式且已有部分正文则不再长 grace
+        _existing = str(state.get("text") or "").strip()
+        if _thr.is_alive() and not (_fast_join and _existing):
+            _grace_until = time.time() + (8.0 if _fast_join else 30.0)
             while _thr.is_alive() and time.time() < _grace_until:
                 await asyncio.sleep(0.12)
                 _full_parts.extend(_drain_queue_parts())
@@ -3960,7 +4418,8 @@ class SimplifiedReActEngine:
             state["version"] = _ver
         print(
             f"[INCR-SUM] wait_for_background: thread_alive={_thr.is_alive()} "
-            f"join_timeout_s={max_wait:.0f} result_chars={len(_ft)}"
+            f"join_timeout_s={_join_budget:.1f} fast={int(_fast_join)} "
+            f"result_chars={len(_ft or _existing)}"
         )
 
     async def _merge_running_summary_incremental_silent(
@@ -3971,6 +4430,7 @@ class SimplifiedReActEngine:
         todo: str,
         nl_obs: str,
         background: bool = False,
+        observation: Optional[Dict[str, Any]] = None,
     ) -> None:
         """每步结束后仅后台合并运行总览，更新 state；不向 SSE 推流（避免中途半篇展示）。
         background=True: 真正后台执行，不阻塞主循环（主循环结束后需检查结果）
@@ -3982,30 +4442,16 @@ class SimplifiedReActEngine:
             next_ver = int(state.get("version") or 0) + 1
         except Exception:
             next_ver = 1
-        rule_text = try_rule_based_incremental_running_summary(
-            self._ui_locale,
-            prev,
-            step_index,
-            tool,
-            todo,
-            nl_obs,
+        _nl_for_summary = enrich_nl_observation_for_incremental_summary_llm(
+            tool, nl_obs, observation, self._ui_locale
         )
-        if rule_text:
-            state["text"] = rule_text
-            state["version"] = next_ver
-            print(
-                f"[INCR-SUM] rule_fast step={step_index} tool={tool} chars={len(rule_text)}",
-                flush=True,
-            )
-            return
-
         prompt = incremental_running_summary_prompt(
             self._ui_locale,
             prev,
             step_index,
             tool,
             todo,
-            nl_obs,
+            _nl_for_summary,
         )
         q: "queue.Queue[object]" = queue.Queue()
         DONE = object()
@@ -4298,6 +4744,14 @@ class SimplifiedReActEngine:
                 f"请用 3–6 句中文说明：1) 为何要执行这一步；2) 打算如何执行；3) 预期结果。"
                 f"不要输出 XML/JSON，不要用列表符号。"
             )
+        )
+        _log_react_prompt(
+            "skill_plan_thought",
+            thought_prompt,
+            engine=self,
+            step_index=i,
+            skill=getattr(skill_ref, "name", None),
+            todo=(todo or "")[:200],
         )
         async for ev in self._stream_skill_plan_thought(thought_prompt, step_index=i):
             yield ev
@@ -4721,6 +5175,33 @@ class SimplifiedReActEngine:
                     if _chosen is not None and _chosen > 0:
                         fields["plan_id"] = _chosen
 
+            if target_type == "plan" and isinstance(fields, dict):
+                from datetime import date, timedelta
+
+                _ui_p = (user_input or "").strip()
+                _td_p = (todo or "").strip()
+                if not fields.get("name"):
+                    _pn = self._extract_create_title(_ui_p, _td_p) or self._extract_plan_name(
+                        _ui_p, _td_p
+                    )
+                    if _pn:
+                        fields["name"] = _pn
+                if not fields.get("parent_id"):
+                    _combo = f"{_ui_p}{_td_p}"
+                    if any(k in _combo for k in ("子计划", "子迭代", "下级迭代", "下级计划")):
+                        _pid = getattr(self, "plan_id", None)
+                        if _pid not in (None, "", 0, "0"):
+                            try:
+                                fields["parent_id"] = int(_pid)
+                            except (TypeError, ValueError):
+                                pass
+                _today = date.today()
+                if not fields.get("start_date"):
+                    fields["start_date"] = _today.isoformat()
+                if not fields.get("end_date"):
+                    fields["end_date"] = (_today + timedelta(days=14)).isoformat()
+                fields.setdefault("status", "active")
+
             params['fields'] = fields
             params.setdefault('confirm', False)
             params.setdefault('natural_query', user_input)
@@ -4884,9 +5365,20 @@ class SimplifiedReActEngine:
             return enrich_grep_observation_nl_with_plan_names(hit_nl, data, loc)
         if (tool or "").lower() == "modify":
             diff_n = len(observation.get("diff") or []) if isinstance(observation.get("diff"), list) else 0
+            if ok is False:
+                from agents.locale_prompts import react_summarize_modify_failed
+
+                return react_summarize_modify_failed(
+                    observation.get("error") or observation.get("message"),
+                    observation.get("confirmation_required"),
+                    diff_n,
+                    loc,
+                )
             return react_summarize_modify_done(
                 ok, observation.get("confirmation_required"), diff_n, loc
             )
+        if (tool or "").lower() == "cdp":
+            return react_summarize_cdp_done(observation, loc)
         return react_summarize_tool_done_ok(tool, ok, loc)
 
     async def _build_structured_plan_rows(
@@ -4980,12 +5472,14 @@ class SimplifiedReActEngine:
         locale: Optional[str] = None,
         pending_diff_context: Optional[List[Dict[str, Any]]] = None,
         agent_session_id: Optional[str] = None,
+        chat_session_id: Optional[int] = None,
         long_memory_prefetch: Optional[Dict[str, Any]] = None,
         hint_project_name: Optional[str] = None,
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         ui_context: Optional[Dict[str, Any]] = None,
+        raw_user_input: Optional[str] = None,
     ):
         '''唯一流式引擎：三段式 XML；前置 gather 与旧链路一致。'''
         perf = (os.getenv("PERF_LOG") == "1")
@@ -4994,13 +5488,16 @@ class SimplifiedReActEngine:
         self._client_shell = client_shell if isinstance(client_shell, dict) else None
         self._ui_context = ui_context if isinstance(ui_context, dict) else None
         self._agent_session_id = (agent_session_id or "").strip() or None
+        self._chat_session_id = chat_session_id
         if self._agent_session_id:
             _REACT_STREAM_CANCEL_EVENTS[self._agent_session_id] = threading.Event()
         self._tool_task_event_buffer = []
         self.project_id = project_id
         self.plan_id = plan_id
-        # grep 纠偏：泛查时若模型窄化 target 会跳过 Card 表，导致「无卡片命中」
+        # LLM 可见 user_input 可能含 [界面上下文]；grep/embed 仅用用户原话
         self._react_stream_user_input = user_input or ""
+        _raw = (raw_user_input or "").strip()
+        self._react_stream_user_query = _raw or self._react_stream_user_input
         self._react_stream_images = list(images) if images else None
         try:
             _rb = int((os.getenv("REACT_VISION_IMAGE_ATTACH_ROUNDS") or "5").strip())
@@ -5038,29 +5535,80 @@ class SimplifiedReActEngine:
                 if _client_shell_excludes_local_bridge(self._client_shell)
                 else ()
             )
-            (project_name, plan_name), tools_info, _pending_for_llm = await asyncio.gather(
-                _gather_to_thread(
-                    "project_plan_names",
-                    _sync_load_project_plan_names,
-                    project_id,
-                    plan_id,
-                    perf,
-                    hint_project_name,
-                    hint_plan_name,
-                ),
+            _uc_gather = getattr(self, "_ui_context", None)
+            _hp_gather, _hpl_gather = _resolved_gather_name_hints(
+                hint_project_name,
+                hint_plan_name,
+                _uc_gather if isinstance(_uc_gather, dict) else None,
+            )
+            _skip_plan_lookup = _gather_skip_project_plan_lookup(
+                project_id, plan_id, _hp_gather, _hpl_gather
+            )
+            _has_pending_ctx = bool(self._pending_diff_context)
+            _gather_tasks: List[Any] = [
                 _gather_to_thread(
                     "format_tools_for_prompt",
                     format_tools_for_prompt,
                     self.tools,
                     _exclude_tools,
                 ),
-                _gather_to_thread("relevant_pending_for_llm", self._relevant_pending_for_llm, user_input),
+            ]
+            if not _skip_plan_lookup:
+                _gather_tasks.append(
+                    _gather_to_thread(
+                        "project_plan_names",
+                        _sync_load_project_plan_names,
+                        project_id,
+                        plan_id,
+                        perf,
+                        _hp_gather or None,
+                        _hpl_gather or None,
+                    )
+                )
+            if _has_pending_ctx:
+                _gather_tasks.append(
+                    _gather_to_thread(
+                        "relevant_pending_for_llm",
+                        self._relevant_pending_for_llm,
+                        user_input,
+                    )
+                )
+            _gather_results = await asyncio.gather(*_gather_tasks)
+            _gi = 0
+            tools_info = _gather_results[_gi]
+            _gi += 1
+            if _skip_plan_lookup:
+                try:
+                    _pid_g = int(project_id) if project_id is not None else 0
+                except (TypeError, ValueError):
+                    _pid_g = 0
+                try:
+                    _plid_g = int(plan_id) if plan_id is not None else 0
+                except (TypeError, ValueError):
+                    _plid_g = 0
+                project_name = (_hp_gather or None) if _pid_g > 0 else None
+                plan_name = (_hpl_gather or None) if _plid_g > 0 else None
+                if perf:
+                    print(
+                        "[PERF][react] unified_gather_skip_project_plan_lookup=1 "
+                        f"hint_project={'set' if project_name else 'none'} "
+                        f"hint_plan={'set' if plan_name else 'none'}",
+                        flush=True,
+                    )
+            else:
+                project_name, plan_name = _gather_results[_gi]
+                _gi += 1
+            _pending_for_llm = (
+                _gather_results[_gi] if _has_pending_ctx else []
             )
             if perf:
                 print(
                     f"[PERF][react] unified_gather_parallel_wall_ms="
                     f"{(time.perf_counter() - _gather_t0) * 1000:.1f} "
-                    f"(≈ max(names, tools, pending)，三者并行)"
+                    f"tasks=format_tools"
+                    f"{'' if _skip_plan_lookup else '+plan_names'}"
+                    f"{'' if _has_pending_ctx else ' (pending_skip)'}",
+                    flush=True,
                 )
         except BaseException as e:
             print(f"[REACT] unified gather 异常: {e}")
@@ -5085,6 +5633,17 @@ class SimplifiedReActEngine:
             result_ctx["plan_id"] = plan_id
             if plan_name:
                 result_ctx["plan_name"] = plan_name
+        try:
+            from agents.cdp.login_pending_store import load_login_pending
+
+            _cdp_pending = load_login_pending(
+                chat_session_id=chat_session_id,
+                project_id=project_id,
+            )
+            if _cdp_pending:
+                result_ctx["cdp_login_pending"] = _cdp_pending
+        except Exception:
+            pass
         if _pending_for_llm:
             result_ctx["pending_diff_summary"] = [
                 {
@@ -5152,6 +5711,63 @@ class SimplifiedReActEngine:
                 yield _ev
             return
 
+        _matched_skill = None
+        _skill_score = 0.0
+        _skill_workflow_prompt = ""
+        _skill_tool_names: List[str] = []
+        try:
+            _match_input = (self._react_stream_user_query or user_input or "").strip()
+            _match_ctx = dict(result_ctx)
+            if isinstance(self._ui_context, dict) and self._ui_context:
+                _match_ctx["ui_context"] = self._ui_context
+            _matched_skill, _skill_score = await asyncio.to_thread(
+                get_skill_integration().match_skill,
+                _match_input,
+                _match_ctx,
+            )
+            if _matched_skill and _skill_score >= 0.3:
+                _skill_workflow_prompt = _matched_skill.get_workflow_prompt()
+                _skill_tool_names = list(_matched_skill.get_tool_names())
+                result_ctx["matched_skill"] = _matched_skill.name
+                result_ctx["matched_skill_score"] = round(_skill_score, 3)
+        except Exception as _sk_ex:
+            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                print(f"[REACT-UNIFIED] skill match skip: {_sk_ex}", flush=True)
+
+        unified_plan_steps: List[str] = []
+        if _matched_skill and _skill_score >= 0.3 and _matched_skill.workflow:
+            for _wf_step in _matched_skill.workflow:
+                _line = (_wf_step.description or "").strip()
+                if not _line and _wf_step.tool:
+                    _line = f"调用 {_wf_step.tool}"
+                if _line:
+                    unified_plan_steps.append(_line)
+            if unified_plan_steps:
+                unified_plan_steps = _cap_unified_task_plan_steps(unified_plan_steps)
+                if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                    print(
+                        f"[REACT-UNIFIED] skill={_matched_skill.name} "
+                        f"plan_steps={len(unified_plan_steps)}",
+                        flush=True,
+                    )
+
+        try:
+            from agents.cdp.credentials import refresh_project_login_hint_in_context
+
+            refresh_project_login_hint_in_context(
+                result_ctx,
+                project_id,
+                user_input=getattr(self, "_react_stream_user_query", None) or user_input,
+                locale=getattr(self, "_ui_locale", None),
+            )
+        except Exception:
+            pass
+
+        _tools_for_unified_prompt = filter_tools_for_unified_prompt(
+            tools_info,
+            _skill_tool_names if _skill_tool_names else None,
+        )
+
         _max_rounds = _react_max_rounds_cap()
         prev_observation: Optional[Dict[str, Any]] = None
         prev_action: Optional[Dict[str, Any]] = None
@@ -5159,8 +5775,8 @@ class SimplifiedReActEngine:
         _done_sent = False
         findings_acc: List[str] = []
         _steps_done = 0
+        _run_had_tool_failure = False
         running_summary_state: Dict[str, Any] = {"text": "", "version": 0}
-        unified_plan_steps: List[str] = []
         _plan_step_idx = 0
         _plan_step_fail_streak = 0
         _dup_win = _react_duplicate_action_window()
@@ -5168,6 +5784,7 @@ class SimplifiedReActEngine:
         _sig_history: deque = deque(maxlen=_dup_win)
         _grep_call_count = 0
         _unified_round_for_debug: int = -1
+        self._macro_pending_decision = None
         try:
             for round_idx in range(_max_rounds):
                 _unified_round_for_debug = round_idx
@@ -5199,6 +5816,49 @@ class SimplifiedReActEngine:
                         }
                         _done_sent = True
                         return
+                if not getattr(self, "_macro_pending_decision", None):
+                    try:
+                        from agents.cdp.login_flow import (
+                            inject_cdp_login_resume_params,
+                            should_auto_resume_cdp_login,
+                        )
+
+                        _resume_ui = (
+                            getattr(self, "_react_stream_user_query", None) or user_input or ""
+                        )
+                        if should_auto_resume_cdp_login(
+                            _resume_ui,
+                            result_context=result_ctx,
+                            chat_session_id=getattr(self, "_chat_session_id", None),
+                            project_id=project_id,
+                        ):
+                            _login_params: Dict[str, Any] = {"action": "login"}
+                            if project_id is not None:
+                                _login_params["project_id"] = project_id
+                            inject_cdp_login_resume_params(
+                                _login_params,
+                                result_context=result_ctx,
+                                user_input=_resume_ui,
+                                chat_session_id=getattr(self, "_chat_session_id", None),
+                                project_id=project_id,
+                            )
+                            self._macro_pending_decision = {
+                                "execute": True,
+                                "tool": "cdp",
+                                "params": _login_params,
+                                "reason": "自动续登：用户已提供验证码或登录凭证",
+                            }
+                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                print(
+                                    "[REACT-CDP-LOGIN] auto resume cdp action=login",
+                                    flush=True,
+                                )
+                    except Exception as _cdp_resume_ex:
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(f"[REACT-CDP-LOGIN] auto resume skipped: {_cdp_resume_ex}", flush=True)
+                _macro_exec_only_round = bool(
+                    getattr(self, "_macro_pending_decision", None)
+                )
                 if unified_plan_steps:
                     if _plan_step_idx < len(unified_plan_steps):
                         _round_todo = unified_plan_steps[_plan_step_idx]
@@ -5210,8 +5870,9 @@ class SimplifiedReActEngine:
                         "step_id": _plan_step_idx + 1,
                         "todo": _round_todo,
                         "planned": True,
-                        "expand_plan": True,
-                        "todo_skip": round_idx == 0,
+                        "expand_plan": not _macro_exec_only_round,
+                        "todo_skip": round_idx == 0 or _macro_exec_only_round,
+                        "macro_exec_only": _macro_exec_only_round,
                     }
                 else:
                     _round_todo = (
@@ -5237,30 +5898,86 @@ class SimplifiedReActEngine:
                         prev_action,
                     )
                 _prompt_round_idx = _plan_step_idx if unified_plan_steps else round_idx
-                base_unified_prompt = self._wrap_prompt(
-                    ReactPromptTemplates.react_unified_prompt(
-                        user_input=user_input,
-                        available_tools=tools_info,
-                        context=result_ctx,
-                        round_idx=_prompt_round_idx,
-                        prev_observation=prev_observation,
-                        prev_action=prev_action,
-                        plan_hints=None,
-                        todo="",
-                        scheduled_plan=unified_plan_steps if unified_plan_steps else None,
-                        first_round_task_plan=_unified_first_round_task_plan_enabled(),
-                        ui_locale=getattr(self, "_ui_locale", None),
+                _unified_fc_mode = use_react_unified_fc_decide()
+                _macro_pending_at_round = getattr(self, "_macro_pending_decision", None)
+                base_unified_prompt = ""
+                if _macro_pending_at_round:
+                    if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                        print(
+                            "[REACT-MACRO] skip unified prompt build "
+                            f"round={round_idx} tool="
+                            f"{(_macro_pending_at_round or {}).get('tool')!r} "
+                            "(macro exec only)",
+                            flush=True,
+                        )
+                else:
+                    try:
+                        from agents.cdp.credentials import refresh_project_login_hint_in_context
+
+                        _prev_t_hint = (
+                            str((prev_action or {}).get("tool") or "").lower()
+                            if isinstance(prev_action, dict)
+                            else ""
+                        )
+                        _cdp_url_hint = None
+                        if isinstance(prev_observation, dict) and _prev_t_hint == "cdp":
+                            _pg_hint = prev_observation.get("page")
+                            if isinstance(_pg_hint, dict):
+                                _cdp_url_hint = _pg_hint.get("url")
+                            _cdp_url_hint = _cdp_url_hint or prev_observation.get("url")
+                        refresh_project_login_hint_in_context(
+                            result_ctx,
+                            project_id,
+                            user_input=getattr(self, "_react_stream_user_query", None) or user_input,
+                            prev_tool=_prev_t_hint or None,
+                            todo=_round_todo if unified_plan_steps else "",
+                            url=str(_cdp_url_hint or "") or None,
+                            locale=getattr(self, "_ui_locale", None),
+                        )
+                    except Exception:
+                        pass
+                    base_unified_prompt = self._wrap_prompt(
+                        ReactPromptTemplates.react_unified_prompt(
+                            user_input=user_input,
+                            available_tools=_tools_for_unified_prompt,
+                            context=result_ctx,
+                            round_idx=_prompt_round_idx,
+                            prev_observation=prev_observation,
+                            prev_action=prev_action,
+                            plan_hints=None,
+                            todo="",
+                            scheduled_plan=unified_plan_steps if unified_plan_steps else None,
+                            first_round_task_plan=_unified_first_round_task_plan_enabled(),
+                            ui_locale=getattr(self, "_ui_locale", None),
+                            fc_decide=_unified_fc_mode,
+                            matched_skill_name=(
+                                _matched_skill.name if _matched_skill and _skill_score >= 0.3 else None
+                            ),
+                            skill_workflow_prompt=_skill_workflow_prompt or None,
+                            skill_tool_names=_skill_tool_names or None,
+                        )
                     )
+                    _log_react_prompt(
+                        "react_unified_round",
+                        base_unified_prompt,
+                        round_idx_0based=round_idx,
+                        engine=self,
+                        prev_tool=(prev_action or {}).get("tool") if isinstance(prev_action, dict) else None,
+                        fc_decide=_unified_fc_mode,
+                    )
+                self._unified_fc_prev_tool = (
+                    str((prev_action or {}).get("tool") or "").strip().lower() or None
                 )
-                yield {
-                    "event": "phase_wait",
-                    "index": round_idx,
-                    "active": True,
-                    "kind": "unified_round_think",
-                    "message": react_phase_wait_message(
-                        "unified_round_think", getattr(self, "_ui_locale", None)
-                    ),
-                }
+                if not _macro_pending_at_round:
+                    yield {
+                        "event": "phase_wait",
+                        "index": round_idx,
+                        "active": True,
+                        "kind": "unified_round_think",
+                        "message": react_phase_wait_message(
+                            "unified_round_think", getattr(self, "_ui_locale", None)
+                        ),
+                    }
                 unified_prompt = base_unified_prompt
                 llm_parts: List[str] = []
                 _think_start = time.time()
@@ -5275,6 +5992,7 @@ class SimplifiedReActEngine:
                 _decision_end_vis = str(_markers_unified.get("decision_end") or "")
                 _think_sse_parts: List[str] = []
                 _unified_seg: Optional[str] = None  # thinking | observation | decision
+                _think_summary_streamed = False
                 try:
                     _min_sse = max(
                         1,
@@ -5413,7 +6131,7 @@ class SimplifiedReActEngine:
                         work = work[best_at + len(best_s) :]
 
                 def _emit_sanitizer_piece(piece: str, d_pw: Optional[str]):
-                    nonlocal _unified_seg
+                    nonlocal _unified_seg, _think_summary_streamed
                     
                     # 处理 phase_wait 事件 (decision 阶段)
                     if d_pw == "start":
@@ -5451,6 +6169,21 @@ class SimplifiedReActEngine:
                             yield from _think_sse_append_text_all(piece)
                         return
                     
+                    if d_pw == "think_summary_piece":
+                        if piece:
+                            _think_summary_streamed = True
+                            yield {
+                                "event": "agent_thought",
+                                "delta": "",
+                                "think_summary_delta": piece,
+                                "index": round_idx,
+                                "processType": PROCESS_TYPE_STREAMING,
+                                "react_phase": REACT_PHASE_THINK,
+                            }
+                        return
+                    if d_pw == "think_summary_end":
+                        return
+
                     # 处理结束标记（通过 d_pw 识别阶段）
                     if d_pw in ("thinking_end", "observation_end", "decision_end", "task_plan_end"):
                         yield from _emit_piece_split_end_markers(piece, d_pw)
@@ -5493,135 +6226,326 @@ class SimplifiedReActEngine:
                         return
                     yield from _think_sse_append_text_all(piece)
 
-                try:
-                    yield {
-                        "event": "agent_thought",
-                        "delta": "",
-                        "index": round_idx,
-                        "think_status": THINK_STREAM_STATUS_START,
-                        "processType": PROCESS_TYPE_STREAMING,
-                        "react_phase": REACT_PHASE_THINK,
+                _unified_fc_applied = False
+                parsed: Dict[str, Any] = {}
+                llm_response = ""
+                _parsed_from_macro_exec = False
+                if getattr(self, "_macro_pending_decision", None):
+                    _pending_m = dict(self._macro_pending_decision or {})
+                    self._macro_pending_decision = None
+                    llm_response = ""
+                    parsed = {
+                        "observation": "",
+                        "thinking": "",
+                        "decision": _pending_m,
+                        "plan_steps": [],
+                        "goal_done": False,
+                        "raw": "",
+                        "parse_meta": {
+                            "fallbacks": ["macro_exec_no_unified_think"],
+                            "decision_envelope_ok": True,
+                            "retry_recommended": False,
+                        },
                     }
-                    async for it in self._stream_llm_text_with_reasoning(unified_prompt):
-                        if not isinstance(it, dict):
-                            continue
-                        if it.get("type") == "reasoning":
-                            d = it.get("delta") or ""
-                            if d:
-                                yield {
-                                    "event": "reasoning",
-                                    "content": str(d),
-                                    "react_phase": REACT_PHASE_THINK,
-                                    "index": round_idx,
-                                }
-                            continue
-                        if it.get("type") == "error":
-                            em = it.get("message") or "unknown"
-                            llm_parts.append(f"Error: {em}")
-                            break
-                        if it.get("type") != "content":
-                            continue
-                        chunk = it.get("delta") or ""
-                        if not chunk:
-                            continue
-                        llm_parts.append(chunk)
-                        for piece, d_pw in _think_san.feed(chunk):
-                            for _ev in _emit_sanitizer_piece(piece, d_pw):
-                                yield _ev
-                        _ev = _think_sse_flush()
-                        if _ev:
-                            yield _ev
-                    for piece, d_pw in _think_san.feed(""):
-                        for _ev in _emit_sanitizer_piece(piece, d_pw):
-                            yield _ev
-                    for piece, d_pw in _think_san.end():
-                        for _ev in _emit_sanitizer_piece(piece, d_pw):
-                            yield _ev
-                    _ev = _think_sse_flush()
-                    if _ev:
-                        yield _ev
-                finally:
-                    pass
-                llm_response = "".join(llm_parts)
-                parsed = parse_unified_response(llm_response)
-                _parse_max = _unified_parse_retry_max()
-                if _unified_should_retry_parse(parsed, 0, _parse_max):
-                    _retry_extra = react_unified_strict_format_retry_suffix(
-                        getattr(self, "_ui_locale", None)
-                    )
-                    _hint = (
-                        "正在按严格格式重试本轮输出…\n\n"
-                        if not is_english_locale(getattr(self, "_ui_locale", None))
-                        else "Retrying with strict XML format…\n\n"
-                    )
-                    yield {
-                        "event": "agent_thought",
-                        "delta": _hint,
-                        "index": round_idx,
-                        "processType": PROCESS_TYPE_STREAMING,
-                        "react_phase": REACT_PHASE_THINK,
-                    }
+                    _parsed_from_macro_exec = True
                     if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
                         print(
-                            "[REACT-UNIFIED] parse retry: appending strict format reminder",
+                            "[REACT-MACRO] macro_exec_step "
+                            f"tool={_pending_m.get('tool')!r} round={round_idx} "
+                            "(no unified think/decide SSE)",
                             flush=True,
                         )
-                    unified_prompt = base_unified_prompt + _retry_extra
-                    llm_parts = []
-                    _think_san = create_unified_think_sanitizer(getattr(self, "_ui_locale", None))
-                    _think_sse_parts.clear()
-                    _unified_seg = None
+                    if os.getenv("PERF_LOG", "1") == "1":
+                        print(
+                            "[PERF][round-bridge] decide_skipped=macro "
+                            f"round={round_idx}",
+                            flush=True,
+                        )
+                    _macro_sum = _unified_think_summary_fallback(parsed)
+                    if _macro_sum:
+                        yield {
+                            "event": "agent_thought",
+                            "delta": "",
+                            "think_summary_delta": _macro_sum,
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                    _think_time = 0.0
+                if not _parsed_from_macro_exec:
                     try:
-                        async for it in self._stream_llm_text_with_reasoning(unified_prompt):
-                            if not isinstance(it, dict):
-                                continue
-                            if it.get("type") == "reasoning":
-                                d = it.get("delta") or ""
-                                if d:
-                                    yield {
-                                        "event": "reasoning",
-                                        "content": str(d),
-                                        "react_phase": REACT_PHASE_THINK,
-                                        "index": round_idx,
+                        yield {
+                            "event": "agent_thought",
+                            "delta": "",
+                            "index": round_idx,
+                            "think_status": THINK_STREAM_STATUS_START,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                        if (
+                            _unified_fc_mode
+                            and getattr(self.llm, "chat_completion_with_tools_stream", None)
+                        ):
+                            try:
+                                _ufc_tools = build_unified_fc_tools_from_registry(self.tools)
+                                if _ufc_tools:
+                                    _fc_imgs = self._react_vision_images_for_llm()
+                                    _ufc_messages = prompt_to_messages(
+                                        unified_prompt, images=_fc_imgs
+                                    )
+                                    _ufc_acc = FcStreamAccumulator()
+                                    _ufc_decision: Optional[Dict[str, Any]] = None
+                                    _ufc_early = use_react_unified_fc_early_execute()
+                                    async for _ufc_chunk in self._iter_unified_fc_stream_chunks(
+                                        _ufc_messages,
+                                        _ufc_tools,
+                                        tool_choice=self._parse_react_fc_tool_choice(),
+                                    ):
+                                        _ufc_piece = _ufc_acc.feed(_ufc_chunk)
+                                        if _ufc_piece:
+                                            llm_parts.append(_ufc_piece)
+                                            for _p2, _dpw in _think_san.feed(_ufc_piece):
+                                                for _ev in _emit_sanitizer_piece(_p2, _dpw):
+                                                    yield _ev
+                                            _ev = _think_sse_flush()
+                                            if _ev:
+                                                yield _ev
+                                        if _ufc_early:
+                                            _d_try = _ufc_acc.try_build_decision()
+                                            if _d_try is not None:
+                                                _ufc_decision = _d_try
+                                                _ufc_timer = getattr(
+                                                    self, "_active_llm_stream_timer", None
+                                                )
+                                                if _ufc_timer is not None:
+                                                    _ufc_timer.on_early_execute()
+                                                if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                                    print(
+                                                        "[REACT-UNIFIED-FC] early decision "
+                                                        f"tool={_d_try.get('tool')!r} "
+                                                        f"execute={_d_try.get('execute')!r}",
+                                                        flush=True,
+                                                    )
+                                                yield {
+                                                    "event": "phase_wait",
+                                                    "index": round_idx,
+                                                    "active": True,
+                                                    "kind": "unified_action_fc",
+                                                    "message": react_phase_wait_message(
+                                                        "decision_xml_parse",
+                                                        getattr(self, "_ui_locale", None),
+                                                    ),
+                                                }
+                                                break
+                                    for _p2, _dpw in _think_san.feed(""):
+                                        for _ev in _emit_sanitizer_piece(_p2, _dpw):
+                                            yield _ev
+                                    for _p2, _dpw in _think_san.end():
+                                        for _ev in _emit_sanitizer_piece(_p2, _dpw):
+                                            yield _ev
+                                    _ev = _think_sse_flush()
+                                    if _ev:
+                                        yield _ev
+                                    llm_response = "".join(llm_parts)
+                                    if _ufc_decision is None:
+                                        _ufc_msg = _ufc_acc.build_assistant_message()
+                                        _ufc_decision = decision_from_assistant_message(_ufc_msg)
+                                    if _ufc_decision is None:
+                                        _ufc_decision = {
+                                            "execute": False,
+                                            "tool": "",
+                                            "params": {},
+                                            "reason": "unified_fc_no_tool_calls",
+                                        }
+                                    _fc_body = parse_unified_fc_content(llm_response)
+                                    _ufc_dec = dict(_ufc_decision)
+                                    _tp_fc = _ufc_dec.pop("_task_plan", None)
+                                    _gd_fc = bool(_ufc_dec.pop("_goal_done", False))
+                                    _ufc_dec.pop("_fc_control", None)
+                                    parsed = {
+                                        "observation": _fc_body.get("observation") or "",
+                                        "thinking": _fc_body.get("thinking") or "",
+                                        "think_summary": _fc_body.get("think_summary") or "",
+                                        "plan_steps": _fc_body.get("plan_steps") or [],
+                                        "goal_done": bool(_fc_body.get("goal_done")) or _gd_fc,
+                                        "decision": _ufc_dec,
+                                        "raw": llm_response,
+                                        "parse_meta": {
+                                            "fallbacks": ["unified_fc"],
+                                            "decision_envelope_ok": True,
+                                            "retry_recommended": False,
+                                        },
                                     }
-                                continue
-                            if it.get("type") == "error":
-                                em = it.get("message") or "unknown"
-                                llm_parts.append(f"Error: {em}")
-                                break
-                            if it.get("type") != "content":
-                                continue
-                            chunk = it.get("delta") or ""
-                            if not chunk:
-                                continue
-                            llm_parts.append(chunk)
-                            for piece, d_pw in _think_san.feed(chunk):
+                                    if (
+                                        isinstance(_tp_fc, list)
+                                        and _tp_fc
+                                        and not parsed.get("plan_steps")
+                                    ):
+                                        parsed["plan_steps"] = _tp_fc
+                                    _unified_fc_applied = True
+                                    if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                        print(
+                                            "[REACT-UNIFIED-FC] round=%s tool=%r execute=%r early=%s"
+                                            % (
+                                                round_idx,
+                                                _ufc_dec.get("tool"),
+                                                _ufc_dec.get("execute"),
+                                                _ufc_early and _ufc_decision is not None,
+                                            ),
+                                            flush=True,
+                                        )
+                            except Exception as _ufc_ex:
+                                print(
+                                    f"[REACT-UNIFIED-FC] fallback XML: {_ufc_ex}",
+                                    flush=True,
+                                )
+                                if os.getenv("REACT_UNIFIED_ERROR_DIAG", "1") != "0":
+                                    traceback.print_exc()
+                                llm_parts.clear()
+                                _think_san = create_unified_think_sanitizer(
+                                    getattr(self, "_ui_locale", None)
+                                )
+                                _think_sse_parts.clear()
+                                _unified_seg = None
+
+                        if not _unified_fc_applied:
+                            async for it in self._stream_llm_text_with_reasoning(unified_prompt):
+                                if not isinstance(it, dict):
+                                    continue
+                                if it.get("type") == "reasoning":
+                                    d = it.get("delta") or ""
+                                    if d:
+                                        yield {
+                                            "event": "reasoning",
+                                            "content": str(d),
+                                            "react_phase": REACT_PHASE_THINK,
+                                            "index": round_idx,
+                                        }
+                                    continue
+                                if it.get("type") == "error":
+                                    em = it.get("message") or "unknown"
+                                    llm_parts.append(f"Error: {em}")
+                                    break
+                                if it.get("type") != "content":
+                                    continue
+                                chunk = it.get("delta") or ""
+                                if not chunk:
+                                    continue
+                                llm_parts.append(chunk)
+                                for piece, d_pw in _think_san.feed(chunk):
+                                    for _ev in _emit_sanitizer_piece(piece, d_pw):
+                                        yield _ev
+                                _ev = _think_sse_flush()
+                                if _ev:
+                                    yield _ev
+                            for piece, d_pw in _think_san.feed(""):
+                                for _ev in _emit_sanitizer_piece(piece, d_pw):
+                                    yield _ev
+                            for piece, d_pw in _think_san.end():
                                 for _ev in _emit_sanitizer_piece(piece, d_pw):
                                     yield _ev
                             _ev = _think_sse_flush()
                             if _ev:
                                 yield _ev
-                        for piece, d_pw in _think_san.feed(""):
-                            for _ev in _emit_sanitizer_piece(piece, d_pw):
-                                yield _ev
-                        for piece, d_pw in _think_san.end():
-                            for _ev in _emit_sanitizer_piece(piece, d_pw):
-                                yield _ev
-                        _ev = _think_sse_flush()
-                        if _ev:
-                            yield _ev
+                            llm_response = "".join(llm_parts)
+                            parsed = parse_unified_response(llm_response)
                     finally:
                         pass
-                    llm_response = "".join(llm_parts)
-                    parsed = parse_unified_response(llm_response)
-                _think_time = time.time() - _think_start
+                    if not parsed:
+                        llm_response = "".join(llm_parts)
+                        parsed = parse_unified_response(llm_response)
+                    _parse_max = _unified_parse_retry_max()
+                    if (not _unified_fc_applied) and _unified_should_retry_parse(
+                        parsed, 0, _parse_max
+                    ):
+                        _retry_extra = react_unified_strict_format_retry_suffix(
+                            getattr(self, "_ui_locale", None)
+                        )
+                        _hint = (
+                            "正在按严格格式重试本轮输出…\n\n"
+                            if not is_english_locale(getattr(self, "_ui_locale", None))
+                            else "Retrying with strict XML format…\n\n"
+                        )
+                        yield {
+                            "event": "agent_thought",
+                            "delta": _hint,
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                "[REACT-UNIFIED] parse retry: appending strict format reminder",
+                                flush=True,
+                            )
+                        unified_prompt = base_unified_prompt + _retry_extra
+                        llm_parts = []
+                        _think_san = create_unified_think_sanitizer(getattr(self, "_ui_locale", None))
+                        _think_sse_parts.clear()
+                        _unified_seg = None
+                        try:
+                            async for it in self._stream_llm_text_with_reasoning(unified_prompt):
+                                if not isinstance(it, dict):
+                                    continue
+                                if it.get("type") == "reasoning":
+                                    d = it.get("delta") or ""
+                                    if d:
+                                        yield {
+                                            "event": "reasoning",
+                                            "content": str(d),
+                                            "react_phase": REACT_PHASE_THINK,
+                                            "index": round_idx,
+                                        }
+                                    continue
+                                if it.get("type") == "error":
+                                    em = it.get("message") or "unknown"
+                                    llm_parts.append(f"Error: {em}")
+                                    break
+                                if it.get("type") != "content":
+                                    continue
+                                chunk = it.get("delta") or ""
+                                if not chunk:
+                                    continue
+                                llm_parts.append(chunk)
+                                for piece, d_pw in _think_san.feed(chunk):
+                                    for _ev in _emit_sanitizer_piece(piece, d_pw):
+                                        yield _ev
+                                _ev = _think_sse_flush()
+                                if _ev:
+                                    yield _ev
+                            for piece, d_pw in _think_san.feed(""):
+                                for _ev in _emit_sanitizer_piece(piece, d_pw):
+                                    yield _ev
+                            for piece, d_pw in _think_san.end():
+                                for _ev in _emit_sanitizer_piece(piece, d_pw):
+                                    yield _ev
+                            _ev = _think_sse_flush()
+                            if _ev:
+                                yield _ev
+                        finally:
+                            pass
+                        llm_response = "".join(llm_parts)
+                        parsed = parse_unified_response(llm_response)
+                    _think_time = time.time() - _think_start
+                if not _think_summary_streamed and not _parsed_from_macro_exec:
+                    _fb_sum = _unified_think_summary_fallback(parsed)
+                    if _fb_sum:
+                        yield {
+                            "event": "agent_thought",
+                            "delta": "",
+                            "think_summary_delta": _fb_sum,
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
                 _total_think_time += _think_time
-                yield {
-                    "event": "phase_wait",
-                    "index": round_idx,
-                    "active": False,
-                    "kind": "unified_round_think",
-                }
+                if not _macro_pending_at_round:
+                    yield {
+                        "event": "phase_wait",
+                        "index": round_idx,
+                        "active": False,
+                        "kind": "unified_round_think",
+                    }
                 if _unified_plan_diag_enabled():
                     _raw = llm_response or ""
                     _has_tp = "<task_plan" in _raw.lower()
@@ -5709,6 +6633,61 @@ class SimplifiedReActEngine:
                             "<task_plan><step> 或步为空）",
                             flush=True,
                         )
+                _ps_freeze_early = list(unified_plan_steps) if unified_plan_steps else (
+                    parsed.get("plan_steps") or []
+                )
+                if (
+                    round_idx == 0
+                    and macro_execution_separation_enabled(
+                        _ps_freeze_early if isinstance(_ps_freeze_early, list) else []
+                    )
+                    and not result_ctx.get("frozen_macro")
+                    and decision.get("execute")
+                    and (decision.get("tool") or "").strip()
+                ):
+                    _ps_freeze = _ps_freeze_early
+                    _uq = (
+                        getattr(self, "_react_stream_user_query", None)
+                        or user_input
+                        or ""
+                    )
+                    _fm = try_freeze_macro_from_plan(
+                        user_input=_uq,
+                        ui_context=getattr(self, "_ui_context", None),
+                        plan_steps=_ps_freeze if isinstance(_ps_freeze, list) else [],
+                        round_id=(self._agent_session_id or ""),
+                        first_tool=str(decision.get("tool") or ""),
+                        first_tool_params=dict(decision.get("params") or {}),
+                    )
+                    if _fm:
+                        result_ctx["frozen_macro"] = _fm
+                        try:
+                            import json as _json
+
+                            _log_react_prompt(
+                                "macro_frozen_plan",
+                                _json.dumps(_fm, ensure_ascii=False, default=str, indent=2),
+                                engine=self,
+                                source=_fm.get("source"),
+                                tools=[s.get("tool") for s in (_fm.get("steps") or [])],
+                            )
+                        except Exception as _fm_log_ex:
+                            print(f"[REACT_PROMPT] macro_frozen_plan log skip: {_fm_log_ex}", flush=True)
+                        _steps_dbg = _fm.get("steps") or []
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                "[REACT-MACRO] macro_path_hit "
+                                f"source={_fm.get('source')!r} "
+                                f"n_steps={len(_steps_dbg)} "
+                                f"tools={[s.get('tool') for s in _steps_dbg]}",
+                                flush=True,
+                            )
+                        if os.getenv("PERF_LOG", "1") == "1":
+                            print(
+                                "[PERF][react] macro_path_hit=1 "
+                                f"request_id={self._agent_session_id!r}",
+                                flush=True,
+                            )
                 _round_todo_effective = _round_todo
                 if unified_plan_steps and _plan_step_idx < len(unified_plan_steps):
                     _round_todo_effective = unified_plan_steps[_plan_step_idx]
@@ -5747,7 +6726,7 @@ class SimplifiedReActEngine:
                             )
                         yield {
                             "event": "done",
-                            "status": "success",
+                            "status": _unified_done_status(_run_had_tool_failure),
                             "findings": findings_acc,
                             "steps_count": _steps_done,
                             "duration": time.time() - _t0,
@@ -5806,9 +6785,37 @@ class SimplifiedReActEngine:
                     _tn_low = tool_name.lower()
                     if self.tools.get(tool_name) is None and self.tools.get(_tn_low) is not None:
                         tool_name = _tn_low
+                _exec_timer = getattr(self, "_active_llm_stream_timer", None)
+                if _exec_timer is not None and tool_name:
+                    _exec_timer.on_tool_start()
                 tool_params = dict(decision.get("params") or {})
+                _rid_obs = getattr(self, "_agent_session_id", None)
+                try:
+                    from utils.observability import (
+                        append_agent_trace,
+                        truncate_modifications_for_trace,
+                    )
+
+                    _dec_keys = list(tool_params.keys()) if isinstance(tool_params, dict) else []
+                    append_agent_trace(
+                        "decide.params",
+                        {
+                            "tool": tool_name,
+                            "param_keys": _dec_keys,
+                            "modifications": truncate_modifications_for_trace(
+                                tool_params.get("modifications")
+                            ),
+                            "reason": str(decision.get("reason") or "")[:400],
+                        },
+                        react_request_id=_rid_obs,
+                        round_idx=round_idx,
+                        tool=tool_name,
+                    )
+                except Exception:
+                    pass
                 if "userId" not in tool_params:
-                    tool_params["userId"] = "system_agent"
+                    _uid = str(getattr(self, "user_id", None) or getattr(self, "_user_id", None) or "").strip()
+                    tool_params["userId"] = _uid or "system_agent"
                 # 模型常下发 project_id: null，「in params」会为真导致旧逻辑漏注入；与 modify 分支的 get 补救对齐
                 if not tool_params.get("project_id"):
                     if self.project_id:
@@ -5816,6 +6823,16 @@ class SimplifiedReActEngine:
                     elif project_id is not None:
                         tool_params["project_id"] = project_id
                 tool_params["ui_locale"] = normalize_locale(getattr(self, "_ui_locale", None))
+                if tool_name == "grep":
+                    _uic = getattr(self, "_ui_context", None)
+                    if isinstance(_uic, dict):
+                        tool_params["ui_context"] = _uic
+                    inject_ui_record_into_grep_params(
+                        tool_params, _uic if isinstance(_uic, dict) else None
+                    )
+                    _rq = getattr(self, "_react_stream_user_query", None) or ""
+                    if str(_rq).strip():
+                        tool_params["raw_user_input"] = str(_rq).strip()
                 if tool_name in ("modify", "create", "delete") and "confirm" not in tool_params:
                     tool_params["confirm"] = False
                 if tool_name == "modify":
@@ -5980,6 +6997,12 @@ class SimplifiedReActEngine:
                             tool_params["target_id"] = _tid
 
                 if tool_name in ("copy", "create", "modify", "delete"):
+                    if tool_name == "modify":
+                        tool_params["_resolve_user_input"] = (
+                            getattr(self, "_react_stream_user_query", None)
+                            or user_input
+                            or ""
+                        )
                     sanitize_tool_entity_ids(
                         tool_name,
                         tool_params,
@@ -5987,14 +7010,180 @@ class SimplifiedReActEngine:
                         result_context=result_ctx or {},
                         ui_context=getattr(self, "_ui_context", None),
                     )
+                    if tool_name == "modify":
+                        tool_params.pop("_resolve_user_input", None)
 
+                if tool_name == "cdp":
+                    _cdp_ui = (
+                        getattr(self, "_react_stream_user_query", None) or user_input or ""
+                    )
+                    try:
+                        from agents.cdp.login_flow import inject_cdp_login_resume_params
+                        from agents.cdp.params import inject_cdp_tool_params
+
+                        inject_cdp_tool_params(
+                            tool_params,
+                            user_input=_cdp_ui,
+                            result_context=result_ctx,
+                            project_id=project_id,
+                        )
+                        inject_cdp_login_resume_params(
+                            tool_params,
+                            result_context=result_ctx,
+                            user_input=_cdp_ui,
+                            chat_session_id=getattr(self, "_chat_session_id", None),
+                            project_id=project_id,
+                        )
+                    except Exception:
+                        pass
+                    _csid = getattr(self, "_chat_session_id", None)
+                    if _csid is not None:
+                        try:
+                            tool_params["chat_session_id"] = int(_csid)
+                        except (TypeError, ValueError):
+                            pass
+
+                _reason_nl = str(decision.get("reason") or "").strip()
+                _step_id_ui = _plan_step_idx + 1 if unified_plan_steps else round_idx + 1
+                _skip_grep_for_delete_plan = (
+                    tool_name == "delete"
+                    and react_delete_plan_may_skip_grep(
+                        tool_params,
+                        ui_context=getattr(self, "_ui_context", None),
+                        sidebar_plan_id=getattr(self, "plan_id", None),
+                    )
+                )
+                if (
+                    tool_name in ("modify", "delete")
+                    and not _skip_grep_for_delete_plan
+                    and react_require_grep_before_modify()
+                    and _grep_call_count > 0
+                ):
+                    try:
+                        from agents.react_macro import macro_grep_has_actionable_hit
+                    except Exception:
+                        macro_grep_has_actionable_hit = lambda _ctx: False  # type: ignore
+                    if not macro_grep_has_actionable_hit(result_ctx):
+                        _empty_mod_msg = react_modify_blocked_after_empty_grep(
+                            getattr(self, "_ui_locale", None)
+                        )
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                "[REACT-UNIFIED] block modify/delete: grep empty hits "
+                                f"grep_calls={_grep_call_count}",
+                                flush=True,
+                            )
+                        yield {
+                            "event": "agent_thought",
+                            "delta": _empty_mod_msg + "\n\n",
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                        findings_acc.append(_empty_mod_msg)
+                        await self._wait_for_background_summary(running_summary_state)
+                        _append_running_summary_stop_note(running_summary_state, _empty_mod_msg)
+                        yield {
+                            "event": "finished",
+                            "finished": True,
+                            "steps_count": _steps_done,
+                            "duration": time.time() - _t0,
+                            "thinking_time": _total_think_time,
+                        }
+                        _incr_empty = str(running_summary_state.get("text") or "").strip()
+                        if use_react_incremental_running_summary() and _incr_empty:
+                            _lsi_empty = max(0, (_steps_done if _steps_done > 0 else 1) - 1)
+                            async for _rs_ev in self._stream_running_summary_final_wire(
+                                running_summary_state,
+                                last_step_index=_lsi_empty,
+                            ):
+                                yield _rs_ev
+                        yield {
+                            "event": "done",
+                            "status": "partial",
+                            "findings": findings_acc,
+                            "steps_count": _steps_done,
+                            "duration": time.time() - _t0,
+                            "thinking_time": _total_think_time,
+                            "summary": _incr_empty or _empty_mod_msg,
+                            "stop_reason": "grep_empty_no_modify",
+                        }
+                        _done_sent = True
+                        return
+                if (
+                    tool_name in ("modify", "delete")
+                    and not _skip_grep_for_delete_plan
+                    and react_require_grep_before_modify()
+                    and not react_context_has_grep_for_mutate(
+                        result_ctx,
+                        prev_action,
+                        grep_tool_calls=_grep_call_count,
+                    )
+                ):
+                    if react_grep_before_modify_coerce():
+                        _uic_coerce = getattr(self, "_ui_context", None)
+                        tool_name = "grep"
+                        tool_params = self._unified_prewarm_grep_params_from_user(
+                            user_input,
+                            _round_todo_effective,
+                            project_id=project_id,
+                            plan_id=plan_id,
+                            ui_context=_uic_coerce if isinstance(_uic_coerce, dict) else None,
+                        )
+                        if isinstance(_uic_coerce, dict):
+                            inject_ui_record_into_grep_params(tool_params, _uic_coerce)
+                        self._coerce_grep_target_for_user_intent(
+                            {"execute": True, "tool": "grep", "params": tool_params},
+                            user_input,
+                            _round_todo_effective,
+                        )
+                        self._normalize_grep_plan_scope(tool_params)
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                "[REACT-UNIFIED] coerce modify/delete → grep same round "
+                                f"(grep_calls={_grep_call_count})",
+                                flush=True,
+                            )
+                    else:
+                        _grep_first_msg = react_unified_modify_requires_grep_first(
+                            getattr(self, "_ui_locale", None)
+                        )
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                f"[REACT-UNIFIED] block {tool_name} before grep "
+                                f"grep_calls={_grep_call_count}",
+                                flush=True,
+                            )
+                        yield {
+                            "event": "agent_thought",
+                            "delta": _grep_first_msg + "\n\n",
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                        prev_observation = {
+                            "success": False,
+                            "blocked": True,
+                            "reason": "grep_required_before_modify",
+                            "message": _grep_first_msg,
+                            "attempted_tool": tool_name,
+                        }
+                        prev_action = {
+                            "tool": tool_name,
+                            "params": _json_safe_tool_params(tool_params),
+                            "blocked": True,
+                        }
+                        continue
+                elif _skip_grep_for_delete_plan and os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                    print(
+                        "[REACT-UNIFIED] delete(target=plan) plan_id 已明确，跳过 grep 前置",
+                        flush=True,
+                    )
                 decision_dict: Dict[str, Any] = {
                     "execute": True,
                     "tool": tool_name,
                     "params": tool_params,
                 }
-                _reason_nl = str(decision.get("reason") or "").strip()
-                _step_id_ui = _plan_step_idx + 1 if unified_plan_steps else round_idx + 1
                 if tool_name == "grep":
                     _grep_block, _grep_block_reason = _react_should_block_repeat_grep(
                         prev_observation=prev_observation,
@@ -6002,6 +7191,24 @@ class SimplifiedReActEngine:
                         grep_call_count=_grep_call_count,
                     )
                     if _grep_block:
+                        _uic_blk = getattr(self, "_ui_context", None)
+                        _gt_blk = str(tool_params.get("target") or "bug").strip().lower()
+                        _ui_seeded = (
+                            _grep_block_reason == "empty"
+                            and isinstance(_uic_blk, dict)
+                            and seed_grep_result_context_from_ui_record(
+                                result_ctx, _uic_blk, grep_target=_gt_blk
+                            )
+                        )
+                        if _ui_seeded:
+                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                print(
+                                    f"[REACT-UNIFIED] grep repeat blocked but ui_context "
+                                    f"record_id={ui_record_for_grep_target(_uic_blk, _gt_blk)!r} "
+                                    f"→ seed context, continue",
+                                    flush=True,
+                                )
+                            continue
                         _stall_msg = react_unified_grep_no_repeat_message(
                             getattr(self, "_ui_locale", None),
                             reason=_grep_block_reason,
@@ -6101,6 +7308,31 @@ class SimplifiedReActEngine:
                     _done_sent = True
                     return
                 _sig_history.append(_sig)
+                try:
+                    from utils.observability import (
+                        append_agent_trace,
+                        truncate_modifications_for_trace,
+                    )
+
+                    _trace_params = {
+                        k: v
+                        for k, v in tool_params.items()
+                        if k not in ("intent_result_context", "intent_card_rows")
+                    }
+                    if "modifications" in _trace_params:
+                        _trace_params["modifications"] = truncate_modifications_for_trace(
+                            _trace_params.get("modifications")
+                        )
+                    append_agent_trace(
+                        "tool.execute.start",
+                        {"params": _trace_params},
+                        react_request_id=_rid_obs,
+                        round_idx=round_idx,
+                        tool=tool_name,
+                    )
+                except Exception:
+                    pass
+                _tool_obs_t0 = time.perf_counter()
                 yield {"event": "tool_call", "tool": tool_name, "params": tool_params}
                 yield {
                     "event": "executing",
@@ -6132,12 +7364,6 @@ class SimplifiedReActEngine:
                         }
                     else:
                         tool_timeout = int(os.getenv("AGENT_TOOL_TIMEOUT", "120"))
-                        try:
-                            from agents.tool_run_context import attach_tool_run_ctx_to_params
-
-                            attach_tool_run_ctx_to_params(tool_params, result_ctx)
-                        except Exception as _atc_ex:
-                            print(f"[TOOL-RUN-CTX] attach before modify failed: {_atc_ex}")
                         fut, progress_q = self._spawn_modify_executor_future(
                             _tool_obj, tool_params
                         )
@@ -6182,8 +7408,53 @@ class SimplifiedReActEngine:
                         yield _te
 
                 observation = _normalize_unified_stream_tool_observation(observation)
+                if (
+                    str(tool_name or "").strip().lower() == "grep"
+                    and _react_strict_plan_fail_enabled()
+                    and isinstance(observation, dict)
+                    and observation.get("success") is not False
+                    and _grep_observation_empty_lists(observation)
+                ):
+                    observation = dict(observation)
+                    observation["success"] = False
+                    observation["error"] = "grep_empty_hits"
+                    observation["code"] = "grep_empty_hits"
+                    if not str(observation.get("message") or "").strip():
+                        observation["message"] = react_summarize_grep_done_empty(
+                            getattr(self, "_ui_locale", None)
+                        )
+                try:
+                    from utils.observability import (
+                        append_agent_trace,
+                        record_react_tool_metrics,
+                        summarize_modify_observation,
+                    )
+
+                    _tool_dur = time.perf_counter() - _tool_obs_t0
+                    if tool_name == "modify":
+                        _obs_payload = summarize_modify_observation(observation)
+                    else:
+                        _obs_payload = {
+                            "success": observation.get("success"),
+                            "error": observation.get("error"),
+                        }
+                    append_agent_trace(
+                        "tool.execute.end",
+                        _obs_payload,
+                        react_request_id=_rid_obs,
+                        round_idx=round_idx,
+                        tool=tool_name,
+                    )
+                    record_react_tool_metrics(
+                        tool_name,
+                        result="success" if observation.get("success") else "fail",
+                        duration_sec=_tool_dur,
+                    )
+                except Exception:
+                    pass
 
                 if tool_exc is not None:
+                    _run_had_tool_failure = True
                     yield {
                         "event": "tool_error",
                         "tool": tool_name,
@@ -6193,25 +7464,82 @@ class SimplifiedReActEngine:
                         "code": "exception",
                     }
                 elif not observation.get("success"):
-                    yield {
-                        "event": "tool_error",
-                        "tool": tool_name,
-                        "index": round_idx,
-                        "step_id": _step_id_ui,
-                        "message": str(
-                            observation.get("error")
-                            or observation.get("message")
-                            or "工具执行失败"
-                        ),
-                        "code": observation.get("code"),
-                        "details": observation,
-                    }
+                    _grep_empty_ui = (
+                        str(tool_name or "").strip().lower() == "grep"
+                        and str(
+                            observation.get("code") or observation.get("error") or ""
+                        ).strip()
+                        == "grep_empty_hits"
+                    )
+                    if not _grep_empty_ui:
+                        _run_had_tool_failure = True
+                        yield {
+                            "event": "tool_error",
+                            "tool": tool_name,
+                            "index": round_idx,
+                            "step_id": _step_id_ui,
+                            "message": str(
+                                observation.get("error")
+                                or observation.get("message")
+                                or "工具执行失败"
+                            ),
+                            "code": observation.get("code"),
+                            "details": observation,
+                        }
 
-                obs_summary = (
-                    observation.get("summary")
-                    or observation.get("message")
-                    or ("成功" if observation.get("success") else "失败")
-                )
+                if tool_name == "cdp" and isinstance(observation, dict):
+                    try:
+                        from agents.cdp.login_flow import update_login_pending_context
+
+                        update_login_pending_context(
+                            result_ctx,
+                            observation,
+                            chat_session_id=getattr(self, "_chat_session_id", None),
+                            project_id=project_id,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from agents.cdp.postprocess import enrich_cdp_observation
+
+                        _cdp_act = (
+                            (tool_params or {}).get("action")
+                            or (tool_params or {}).get("tool_action")
+                            or observation.get("action")
+                            or ""
+                        )
+                        observation = await enrich_cdp_observation(
+                            self,
+                            observation,
+                            action=str(_cdp_act),
+                            params=tool_params,
+                            project_id=project_id,
+                            plan_id=plan_id or (tool_params or {}).get("plan_id"),
+                            user_query=(
+                                getattr(self, "_react_stream_user_query", None) or user_input or ""
+                            ),
+                            result_context=result_ctx,
+                            todo=_round_todo_effective or "",
+                            chat_session_id=getattr(self, "_chat_session_id", None),
+                            react_request_id=getattr(self, "_agent_session_id", None),
+                        )
+                    except Exception as _cdp_pp_ex:
+                        if os.getenv("PERF_LOG") == "1":
+                            print(f"[REACT-CDP] postprocess skipped: {_cdp_pp_ex}", flush=True)
+
+                if (tool_name or "").lower() == "cdp":
+                    if isinstance(observation.get("summary"), str) and observation["summary"].strip():
+                        obs_summary = observation["summary"].strip()
+                    else:
+                        obs_summary = self._summarize_observation_nl(tool_name, observation)
+                else:
+                    obs_summary = (
+                        observation.get("summary")
+                        or observation.get("message")
+                        or self._summarize_observation_nl(tool_name, observation)
+                    )
+                    if not obs_summary:
+                        obs_summary = "成功" if observation.get("success") else "失败"
                 if tool_name == "modify" and observation.get("success"):
                     tt = observation.get("target")
                     tid = observation.get("target_id")
@@ -6238,13 +7566,57 @@ class SimplifiedReActEngine:
                 }
                 _tool_ms = observation.get("grep_perf_ms") if tool_name == "grep" else None
                 if _tool_ms is None and isinstance(observation, dict):
-                    _tool_ms = observation.get("tool_duration_ms")
-                if _tool_ms is not None:
-                    try:
-                        _obs_ev["tool_duration_ms"] = float(_tool_ms)
-                    except (TypeError, ValueError):
-                        pass
+                    _tool_ms = observation.get("tool_duration_ms") or observation.get("duration_ms")
+                if _tool_ms is None:
+                    _tool_ms = (time.perf_counter() - _tool_obs_t0) * 1000
+                try:
+                    _obs_ev["tool_duration_ms"] = float(_tool_ms)
+                except (TypeError, ValueError):
+                    pass
                 yield _obs_ev
+                if tool_name == "cdp" and isinstance(observation, dict):
+                    try:
+                        from agents.cdp.test_task import pop_test_task_sse_buffer
+
+                        for _tt_ev in pop_test_task_sse_buffer(result_ctx):
+                            yield _tt_ev
+                    except Exception:
+                        pass
+                    _preview_seen: set = set()
+                    for _prev in observation.get("cdp_create_previews") or []:
+                        if not isinstance(_prev, dict):
+                            continue
+                        _pdata = _prev.get("data") if isinstance(_prev.get("data"), dict) else _prev
+                        if not isinstance(_pdata, dict):
+                            continue
+                        _pid = id(_pdata)
+                        if _pid in _preview_seen:
+                            continue
+                        _preview_seen.add(_pid)
+                        yield {
+                            "event": "create_preview",
+                            "data": _pdata,
+                            "source": "cdp_interaction_auto_create"
+                            if _prev.get("kind") == "bug"
+                            else "cdp_plan_auto_create",
+                        }
+                    if observation.get("cdp_create_preview") and id(observation["cdp_create_preview"]) not in _preview_seen:
+                        yield {
+                            "event": "create_preview",
+                            "data": observation["cdp_create_preview"],
+                            "source": "cdp_auto_create",
+                        }
+                    if observation.get("cdp_plan_create_preview") and id(observation["cdp_plan_create_preview"]) not in _preview_seen:
+                        yield {
+                            "event": "create_preview",
+                            "data": observation["cdp_plan_create_preview"],
+                            "source": "cdp_plan_auto_create",
+                        }
+                    if observation.get("cdp_auto_created"):
+                        yield {
+                            "event": "cdp_records_created",
+                            "data": observation["cdp_auto_created"],
+                        }
                 _clr = observation.get("client_local_run")
                 if isinstance(_clr, dict) and _clr:
                     for _pkt in engine_dict_to_wire_packets({"event": "client_local_run", **_clr}):
@@ -6296,6 +7668,60 @@ class SimplifiedReActEngine:
                 tool_params.pop("progress_queue", None)
                 tool_params.pop("progress_callback", None)
                 if unified_plan_steps and not observation.get("success"):
+                    _is_grep_empty_fail = (
+                        str(tool_name or "").strip().lower() == "grep"
+                        and (
+                            str(observation.get("code") or observation.get("error") or "")
+                            == "grep_empty_hits"
+                            or _grep_observation_empty_lists(observation)
+                        )
+                    )
+                    if _is_grep_empty_fail:
+                        _stop_msg = react_modify_blocked_after_empty_grep(
+                            getattr(self, "_ui_locale", None)
+                        )
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                "[REACT-UNIFIED] stop after grep empty (no plan skip to modify)",
+                                flush=True,
+                            )
+                        yield {
+                            "event": "agent_thought",
+                            "delta": _stop_msg + "\n\n",
+                            "index": round_idx,
+                            "processType": PROCESS_TYPE_STREAMING,
+                            "react_phase": REACT_PHASE_THINK,
+                        }
+                        findings_acc.append(_stop_msg)
+                        await self._wait_for_background_summary(running_summary_state)
+                        _append_running_summary_stop_note(running_summary_state, _stop_msg)
+                        yield {
+                            "event": "finished",
+                            "finished": True,
+                            "steps_count": _steps_done,
+                            "duration": time.time() - _t0,
+                            "thinking_time": _total_think_time,
+                        }
+                        _incr_g = str(running_summary_state.get("text") or "").strip()
+                        if use_react_incremental_running_summary() and _incr_g:
+                            _lsi_g = max(0, (_steps_done if _steps_done > 0 else 1) - 1)
+                            async for _rs_ev in self._stream_running_summary_final_wire(
+                                running_summary_state,
+                                last_step_index=_lsi_g,
+                            ):
+                                yield _rs_ev
+                        yield {
+                            "event": "done",
+                            "status": "partial",
+                            "findings": findings_acc,
+                            "steps_count": _steps_done,
+                            "duration": time.time() - _t0,
+                            "thinking_time": _total_think_time,
+                            "summary": _incr_g or _stop_msg,
+                            "stop_reason": "grep_empty_no_modify",
+                        }
+                        _done_sent = True
+                        return
                     _plan_step_fail_streak += 1
                     if _plan_step_fail_streak >= _plan_step_max_fail:
                         _skip_msg = react_unified_plan_step_skip_failures_message(
@@ -6323,22 +7749,93 @@ class SimplifiedReActEngine:
                         _round_todo_effective,
                         str(obs_summary),
                         background=True,  # 不阻塞主循环
+                        observation=(
+                            observation if isinstance(observation, dict) else None
+                        ),
                     )
-                    if tool_name == "grep":
-                        _grep_call_count += 1
+                else:
+                    _fail_nl = self._summarize_observation_nl(tool_name, observation)
+                    await self._merge_running_summary_incremental_silent(
+                        running_summary_state,
+                        round_idx,
+                        tool_name,
+                        _round_todo_effective,
+                        str(_fail_nl),
+                        background=True,
+                        observation=(
+                            observation if isinstance(observation, dict) else None
+                        ),
+                    )
+                if str(tool_name or "").strip().lower() == "grep":
+                    _grep_call_count += 1
+                if observation.get("success"):
+                    if str(tool_name or "").strip().lower() == "grep":
                         self._merge_grep_observation_into_context(
                             observation, tool_params, result_ctx
                         )
-                    elif tool_name == "modify":
-                        try:
-                            from agents.tool_run_context import (
-                                merge_tool_run_patch_from_observation,
+                    _fm_ctx = result_ctx.get("frozen_macro")
+                    _macro_preview_await = (
+                        observation.get("confirmation_required") is True
+                        and str(tool_name or "").strip().lower()
+                        in ("modify", "delete", "create")
+                    )
+                    if (
+                        isinstance(_fm_ctx, dict)
+                        and observation.get("success")
+                        and not _macro_preview_await
+                        and macro_execution_separation_enabled(has_frozen_macro=True)
+                    ):
+                        _nxt_spec = macro_next_step_spec(_fm_ctx)
+                        if _nxt_spec:
+                            _nxt_tool = str(_nxt_spec.get("tool") or "").strip().lower()
+                            _uq_macro = (
+                                getattr(self, "_react_stream_user_query", None)
+                                or user_input
+                                or ""
                             )
-
-                            merge_tool_run_patch_from_observation(result_ctx, observation)
-                        except Exception as _mrg_ex:
-                            print(f"[TOOL-RUN-CTX] merge modify patch failed: {_mrg_ex}")
-                    else:
+                            yield {
+                                "event": "phase_wait",
+                                "index": round_idx,
+                                "active": True,
+                                "kind": "preparing_next_step",
+                                "message": macro_params_phase_wait_message(
+                                    getattr(self, "_ui_locale", None),
+                                    next_tool=_nxt_tool,
+                                ),
+                            }
+                            _md_macro = await schedule_macro_next_step_decision(
+                                self.llm,
+                                frozen_macro=_fm_ctx,
+                                completed_tool=tool_name,
+                                completed_params=tool_params,
+                                observation=observation,
+                                result_ctx=result_ctx,
+                                user_input=_uq_macro,
+                                ui_context=getattr(self, "_ui_context", None),
+                                project_id=project_id,
+                                plan_id=plan_id,
+                                collect_llm_text_fn=self._collect_llm_text_content_only,
+                            )
+                            yield {
+                                "event": "phase_wait",
+                                "index": round_idx,
+                                "active": False,
+                                "kind": "preparing_next_step",
+                            }
+                            if _md_macro:
+                                self._macro_pending_decision = _md_macro
+                                if unified_plan_steps:
+                                    _plan_step_idx = min(
+                                        _plan_step_idx + 1, len(unified_plan_steps)
+                                    )
+                                if os.getenv("PERF_LOG", "1") == "1":
+                                    print(
+                                        "[PERF][round-bridge] "
+                                        f"decide_skipped=macro_after_{tool_name}",
+                                        flush=True,
+                                    )
+                                continue
+                    if tool_name != "grep":
                         for key in (
                             "bug_list",
                             "badcase_list",
@@ -6363,11 +7860,18 @@ class SimplifiedReActEngine:
                     if unified_plan_steps:
                         _plan_step_idx += 1
 
-                # 沙箱/创建预览待用户确认：收束本轮 SSE，避免继续空转 round/LLM（确认后由新请求继续）
+                # 沙箱/创建预览/登录待输入：收束本轮 SSE，避免继续空转 round/LLM
+                _cdp_await_login = (
+                    observation.get("success") is True
+                    and (
+                        observation.get("await_verification_code") is True
+                        or observation.get("await_user_credentials") is True
+                    )
+                )
                 _await_user = (
                     observation.get("confirmation_required") is True
                     and observation.get("success") is True
-                )
+                ) or _cdp_await_login
                 _terminal_pause = (
                     tool_name == "terminal"
                     and observation.get("success") is True
@@ -6389,11 +7893,15 @@ class SimplifiedReActEngine:
                         str(observation.get("message") or obs_summary or "").strip()
                         or (
                             "预览已生成，请在侧栏确认或拒绝后再继续。"
-                            if _await_user
+                            if observation.get("confirmation_required") is True
                             else (
-                                "终端命令已在本机执行，输出已自动作为下一条上下文提交。"
-                                if _terminal_pause
-                                else "\n".join(findings_acc).strip()
+                                str(observation.get("message") or "").strip()
+                                if _cdp_await_login
+                                else (
+                                    "终端命令已在本机执行，输出已自动作为下一条上下文提交。"
+                                    if _terminal_pause
+                                    else "\n".join(findings_acc).strip()
+                                )
                             )
                         )
                     )
@@ -6414,7 +7922,9 @@ class SimplifiedReActEngine:
                             yield _rs_ev
                     yield {
                         "event": "done",
-                        "status": "success",
+                        "status": _unified_done_status(
+                            _run_had_tool_failure, preview_await=_await_user
+                        ),
                         "findings": findings_acc,
                         "steps_count": _steps_done,
                         "duration": time.time() - _t0,
@@ -6528,12 +8038,14 @@ class SimplifiedReActEngine:
         locale: Optional[str] = None,
         pending_diff_context: Optional[List[Dict[str, Any]]] = None,
         agent_session_id: Optional[str] = None,
+        chat_session_id: Optional[int] = None,
         long_memory_prefetch: Optional[Dict[str, Any]] = None,
         hint_project_name: Optional[str] = None,
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         ui_context: Optional[Dict[str, Any]] = None,
+        raw_user_input: Optional[str] = None,
     ):
         """
         流式执行 ReAct（Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下记录。
@@ -6547,12 +8059,14 @@ class SimplifiedReActEngine:
             locale=locale,
             pending_diff_context=pending_diff_context,
             agent_session_id=agent_session_id,
+            chat_session_id=chat_session_id,
             long_memory_prefetch=long_memory_prefetch,
             hint_project_name=hint_project_name,
             hint_plan_name=hint_plan_name,
             client_shell=client_shell,
             images=images,
             ui_context=ui_context,
+            raw_user_input=raw_user_input,
         ):
             if not isinstance(raw, dict):
                 continue
@@ -7034,16 +8548,6 @@ class SimplifiedReActEngine:
                     )
         except Exception as _e:
             print(f"[MODIFY-TRACE] merge_grep 附加日志失败: {_e}")
-        try:
-            from agents.tool_run_context import seed_tool_run_store_from_grep_context
-
-            seed_tool_run_store_from_grep_context(
-                result_context,
-                project_id=result_context.get("project_id"),
-            )
-        except Exception as _seed_ex:
-            print(f"[TOOL-RUN-CTX] seed from grep failed: {_seed_ex}")
-
     async def _enrich_modify_decision_for_main_loop(
         self,
         decision: Dict[str, Any],
@@ -7088,12 +8592,6 @@ class SimplifiedReActEngine:
         _card_rows_param = result_context.get("grep_modify_raw_card_list") or result_context.get("card_list")
         params["intent_card_rows"] = _card_rows_param if isinstance(_card_rows_param, list) else None
         params["intent_result_context"] = result_context
-        try:
-            from agents.tool_run_context import attach_tool_run_ctx_to_params
-
-            attach_tool_run_ctx_to_params(params, result_context)
-        except Exception as _atc_ex:
-            print(f"[TOOL-RUN-CTX] attach on enrich failed: {_atc_ex}")
         explicit = self._infer_modify_target_explicit(user_input, todo)
         user_infer = self._infer_modify_target(user_input, todo)
         if explicit:
@@ -7577,7 +9075,51 @@ class SimplifiedReActEngine:
         except Exception as _log_e:
             print(f"[MODIFY-ENRICH] main_loop 入参日志失败(忽略): {_log_e}", flush=True)
 
+        try:
+            from utils.observability import (
+                append_agent_trace,
+                truncate_modifications_for_trace,
+            )
+
+            append_agent_trace(
+                "enrich.modify.done",
+                {
+                    "target": params.get("target"),
+                    "target_id": params.get("target_id"),
+                    "modifications": truncate_modifications_for_trace(
+                        params.get("modifications")
+                    ),
+                },
+                react_request_id=getattr(self, "_agent_session_id", None),
+                round_idx=step_index,
+                tool="modify",
+            )
+        except Exception:
+            pass
+
+        self._attach_modify_actor_context(params)
         return decision, events
+
+    def _attach_modify_actor_context(self, params: Optional[Dict[str, Any]]) -> None:
+        """modify 落库 diff_review 时写入 operator / session。"""
+        if not isinstance(params, dict):
+            return
+        try:
+            uid = int(getattr(self, "user_id", "") or 0)
+            if uid > 0:
+                params["operator_user_id"] = uid
+        except (TypeError, ValueError):
+            pass
+        sid = getattr(self, "_chat_session_id", None)
+        if sid is not None:
+            try:
+                n = int(sid)
+                if n > 0:
+                    params["chat_session_id"] = n
+            except (TypeError, ValueError):
+                pass
+        if self.plan_id is not None and params.get("plan_id") in (None, ""):
+            params["plan_id"] = self.plan_id
 
     @staticmethod
     def _modify_params_ready(params: Optional[Dict[str, Any]]) -> bool:
@@ -7873,6 +9415,44 @@ class SimplifiedReActEngine:
             print(f"[MODIFY-TRACE] trace log failed: {_ex}")
         return _fil
 
+    def _unified_prewarm_grep_params_from_user(
+        self,
+        user_input: str,
+        todo: str,
+        *,
+        project_id: Optional[int] = None,
+        plan_id: Optional[int] = None,
+        ui_context: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        """首轮误选 modify 时同轮改写为 grep 的参数（与 _last_resort_modify_fill 的 grep 段对齐）。"""
+        kw = (self._extract_title_keywords_for_grep(user_input, todo) or "").strip()
+        if not kw and user_input:
+            kw = (user_input or "")[:200].strip()
+        if not kw and todo:
+            kw = (todo or "")[:200].strip()
+        if not kw:
+            kw = " "
+        target = "bug"
+        exp = self._infer_modify_target_explicit(user_input, todo)
+        if exp:
+            target = exp
+        elif isinstance(ui_context, dict):
+            ut = str(ui_context.get("target") or "").strip().lower()
+            if ut in ("bug", "badcase", "testcase", "card", "plan"):
+                target = ut
+        params: Dict[str, Any] = {
+            "project_id": project_id,
+            "keywords": kw,
+            "mode": "locate",
+            "target": target,
+            "userId": "system_agent",
+        }
+        if plan_id is not None:
+            params["plan_id"] = plan_id
+        elif getattr(self, "plan_id", None) is not None:
+            params["plan_id"] = self.plan_id
+        return params
+
     def _infer_modify_target_explicit(self, user_input: str, todo: str) -> Optional[str]:
         """
         用户话术里能否**明确**到实体类型；若能则优先于模型给的 params.target（常见误填 badcase）。
@@ -7973,6 +9553,15 @@ class SimplifiedReActEngine:
         if not isinstance(params, dict):
             return
         t = str(params.get('target') or '').strip().lower()
+        ui_ctx = params.get("ui_context")
+        if isinstance(ui_ctx, dict):
+            ut = str(ui_ctx.get("target") or "").strip().lower()
+            if ut in ("bug", "badcase", "testcase") and t in ("card", "all", ""):
+                print(
+                    f"[REACT-execution] grep.params.target 界面聚焦 {ut}，纠正: {t!r} -> {ut}"
+                )
+                params["target"] = ut
+                return
         _raw = f"{user_input or ''} {todo or ''}"
         if user_text_implies_bug_entity_type(_raw) and t in ("card", "badcase"):
             print(
@@ -8205,6 +9794,28 @@ class SimplifiedReActEngine:
                     title = (match.group(1) or '').strip()
                     if title:
                         return title
+        return ''
+
+    def _extract_plan_name(self, user_input: str, todo: str) -> str:
+        """从自然语言提取迭代计划名称（fields.name）。"""
+        import re
+
+        for text in (todo or '', user_input or ''):
+            if not text:
+                continue
+            patterns = [
+                r'(?:迭代计划|计划)(?:名叫|名为|叫做|叫|[:：为是]\s*)[\"“”‘’「]?([^，。,；;」\"“”‘’\n]+)',
+                r'(?:新建|创建)(?:一个)?(?:子)?(?:迭代计划|迭代)[\"“”‘’「]?([^，。,；;」\"“”‘’\n]+)',
+                r'迭代\s*[\"“”‘’「]?([^，。,；;」\"“”‘’\n]+)[\"“”]?计划',
+                r'名为\s*[\"“”‘’「]?([^，。,；;」\"“”‘’\n]+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
+                    name = (match.group(1) or '').strip()
+                    name = re.sub(r'^(一个|新的|子)', '', name).strip()
+                    if name and name not in ('迭代', '迭代计划', '计划'):
+                        return name
         return ''
 
     def _infer_modify_params(self, todo: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -8635,8 +10246,17 @@ class SimplifiedReActEngine:
 
 请直接返回 JSON，不要包含其他内容。"""
         
+        _log_react_prompt(
+            "react_modify_params_llm",
+            prompt,
+            engine=self,
+            todo=(todo or "")[:200],
+            has_exploration=bool(exploration),
+        )
         try:
-            response = await self._collect_llm_text(prompt)
+            response = await self._collect_llm_text(
+                prompt, tag="react_modify_params_llm"
+            )
             print(f"[REACT-planing] 提取修改参数响应: {response}")
             
             # _collect_llm_text 一般为字符串；若以后改为结构化再处理 dict
@@ -8827,17 +10447,48 @@ class SimplifiedReActEngine:
         return "正在分析您的请求并规划操作步骤。"
     
     def _normalize_modifications_for_bug_expected_result(self, modifications: Dict[str, Any], user_input: str) -> Dict[str, Any]:
-        """兜底：用户说的是「期望结果」但 LLM 误提成 base_problem 时，改为 expected_result，避免沙箱预览显示为「相似问题」。"""
+        """兜底：用户明确只改 Bug 期望结果时，避免定位描述被误提成其它字段。"""
         if not modifications or not user_input:
             return modifications
-        if 'expected_result' in modifications:
+        text = str(user_input or "")
+        mentions_expected = '期望结果' in text or '预期结果' in text
+        if not mentions_expected:
             return modifications
+        modifications = dict(modifications)
         if 'base_problem' not in modifications:
-            return modifications
-        if '期望结果' in user_input or '预期结果' in user_input:
-            modifications = dict(modifications)
+            pass
+        elif 'expected_result' not in modifications:
             modifications['expected_result'] = modifications.pop('base_problem')
             print(f"[REACT-planing] 兜底：用户说期望结果，将 base_problem 改为 expected_result")
+        if 'expected_result' not in modifications:
+            return modifications
+        explicitly_mentions_other_field = any(
+            k in text
+            for k in (
+                '复现步骤',
+                '重现步骤',
+                '操作步骤',
+                '实际结果',
+                '实际表现',
+                '标题',
+                '状态',
+                '优先级',
+                '严重程度',
+                '负责人',
+            )
+        )
+        expected_assignment = re.search(
+            r'(?:期望结果|预期结果)\s*(?:修改\s*[为成]|改为|改成|设为|调整为|为|成)\s*[：:\s]*(.+)$',
+            text,
+        )
+        if expected_assignment and not explicitly_mentions_other_field:
+            extra_keys = set(modifications.keys()) - {'expected_result'}
+            if extra_keys:
+                modifications = {'expected_result': modifications.get('expected_result')}
+                print(
+                    f"[REACT-planing] 兜底：用户明确只改期望结果，丢弃误提字段 {sorted(extra_keys)}",
+                    flush=True,
+                )
         return modifications
 
     def _finalize_comment_modifications(
@@ -8959,8 +10610,13 @@ class SimplifiedReActEngine:
         # 先检查是否明确指定了 modify 工具或包含修改意图
         modify_keywords = ['modify', '修改', '改成', '改为', '更新', '设为', '调整']
         has_modify_intent = any(kw in todo.lower() for kw in modify_keywords)
+        record_id_match = re.search(
+            r'(?:record_id|recordId|target_id|targetId|id)\s*(?:[=：:]\s*|\()\s*(\d+)',
+            todo,
+            re.IGNORECASE,
+        )
                 
-        if has_modify_intent and 'grep' not in todo.lower():
+        if has_modify_intent and ('grep' not in todo.lower() or record_id_match):
             result['tool'] = 'modify'
                     
             # 使用大模型提取修改参数（更准确）
@@ -8985,6 +10641,11 @@ class SimplifiedReActEngine:
                 'modifications': modifications,
                 'confirm': False,
             }
+            if record_id_match:
+                try:
+                    result['params']['target_id'] = int(record_id_match.group(1))
+                except (TypeError, ValueError):
+                    pass
             print(f"[REACT] 从 todo 提取 modify 参数：modifications={modifications}, target={target}")
         
         # 必须先于 create：todo 文案里常含标题「一个新增的 bug」，子串「新增」会误匹配 create
@@ -9088,14 +10749,6 @@ class SimplifiedReActEngine:
             print(f"[MODIFY] spawn_executor 入参日志失败: {_se}; keys={list(params.keys())}", flush=True)
         params["progress_queue"] = progress_q
         _rc = getattr(self, "_unified_result_ctx", None)
-        if isinstance(_rc, dict):
-            try:
-                from agents.tool_run_context import attach_tool_run_ctx_to_params
-
-                attach_tool_run_ctx_to_params(params, _rc)
-            except Exception as _atc_ex:
-                print(f"[TOOL-RUN-CTX] attach in spawn failed: {_atc_ex}")
-
         def _progress_cb(msg: str):
             try:
                 progress_q.put(str(msg))
@@ -9109,18 +10762,12 @@ class SimplifiedReActEngine:
                 params["progress_callback"] = _progress_cb
                 if "confirm" not in params:
                     params["confirm"] = False
-                raw = thread_loop.run_until_complete(tool.execute(**params))
-                try:
-                    from agents.tools.modify_tool import attach_tool_run_patch_to_result
-
-                    return attach_tool_run_patch_to_result(raw)
-                except Exception:
-                    return raw
+                return thread_loop.run_until_complete(tool.execute(**params))
             finally:
                 try:
-                    from agents.tools.modify_tool import _row_cache_reset_for_request
+                    from agents.tools.modify_tool import _exists_cache_reset_for_request
 
-                    _row_cache_reset_for_request()
+                    _exists_cache_reset_for_request()
                 except Exception:
                     pass
                 thread_loop.close()
@@ -9190,18 +10837,19 @@ class SimplifiedReActEngine:
                 tool_name = _tn_low
                 decision["tool"] = _tn_low
         
-        # 增加模糊匹配映射
-        # 注意：browser_assert / browser_click 等 L1 工具名也含 "browser"，不可一律映射到 browser_test（会缺少 test_case）
-        _browser_subtools = frozenset(
-            ("browser_assert", "browser_click", "browser_input", "browser_wait")
-        )
+        # 浏览器操作统一走 cdp
         _tn = tool_name.lower() if isinstance(tool_name, str) else ""
         if "bug" in _tn and "management" in _tn:
             tool_name = "bug_management"
-        elif _tn in _browser_subtools:
-            pass
+        elif _tn == "cdp" or _tn.startswith("cdp_") or _tn == "browser_test":
+            tool_name = "cdp"
+        elif _tn in (
+            "browser_click", "browser_input", "browser_wait", "browser_assert",
+            "form_fill", "form_submit", "complete_login", "test_scenario",
+        ):
+            tool_name = "cdp"
         elif "browser" in _tn:
-            tool_name = "browser_test"
+            tool_name = "cdp"
         elif "search" in _tn:
             tool_name = "search"
         
@@ -9239,14 +10887,16 @@ class SimplifiedReActEngine:
             if 'params' not in decision:
                 decision['params'] = params
             if 'userId' not in params:
-                params['userId'] = 'system_agent'
+                _uid = str(getattr(self, "user_id", None) or getattr(self, "_user_id", None) or "").strip()
+                params['userId'] = _uid or 'system_agent'
             if self.project_id and 'project_id' not in params:
                 params['project_id'] = self.project_id
             params["ui_locale"] = normalize_locale(getattr(self, "_ui_locale", None))
 
             if tool_name == "grep":
                 _grep_ui = (
-                    getattr(self, "_react_stream_user_input", None)
+                    getattr(self, "_react_stream_user_query", None)
+                    or getattr(self, "_react_stream_user_input", None)
                     or params.get("natural_query")
                     or ""
                 )
@@ -9260,8 +10910,33 @@ class SimplifiedReActEngine:
                 )
                 self._force_grep_card_layer_only_if_requested(params, _grep_ui, "")
                 self._normalize_grep_plan_scope(params)
-                if _grep_ui and not params.get("user_input"):
-                    params["user_input"] = _grep_ui
+                if _grep_ui:
+                    params["raw_user_input"] = str(_grep_ui).strip()
+                    if not params.get("user_input"):
+                        params["user_input"] = params["raw_user_input"]
+
+            if tool_name == "cdp":
+                _rc_cdp = getattr(self, "_unified_result_ctx", None)
+                if isinstance(_rc_cdp, dict):
+                    params["result_context"] = _rc_cdp
+                _cdp_ui_exec = (
+                    getattr(self, "_react_stream_user_query", None)
+                    or getattr(self, "_react_stream_user_input", None)
+                    or params.get("natural_query")
+                    or params.get("user_query")
+                    or ""
+                )
+                try:
+                    from agents.cdp.params import inject_cdp_tool_params
+
+                    inject_cdp_tool_params(
+                        params,
+                        user_input=_cdp_ui_exec,
+                        result_context=_rc_cdp if isinstance(_rc_cdp, dict) else None,
+                        project_id=self.project_id,
+                    )
+                except Exception:
+                    pass
 
             if tool_name != "modify":
                 print(f"[REACT] 工具参数: {params}")
@@ -9304,13 +10979,13 @@ class SimplifiedReActEngine:
                     f"target_ids={params.get('target_ids')}, target={params.get('target')}）…"
                 )
                 _rc_exec = getattr(self, "_unified_result_ctx", None)
-                if isinstance(_rc_exec, dict):
-                    try:
-                        from agents.tool_run_context import attach_tool_run_ctx_to_params
+                try:
+                    from agents.tool_run_context import attach_tool_run_ctx_to_params
 
-                        attach_tool_run_ctx_to_params(params, _rc_exec)
-                    except Exception as _atc_ex:
-                        print(f"[TOOL-RUN-CTX] attach before modify failed: {_atc_ex}")
+                    attach_tool_run_ctx_to_params(params, _rc_exec)
+                except Exception:
+                    pass
+                self._attach_modify_actor_context(params)
                 fut, _progress_q = self._spawn_modify_executor_future(tool, params)
                 tool_timeout = int(os.getenv("AGENT_TOOL_TIMEOUT", "120"))
                 try:
@@ -9354,17 +11029,6 @@ class SimplifiedReActEngine:
                 self._grep_result_cache.clear()
                 if os.getenv("PERF_LOG") == "1":
                     print("[PERF][grep_cache] cleared after modify/create/delete success")
-            if tool_name == "modify" and isinstance(res, dict):
-                _rc_m = getattr(self, "_unified_result_ctx", None)
-                if isinstance(_rc_m, dict):
-                    try:
-                        from agents.tool_run_context import (
-                            merge_tool_run_patch_from_observation,
-                        )
-
-                        merge_tool_run_patch_from_observation(_rc_m, res)
-                    except Exception as _mrg_ex:
-                        print(f"[TOOL-RUN-CTX] merge modify patch failed: {_mrg_ex}")
             return res
         except Exception as e:
             print(f"[REACT] ❌ 工具执行异常: {str(e)}")

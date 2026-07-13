@@ -247,6 +247,7 @@ class _LlMSpanContext:
             model=model,
             tool_name=tool_name,
             result=result,
+            duration_sec=duration,
         )
 
     def record_workflow_step(

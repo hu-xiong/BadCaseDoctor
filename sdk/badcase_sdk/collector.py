@@ -129,6 +129,14 @@ tool_calls_total = Counter(
     registry=REGISTRY,
 )
 
+tool_call_duration_seconds = Histogram(
+    "bdc_llm_tool_call_duration_seconds",
+    "工具调用耗时",
+    ["app", "env", "provider", "endpoint", "model", "tool_name", "result"],
+    buckets=_DURATION_BUCKETS,
+    registry=REGISTRY,
+)
+
 # ==================== 检索 ====================
 
 retrieval_duration_seconds = Histogram(
@@ -357,6 +365,7 @@ class BadCaseCollector:
         model: str,
         tool_name: str,
         result: str = "success",
+        duration_sec: Optional[float] = None,
     ) -> None:
         model = normalize_model(model)
         tool_name = str(tool_name)[:32]  # 限制长度
@@ -369,6 +378,16 @@ class BadCaseCollector:
                 result=result,
             )
         ).inc()
+        if duration_sec is not None and duration_sec >= 0:
+            tool_call_duration_seconds.labels(
+                **self._t(
+                    provider=provider,
+                    endpoint=endpoint,
+                    model=model,
+                    tool_name=tool_name,
+                    result=result,
+                )
+            ).observe(float(duration_sec))
 
     def record_retrieval(
         self,

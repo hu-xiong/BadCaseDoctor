@@ -31,6 +31,7 @@ from agents.locale_prompts import (
     react_batch_modify_summary,
 )
 from config import Config
+from utils.entity_id import coerce_plausible_entity_pk
 import difflib
 import json
 import os
@@ -51,10 +52,7 @@ except ImportError:
 # 批量预览流式事件：经 progress_queue 透传到 SSE（前缀 + JSON）
 MODIFY_BATCH_ROW_PREFIX = "__MODIFY_BATCH_ROW__"
 
-# 同一次 ReAct 请求 / asyncio Task 内复用已读行（类似 Java ThreadLocal）
-_modify_run_row_cache: ContextVar[Optional[Dict[Tuple[str, int, int], Dict[str, Any]]]] = (
-    ContextVar("bcd_modify_run_row_cache", default=None)
-)
+# 同一次 modify.execute 内缓存源表存在性探测（worker 线程复用，非 grep 行缓存）
 _modify_exists_cache: ContextVar[Optional[Dict[Tuple[str, int, int], bool]]] = (
     ContextVar("bcd_modify_exists_cache", default=None)
 )
@@ -63,80 +61,29 @@ _MODIFY_APPEND_COMMENT_KEYS = frozenset({"append_comment", "comment"})
 _MODIFY_ASSIGNEE_KEYS = frozenset({"assignee_id", "assignee", "owner"})
 
 
-def _row_cache_key(target: str, target_id: int, project_id: int) -> Tuple[str, int, int]:
+def _modify_run_key(target: str, target_id: int, project_id: int) -> Tuple[str, int, int]:
     return (str(target or "").strip().lower(), int(target_id), int(project_id))
 
 
-def _row_cache_get(target: str, target_id: int, project_id: int) -> Optional[Dict[str, Any]]:
-    store = _modify_run_row_cache.get()
-    if not store:
-        return None
-    return store.get(_row_cache_key(target, target_id, project_id))
-
-
-def _row_cache_put(target: str, target_id: int, project_id: int, row: Dict[str, Any]) -> None:
-    if not row or not isinstance(row, dict):
-        return
-    store = _modify_run_row_cache.get()
-    if store is None:
-        store = {}
-        _modify_run_row_cache.set(store)
-    store[_row_cache_key(target, target_id, project_id)] = dict(row)
-
-
-def _row_cache_reset_for_request() -> None:
-    """
-    每次 modify.execute 开始时清空：工具在线程池 worker 中运行，worker 会复用；
-    不清空则上一请求残留行可能命中错误缓存（脏读）。
-    """
-    _modify_run_row_cache.set({})
+def _exists_cache_reset_for_request() -> None:
+    """modify 在线程池 worker 中运行，每次 execute 清空存在性缓存。"""
     _modify_exists_cache.set({})
 
 
-def _hydrate_row_cache_from_tool_run_ctx(tool_run_ctx: Any) -> None:
-    """主线程经 params 传入的 tool_run_ctx 快照 → worker 内 ContextVar 行缓存。"""
-    if not isinstance(tool_run_ctx, dict):
-        return
-    rows = tool_run_ctx.get("rows")
-    if not isinstance(rows, dict):
-        return
-    from agents.tool_run_context import parse_row_cache_key
-
-    for key, row in rows.items():
-        if not isinstance(row, dict):
-            continue
-        parsed = parse_row_cache_key(str(key))
-        if not parsed:
-            continue
-        target, target_id, project_id = parsed
-        _row_cache_put(target, target_id, project_id, row)
-
-
-def export_tool_run_ctx_patch() -> Optional[Dict[str, Any]]:
-    """worker 内已读行导出，供主线程 merge 回 ToolRunStore。"""
-    store = _modify_run_row_cache.get()
-    if not store:
+def _parse_operator_user_id(kwargs: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not isinstance(kwargs, dict):
         return None
-    from agents.tool_run_context import row_cache_key
-
-    rows: Dict[str, Dict[str, Any]] = {}
-    for (target, target_id, project_id), row in store.items():
-        if isinstance(row, dict):
-            rows[row_cache_key(target, target_id, project_id)] = dict(row)
-    if not rows:
-        return None
-    return {"v": 1, "rows": rows}
-
-
-def attach_tool_run_patch_to_result(result: Any) -> Any:
-    if not isinstance(result, dict):
-        return result
-    patch = export_tool_run_ctx_patch()
-    if not patch:
-        return result
-    out = dict(result)
-    out["tool_run_ctx_patch"] = patch
-    return out
+    for k in ("operator_user_id", "user_id", "userId"):
+        v = kwargs.get(k)
+        if v is None or v == "" or str(v).strip().lower() == "system_agent":
+            continue
+        try:
+            n = int(v)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _modify_perf_detail_enabled() -> bool:
@@ -1151,19 +1098,16 @@ class ModifyTool(BaseTool):
             print("[MODIFY] 剔除冗余 title（与当前记录标题相同）", flush=True)
             return m
 
-        # 仅有 title、且无显式「改标题」话术：防模型把 grep 到的实体名误写入 title。
-        # 若新标题与旧标题不同（或尚无旧标题），说明确有文案变更，必须保留，否则 diff 为空、沙箱「0 项」。
+        # 仅有 title、且无显式「改标题」话术：模型误把问题描述写进 title，一律剔除（字段应由 LLM 选 base_problem 等）。
         if (
             not batch_mode
             and set(m.keys()) == {"title"}
             and not has_title_intent
             and target != "card"
         ):
-            if new_t and (not old_t or new_t != old_t):
-                return m
             m.pop("title", None)
             print(
-                "[MODIFY] 仅 title 且无改标题话术且新标题为空或与旧相同，已移除 title",
+                "[MODIFY] 仅 title 且无改标题话术，已移除 title（请由 LLM 选择 base_problem 等字段）",
                 flush=True,
             )
             return m
@@ -1278,9 +1222,33 @@ class ModifyTool(BaseTool):
         except AttributeError:
             return self.db
 
+    @staticmethod
+    def _disambiguate_compound_cn_status(raw: str) -> str:
+        """模型/用户常把「已关闭」「重新打开」粘成一句；系统无此组合态，需拆成单一合法值。"""
+        s = (raw or "").strip()
+        if not s:
+            return s
+        compact = s.replace(" ", "")
+        glued = {
+            "已关闭重新打开",
+            "关闭重新打开",
+            "已关闭重开",
+            "关闭重开",
+            "已关闭reopen",
+            "closed重新打开",
+            "closedreopened",
+        }
+        if compact in glued or compact.lower() in glued:
+            return "重新打开"
+        if "已关闭" in compact and ("重新打开" in compact or "重开" in compact):
+            return "重新打开"
+        if "已解决" in compact and "关闭" in compact:
+            return "已关闭"
+        return s
+
     def _normalize_status(self, status_value: str, target: str) -> str:
         """将中文状态描述映射到数据库定义的英文状态值"""
-        raw = str(status_value).strip()
+        raw = self._disambiguate_compound_cn_status(str(status_value).strip())
         t = (target or "").strip().lower().replace("-", "_")
 
         testcase_status_map = {
@@ -1312,6 +1280,7 @@ class ModifyTool(BaseTool):
             '已解决': 'resolved', '解决': 'resolved',
             '已关闭': 'closed', '关闭': 'closed',
             '已重新打开': 'reopened', '重新打开': 'reopened', '重开': 'reopened',
+            '已关闭重新打开': 'reopened', '关闭重新打开': 'reopened',
         }
         
         badcase_status_map = {
@@ -1464,6 +1433,26 @@ class ModifyTool(BaseTool):
             print(f"[MODIFY] bug.status SQL fallback failed: {ex}", flush=True)
         return ""
 
+    def _authoritative_status_snap(
+        self,
+        flask_db,
+        target: str,
+        row_id: int,
+        project_id: int,
+        orm_status: Any,
+    ) -> str:
+        """预览/diff：直读 DB status，避免 ORM identity map 脏读导致 before/after 同为新值。"""
+        orm_snap = self._snapshot_status_string(orm_status)
+        t = (target or "").strip().lower().replace("-", "_")
+        sql_snap = ""
+        if t == "bug":
+            sql_snap = self._bug_status_sql_fallback(flask_db, row_id, project_id)
+        elif t == "badcase":
+            sql_snap = self._badcase_status_sql_fallback(flask_db, row_id, project_id)
+        elif t == "testcase":
+            sql_snap = self._testcase_status_sql_fallback(flask_db, row_id, project_id)
+        return sql_snap if sql_snap else orm_snap
+
     def _badcase_status_sql_fallback(self, flask_db, badcase_id: int, project_id: int) -> str:
         """BadCase.status 与 ORM 枚举/列不一致时直读库内字符串，避免沙箱旧值被当成空。"""
         try:
@@ -1587,7 +1576,7 @@ class ModifyTool(BaseTool):
     ) -> bool:
         """同一次 execute 内缓存源表存在性探测。"""
         try:
-            key = _row_cache_key(target, int(target_id), int(project_id))
+            key = _modify_run_key(target, int(target_id), int(project_id))
         except (TypeError, ValueError):
             return self._modify_source_row_exists(target, target_id, project_id)
         store = _modify_exists_cache.get()
@@ -1609,12 +1598,6 @@ class ModifyTool(BaseTool):
     ) -> Any:
         if card_id is not None and str(card_id).strip() != "":
             return card_id
-        try:
-            row = _row_cache_get(target, int(target_id), int(project_id))
-        except (TypeError, ValueError):
-            return None
-        if isinstance(row, dict):
-            return row.get("card_id") or row.get("cardId")
         return None
 
     @staticmethod
@@ -1625,7 +1608,7 @@ class ModifyTool(BaseTool):
         known_card_id: Any = None,
     ) -> Dict[str, bool]:
         """
-        按本次 modifications 决定预览读行要加载哪些关联数据（改什么查什么）。
+        预览读行关联数据开关。Bug 长文本字段（期望结果/复现步骤等）始终全量加载。
         """
         tl = (str(target or "")).strip().lower().replace("-", "_")
         keys: Set[str] = set()
@@ -1653,25 +1636,7 @@ class ModifyTool(BaseTool):
         load_nav_card = (known_card_id is None or str(known_card_id).strip() == "") and not (
             skip_nav_env and _fast_mod
         )
-        load_long_text = bool(
-            keys
-            & {
-                "steps_to_reproduce",
-                "expected_result",
-                "expected",
-                "actual_result",
-                "remark",
-                "preconditions",
-                "reproduction_steps",
-                "reproduce_steps",
-                "repro_steps",
-                "steps",
-                "answer",
-                "correct_answer",
-                "预期结果",
-                "期望结果",
-            }
-        )
+        load_long_text = True
         return {
             "load_comments": load_comments,
             "load_assignee": load_assignee,
@@ -1704,9 +1669,9 @@ class ModifyTool(BaseTool):
                     unames[u.id] = u.name or ""
             for bug in rows:
                 assignee_name = unames.get(bug.assignee_id, "") if bug.assignee_id else ""
-                status_snap = self._snapshot_status_string(getattr(bug, "status", None))
-                if not status_snap:
-                    status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
+                status_snap = self._authoritative_status_snap(
+                    flask_db, "bug", bug.id, project_id, getattr(bug, "status", None)
+                )
                 nav_cid = self._nav_card_pk_for_source_orm_row(
                     flask_db.session, "bug", bug, project_id
                 )
@@ -1736,9 +1701,9 @@ class ModifyTool(BaseTool):
                 .all()
             )
             for bc in rows:
-                st_snap = self._snapshot_status_string(getattr(bc, "status", None))
-                if not st_snap:
-                    st_snap = self._badcase_status_sql_fallback(flask_db, bc.id, project_id)
+                st_snap = self._authoritative_status_snap(
+                    flask_db, "badcase", bc.id, project_id, getattr(bc, "status", None)
+                )
                 nav_cid = self._nav_card_pk_for_source_orm_row(
                     flask_db.session, "badcase", bc, project_id
                 )
@@ -1785,9 +1750,9 @@ class ModifyTool(BaseTool):
                 executed_by_name = (
                     unames.get(testcase.executed_by, "") if testcase.executed_by else ""
                 )
-                tc_st = self._snapshot_status_string(getattr(testcase, "status", None))
-                if not tc_st:
-                    tc_st = self._testcase_status_sql_fallback(flask_db, testcase.id, project_id)
+                tc_st = self._authoritative_status_snap(
+                    flask_db, "testcase", testcase.id, project_id, getattr(testcase, "status", None)
+                )
                 nav_cid = self._nav_card_pk_for_source_orm_row(
                     flask_db.session, "testcase", testcase, project_id
                 )
@@ -1863,11 +1828,14 @@ class ModifyTool(BaseTool):
                 pass
 
         _progress(modify_tool_progress("init", loc))
-        _row_cache_reset_for_request()
-        _hydrate_row_cache_from_tool_run_ctx(kwargs.get("tool_run_ctx"))
+        _exists_cache_reset_for_request()
         _wall = _ModifyWallTimer()
         _wall.mark("prep_early")
+        _tool_run_snapshot = (
+            kwargs.get("tool_run_ctx") if isinstance(kwargs.get("tool_run_ctx"), dict) else None
+        )
         from agents.intent.resolution import remap_card_layer_modification_keys
+        from agents.modify_field_schema import remap_entity_modification_keys
 
         # 卡片层适配：优先支持 card_id（推荐）；若传入 card_id 且未显式传 target_id，则在源表中反查主键
         card_id = kwargs.get("card_id") or kwargs.get("cardId")
@@ -2083,6 +2051,19 @@ class ModifyTool(BaseTool):
         
         modifications = dict(modifications or {})
         modifications = remap_card_layer_modification_keys(modifications)
+        modifications = remap_entity_modification_keys(str(target or ""), modifications)
+        _uq_coerce = (
+            kwargs.get("_resolve_user_input")
+            or kwargs.get("intent_combined_text")
+            or natural_query
+            or ""
+        ).strip()
+        if str(target or "").strip().lower() in ("badcase", "bad_case") and _uq_coerce:
+            from agents.modify_field_schema import coerce_badcase_modifications_from_user_intent
+
+            modifications = coerce_badcase_modifications_from_user_intent(
+                _uq_coerce, modifications
+            )
         _skip_intent_resolve = bool(
             _located_fast
             and db_reconciled_for_resolve
@@ -2246,6 +2227,7 @@ class ModifyTool(BaseTool):
                         project_id,
                         progress_callback=_progress,
                         ui_locale=loc,
+                        tool_run_snapshot=_tool_run_snapshot,
                     )
                     if not original_data:
                         return {
@@ -2446,6 +2428,7 @@ class ModifyTool(BaseTool):
                             batch_items=kwargs.get("batch_items"),
                             prefer_orm_read=prefer_orm_read,
                             use_direct_sandbox=use_direct_sandbox,
+                            actor_kwargs=kwargs,
                         )
                     # confirm=False: 沙箱副本预览（默认 ORM 读行 + 直拼 UPDATE，可按需 Text2SQL）
                     print(f"[MODIFY] 沙箱预览模式，获取原始数据…", flush=True)
@@ -2477,6 +2460,7 @@ class ModifyTool(BaseTool):
                             project_id,
                             card_id or kwargs.get("cardId"),
                         ),
+                        tool_run_snapshot=_tool_run_snapshot,
                     )
                     _wall.mark("original_fetch")
                     if _fetch_sub:
@@ -2491,15 +2475,21 @@ class ModifyTool(BaseTool):
                     from app import db as flask_db
 
                     preview_mods = {}
+                    mods_for_sandbox = dict(modifications)
+                    _nq = (natural_query or kwargs.get("intent_combined_text") or "").strip()
                     for fk, fv in modifications.items():
                         if fk in self._APPEND_ONLY_FIELDS:
                             preview_mods[fk] = (
                                 fv["new"] if isinstance(fv, dict) and "new" in fv else fv
                             )
+                            mods_for_sandbox[fk] = preview_mods[fk]
                             continue
-                        preview_mods[fk] = (
-                            fv["new"] if isinstance(fv, dict) and "new" in fv else fv
+                        resolved = self._resolve_modification_field_value(
+                            fk, fv, original_data, natural_query=_nq
                         )
+                        preview_mods[fk] = resolved
+                        mods_for_sandbox[fk] = resolved
+                    modifications = mods_for_sandbox
                     modified_data = original_data.copy()
                     if "append_comment" in preview_mods:
                         modified_data.setdefault("append_comment", "")
@@ -2544,11 +2534,19 @@ class ModifyTool(BaseTool):
                     )
                     _progress(modify_tool_progress("sandbox_wait_confirm", loc))
                     mod_summary = modify_modifications_kv_summary(modifications, loc)
+                    _rec_title = (
+                        (original_data or {}).get("title")
+                        or (original_data or {}).get("name")
+                        or ""
+                    )
                     out_preview = {
                         'success': True, 'confirmation_required': True,
                         'message': modify_message_sandbox_done(loc),
-                        'summary': modify_summary_preview(target, target_id, mod_summary, loc),
+                        'summary': modify_summary_preview(
+                            target, target_id, mod_summary, loc, record_title=_rec_title
+                        ),
                         'target': target, 'target_id': _json_safe_id(target_id),
+                        'record_title': _rec_title or None,
                         'before': _json_safe_row(original_data), 'after': _json_safe_row(modified_data), 'diff': diff_result,
                         'modifications': modifications, 'sandbox_preview': sandbox_result
                     }
@@ -2557,6 +2555,21 @@ class ModifyTool(BaseTool):
                         cid_out = card_id
                     if cid_out is not None:
                         out_preview["card_id"] = _json_safe_id(cid_out)
+                    try:
+                        from memory.diff_review_store import persist_modify_preview_observation
+
+                        persist_modify_preview_observation(
+                            project_id=project_id,
+                            preview=out_preview,
+                            operator_user_id=_parse_operator_user_id(kwargs),
+                            source_message_id=kwargs.get("source_message_id")
+                            or kwargs.get("message_id"),
+                            source_session_id=kwargs.get("chat_session_id")
+                            or kwargs.get("session_id"),
+                            plan_id=kwargs.get("plan_id"),
+                        )
+                    except Exception as _dru_ex:
+                        print(f"[DIFF-UPSERT][auto] preview persist skipped: {_dru_ex}", flush=True)
                     return out_preview
                 
                 # confirm=True: 采纳即落库，快速路径（跳过 Text2SQL 和原始数据获取）
@@ -2576,6 +2589,7 @@ class ModifyTool(BaseTool):
                         project_id,
                         progress_callback=_progress,
                         ui_locale=loc,
+                        tool_run_snapshot=_tool_run_snapshot,
                     )
                     modifications = self._sanitize_title_modifications(
                         target, modifications, od_apply, natural_query, batch_mode=False
@@ -2742,19 +2756,33 @@ class ModifyTool(BaseTool):
         perf_sink: Optional[Dict[str, float]] = None,
         modifications: Optional[Dict[str, Any]] = None,
         known_card_id: Any = None,
+        tool_run_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """获取原始数据。按 modifications 按需加载；同 Task 内走 ContextVar 行缓存。"""
-        loc = normalize_locale(ui_locale)
-        cached = _row_cache_get(target, target_id, project_id)
-        if cached is not None:
-            if perf_sink is not None:
-                perf_sink["row_cache_hit"] = 0.0
-            if _modify_perf_detail_enabled():
-                print(
-                    f"[MODIFY] row_cache hit target={target!r} id={target_id}",
-                    flush=True,
+        """获取原始数据。按 modifications 按需加载，每次从 ORM/DB 读取。"""
+        if isinstance(tool_run_snapshot, dict):
+            try:
+                from agents.tool_run_context import ToolRunStore
+
+                cached = ToolRunStore.from_snapshot(tool_run_snapshot).get_row(
+                    target, target_id, project_id
                 )
-            return dict(cached)
+                if isinstance(cached, dict) and cached:
+                    if os.getenv("PERF_LOG", "1") == "1":
+                        print(
+                            f"[PERF][modify_original_fetch] path=tool_run_row_cache hit=1 "
+                            f"target={target!r} id={target_id}",
+                            flush=True,
+                        )
+                    if perf_sink is not None:
+                        perf_sink["tool_run_row_cache_hit"] = 1.0
+                    return dict(cached)
+            except Exception:
+                pass
+
+        loc = normalize_locale(ui_locale)
+        fetch_flags = self._preview_fetch_flags(
+            target, modifications or {}, known_card_id=known_card_id
+        )
 
         def _perf_mark(sub: str, t0: float) -> None:
             if perf_sink is not None:
@@ -2874,11 +2902,8 @@ class ModifyTool(BaseTool):
         if target == 'bug':
             _prog(modify_tool_progress("querying_bug", loc))
             from app import Bug, User
-            from sqlalchemy.orm import load_only
 
-            flags = self._preview_fetch_flags(
-                target, modifications or {}, known_card_id=known_card_id
-            )
+            flags = fetch_flags
             if perf_sink is not None:
                 perf_sink["fetch_profile"] = 0.0
             if _modify_perf_detail_enabled():
@@ -2890,24 +2915,14 @@ class ModifyTool(BaseTool):
                 )
 
             _t_bug = time.perf_counter()
-            q = flask_db.session.query(Bug).filter(
-                Bug.id == target_id,
-                Bug.project_id == project_id,
-            )
-            if not flags["load_long_text"] and not flags["load_assignee"]:
-                q = q.options(
-                    load_only(
-                        Bug.id,
-                        Bug.title,
-                        Bug.status,
-                        Bug.priority,
-                        Bug.severity,
-                        Bug.assignee_id,
-                        Bug.plan_id,
-                        Bug.project_id,
-                    )
+            bug = (
+                flask_db.session.query(Bug)
+                .filter(
+                    Bug.id == target_id,
+                    Bug.project_id == project_id,
                 )
-            bug = q.first()
+                .first()
+            )
             _perf_mark("orm_bug_query", _t_bug)
 
             if not bug:
@@ -2936,9 +2951,9 @@ class ModifyTool(BaseTool):
                     flush=True,
                 )
             _t_st = time.perf_counter()
-            status_snap = self._snapshot_status_string(getattr(bug, "status", None))
-            if not status_snap:
-                status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
+            status_snap = self._authoritative_status_snap(
+                flask_db, "bug", bug.id, project_id, getattr(bug, "status", None)
+            )
             _perf_mark("status_snap", _t_st)
             nav_card_id = None
             if known_card_id not in (None, ""):
@@ -2966,17 +2981,16 @@ class ModifyTool(BaseTool):
                 'title': bug.title,
                 'status': status_snap,
                 'priority': bug.priority,
-                'severity': (bug.severity or '') if flags["load_long_text"] else '',
+                'severity': bug.severity or '',
                 'assignee_id': bug.assignee_id,
                 'assignee': assignee_name,
                 'plan_id': bug.plan_id,
                 'card_id': nav_card_id,
-                'steps_to_reproduce': (bug.steps_to_reproduce or '') if flags["load_long_text"] else '',
-                'expected_result': (bug.expected_result or '') if flags["load_long_text"] else '',
-                'actual_result': (bug.actual_result or '') if flags["load_long_text"] else '',
+                'steps_to_reproduce': bug.steps_to_reproduce or '',
+                'expected_result': bug.expected_result or '',
+                'actual_result': bug.actual_result or '',
                 'comment_records': _bug_comments,
             }
-            _row_cache_put(target, target_id, project_id, row)
             return row
         
         elif target == 'badcase':
@@ -2990,9 +3004,9 @@ class ModifyTool(BaseTool):
             if not badcase:
                 return None
 
-            status_snap = self._snapshot_status_string(getattr(badcase, "status", None))
-            if not status_snap:
-                status_snap = self._badcase_status_sql_fallback(flask_db, badcase.id, project_id)
+            status_snap = self._authoritative_status_snap(
+                flask_db, "badcase", badcase.id, project_id, getattr(badcase, "status", None)
+            )
 
             # 仅补全已有映射（行上 card_id / Card.source_id），禁止在此自动新建 Card：
             # 否则会把孤儿 BadCase 绑到新卡，用户原「卡片 Tab」下列表会丢行。
@@ -3052,9 +3066,9 @@ class ModifyTool(BaseTool):
                 if user:
                     executed_by_name = user.name
             
-            tc_status = self._snapshot_status_string(getattr(testcase, "status", None))
-            if not tc_status:
-                tc_status = self._testcase_status_sql_fallback(flask_db, testcase.id, project_id)
+            tc_status = self._authoritative_status_snap(
+                flask_db, "testcase", testcase.id, project_id, getattr(testcase, "status", None)
+            )
 
             nav_card_id = self._nav_card_pk_for_source_orm_row(
                 flask_db.session, "testcase", testcase, project_id
@@ -3133,9 +3147,9 @@ class ModifyTool(BaseTool):
                                 row["priority"] = str(bug.priority).strip()
                             if bug.severity is not None and str(bug.severity).strip() != "":
                                 row["severity"] = bug.severity or ""
-                            status_snap = self._snapshot_status_string(getattr(bug, "status", None))
-                            if not status_snap:
-                                status_snap = self._bug_status_sql_fallback(flask_db, bug.id, project_id)
+                            status_snap = self._authoritative_status_snap(
+                                flask_db, "bug", bug.id, project_id, getattr(bug, "status", None)
+                            )
                             if status_snap:
                                 row["status"] = status_snap
                             row["steps_to_reproduce"] = bug.steps_to_reproduce or ""
@@ -3152,9 +3166,9 @@ class ModifyTool(BaseTool):
                         if bc:
                             if bc.priority is not None and str(bc.priority).strip() != "":
                                 row["priority"] = str(bc.priority).strip()
-                            st_bc = self._snapshot_status_string(getattr(bc, "status", None))
-                            if not st_bc:
-                                st_bc = self._badcase_status_sql_fallback(flask_db, bc.id, project_id)
+                            st_bc = self._authoritative_status_snap(
+                                flask_db, "badcase", bc.id, project_id, getattr(bc, "status", None)
+                            )
                             if st_bc:
                                 row["status"] = st_bc
                     elif st in ("test_case", "testcase"):
@@ -3168,9 +3182,9 @@ class ModifyTool(BaseTool):
                         if tc:
                             if tc.priority is not None and str(tc.priority).strip() != "":
                                 row["priority"] = str(tc.priority).strip()
-                            st_tc = self._snapshot_status_string(getattr(tc, "status", None))
-                            if not st_tc:
-                                st_tc = self._testcase_status_sql_fallback(flask_db, tc.id, project_id)
+                            st_tc = self._authoritative_status_snap(
+                                flask_db, "testcase", tc.id, project_id, getattr(tc, "status", None)
+                            )
                             if st_tc:
                                 row["status"] = st_tc
             # Bug 卡片常见：Card.source 未回填，用 bug.card_id 反查源缺陷状态（与列表/详情一致）
@@ -3184,9 +3198,9 @@ class ModifyTool(BaseTool):
                     .first()
                 )
                 if bug_linked:
-                    status_snap = self._snapshot_status_string(getattr(bug_linked, "status", None))
-                    if not status_snap:
-                        status_snap = self._bug_status_sql_fallback(flask_db, bug_linked.id, project_id)
+                    status_snap = self._authoritative_status_snap(
+                        flask_db, "bug", bug_linked.id, project_id, getattr(bug_linked, "status", None)
+                    )
                     if status_snap:
                         row["status"] = status_snap
                     row["steps_to_reproduce"] = bug_linked.steps_to_reproduce or ""
@@ -3726,6 +3740,107 @@ class ModifyTool(BaseTool):
             t = titles.get(bid, "")
             lines.append(t if t else f"Bug-{bid}")
         return "\n".join(lines)
+
+    _PARTIAL_TEXT_REPLACE_FIELDS = frozenset(
+        {
+            "steps_to_reproduce",
+            "reproduction_steps",
+            "reproduce_steps",
+            "repro_steps",
+            "expected_result",
+            "actual_result",
+            "base_problem",
+            "answer",
+            "correct_answer",
+            "preconditions",
+            "steps",
+        }
+    )
+
+    @staticmethod
+    def _normalize_plain_for_anchor_match(text: str) -> str:
+        s = re.sub(r"<[^>]+>", "", str(text or ""))
+        s = s.replace("&nbsp;", " ")
+        return re.sub(r"\s+", "", s)
+
+    def _apply_partial_text_replace(
+        self, current: Any, old: Any, new: Any, *, field: str = ""
+    ) -> Tuple[Any, bool]:
+        """
+        长文本字段：在原文中替换 old→new（一次）；找不到 old 时保持原文并返回 replaced=False。
+        """
+        cur_s = str(current if current is not None else "")
+        old_s = str(old if old is not None else "").strip()
+        new_s = str(new if new is not None else "")
+        if not old_s:
+            return (new_s if new_s else cur_s), bool(new_s and new_s != cur_s)
+        if old_s in cur_s:
+            return cur_s.replace(old_s, new_s, 1), True
+        cur_plain = self._normalize_plain_for_anchor_match(cur_s)
+        old_plain = self._normalize_plain_for_anchor_match(old_s)
+        if old_plain and old_plain in cur_plain:
+            # HTML 富文本：在剥离标签后的串上定位，尽量保持原 HTML 结构（单行/纯文本常见）
+            idx = cur_plain.find(old_plain)
+            if idx >= 0 and cur_plain == cur_s:
+                return cur_plain[:idx] + new_s + cur_plain[idx + len(old_plain) :], True
+        print(
+            f"[MODIFY] 部分替换未命中 field={field!r} old_head={old_s[:40]!r} "
+            f"cur_head={cur_s[:40]!r}，保持原值",
+            flush=True,
+        )
+        return cur_s, False
+
+    def _resolve_modification_field_value(
+        self,
+        field: str,
+        value: Any,
+        original_data: Optional[Dict[str, Any]],
+        *,
+        natural_query: str = "",
+    ) -> Any:
+        """dict old/new → 局部替换；仅 new 时尝试从用户句解析复现步骤锚点。"""
+        field_key = str(field or "").strip().lower().replace("-", "_")
+        if field_key not in self._PARTIAL_TEXT_REPLACE_FIELDS:
+            if isinstance(value, dict) and "new" in value:
+                return value["new"]
+            return value
+
+        old_v = None
+        new_v = value
+        if isinstance(value, dict):
+            if "new" in value:
+                new_v = value.get("new")
+            old_v = value.get("old")
+            if (old_v is None or not str(old_v).strip()) and new_v is not None:
+                try:
+                    from agents.modify_target_resolve import _field_anchor_from_user_query
+
+                    anchor = _field_anchor_from_user_query(
+                        natural_query or "", field_key
+                    )
+                    if anchor:
+                        old_v = anchor
+                except Exception:
+                    pass
+
+        row = original_data if isinstance(original_data, dict) else {}
+        cur = row.get(field_key)
+        if cur is None:
+            for alias in (
+                "reproduction_steps",
+                "steps_to_reproduce",
+                "reproduce_steps",
+            ):
+                if alias in row:
+                    cur = row.get(alias)
+                    break
+
+        if old_v is not None and str(old_v).strip():
+            merged, _ok = self._apply_partial_text_replace(
+                cur, old_v, new_v, field=field_key
+            )
+            return merged
+        return new_v
 
     @staticmethod
     def _coalesce_bug_repro_from_row(row: Any) -> str:
@@ -4343,6 +4458,7 @@ class ModifyTool(BaseTool):
         batch_items: Optional[List[Dict[str, Any]]],
         prefer_orm_read: bool,
         use_direct_sandbox: bool,
+        actor_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """多条同字段预览：一次 ORM 批量读行 + 逐条 diff（可流式推送）+ 一次沙箱副本批量 UPDATE。"""
         print(
@@ -4487,9 +4603,18 @@ class ModifyTool(BaseTool):
                 "success": True,
                 "confirmation_required": True,
                 "message": modify_message_sandbox_done(loc),
-                "summary": modify_summary_preview(target, tid_i, mod_summary, loc),
+                "summary": modify_summary_preview(
+                    target,
+                    tid_i,
+                    mod_summary,
+                    loc,
+                    record_title=(original_data or {}).get("title")
+                    or (original_data or {}).get("name"),
+                ),
                 "target": target,
                 "target_id": _json_safe_id(tid_i),
+                "record_title": (original_data or {}).get("title")
+                or (original_data or {}).get("name"),
                 "before": _json_safe_row(original_data),
                 "after": _json_safe_row(modified_data),
                 "diff": diff_result,
@@ -4600,7 +4725,7 @@ class ModifyTool(BaseTool):
                 )
             except Exception:
                 pass
-        return {
+        batch_out = {
             "success": ok,
             "confirmation_required": True,
             "message": react_batch_modify_preview_message(n, loc),
@@ -4613,6 +4738,39 @@ class ModifyTool(BaseTool):
             "sandbox_preview": sandbox_result,
             "perf": timings,
         }
+        if ok:
+            try:
+                from memory.diff_review_store import persist_modify_preview_observation
+
+                _actor = actor_kwargs if isinstance(actor_kwargs, dict) else {}
+                _op_uid = _parse_operator_user_id(_actor)
+                _msg_id = _actor.get("source_message_id") or _actor.get("message_id")
+                _sess_id = _actor.get("chat_session_id") or _actor.get("session_id")
+                _plan_id = _actor.get("plan_id")
+                for br in batch_results_flat:
+                    if not isinstance(br, dict) or not br.get("success"):
+                        continue
+                    persist_modify_preview_observation(
+                        project_id=project_id,
+                        preview={
+                            "success": True,
+                            "confirmation_required": True,
+                            "target": br.get("target") or target,
+                            "target_id": br.get("target_id"),
+                            "plan_id": br.get("plan_id") or _plan_id,
+                            "diff": br.get("diff") or [],
+                            "modifications": br.get("modifications") or modifications or {},
+                            "before": br.get("before"),
+                            "after": br.get("after"),
+                        },
+                        operator_user_id=_op_uid,
+                        source_message_id=_msg_id,
+                        source_session_id=_sess_id,
+                        plan_id=br.get("plan_id") or _plan_id,
+                    )
+            except Exception as _dru_batch_ex:
+                print(f"[DIFF-UPSERT][auto] batch persist skipped: {_dru_batch_ex}", flush=True)
+        return batch_out
 
     async def _preview_in_sandbox_batch(
         self,
@@ -5356,6 +5514,12 @@ class ModifyTool(BaseTool):
         
         if target == 'badcase':
             badcase_labels = dict(label_to_field)
+            # BadCase 无 expected_result 列；与详情页「答案」「正确答案」对齐
+            badcase_labels['期望结果'] = 'answer'
+            badcase_labels['预期结果'] = 'answer'
+            badcase_labels['实际结果'] = 'correct_answer'
+            badcase_labels['expected_result'] = 'answer'
+            badcase_labels['actual_result'] = 'correct_answer'
             badcase_labels['严重程度'] = 'priority'
             badcase_labels['严重级别'] = 'priority'
             badcase_labels['严重性'] = 'priority'
@@ -5364,6 +5528,7 @@ class ModifyTool(BaseTool):
             badcase_labels['问题分类'] = 'case_category'
             badcase_labels['问题类型'] = 'case_category'
             badcase_labels['复现步骤'] = 'reproduction_steps'
+            badcase_labels['测试步骤'] = 'reproduction_steps'  # 勿用 testcase 的 steps 列
             badcase_labels['similar_questions'] = 'base_problem'
             badcase_labels['similar_question'] = 'base_problem'
             badcase_labels['related_questions'] = 'base_problem'
@@ -5432,6 +5597,18 @@ class ModifyTool(BaseTool):
                 return "case_type"
             if fl in ("testcase_test_type",):
                 return "test_type"
+        if tgt == "badcase":
+            fl = (field or "").strip().lower().replace("-", "_")
+            if fl in (
+                "steps",
+                "test_steps",
+                "test_step",
+                "reproduce_steps",
+                "repro_steps",
+                "steps_to_reproduce",
+                "reproduction_step",
+            ):
+                return "reproduction_steps"
         return field
 
     def _resolve_db_column_name(self, target: str, field: str) -> str:

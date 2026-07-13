@@ -3,7 +3,7 @@
 通用 Agent 路由：根据用户意图自动分发任务到对应的 Agent
 """
 
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, current_app
 from flask_login import login_required, current_user
 import time
 import json
@@ -104,8 +104,7 @@ def _sse_json_dumps(obj, **kwargs) -> str:
 
 agent_bp = Blueprint('agent', __name__, url_prefix='/api/agent')
 
-_REACT_AGENT_CACHE_LOCK = threading.Lock()
-_REACT_AGENT_CACHE: dict[str, IntelligentDevOpsAgent] = {}
+_REACT_CACHE_LOCK = threading.Lock()
 _REACT_LLM_CACHE: dict[str, object] = {}
 _WARMUP_IN_FLIGHT: set[str] = set()
 
@@ -219,17 +218,18 @@ def _warmup_model_keys(models=None) -> list[str]:
 
 def schedule_react_agent_warmup(app, models=None) -> bool:
     """
-    异步预热 ReAct Agent（LLM + 工具注册），避免首条对话在请求路径上冷启动。
+    异步预热 ReAct LLM client，避免首条对话在请求路径上冷启动。
+    Agent 对象持有 request-scoped db.session，必须按请求新建，不能进程级缓存。
     已缓存的 model 会跳过；同一 model 并发只调度一次。
     """
     if not _warmup_enabled():
         return False
     model_keys = _warmup_model_keys(models)
     to_run: list[str] = []
-    with _REACT_AGENT_CACHE_LOCK:
+    with _REACT_CACHE_LOCK:
         for mk in model_keys:
             cache_key = mk or "__default__"
-            if cache_key in _REACT_AGENT_CACHE or cache_key in _WARMUP_IN_FLIGHT:
+            if cache_key in _REACT_LLM_CACHE or cache_key in _WARMUP_IN_FLIGHT:
                 continue
             _WARMUP_IN_FLIGHT.add(cache_key)
             to_run.append(mk)
@@ -238,32 +238,24 @@ def schedule_react_agent_warmup(app, models=None) -> bool:
 
     def _worker():
         try:
-            with app.app_context():
-                from app import db
-
-                for model_name in to_run:
-                    cache_key = model_name or "__default__"
-                    t0 = time.perf_counter()
-                    try:
-                        _get_cached_react_agent(model_name, db.session)
-                        logger.info(
-                            "[AGENT-WARMUP] ok model=%s ms=%.1f",
-                            cache_key,
-                            (time.perf_counter() - t0) * 1000.0,
-                        )
-                    except Exception as ex:
-                        logger.warning(
-                            "[AGENT-WARMUP] failed model=%s: %s",
-                            cache_key,
-                            ex,
-                        )
-                    finally:
-                        try:
-                            db.session.remove()
-                        except Exception:
-                            pass
+            for model_name in to_run:
+                cache_key = model_name or "__default__"
+                t0 = time.perf_counter()
+                try:
+                    _get_cached_llm(model_name)
+                    logger.info(
+                        "[AGENT-WARMUP] ok llm=%s ms=%.1f",
+                        cache_key,
+                        (time.perf_counter() - t0) * 1000.0,
+                    )
+                except Exception as ex:
+                    logger.warning(
+                        "[AGENT-WARMUP] failed llm=%s: %s",
+                        cache_key,
+                        ex,
+                    )
         finally:
-            with _REACT_AGENT_CACHE_LOCK:
+            with _REACT_CACHE_LOCK:
                 for model_name in to_run:
                     _WARMUP_IN_FLIGHT.discard(model_name or "__default__")
 
@@ -276,49 +268,35 @@ def schedule_react_agent_warmup(app, models=None) -> bool:
 
 
 def _get_cached_llm(model_name: str):
+    """进程级 LLM client 缓存；锁只保护字典，不包住网络初始化。"""
     key = (model_name or "").strip() or "__default__"
     llm = _REACT_LLM_CACHE.get(key)
     if llm is not None:
         return llm
-    with _REACT_AGENT_CACHE_LOCK:
+    llm_new = get_llm(model=model_name)
+    with _REACT_CACHE_LOCK:
         llm2 = _REACT_LLM_CACHE.get(key)
         if llm2 is not None:
             return llm2
-        llm2 = get_llm(model=model_name)
-        _REACT_LLM_CACHE[key] = llm2
-        return llm2
-
-
-def _get_cached_react_agent(model_name: str, db_session):
-    key = (model_name or "").strip() or "__default__"
-    agent = _REACT_AGENT_CACHE.get(key)
-    if agent is not None:
-        agent.set_db_session(db_session)
-        return agent
-    with _REACT_AGENT_CACHE_LOCK:
-        agent2 = _REACT_AGENT_CACHE.get(key)
-        if agent2 is not None:
-            agent2.set_db_session(db_session)
-            return agent2
-        llm = _get_cached_llm(model_name)
-        agent2 = IntelligentDevOpsAgent(llm=llm, db_session=db_session)
-        _REACT_AGENT_CACHE[key] = agent2
-        return agent2
+        _REACT_LLM_CACHE[key] = llm_new
+        return llm_new
 
 
 @agent_bp.route('/warmup', methods=['POST'])
 @login_required
 def warmup_react_agent():
-    """登录后进项目页时异步预热 Agent，立即返回不阻塞。"""
-    from flask import current_app
-
-    data = request.get_json(silent=True) or {}
-    raw_models = data.get("models")
-    models = None
-    if isinstance(raw_models, list) and raw_models:
-        models = [str(m).strip() for m in raw_models if str(m).strip()]
-    scheduled = schedule_react_agent_warmup(current_app._get_current_object(), models=models)
-    return jsonify({"success": True, "scheduled": scheduled})
+    """登录后进项目页时异步预热 ReAct LLM client，立即返回不阻塞。"""
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_models = data.get("models")
+        models = None
+        if isinstance(raw_models, list) and raw_models:
+            models = [str(m).strip() for m in raw_models if str(m).strip()]
+        scheduled = schedule_react_agent_warmup(current_app._get_current_object(), models=models)
+        return jsonify({"success": True, "scheduled": scheduled})
+    except Exception as ex:
+        logger.warning("[AGENT-WARMUP] schedule skipped: %s", ex)
+        return jsonify({"success": True, "scheduled": False, "skipped": True})
 
 
 @agent_bp.route('/execute', methods=['POST'])
@@ -794,6 +772,15 @@ def react_agent():
         react_request_id = (
             (data.get('request_id') or data.get('react_request_id') or '').strip() or str(uuid.uuid4())
         )
+        try:
+            from memory.prompt_page_pipeline import preflight_agent_request
+
+            preflight_agent_request(
+                session_id=react_request_id,
+                user_id=str(getattr(current_user, 'id', '') or ''),
+            )
+        except Exception:
+            logger.debug("[PROMPT-PAGES] preflight skipped", exc_info=True)
         image_intent_for_route = classify_image_intent(user_input) if images else None
         _route = resolve_route(
             raw_model_name,
@@ -852,6 +839,14 @@ def react_agent():
 
         _resume_run_id = (data.get('resume_run_id') or data.get('resumeRunId') or '').strip()
         _chat_session_id_raw = data.get('chat_session_id') or data.get('chatSessionId')
+        _chat_session_id = None
+        if _chat_session_id_raw is not None:
+            try:
+                from app import _safe_mysql_int_fk_id
+
+                _chat_session_id = _safe_mysql_int_fk_id(_chat_session_id_raw)
+            except Exception:
+                _chat_session_id = None
         if _resume_run_id:
             try:
                 from agents.react_run_store import (
@@ -906,17 +901,13 @@ def react_agent():
             )
         from app import db
         t_agent0 = time.perf_counter()
-        _fresh = (os.getenv("BADCASE_REACT_AGENT_PER_REQUEST", "").strip().lower() in ("1", "true", "yes"))
-        if _fresh:
-            agent = IntelligentDevOpsAgent(llm=llm, db_session=db.session)
-        else:
-            agent = _get_cached_react_agent(model_name, db.session)
+        agent = IntelligentDevOpsAgent(llm=llm, db_session=db.session)
         if perf:
             logger.info(
                 "[PERF][react_api][%s] agent_init_ms=%.1f fresh_agent=%s",
                 req_id,
                 (time.perf_counter() - t_agent0) * 1000,
-                "1" if _fresh else "0",
+                "1",
             )
 
         # 长期记忆：把 user_id 注入到 ReAct 引擎实例（供 ES 向量检索 scope 过滤）
@@ -1261,6 +1252,7 @@ def react_agent():
                             locale=ui_locale,
                             pending_diff_context=pending_diff_context,
                             agent_session_id=react_request_id,
+                            chat_session_id=_chat_session_id,
                             long_memory_context=long_memory_context,
                             hint_project_name=hint_project_name,
                             hint_plan_name=hint_plan_name,
@@ -1329,6 +1321,20 @@ def react_agent():
                             react_request_id,
                             "completed" if _task_ok else "failed",
                         )
+                        try:
+                            from utils.observability import (
+                                append_agent_trace,
+                                flush_observability,
+                            )
+
+                            append_agent_trace(
+                                "run.finished",
+                                {"status": "completed" if _task_ok else "failed"},
+                                react_request_id=react_request_id,
+                            )
+                            flush_observability(prefix=f"run_{react_request_id[:24]}")
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     loop.close()
@@ -1432,6 +1438,30 @@ def react_agent_save_checkpoint():
         from agents.react_run_store import enrich_checkpoint_with_agent_dag, upsert_interrupted_run
 
         checkpoint = enrich_checkpoint_with_agent_dag(checkpoint, react_request_id)
+
+        _ap = data.get("assistant_persist") or checkpoint.get("assistant_persist")
+        if isinstance(_ap, dict) and chat_session_id is not None:
+            try:
+                from app_services.chat_message_persist import (
+                    assistant_fields_from_client,
+                    upsert_assistant_chat_message,
+                )
+                from app import ChatMessage, ChatSession, db
+
+                _fields = assistant_fields_from_client(_ap)
+                _mid = _ap.get("message_id") or _ap.get("db_message_id")
+                if _fields:
+                    upsert_assistant_chat_message(
+                        db=db,
+                        ChatMessage=ChatMessage,
+                        ChatSession=ChatSession,
+                        session_id=int(chat_session_id),
+                        user_id=int(getattr(current_user, "id", 0) or 0),
+                        fields=_fields,
+                        message_id=_mid,
+                    )
+            except Exception:
+                logger.exception("[REACT] checkpoint assistant_persist failed")
 
         run_id = upsert_interrupted_run(
             chat_session_id=int(chat_session_id),
@@ -1663,5 +1693,28 @@ def api_list_agent_tasks():
                 ],
             }
         )
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/cdp-test-runs', methods=['GET'])
+@login_required
+def api_list_cdp_test_runs():
+    """按 react_request_id 或 chat_session_id 查询 CDP 测试任务。"""
+    try:
+        react_request_id = (request.args.get('react_request_id') or request.args.get('session_id') or '').strip()
+        chat_session_id = request.args.get('chat_session_id')
+        limit = min(int(request.args.get('limit', 20)), 100)
+        from models.orm import CdpTestRun
+
+        q = CdpTestRun.query
+        if react_request_id:
+            q = q.filter(CdpTestRun.react_request_id == react_request_id[:64])
+        elif chat_session_id:
+            q = q.filter(CdpTestRun.chat_session_id == int(chat_session_id))
+        else:
+            return jsonify({'success': False, 'error': '缺少 react_request_id 或 chat_session_id'}), 400
+        rows = q.order_by(CdpTestRun.created_at.desc()).limit(limit).all()
+        return jsonify({'success': True, 'runs': [r.to_dict() for r in rows]})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
