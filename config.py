@@ -15,7 +15,7 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # 新用户无项目时，从此模板项目克隆副本并关联到用户（见 POST /api/projects/ensure-default）
     SYSTEM_PROJECT_TEMPLATE_ID = int(os.getenv('SYSTEM_PROJECT_TEMPLATE_ID', '1'))
-    
+
     # 邮件配置
     MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.qq.com')
     MAIL_PORT = int(os.getenv('MAIL_PORT', 587))
@@ -292,7 +292,7 @@ class Config:
     # 短关键词 BM25 只查 title（比扫 search_text 快）
     # 0=禁用「只搜 title」；混合/全向量路径均用 title+search_text
     GREP_ES_BM25_TITLE_ONLY_MAX_CHARS = int(os.getenv("GREP_ES_BM25_TITLE_ONLY_MAX_CHARS", "0"))
-    GREP_ES_SEARCH_TIMEOUT_S = float(os.getenv("GREP_ES_SEARCH_TIMEOUT_S", "10"))
+    GREP_ES_SEARCH_TIMEOUT_S = float(os.getenv("GREP_ES_SEARCH_TIMEOUT_S", "2"))
     # 有关键词且走 ES 时跳过全项目 plan_tree 查询（省 ~100ms+ MySQL）
     # 关键词走 ES 时：minimal plan_tree 与 hybrid(embed+ES) 并行，避免 plan_tree+hybrid 串行叠满 ~3s
     GREP_PARALLEL_ES_PLAN_TREE = os.getenv("GREP_PARALLEL_ES_PLAN_TREE", "true").lower() == "true"

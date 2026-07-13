@@ -810,7 +810,6 @@ import {
   extractToolName
 } from '../composables/useAgentStream.js'
 import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
-import { finalizeMessageFirstThinkStream } from '../composables/applyReactThinkSSEStepEvent.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
@@ -1377,7 +1376,6 @@ const finalizeRunningMessage = (aiMessage, reason = 'stopped') => {
   cancelTodosStreamTypewriter(aiMessage)
   aiMessage.todosStreamVisible = ''
   flushReasoningTypewriter(aiMessage)
-  finalizeMessageFirstThinkStream(aiMessage)
 }
 
 // 格式化消息内容（支持简单的markdown）
@@ -1452,7 +1450,6 @@ const SHOW_FIRST_ROUND_THOUGHT_UI = true
 const showFirstThinkBlock = (m) => {
   if (!SHOW_FIRST_ROUND_THOUGHT_UI) return false
   if (!m || m.reactDirectChatReply) return false
-  if (m._firstThinkUiSealed) return false
   if (!substantiveThinkPhase(m)) return false
   return !!m.hadAgentThinkPhase
 }
@@ -2070,23 +2067,20 @@ const getFieldNewValue = (fieldDiff) => {
 }
 
 /**
- * 首轮 THINK 标题：流式中用「思考中/Thinking」；结束后用「思考/Thought」（可带秒数）
+ * 首轮 THINK 标题：仅当已有可见正文后再显示 Thought for Xs；流式中尚无正文时用 Thinking…，避免「几秒但空白」
  */
 const thoughtSummaryLabel = (message) => {
-  if (message?._reasoningPhaseLive && !message._firstThinkUiSealed) {
-    return t('agentTask.thinking')
-  }
   const hasBody = substantiveThinkPhase(message)
-  if (!hasBody) return t('agentTask.thinking')
+  if (!hasBody) return 'Thinking…'
   const ms = message.reasoningUiDurationMs
   const kind = message.reasoningUiKind
   const thr = message.reasoningBriefThresholdMs ?? 800
-  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return t('agentTask.thoughtBriefly')
-  if (ms != null && ms >= 0) return t('agentTask.thoughtFor', { s: (ms / 1000).toFixed(1) })
+  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return 'Thought briefly'
+  if (ms != null && ms >= 0) return `Thought for ${(ms / 1000).toFixed(1)}s`
   const tt = message.agentResult?.thinking_time
-  if (tt != null && tt >= 0 && Number(tt) < 0.8) return t('agentTask.thoughtBriefly')
-  if (tt != null && tt >= 0) return t('agentTask.thoughtFor', { s: Number(tt).toFixed(1) })
-  return t('agentTask.thought')
+  if (tt != null && tt >= 0 && Number(tt) < 0.8) return 'Thought briefly'
+  if (tt != null && tt >= 0) return `Thought for ${Number(tt).toFixed(1)}s`
+  return 'Thought'
 }
 
 // 是否显示「统一总结」块（关键发现 + 执行统计合并，Cursor 式耗时 Xs）
@@ -2496,7 +2490,6 @@ const handleShowGroupInList = async (group, messageId, navOpts = {}) => {
       batchItems.push({
         targetId: intTargetId,
         target: tgt,
-        ...(item?.card_id ? { card_id: item.card_id } : {}),
         diff: payload.diff,
         modifications: payload.modifications,
         plan_id: payload.plan_id,
@@ -2610,7 +2603,6 @@ const handleShowModifyInList = async (modifyData, messageId) => {
         batchItems.push({
           targetId: intTargetId,
           target: tgt,
-          ...(result?.card_id ? { card_id: result.card_id } : {}),
           diff: payload.diff,
           modifications: payload.modifications,
           plan_id: payload.plan_id ?? result.plan_id,
@@ -2712,7 +2704,6 @@ const handleShowModifyInList = async (modifyData, messageId) => {
       detail: {
         targetId: intTargetId,
         target: tgt,
-        ...(modifyData?.card_id ? { card_id: modifyData.card_id } : {}),
         diff: payload.diff,
         modifications: payload.modifications,
         plan_id: payload.plan_id,
@@ -2900,7 +2891,7 @@ const recoverModifyNavigationFromExecutionResults = (execRaw) => {
       const batch_results_flat = []
       for (const r of toolData.results) {
         const obs = r && r.result && typeof r.result === 'object' ? r.result : {}
-        const tid = r?.target_id ?? obs.target_id ?? r?.id
+        const tid = r?.id ?? r?.target_id ?? obs.target_id
         if (tid == null || !Number.isFinite(Number(tid))) continue
         batch_results_flat.push({
           target_id: Number(tid),
@@ -3594,13 +3585,11 @@ const cancelEditUserMessage = () => {
 const handleInlineSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
-  const text = (inlineInputMessage.value || '').trim()
-  if (!text) return
+  const text = inlineInputMessage.value
   inlineInputMessage.value = ''
-  // 先退出编辑态再 sendText：避免对话进行中历史编辑框空白且误显示「停止」
-  editingUserMessageId.value = null
-  await nextTick()
+  // 先发送消息，再退出编辑态：避免 key 变化与新消息添加同一 tick 导致 Vue patch 冲突
   await sendText(text)
+  editingUserMessageId.value = null
 }
 
 const addNewLineInline = (e) => {

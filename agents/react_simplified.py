@@ -233,7 +233,6 @@ from .locale_prompts import (
     react_executing_database_query_about_to,
     react_retry_grep_for_modify,
     react_unified_modify_requires_grep_first,
-    react_modify_blocked_after_empty_grep,
     react_modify_progress_wait,
     react_modify_executing_fallback_reason,
     react_modify_single_record_reason,
@@ -911,15 +910,6 @@ def _grep_observation_empty_lists(observation: Dict[str, Any]) -> bool:
         if isinstance(x, list):
             n += len(x)
     return n == 0
-
-
-def _react_strict_plan_fail_enabled() -> bool:
-    return (os.getenv("REACT_STRICT_PLAN_FAIL", "1") or "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
 
 
 def _sync_plan_single_in_progress(plan_rows: List[Dict[str, Any]], current_index: int) -> None:
@@ -7019,14 +7009,7 @@ class SimplifiedReActEngine:
                     )
                     try:
                         from agents.cdp.login_flow import inject_cdp_login_resume_params
-                        from agents.cdp.params import inject_cdp_tool_params
 
-                        inject_cdp_tool_params(
-                            tool_params,
-                            user_input=_cdp_ui,
-                            result_context=result_ctx,
-                            project_id=project_id,
-                        )
                         inject_cdp_login_resume_params(
                             tool_params,
                             result_context=result_ctx,
@@ -7053,63 +7036,6 @@ class SimplifiedReActEngine:
                         sidebar_plan_id=getattr(self, "plan_id", None),
                     )
                 )
-                if (
-                    tool_name in ("modify", "delete")
-                    and not _skip_grep_for_delete_plan
-                    and react_require_grep_before_modify()
-                    and _grep_call_count > 0
-                ):
-                    try:
-                        from agents.react_macro import macro_grep_has_actionable_hit
-                    except Exception:
-                        macro_grep_has_actionable_hit = lambda _ctx: False  # type: ignore
-                    if not macro_grep_has_actionable_hit(result_ctx):
-                        _empty_mod_msg = react_modify_blocked_after_empty_grep(
-                            getattr(self, "_ui_locale", None)
-                        )
-                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
-                            print(
-                                "[REACT-UNIFIED] block modify/delete: grep empty hits "
-                                f"grep_calls={_grep_call_count}",
-                                flush=True,
-                            )
-                        yield {
-                            "event": "agent_thought",
-                            "delta": _empty_mod_msg + "\n\n",
-                            "index": round_idx,
-                            "processType": PROCESS_TYPE_STREAMING,
-                            "react_phase": REACT_PHASE_THINK,
-                        }
-                        findings_acc.append(_empty_mod_msg)
-                        await self._wait_for_background_summary(running_summary_state)
-                        _append_running_summary_stop_note(running_summary_state, _empty_mod_msg)
-                        yield {
-                            "event": "finished",
-                            "finished": True,
-                            "steps_count": _steps_done,
-                            "duration": time.time() - _t0,
-                            "thinking_time": _total_think_time,
-                        }
-                        _incr_empty = str(running_summary_state.get("text") or "").strip()
-                        if use_react_incremental_running_summary() and _incr_empty:
-                            _lsi_empty = max(0, (_steps_done if _steps_done > 0 else 1) - 1)
-                            async for _rs_ev in self._stream_running_summary_final_wire(
-                                running_summary_state,
-                                last_step_index=_lsi_empty,
-                            ):
-                                yield _rs_ev
-                        yield {
-                            "event": "done",
-                            "status": "partial",
-                            "findings": findings_acc,
-                            "steps_count": _steps_done,
-                            "duration": time.time() - _t0,
-                            "thinking_time": _total_think_time,
-                            "summary": _incr_empty or _empty_mod_msg,
-                            "stop_reason": "grep_empty_no_modify",
-                        }
-                        _done_sent = True
-                        return
                 if (
                     tool_name in ("modify", "delete")
                     and not _skip_grep_for_delete_plan
@@ -7408,21 +7334,6 @@ class SimplifiedReActEngine:
                         yield _te
 
                 observation = _normalize_unified_stream_tool_observation(observation)
-                if (
-                    str(tool_name or "").strip().lower() == "grep"
-                    and _react_strict_plan_fail_enabled()
-                    and isinstance(observation, dict)
-                    and observation.get("success") is not False
-                    and _grep_observation_empty_lists(observation)
-                ):
-                    observation = dict(observation)
-                    observation["success"] = False
-                    observation["error"] = "grep_empty_hits"
-                    observation["code"] = "grep_empty_hits"
-                    if not str(observation.get("message") or "").strip():
-                        observation["message"] = react_summarize_grep_done_empty(
-                            getattr(self, "_ui_locale", None)
-                        )
                 try:
                     from utils.observability import (
                         append_agent_trace,
@@ -7464,28 +7375,20 @@ class SimplifiedReActEngine:
                         "code": "exception",
                     }
                 elif not observation.get("success"):
-                    _grep_empty_ui = (
-                        str(tool_name or "").strip().lower() == "grep"
-                        and str(
-                            observation.get("code") or observation.get("error") or ""
-                        ).strip()
-                        == "grep_empty_hits"
-                    )
-                    if not _grep_empty_ui:
-                        _run_had_tool_failure = True
-                        yield {
-                            "event": "tool_error",
-                            "tool": tool_name,
-                            "index": round_idx,
-                            "step_id": _step_id_ui,
-                            "message": str(
-                                observation.get("error")
-                                or observation.get("message")
-                                or "工具执行失败"
-                            ),
-                            "code": observation.get("code"),
-                            "details": observation,
-                        }
+                    _run_had_tool_failure = True
+                    yield {
+                        "event": "tool_error",
+                        "tool": tool_name,
+                        "index": round_idx,
+                        "step_id": _step_id_ui,
+                        "message": str(
+                            observation.get("error")
+                            or observation.get("message")
+                            or "工具执行失败"
+                        ),
+                        "code": observation.get("code"),
+                        "details": observation,
+                    }
 
                 if tool_name == "cdp" and isinstance(observation, dict):
                     try:
@@ -7668,60 +7571,6 @@ class SimplifiedReActEngine:
                 tool_params.pop("progress_queue", None)
                 tool_params.pop("progress_callback", None)
                 if unified_plan_steps and not observation.get("success"):
-                    _is_grep_empty_fail = (
-                        str(tool_name or "").strip().lower() == "grep"
-                        and (
-                            str(observation.get("code") or observation.get("error") or "")
-                            == "grep_empty_hits"
-                            or _grep_observation_empty_lists(observation)
-                        )
-                    )
-                    if _is_grep_empty_fail:
-                        _stop_msg = react_modify_blocked_after_empty_grep(
-                            getattr(self, "_ui_locale", None)
-                        )
-                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
-                            print(
-                                "[REACT-UNIFIED] stop after grep empty (no plan skip to modify)",
-                                flush=True,
-                            )
-                        yield {
-                            "event": "agent_thought",
-                            "delta": _stop_msg + "\n\n",
-                            "index": round_idx,
-                            "processType": PROCESS_TYPE_STREAMING,
-                            "react_phase": REACT_PHASE_THINK,
-                        }
-                        findings_acc.append(_stop_msg)
-                        await self._wait_for_background_summary(running_summary_state)
-                        _append_running_summary_stop_note(running_summary_state, _stop_msg)
-                        yield {
-                            "event": "finished",
-                            "finished": True,
-                            "steps_count": _steps_done,
-                            "duration": time.time() - _t0,
-                            "thinking_time": _total_think_time,
-                        }
-                        _incr_g = str(running_summary_state.get("text") or "").strip()
-                        if use_react_incremental_running_summary() and _incr_g:
-                            _lsi_g = max(0, (_steps_done if _steps_done > 0 else 1) - 1)
-                            async for _rs_ev in self._stream_running_summary_final_wire(
-                                running_summary_state,
-                                last_step_index=_lsi_g,
-                            ):
-                                yield _rs_ev
-                        yield {
-                            "event": "done",
-                            "status": "partial",
-                            "findings": findings_acc,
-                            "steps_count": _steps_done,
-                            "duration": time.time() - _t0,
-                            "thinking_time": _total_think_time,
-                            "summary": _incr_g or _stop_msg,
-                            "stop_reason": "grep_empty_no_modify",
-                        }
-                        _done_sent = True
-                        return
                     _plan_step_fail_streak += 1
                     if _plan_step_fail_streak >= _plan_step_max_fail:
                         _skip_msg = react_unified_plan_step_skip_failures_message(
@@ -7766,10 +7615,9 @@ class SimplifiedReActEngine:
                             observation if isinstance(observation, dict) else None
                         ),
                     )
-                if str(tool_name or "").strip().lower() == "grep":
-                    _grep_call_count += 1
                 if observation.get("success"):
-                    if str(tool_name or "").strip().lower() == "grep":
+                    if tool_name == "grep":
+                        _grep_call_count += 1
                         self._merge_grep_observation_into_context(
                             observation, tool_params, result_ctx
                         )
@@ -10914,29 +10762,6 @@ class SimplifiedReActEngine:
                     params["raw_user_input"] = str(_grep_ui).strip()
                     if not params.get("user_input"):
                         params["user_input"] = params["raw_user_input"]
-
-            if tool_name == "cdp":
-                _rc_cdp = getattr(self, "_unified_result_ctx", None)
-                if isinstance(_rc_cdp, dict):
-                    params["result_context"] = _rc_cdp
-                _cdp_ui_exec = (
-                    getattr(self, "_react_stream_user_query", None)
-                    or getattr(self, "_react_stream_user_input", None)
-                    or params.get("natural_query")
-                    or params.get("user_query")
-                    or ""
-                )
-                try:
-                    from agents.cdp.params import inject_cdp_tool_params
-
-                    inject_cdp_tool_params(
-                        params,
-                        user_input=_cdp_ui_exec,
-                        result_context=_rc_cdp if isinstance(_rc_cdp, dict) else None,
-                        project_id=self.project_id,
-                    )
-                except Exception:
-                    pass
 
             if tool_name != "modify":
                 print(f"[REACT] 工具参数: {params}")

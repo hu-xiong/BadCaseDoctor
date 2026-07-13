@@ -429,42 +429,14 @@ def react_context_has_grep_for_mutate(
     grep_tool_calls: int = 0,
 ) -> bool:
     """
-    是否已满足「先 grep 再 modify/delete」且 grep 有**可操作的命中**。
-    仅 ui_context 种子化 grep_result、未真正调用 grep 工具时返回 False；
-    grep 已执行但 0 命中时返回 False（禁止空转 modify）。
+    是否已满足「先 grep 再 modify/delete」。
+    仅 ui_context 种子化 grep_result、未真正调用 grep 工具时返回 False。
     """
-    try:
-        from agents.react_macro import macro_grep_has_actionable_hit
-    except Exception:
-        macro_grep_has_actionable_hit = None  # type: ignore
-
-    def _has_hits(ctx: Optional[dict]) -> bool:
-        if not isinstance(ctx, dict):
-            return False
-        if macro_grep_has_actionable_hit is not None:
-            return bool(macro_grep_has_actionable_hit(ctx))
-        gr = ctx.get("grep_result")
-        if isinstance(gr, dict) and gr:
-            for k in (
-                "first_bug_id",
-                "first_badcase_id",
-                "first_testcase_id",
-                "first_card_id",
-                "first_plan_id",
-            ):
-                if gr.get(k) not in (None, "", 0, "0"):
-                    return True
-        for k in ("bug_list", "badcase_list", "testcase_list", "card_list", "plan_list"):
-            lst = ctx.get(k)
-            if isinstance(lst, list) and len(lst) > 0:
-                return True
-        return False
-
     if grep_tool_calls > 0:
-        return _has_hits(result_context)
+        return True
     if isinstance(prev_action, dict):
         if str(prev_action.get("tool") or "").strip().lower() == "grep":
-            return _has_hits(result_context)
+            return True
     if not isinstance(result_context, dict):
         return False
     if result_context.get("_grep_seeded_from_ui_context"):

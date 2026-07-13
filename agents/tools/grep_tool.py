@@ -189,9 +189,10 @@ class GrepTool(BaseTool):
         _es_keywords = (keywords or "").strip() or None
         if _es_keywords and _es_keywords.isdigit():
             _es_keywords = None
-        # ES/BM25/向量用精炼 keywords；仅当解析不出关键词时才用用户原话
-        if not _es_keywords and _user_q:
-            _es_keywords = _user_q.strip() or None
+        if _user_q:
+            _es_keywords = _user_q
+        elif _es_keywords and _es_keywords.isdigit():
+            _es_keywords = None
 
         print(
             f"[GREP] 🔍 开始定位 (keywords={keywords}, es_keywords={_es_keywords!r}, "
@@ -517,38 +518,6 @@ class GrepTool(BaseTool):
                                     "— 未到 rerank（向量/ES 未召回或 hydrate 为空）",
                                     flush=True,
                                 )
-                                _sql_kw = (keywords or "").strip() or None
-                                if _sql_kw and _es_hits_n == 0:
-                                    try:
-                                        if raw_target in ("all", "bug") and not bug_list:
-                                            bug_list = await self._get_bug_list(
-                                                project_id,
-                                                _sql_kw,
-                                                status=status,
-                                                plan_id=plan_id,
-                                                assignee=assignee,
-                                            )
-                                        if raw_target in ("all", "badcase", "bug") and not badcase_list:
-                                            badcase_list = await self._get_badcase_list(
-                                                project_id,
-                                                _sql_kw,
-                                                status=status,
-                                                plan_id=plan_id,
-                                                assignee=assignee,
-                                            )
-                                        if bug_list or badcase_list:
-                                            _hybrid_meta["sql_fallback_empty_es"] = True
-                                            print(
-                                                f"[GREP-FALLBACK] ES 0 命中，SQL 全字段兜底 "
-                                                f"bug={len(bug_list or [])} badcase={len(badcase_list or [])} "
-                                                f"keywords={_sql_kw!r}",
-                                                flush=True,
-                                            )
-                                    except Exception as _sqlex:
-                                        print(
-                                            f"[GREP-FALLBACK] ES 空结果 SQL 兜底失败: {_sqlex}",
-                                            flush=True,
-                                        )
                             elif _pre_rr_bug or _pre_rr_bc:
                                 print(
                                     f"[GREP-PIPELINE] 阶段=es_recall 完成 hits_n={_es_hits_n} "
