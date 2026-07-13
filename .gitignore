@@ -29,8 +29,16 @@ electron-vue3/.vite/
 electron-vue3/.pnpm-store/
 /electron-vue3/.npmrc
 
+electron-vue3/nul
+
 go-local-proxy/badcase-local-proxy
 go-local-proxy/badcase-local-proxy.exe
 
+go-local-proxy/go-local-proxy.exe
+
+king-farm-calculator/target/
+
 client_binaries/*
 !client_binaries/.gitkeep
+
+observability/
