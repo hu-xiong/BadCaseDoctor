@@ -2071,17 +2071,19 @@ const getFieldNewValue = (fieldDiff) => {
  * 首轮 THINK 标题：仅当已有可见正文后再显示 Thought for Xs；流式中尚无正文时用 Thinking…，避免「几秒但空白」
  */
 const thoughtSummaryLabel = (message) => {
+  // 流式推理/输出进行中 => 始终显示「思考中」，输出结束后才显示耗时统计
+  if (message?._reasoningPhaseLive) return t('agentTask.thinking')
   const hasBody = substantiveThinkPhase(message)
-  if (!hasBody) return 'Thinking…'
+  if (!hasBody) return t('agentTask.thinking')
   const ms = message.reasoningUiDurationMs
   const kind = message.reasoningUiKind
   const thr = message.reasoningBriefThresholdMs ?? 800
-  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return 'Thought briefly'
-  if (ms != null && ms >= 0) return `Thought for ${(ms / 1000).toFixed(1)}s`
+  if (kind === 'brief' || (ms != null && ms >= 0 && ms < thr)) return t('agentTask.thoughtBriefly')
+  if (ms != null && ms >= 0) return t('agentTask.thoughtFor', { s: (ms / 1000).toFixed(1) })
   const tt = message.agentResult?.thinking_time
-  if (tt != null && tt >= 0 && Number(tt) < 0.8) return 'Thought briefly'
-  if (tt != null && tt >= 0) return `Thought for ${Number(tt).toFixed(1)}s`
-  return 'Thought'
+  if (tt != null && tt >= 0 && Number(tt) < 0.8) return t('agentTask.thoughtBriefly')
+  if (tt != null && tt >= 0) return t('agentTask.thoughtFor', { s: Number(tt).toFixed(1) })
+  return t('agentTask.thought')
 }
 
 // 是否显示「统一总结」块（关键发现 + 执行统计合并，Cursor 式耗时 Xs）

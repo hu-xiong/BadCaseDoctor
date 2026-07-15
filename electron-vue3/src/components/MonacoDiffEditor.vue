@@ -33,13 +33,17 @@ const isLightTheme = computed(() => {
 })
 
 const buildModels = () => {
-  if (originalModel) originalModel.dispose()
-  if (modifiedModel) modifiedModel.dispose()
+  const oldOriginal = originalModel
+  const oldModified = modifiedModel
 
   originalModel = monaco.editor.createModel(props.original ?? '', props.language)
   modifiedModel = monaco.editor.createModel(props.modified ?? '', props.language)
 
   diffEditor?.setModel({ original: originalModel, modified: modifiedModel })
+
+  // setModel 成功之后再 dispose 旧 model，避免 Monaco 报 "TextModel got disposed before DiffEditorWidget model got reset"
+  if (oldOriginal) oldOriginal.dispose()
+  if (oldModified) oldModified.dispose()
 }
 
 onMounted(() => {
@@ -107,9 +111,10 @@ watch(
 
 onBeforeUnmount(() => {
   try {
+    // 必须先 dispose editor，再 dispose model；反序会导致 "TextModel got disposed before DiffEditorWidget model got reset"
+    diffEditor?.dispose()
     originalModel?.dispose()
     modifiedModel?.dispose()
-    diffEditor?.dispose()
   } catch {
     // ignore
   }

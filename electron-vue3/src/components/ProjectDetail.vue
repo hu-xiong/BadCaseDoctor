@@ -4159,7 +4159,7 @@ const totalCards = ref(0)
           const i = arr.findIndex((c) => sameEntityId(c.id, idKey))
           if (i < 0) continue
           for (const [field, val] of Object.entries(fieldUpdates)) {
-            if (Object.prototype.hasOwnProperty.call(arr[i], field)) {
+            if (field in arr[i]) {
               arr[i][field] = val
             }
           }
@@ -4171,7 +4171,7 @@ const totalCards = ref(0)
         const i = arr.findIndex((b) => sameEntityId(b.id, idKey))
         if (i < 0) continue
         for (const [field, val] of Object.entries(fieldUpdates)) {
-          if (Object.prototype.hasOwnProperty.call(arr[i], field)) {
+          if (field in arr[i]) {
             arr[i][field] = val
           }
         }
@@ -5742,7 +5742,7 @@ const totalCards = ref(0)
         cardRow = cards.value.find((c) => sameEntityId(c.id, pendingKey))
         if (cardRow) {
           for (const [field, value] of Object.entries(modifications)) {
-            if (Object.prototype.hasOwnProperty.call(cardRow, field)) {
+            if (field in cardRow) {
               cardRow[field] = value
             }
           }
@@ -5752,7 +5752,7 @@ const totalCards = ref(0)
         badcaseRow = badcases.value.find((b) => sameEntityId(b.id, pendingKey))
         if (badcaseRow) {
           for (const [field, value] of Object.entries(optimisticMods)) {
-            if (badcaseRow.hasOwnProperty(field)) {
+            if (badcaseRow != null && field in badcaseRow) {
               badcaseRow[field] = value
             }
           }
@@ -5931,7 +5931,7 @@ const totalCards = ref(0)
         const rollbackRow = targetType === 'card' ? cardRow : badcaseRow
         if (rollbackRow) {
           for (const [field, value] of Object.entries(oldValues)) {
-            if (rollbackRow.hasOwnProperty(field)) {
+            if (field in rollbackRow) {
               rollbackRow[field] = value
             }
           }
@@ -5944,7 +5944,7 @@ const totalCards = ref(0)
         const rollbackRow = targetType === 'card' ? cardRow : badcaseRow
         if (rollbackRow) {
           for (const [field, value] of Object.entries(oldValues)) {
-            if (rollbackRow.hasOwnProperty(field)) {
+            if (field in rollbackRow) {
               rollbackRow[field] = value
             }
           }
@@ -6001,7 +6001,7 @@ const totalCards = ref(0)
           const row = badcases.value.find((b) => sameEntityId(b.id, s.bugId))
           if (row) {
             for (const [field, value] of Object.entries(s.oldValues)) {
-              if (row.hasOwnProperty(field)) row[field] = value
+              if (field in row) row[field] = value
             }
           }
         }
@@ -6020,7 +6020,7 @@ const totalCards = ref(0)
             delete om.title
           }
           for (const [field, value] of Object.entries(om)) {
-            if (row.hasOwnProperty(field)) row[field] = value
+            if (field in row) row[field] = value
           }
         }
       }
@@ -10575,6 +10575,8 @@ const totalCards = ref(0)
 
     const handleShowModifyInList = async (event) => {
           const dtop = event.detail || {}
+          // 批量路径已同步过且重新派发过来的，跳过避免重复处理
+          if (dtop.__pendingSyncedBatch === true) return
           if (dtop.__modifyListBatch === true && Array.isArray(dtop.items) && dtop.items.length > 0) {
             const items = dtop.items
             const skipListFetchBatch = dtop.__skipListFetch === true
@@ -10606,18 +10608,49 @@ const totalCards = ref(0)
                   })
               )
             }
-            const navItem = items.find((x) => x.executed !== true) || items[0]
-            await handleShowModifyInList({
-              detail: {
-                ...navItem,
-                __modifyListBatchItem: true,
-                __pendingSyncedBatch: true,
-                __skipListFetch: skipListFetchBatch,
-                __skipDbUpsert: skipDbUpsert
-              }
-            })
             if (!skipListFetchBatch) {
               await awaitCoalescedFetchBadcasesForModifyList()
+            }
+            // 批量路径不走递归：直接统一设置 highlight/tab/scroll
+            const firstItem = items.find((x) => x.executed !== true) || items[0]
+            if (firstItem && firstItem.targetId) {
+              const hId = entityIdStr(firstItem.targetId)
+              if (hId) {
+                const tgt = firstItem.target
+                if (tgt === 'bug') urlContentType.value = 'bug'
+                else if (tgt === 'badcase') urlContentType.value = 'badcase'
+                else if (tgt === 'testcase') urlContentType.value = 'test_case'
+                else if (tgt === 'card') urlContentType.value = null
+                highlightRowId.value = hId
+                // 若仅有详情字段变更，打开详情编辑器
+                const detailOnlyItem = items.find((x) => {
+                  if (x.executed === true) return false
+                  const md = buildModifyDataFromShowModifyDetail(x)
+                  const impact = getModifyFieldImpact(md, x.target)
+                  return impact.hasEffectiveDetail && !impact.hasEffectiveList
+                })
+                if (detailOnlyItem) {
+                  const diffData = {
+                    targetId: hId,
+                    target: tgt,
+                    diff: Array.isArray(detailOnlyItem.diff) ? detailOnlyItem.diff : [],
+                    modifications: filterModifyDataToDetailSession(
+                      buildModifyDataFromShowModifyDetail(detailOnlyItem), tgt
+                    ),
+                    messageId: detailOnlyItem.messageId,
+                    batchIndex: detailOnlyItem.batchIndex
+                  }
+                  setPendingModifyDiffSession(diffData)
+                  await openMainEditorForModifyDiff(hId, tgt, true)
+                }
+                await nextTick()
+                const el = findNavListRowEl(hId, tgt)
+                if (el) {
+                  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                  el.classList.add('highlight-row')
+                  setTimeout(() => el.classList.remove('highlight-row'), 3000)
+                }
+              }
             }
             return
           }

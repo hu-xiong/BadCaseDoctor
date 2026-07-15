@@ -342,20 +342,20 @@ class ModifyTool(BaseTool):
             with flask_app.app_context():
                 if tl == "bug":
                     return (
-                        flask_db.session.query(Bug)
+                        flask_db.session.query(Bug.id)
                         .filter(Bug.id == tid, Bug.project_id == pid)
                         .first()
                         is not None
                     )
                 if tl == "badcase":
                     return (
-                        flask_db.session.query(BadCase)
+                        flask_db.session.query(BadCase.id)
                         .filter(BadCase.id == tid, BadCase.project_id == pid)
                         .first()
                         is not None
                     )
                 return (
-                    flask_db.session.query(TestCase)
+                    flask_db.session.query(TestCase.id)
                     .filter(TestCase.id == tid, TestCase.project_id == pid)
                     .first()
                     is not None
@@ -2589,6 +2589,7 @@ class ModifyTool(BaseTool):
                         project_id,
                         progress_callback=_progress,
                         ui_locale=loc,
+                        modifications=modifications,
                         tool_run_snapshot=_tool_run_snapshot,
                     )
                     modifications = self._sanitize_title_modifications(
@@ -2759,7 +2760,10 @@ class ModifyTool(BaseTool):
         tool_run_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """获取原始数据。按 modifications 按需加载，每次从 ORM/DB 读取。"""
-        if isinstance(tool_run_snapshot, dict):
+        # 有 modifications 时本次是修改预览/确认，跳过 tool_run_snapshot 缓存
+        # 否则可能拿到同轮会话中其他工具修改前的旧值，导致 diff 原值错误
+        has_pending_mods = isinstance(modifications, dict) and len(modifications) > 0
+        if not has_pending_mods and isinstance(tool_run_snapshot, dict):
             try:
                 from agents.tool_run_context import ToolRunStore
 
@@ -2996,29 +3000,68 @@ class ModifyTool(BaseTool):
         elif target == 'badcase':
             _prog(modify_tool_progress("querying_badcase", loc))
             from app import BadCase, ensure_badcase_card_link
+
+            flags = fetch_flags
+            if _modify_perf_detail_enabled():
+                print(
+                    f"[MODIFY] preview_fetch_flags badcase keys={list((modifications or {}).keys())} "
+                    f"load_comments={flags['load_comments']} load_nav_card={flags['load_nav_card']}",
+                    flush=True,
+                )
+
+            _t_bc = time.perf_counter()
             badcase = flask_db.session.query(BadCase).filter(
                 BadCase.id == target_id,
                 BadCase.project_id == project_id
             ).first()
+            _perf_mark("orm_badcase_query", _t_bc)
             
             if not badcase:
+                if perf_fetch:
+                    print(
+                        f"[PERF][modify_original_fetch] path=orm_badcase hit=0 "
+                        f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
+                        flush=True,
+                    )
                 return None
 
-            status_snap = self._authoritative_status_snap(
-                flask_db, "badcase", badcase.id, project_id, getattr(badcase, "status", None)
-            )
+            # ORM 刚加载的行，status 直接可用，无需再发 SQL 查 status
+            status_snap = self._snapshot_status_string(getattr(badcase, "status", None))
+            _perf_mark("status_orm", _t_bc)
+
+            if perf_fetch:
+                print(
+                    f"[PERF][modify_original_fetch] path=orm_badcase hit=1 "
+                    f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
+                    flush=True,
+                )
 
             # 仅补全已有映射（行上 card_id / Card.source_id），禁止在此自动新建 Card：
             # 否则会把孤儿 BadCase 绑到新卡，用户原「卡片 Tab」下列表会丢行。
-            repaired_cid = ensure_badcase_card_link(badcase, auto_create=False, commit=True)
+            repaired_cid = ensure_badcase_card_link(badcase, auto_create=False, commit=False)
             if repaired_cid is not None:
                 print(
                     f"[MODIFY] badcase id={badcase.id} card_id 已从已有 Card 补全为 {repaired_cid}",
                     flush=True,
                 )
-            nav_card_id = self._nav_card_pk_for_source_orm_row(
-                flask_db.session, "badcase", badcase, project_id
-            )
+            nav_card_id = None
+            if known_card_id not in (None, ""):
+                try:
+                    nav_card_id = int(known_card_id)
+                except (TypeError, ValueError):
+                    nav_card_id = None
+            if flags["load_nav_card"] and nav_card_id is None:
+                _t_nav = time.perf_counter()
+                # 优先复用 ensure_badcase_card_link 已查到的 card_id，减少 SQL 往返
+                if repaired_cid is not None:
+                    nav_card_id = int(repaired_cid)
+                else:
+                    nav_card_id = self._nav_card_pk_for_source_orm_row(
+                        flask_db.session, "badcase", badcase, project_id
+                    )
+                _perf_mark("nav_card_lookup", _t_nav)
+            elif perf_sink is not None:
+                perf_sink["nav_card_lookup_skipped"] = 0.0
             if nav_card_id is None:
                 print(
                     f"[MODIFY] badcase id={badcase.id} 仍无可用 card_id: "
@@ -3026,7 +3069,13 @@ class ModifyTool(BaseTool):
                     f"且无 Card.source_id 指向该记录（未自动建卡）",
                     flush=True,
                 )
-            _bc_comments = self._load_comment_records("badcase", badcase.id)
+            _bc_comments: List[Dict[str, Any]] = []
+            if flags["load_comments"]:
+                _t_cmt = time.perf_counter()
+                _bc_comments = self._load_comment_records("badcase", badcase.id)
+                _perf_mark("comment_records", _t_cmt)
+            elif perf_sink is not None:
+                perf_sink["comment_records_skipped"] = 0.0
             return {
                 'id': badcase.id,
                 'title': badcase.title,

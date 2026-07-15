@@ -2,13 +2,17 @@
 """火山方舟 Ark 多模态向量 API（/api/v3/embeddings/multimodal）。"""
 from __future__ import annotations
 
+import concurrent.futures
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 _DOUBAO_ARK_MULTIMODAL_MARKERS = (
     "doubao-embedding",
     "doubao-embed",
 )
+
+# 并行 embedding 最大并发数
+_ARK_EMBED_MAX_WORKERS = 8
 
 
 def is_doubao_ark_multimodal_embedding_model(model: str) -> bool:
@@ -57,6 +61,40 @@ def _parse_embedding_vector(body: Dict[str, Any]) -> List[float]:
     return [float(x) for x in vec]
 
 
+def _do_single_embed(
+    text: str,
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    timeout: float,
+    include_sample_image: bool,
+    sample_image_url: Optional[str],
+) -> List[float]:
+    """单条文本 embedding 请求（被并行池调用）。"""
+    from memory.qianfan_http_pool import qianfan_post_json
+
+    t = (text or "").strip() or " "
+    inp: List[Dict[str, Any]] = [{"type": "text", "text": t}]
+    if include_sample_image:
+        img_url = (sample_image_url or "").strip() or (
+            "https://ark-project.tos-cn-beijing.volces.com/images/view.jpeg"
+        )
+        inp.append({"type": "image_url", "image_url": {"url": img_url}})
+    payload = {"model": model, "input": inp}
+    status, body, err = qianfan_post_json(
+        "/embeddings/multimodal",
+        payload,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+    )
+    if err or status >= 400:
+        detail = err or body.get("error") or body.get("message") or body
+        raise RuntimeError(f"Ark multimodal embedding HTTP {status}: {detail}")
+    return _parse_embedding_vector(body)
+
+
 def embed_texts_ark_multimodal(
     texts: List[str],
     *,
@@ -68,11 +106,10 @@ def embed_texts_ark_multimodal(
     sample_image_url: Optional[str] = None,
 ) -> List[List[float]]:
     """
-    对每条文本单独请求 multimodal embedding（文本态）。
-    include_sample_image=True 时复现官方 curl：同一条 input 含 text + image_url（测图文融合耗时）。
+    并行请求 Ark multimodal embedding。
+    之前 for 循环逐条请求是性能瓶颈（16 条 batch 串行发 16 次网络往返 ~2.99s）。
+    改用 ThreadPoolExecutor 并发，利用 HTTP 连接池 keep-alive。
     """
-    from memory.qianfan_http_pool import qianfan_post_json
-
     key = (api_key or "").strip()
     if not key:
         raise RuntimeError("DOUBAO_API_KEY / ARK API key 未配置")
@@ -80,26 +117,27 @@ def embed_texts_ark_multimodal(
     if not m:
         raise RuntimeError("豆包 embedding model 未配置")
     base = (base_url or _default_ark_base_url()).strip().rstrip("/")
-    img_url = (sample_image_url or "").strip() or (
-        "https://ark-project.tos-cn-beijing.volces.com/images/view.jpeg"
-    )
 
-    out: List[List[float]] = []
-    for text in texts:
-        t = (text or "").strip() or " "
-        inp: List[Dict[str, Any]] = [{"type": "text", "text": t}]
-        if include_sample_image:
-            inp.append({"type": "image_url", "image_url": {"url": img_url}})
-        payload = {"model": m, "input": inp}
-        status, body, err = qianfan_post_json(
-            "/embeddings/multimodal",
-            payload,
-            api_key=key,
-            base_url=base,
-            timeout=timeout,
-        )
-        if err or status >= 400:
-            detail = err or body.get("error") or body.get("message") or body
-            raise RuntimeError(f"Ark multimodal embedding HTTP {status}: {detail}")
-        out.append(_parse_embedding_vector(body))
-    return out
+    if not texts:
+        return []
+
+    # 并行提交所有文本的 embedding 请求
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_ARK_EMBED_MAX_WORKERS
+    ) as pool:
+        futures = [
+            pool.submit(
+                _do_single_embed,
+                text,
+                api_key=key,
+                model=m,
+                base_url=base,
+                timeout=timeout,
+                include_sample_image=include_sample_image,
+                sample_image_url=sample_image_url,
+            )
+            for text in texts
+        ]
+
+    # 按原始顺序收集结果，result() 会等待并自动抛出异常
+    return [fut.result() for fut in futures]

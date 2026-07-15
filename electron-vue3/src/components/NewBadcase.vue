@@ -1333,6 +1333,33 @@ export default {
       scrollToDiffField('append_comment')
     }
 
+    /** 已从 DB 加载完整 badcase 后，校正 pending diff 中 stage 时点后的字段旧值与 DB 一致 */
+    const reconcilePendingOldFromLoadedBadcase = () => {
+      if (!pendingDiff.value?.modifications) return
+      for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
+        if (String(field).startsWith('_')) continue
+        if (!badcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
+        let bv = null
+        if (field === 'case_category' || field === 'classification' || field === 'category') {
+          bv = badcase.case_category
+        } else if (field === 'priority' || field === 'severity') {
+          bv = badcase.priority
+        } else if (badcase.hasOwnProperty(field)) {
+          bv = badcase[field]
+        } else {
+          continue
+        }
+        const bs = bv != null ? String(bv).trim() : ''
+        if (!bs) continue
+        const oldS = data.old != null ? String(data.old).trim() : ''
+        const newS = data.new != null ? String(data.new).trim() : ''
+        if (!newS || newS === bs) continue
+        if (oldS !== bs) {
+          data.old = bv
+        }
+      }
+    }
+
     const reloadPendingDiffFromSession = async () => {
       if (!props.embedded) return
       const showDiffMode = props.show_diff
@@ -2857,31 +2884,6 @@ export default {
         }
         clearPendingModifyIfNotThisBadcase()
         const dbBaselineForPending = isEdit.value ? captureDbBaselineForPendingPrune() : null
-        const reconcilePendingOldFromLoadedBadcase = () => {
-          if (!pendingDiff.value?.modifications) return
-          for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
-            if (String(field).startsWith('_')) continue
-            if (!badcase.hasOwnProperty(field) || !data || typeof data !== 'object' || !('new' in data)) continue
-            let bv = null
-            if (field === 'case_category' || field === 'classification' || field === 'category') {
-              bv = badcase.case_category
-            } else if (field === 'priority' || field === 'severity') {
-              bv = badcase.priority
-            } else if (badcase.hasOwnProperty(field)) {
-              bv = badcase[field]
-            } else {
-              continue
-            }
-            const bs = bv != null ? String(bv).trim() : ''
-            if (!bs) continue
-            const oldS = data.old != null ? String(data.old).trim() : ''
-            const newS = data.new != null ? String(data.new).trim() : ''
-            if (!newS || newS === bs) continue
-            if (oldS !== bs) {
-              data.old = bv
-            }
-          }
-        }
         reconcilePendingOldFromLoadedBadcase()
         if (showDiffModeForPrefill && pendingDiff.value?.modifications) {
           if (dbBaselineForPending) {
