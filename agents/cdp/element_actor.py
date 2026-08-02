@@ -681,3 +681,307 @@ class ElementActor:
             "duration_ms": int((time.perf_counter() - t0) * 1000),
             "page": page_info,
         }
+
+    # —— 以下动作对齐 OpenClaw Browser act kinds（Playwright 实现）——
+
+    async def hover(
+        self,
+        *,
+        ref: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        selector: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        timeout = timeout_ms or cdp_default_timeout_ms()
+        try:
+            node = await self.resolve_ref(ref, snapshot_id, selector)
+            loc = await self._locator_for_node(node)
+            await loc.hover(timeout=timeout)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_hover",
+                "ref": ref,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_hover"}
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_hover", "error": str(ex)}
+
+    async def scroll_into_view(
+        self,
+        *,
+        ref: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        selector: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        timeout = timeout_ms or cdp_default_timeout_ms()
+        try:
+            node = await self.resolve_ref(ref, snapshot_id, selector)
+            if node.backend_node_id is not None:
+                client = await self.session.cdp_session()
+                await client.send(
+                    "DOM.scrollIntoViewIfNeeded", {"backendNodeId": node.backend_node_id}
+                )
+            else:
+                loc = await self._locator_for_node(node)
+                await loc.scroll_into_view_if_needed(timeout=timeout)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_scroll",
+                "ref": ref,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_scroll"}
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_scroll", "error": str(ex)}
+
+    async def press(
+        self,
+        *,
+        key: str,
+        ref: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        selector: Optional[str] = None,
+        delay_ms: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        timeout = timeout_ms or cdp_default_timeout_ms()
+        k = (key or "").strip()
+        if not k:
+            return {"success": False, "error": "press 需要 key"}
+        try:
+            page = self.session.page
+            if ref or selector:
+                node = await self.resolve_ref(ref, snapshot_id, selector)
+                loc = await self._locator_for_node(node)
+                await loc.press(k, delay=delay_ms or 0, timeout=timeout)
+            else:
+                await page.keyboard.press(k, delay=delay_ms or 0)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_press",
+                "key": k,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_press"}
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_press", "error": str(ex)}
+
+    async def type_text(
+        self,
+        *,
+        text: str,
+        ref: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        selector: Optional[str] = None,
+        slowly: bool = False,
+        submit: bool = False,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """对齐 OpenClaw act:type（可 slowly / submit）。"""
+        t0 = time.perf_counter()
+        timeout = timeout_ms or cdp_default_timeout_ms()
+        try:
+            node = await self.resolve_ref(ref, snapshot_id, selector)
+            loc = await self._locator_for_node(node)
+            await loc.click(timeout=timeout)
+            if slowly:
+                await loc.type(str(text), delay=40, timeout=timeout)
+            else:
+                await loc.fill(str(text), timeout=timeout)
+            if submit:
+                await loc.press("Enter", timeout=timeout)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_type",
+                "ref": ref,
+                "slowly": slowly,
+                "submit": submit,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_type"}
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_type", "error": str(ex)}
+
+    async def select_option(
+        self,
+        *,
+        values: Optional[List[str]] = None,
+        ref: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        selector: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        timeout = timeout_ms or cdp_default_timeout_ms()
+        vals = [str(v) for v in (values or []) if str(v).strip()]
+        if not vals:
+            return {"success": False, "error": "select 需要 values"}
+        try:
+            node = await self.resolve_ref(ref, snapshot_id, selector)
+            loc = await self._locator_for_node(node)
+            await loc.select_option(vals if len(vals) > 1 else vals[0], timeout=timeout)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_select",
+                "values": vals,
+                "ref": ref,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_select"}
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_select", "error": str(ex)}
+
+    async def drag(
+        self,
+        *,
+        start_ref: Optional[str] = None,
+        end_ref: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        timeout = timeout_ms or cdp_default_timeout_ms()
+        if not start_ref or not end_ref:
+            return {"success": False, "error": "drag 需要 start_ref 与 end_ref"}
+        try:
+            a = await self.resolve_ref(start_ref, snapshot_id, None)
+            b = await self.resolve_ref(end_ref, snapshot_id, None)
+            loc_a = await self._locator_for_node(a)
+            loc_b = await self._locator_for_node(b)
+            await loc_a.drag_to(loc_b, timeout=timeout)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_drag",
+                "start_ref": start_ref,
+                "end_ref": end_ref,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_drag"}
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_drag", "error": str(ex)}
+
+    async def click_coords(
+        self,
+        *,
+        x: float,
+        y: float,
+        double_click: bool = False,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        try:
+            page = self.session.page
+            if double_click:
+                await page.mouse.dblclick(float(x), float(y))
+            else:
+                await page.mouse.click(float(x), float(y))
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_click_coords",
+                "x": x,
+                "y": y,
+                "double_click": double_click,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except Exception as ex:
+            return {
+                "success": False,
+                "tool": "cdp_click_coords",
+                "error": str(ex),
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+
+    async def evaluate_js(
+        self,
+        *,
+        fn: str,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """对齐 OpenClaw act:evaluate — 在页面执行 JS（表达式或函数体）。"""
+        t0 = time.perf_counter()
+        code = (fn or "").strip()
+        if not code:
+            return {"success": False, "error": "evaluate 需要 fn"}
+        try:
+            page = self.session.page
+            # 允许传箭头函数或表达式
+            result = await page.evaluate(code)
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_evaluate",
+                "result": result,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "page": await self.session.page_info(),
+            }
+        except Exception as ex:
+            return {
+                "success": False,
+                "tool": "cdp_evaluate",
+                "error": str(ex),
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+
+    async def resize_viewport(
+        self,
+        *,
+        width: int,
+        height: int,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        try:
+            w = max(200, min(int(width), 3840))
+            h = max(200, min(int(height), 2160))
+            await self.session.page.set_viewport_size({"width": w, "height": h})
+            await self.session.touch()
+            return {
+                "success": True,
+                "tool": "cdp_resize",
+                "width": w,
+                "height": h,
+                "session_id": self.session.session_id,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_resize", "error": str(ex)}
+
+    async def _locator_for_node(self, node: SnapshotNode):
+        page = self.session.page
+        if node.selector_hint:
+            return page.locator(node.selector_hint).first
+        role = (node.role or "generic").lower()
+        name = node.name or None
+        return page.get_by_role(role, name=name).first

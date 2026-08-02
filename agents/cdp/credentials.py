@@ -30,9 +30,6 @@ def load_credentials_file() -> Optional[Dict[str, str]]:
     return None
 
 
-    return None
-
-
 def _parse_login_configs_raw(raw: Any) -> List[Dict[str, Any]]:
     if not raw:
         return []
@@ -271,6 +268,7 @@ def load_credentials_from_project(project_id: int, url: str) -> Optional[Dict[st
     return {
         "username": picked.get("username"),
         "password": picked.get("password"),
+        "url": picked.get("url") or "",
         "note": picked.get("note", ""),
     }
 
@@ -283,17 +281,29 @@ def resolve_login_credentials(
     password: Optional[str] = None,
 ) -> Dict[str, Optional[str]]:
     u, p = username, password
+    login_url: Optional[str] = None
     if (not u or not p) and project_id:
         creds = load_credentials_from_project(project_id, url)
         if creds:
             u = u or creds.get("username")
             p = p or creds.get("password")
+            login_url = (creds.get("url") or "").strip() or None
     if not u or not p:
         creds = load_credentials_file()
         if creds:
             u = u or creds.get("username")
             p = p or creds.get("password")
-    return {"username": u, "password": p}
+            if not login_url:
+                login_url = (creds.get("url") or "").strip() or None
+    # 同域兜底：配置了账号但未写 login url 时，拼 #/login
+    if not login_url and url:
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme and parsed.netloc:
+                login_url = f"{parsed.scheme}://{parsed.netloc}/#/login"
+        except Exception:
+            pass
+    return {"username": u, "password": p, "url": login_url}
 
 
 def extract_credentials_from_text(text: Optional[str]) -> Dict[str, Optional[str]]:

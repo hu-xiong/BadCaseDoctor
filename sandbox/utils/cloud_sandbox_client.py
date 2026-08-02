@@ -26,11 +26,8 @@ class CloudSandboxHttpConfig:
             except Exception:
                 return default
 
-        # 如果环境变量未配置，默认使用当前云端沙箱地址，方便本地直接跑通
-        default_base_url = "http://117.72.33.38:5000"
-
         return CloudSandboxHttpConfig(
-            base_url=(os.getenv("SANDBOX_REMOTE_URL", "") or default_base_url).rstrip("/"),
+            base_url=(os.getenv("SANDBOX_REMOTE_URL", "") or "").rstrip("/"),
             token=os.getenv("SANDBOX_REMOTE_TOKEN", "") or "",
             tenant_id=os.getenv("SANDBOX_TENANT_ID", "") or "",
             timeout_s=_to_int(os.getenv("SANDBOX_REMOTE_TIMEOUT_S", "60"), 60),

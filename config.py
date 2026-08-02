@@ -9,9 +9,10 @@ load_dotenv(_PROJECT_ROOT / ".env")
 load_dotenv()  # 仍尝试当前工作目录，兼容旧习惯
 
 class Config:
-    SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-here')
+    # 密钥/连接串一律从环境变量或项目根 .env 读取；仓库内不放真实默认密钥。
+    SECRET_KEY = os.getenv('SECRET_KEY') or 'dev-only-change-me'
     # 主业务库：必须为 MySQL（app 启动时会校验 URI）。在 .env 中设置 DATABASE_URL；迁移/工具脚本如需 SQLite 见 scripts/migrate_sqlite_to_mysql.py
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'mysql+pymysql://root:hx123456@117.72.33.38:33106/bad_case')
+    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL') or ''
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # 新用户无项目时，从此模板项目克隆副本并关联到用户（见 POST /api/projects/ensure-default）
     SYSTEM_PROJECT_TEMPLATE_ID = int(os.getenv('SYSTEM_PROJECT_TEMPLATE_ID', '1'))
@@ -21,15 +22,15 @@ class Config:
     MAIL_PORT = int(os.getenv('MAIL_PORT', 587))
     MAIL_USE_TLS = os.getenv('MAIL_USE_TLS', 'true').lower() == 'true'
     MAIL_USE_SSL = os.getenv('MAIL_USE_SSL', 'false').lower() == 'true'
-    MAIL_USERNAME = os.getenv('MAIL_USERNAME', 'your-email@qq.com')
-    MAIL_PASSWORD = os.getenv('MAIL_PASSWORD', 'your-email-password')
-    MAIL_DEFAULT_SENDER = os.getenv('MAIL_DEFAULT_SENDER', 'your-email@qq.com')
+    MAIL_USERNAME = os.getenv('MAIL_USERNAME', '')
+    MAIL_PASSWORD = os.getenv('MAIL_PASSWORD', '')
+    MAIL_DEFAULT_SENDER = os.getenv('MAIL_DEFAULT_SENDER', '')
     REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
     REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
     REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', None)
     # ==================== Qwen (阿里云/通义千问) ====================
-    # API Key 配置
-    QWEN_API_KEY = os.getenv('QWEN_API_KEY', "sk-ae78f45927654500ab070de1addb4156")
+    # API Key 仅来自环境变量 / .env
+    QWEN_API_KEY = (os.getenv('QWEN_API_KEY') or '').strip()
     QWEN_API_URL = os.getenv('QWEN_API_URL', None)
     
     # 默认模型配置
@@ -58,14 +59,8 @@ class Config:
     QWEN_EXPLICIT_DISABLE_THINKING_BODY = _qedb not in ('0', 'false', 'no', 'off', '')
     
     # ==================== Qianfan (百度/文心一言) ====================
-    QIANFAN_API_KEY = os.getenv(
-        'QIANFAN_API_KEY',
-        'bce-v3/ALTAK-o11nAoKmuL7qDdZL3CQMD/62c7691269aa3fb33674cdb022f17a6f03280078'
-    )
-    QIANFAN_SECRET_KEY = os.getenv(
-        'QIANFAN_SECRET_KEY',
-        'ALTAKxhlfvE2A08OyAYx2xKieC'
-    )
+    QIANFAN_API_KEY = (os.getenv('QIANFAN_API_KEY') or '').strip()
+    QIANFAN_SECRET_KEY = (os.getenv('QIANFAN_SECRET_KEY') or '').strip()
     QIANFAN_USE_BEARER_TOKEN = os.getenv('QIANFAN_USE_BEARER_TOKEN', 'True').lower() == 'true'
     
     # 千帆模型配置
@@ -85,8 +80,7 @@ class Config:
     OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
 
     # ==================== DeepSeek（官方 OpenAI 兼容 API）====================
-    # 环境变量 DEEPSEEK_API_KEY 优先；未设置时用下方默认（与 Qwen/千帆 同项目习惯，提交 Git 前请改回空或仅放 .env）
-    DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY', 'sk-fb38f3d033be4f2bb949bd6765d64157').strip()
+    DEEPSEEK_API_KEY = (os.getenv('DEEPSEEK_API_KEY') or '').strip()
     DEEPSEEK_API_BASE_URL = os.getenv('DEEPSEEK_API_BASE_URL', 'https://api.deepseek.com').strip().rstrip('/')
     # 默认 deepseek-v4-pro；可用 DEEPSEEK_V4_MODEL 覆盖
     DEEPSEEK_V4_MODEL = os.getenv('DEEPSEEK_V4_MODEL', 'deepseek-v4-pro').strip()
@@ -134,12 +128,12 @@ class Config:
     REDIS_USERNAME=os.getenv('REDIS_USERNAME', None)
 
     # Stripe 支付配置
-    STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_xxx')  # 替换为真实密钥
-    STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', 'whsec_xxx')  # Webhook 签名密钥
+    STRIPE_SECRET_KEY = (os.getenv('STRIPE_SECRET_KEY') or '').strip()
+    STRIPE_WEBHOOK_SECRET = (os.getenv('STRIPE_WEBHOOK_SECRET') or '').strip()
 
     # ==================== GLM (智谱 AI/智谱清言) ====================
-    ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY', 'b6185f3bac97489da843602537da8cec.cFBNLM2wRxb8lBwJ')
-        
+    ZHIPU_API_KEY = (os.getenv('ZHIPU_API_KEY') or '').strip()
+
     # 可选模型列表：
     # - glm-4-flash: 快速响应（文本对话，默认）
     # - glm-5: 强推理模型（复杂推理、Text2SQL）
@@ -149,15 +143,49 @@ class Config:
     ZHIPU_TEMPERATURE = float(os.getenv('ZHIPU_TEMPERATURE', '0.7'))
     ZHIPU_ENABLE_THINKING = os.getenv('ZHIPU_ENABLE_THINKING', 'true').lower() == 'true'
 
-    # ==================== Long-term Memory (ES Vector) ====================
+    # ==================== Long-term Memory (mem0) ====================
     # 总开关：默认关闭；开启后会在 ReAct 上下文中注入 long_memory，并开放 /api/memory/* 接口
     LONG_MEMORY_ENABLED = os.getenv("LONG_MEMORY_ENABLED", "false").lower() == "true"
+    # mem0 本地向量库（Qdrant on_disk，无需单独 Docker）
+    MEM0_COLLECTION = os.getenv("MEM0_COLLECTION", "bdc_long_memory").strip() or "bdc_long_memory"
+    _mem0_qpath = os.getenv("MEM0_QDRANT_PATH", "").strip()
+    MEM0_QDRANT_PATH = _mem0_qpath or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "mem0_qdrant"
+    )
+    _mem0_hist = os.getenv("MEM0_HISTORY_DB", "").strip()
+    MEM0_HISTORY_DB = _mem0_hist or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "mem0_history.db"
+    )
+    # 对话结束后用 LLM 自动抽取记忆；未显式设置时跟随 LONG_MEMORY_ENABLED
+    _mem0_auto = os.getenv("MEM0_AUTO_CAPTURE", "").strip().lower()
+    if _mem0_auto in ("1", "true", "yes", "on"):
+        MEM0_AUTO_CAPTURE = True
+    elif _mem0_auto in ("0", "false", "no", "off"):
+        MEM0_AUTO_CAPTURE = False
+    else:
+        MEM0_AUTO_CAPTURE = LONG_MEMORY_ENABLED
+    # 抽取用 LLM（openai-compatible）；默认复用 DashScope/Qwen
+    MEM0_LLM_MODEL = (
+        os.getenv("MEM0_LLM_MODEL", "").strip()
+        or DASHSCOPE_MODEL
+        or "qwen-plus"
+    )
+    MEM0_LLM_BASE_URL = (
+        os.getenv("MEM0_LLM_BASE_URL", "").strip()
+        or DASHSCOPE_COMPAT_BASE_URL
+    )
+    MEM0_LLM_API_KEY = (
+        os.getenv("MEM0_LLM_API_KEY", "").strip()
+        or DASHSCOPE_API_KEY
+        or QWEN_API_KEY
+        or OPENAI_API_KEY
+    )
 
     # Elasticsearch 连接（向量检索 / 文档索引）
     # 支持 ES_URL=http(s)://host:port 或 ES_HOST/ES_PORT；鉴权可用 ES_API_KEY 或 ES_USERNAME/ES_PASSWORD
     ES_URL = os.getenv("ES_URL", "").strip()
-    ES_HOST = os.getenv("ES_HOST", "117.72.33.38").strip()
-    ES_PORT = int(os.getenv("ES_PORT", "19200"))
+    ES_HOST = os.getenv("ES_HOST", "127.0.0.1").strip()
+    ES_PORT = int(os.getenv("ES_PORT", "9200"))
     ES_USERNAME = os.getenv("ES_USERNAME", "").strip()
     ES_PASSWORD = os.getenv("ES_PASSWORD", "").strip()
     ES_API_KEY = os.getenv("ES_API_KEY", "").strip()
@@ -183,7 +211,7 @@ class Config:
     ES_INDEX_USER_DOC_PREFIX = os.getenv("ES_INDEX_USER_DOC_PREFIX", "udoc_").strip() or "udoc_"
     ES_INDEX_SYSTEM_DOC_PREFIX = os.getenv("ES_INDEX_SYSTEM_DOC_PREFIX", "sdoc_").strip() or "sdoc_"
 
-    # 长期记忆向量索引（默认 bdc_dev_long_memory；勿在后缀里重复 bdc）
+    # 已废弃：长期记忆改走 mem0；保留变量以免旧 .env / 脚本引用报错
     _es_lm = os.getenv("ES_LONG_MEMORY_INDEX", "").strip()
     ES_LONG_MEMORY_INDEX = _es_lm or f"{ES_INDEX_PREFIX}long_memory"
 
@@ -292,7 +320,7 @@ class Config:
     # 短关键词 BM25 只查 title（比扫 search_text 快）
     # 0=禁用「只搜 title」；混合/全向量路径均用 title+search_text
     GREP_ES_BM25_TITLE_ONLY_MAX_CHARS = int(os.getenv("GREP_ES_BM25_TITLE_ONLY_MAX_CHARS", "0"))
-    GREP_ES_SEARCH_TIMEOUT_S = float(os.getenv("GREP_ES_SEARCH_TIMEOUT_S", "2"))
+    GREP_ES_SEARCH_TIMEOUT_S = float(os.getenv("GREP_ES_SEARCH_TIMEOUT_S", "10"))
     # 有关键词且走 ES 时跳过全项目 plan_tree 查询（省 ~100ms+ MySQL）
     # 关键词走 ES 时：minimal plan_tree 与 hybrid(embed+ES) 并行，避免 plan_tree+hybrid 串行叠满 ~3s
     GREP_PARALLEL_ES_PLAN_TREE = os.getenv("GREP_PARALLEL_ES_PLAN_TREE", "true").lower() == "true"
@@ -356,10 +384,10 @@ class Config:
 
     # ==================== MinIO（通用文件上传：/upload、富文本附件、头像等）====================
     # 后续若换独立文件服务，可改环境变量或只替换上传逻辑，仍建议保留此处为单一配置源。
-    MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://117.72.33.38:9901").strip().rstrip("/")
-    MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin")
-    MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "hxReligi12.")
-    MINIO_BUCKET_NAME = os.getenv("MINIO_BUCKET_NAME", "apaas-root")
+    MINIO_ENDPOINT = (os.getenv("MINIO_ENDPOINT") or "").strip().rstrip("/")
+    MINIO_ACCESS_KEY = (os.getenv("MINIO_ACCESS_KEY") or "").strip()
+    MINIO_SECRET_KEY = (os.getenv("MINIO_SECRET_KEY") or "").strip()
+    MINIO_BUCKET_NAME = (os.getenv("MINIO_BUCKET_NAME") or "apaas-root").strip()
     _minio_prefix = os.getenv("MINIO_SAAS_FILE_PATH", "saas_qa_file").strip().strip("/")
     MINIO_SAAS_FILE_PATH = f"{_minio_prefix}/" if _minio_prefix else ""
     MINIO_MAX_FILE_SIZE = int(os.getenv("MINIO_MAX_FILE_SIZE", str(524288000)))  # 默认 500MB，与历史 app 一致
@@ -387,7 +415,7 @@ class Config:
         "yes",
         "on",
     )
-    CDP_HEADLESS = (os.getenv("CDP_HEADLESS", "1") or "1").strip().lower() in (
+    CDP_HEADLESS = (os.getenv("CDP_HEADLESS", "0") or "0").strip().lower() in (
         "1",
         "true",
         "yes",

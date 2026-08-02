@@ -5,7 +5,7 @@
   python sandbox/sandbox_cleanup.py
 
 环境变量:
-  SANDBOX_REMOTE_URL    沙箱 base URL（默认 http://117.72.33.38:5000）
+  SANDBOX_REMOTE_URL    沙箱 base URL（必填）
   SANDBOX_REMOTE_TOKEN  鉴权 Bearer（云端开鉴权时必填）
   SANDBOX_TENANT_ID     只清理该租户；不设则清理 default
   SANDBOX_CLEANUP_KEEP_LAST   保留最近 N 个版本（默认 10）
@@ -29,6 +29,9 @@ def main():
     from sandbox.utils.cloud_sandbox_client import CloudSandboxHttpConfig, cleanup_remote
 
     cfg = CloudSandboxHttpConfig.from_env()
+    if not cfg.base_url:
+        print("请设置 SANDBOX_REMOTE_URL", file=sys.stderr)
+        raise SystemExit(2)
     keep_last = _int_env("SANDBOX_CLEANUP_KEEP_LAST", 10)
     max_age_hours = _int_env("SANDBOX_CLEANUP_MAX_AGE_HOURS", 72)
     all_tenants = (os.getenv("SANDBOX_CLEANUP_ALL_TENANTS") or "").strip().lower() in ("1", "true", "yes")

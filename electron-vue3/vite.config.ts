@@ -18,6 +18,8 @@ const devApiProxy = {
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Electron file:// 加载需要相对资源路径
+  base: './',
   plugins: [vue()],
   server: {
     port: 5173,

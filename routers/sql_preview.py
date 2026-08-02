@@ -37,7 +37,7 @@ def api_sql_preview():
             - sqlite: { "path": "/path/to/db.sqlite" }
             - mysql: { "host": "...", "port": 3306, "user": "...", "password": "...", "database": "..." }
         sandbox: dict - 云端沙箱配置（用于上传子集与执行预览）
-            - base_url: "http://117.72.33.38:5000"
+            - base_url: "http://your-sandbox-host:5000"
             - token: "..."（可选）
             - tenant_id: "..."（可选）
 

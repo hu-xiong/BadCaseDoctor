@@ -38,9 +38,9 @@ def _mk_es_client(cfg: ESConfig):
 
 class ESLongMemoryStore:
     """
-    ES 向量长期记忆：
-    - 自动建索引（首次写入时按 embedding 维度创建 mapping）
-    - 写入/upsert、向量检索、列表、启停、删除、反馈
+    【已废弃用于长期记忆】业务长期记忆已迁移至 mem0（见 memory/long_memory_manager.py）。
+    本类仍保留 ES 向量 CRUD 实现，供参考或临时脚本；ESConfig / _mk_es_client 仍被
+    grep 工作项索引等模块复用。
     """
 
     def __init__(self, es_cfg: ESConfig, mem_cfg: LongMemoryConfig):

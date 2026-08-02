@@ -37,6 +37,15 @@ def test_explicit_off():
     assert out["should_open"] is False
 
 
+def test_advise_only_how_to_test():
+    out = detect_cdp_test_intent(
+        user_input="这个登录用例怎么测？",
+        tool_action="",
+    )
+    assert out["should_open"] is False
+    assert out.get("reason") == "advise_only"
+
+
 def test_extract_testcase_ids():
     ids = extract_testcase_ids_from_context({
         "first_testcase_id": 101,

@@ -3,7 +3,7 @@
 
 在项目根目录执行: python scripts/oneclick_ssh.py
 可选环境变量:
-  SANDBOX_SSH=root@117.72.33.38
+  SANDBOX_SSH=root@your-host
   SANDBOX_SERVER_TOKEN=xxx  # 会透传到云端，开启鉴权
   SANDBOX_AUTH_REQUIRED=true
   SANDBOX_RATE_RPM / SANDBOX_RATE_BURST / SANDBOX_MAX_DB_MB  # 限流与上传限制
@@ -17,7 +17,10 @@ import shutil
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
-    ssh = os.getenv("SANDBOX_SSH", "root@117.72.33.38")
+    ssh = (os.getenv("SANDBOX_SSH") or "").strip()
+    if not ssh:
+        print("请设置 SANDBOX_SSH，例如: SANDBOX_SSH=root@your-host", file=sys.stderr)
+        raise SystemExit(2)
 
     print("=" * 60)
     print("沙箱一键（会提示输入 SSH 密码）")

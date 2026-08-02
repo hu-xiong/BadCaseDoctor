@@ -183,7 +183,7 @@
 <script setup>
 import { ref, reactive, onMounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getProjects } from '../api.js'
+import { getProjects, BACKEND_BASE_URL } from '../api.js'
 import user, { logout } from '../store/user.js'
 import TypewriterText from './TypewriterText.vue'
 
@@ -229,7 +229,7 @@ async function sendMessage() {
   sending.value = true
   try {
     // 调用真实的后端 ReAct 接口
-    const response = await fetch('http://localhost:5000/api/agent/react', {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/agent/react`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'

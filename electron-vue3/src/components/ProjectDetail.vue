@@ -510,6 +510,7 @@
             :projectId="Number(projectId)"
             :project-display-name="projectName || ''"
             :plan-id="selectedPlan"
+            :diagnostic-evidence="diagnosticEvidenceBySession[String(currentSession)] || null"
             @title-updated="handleTitleUpdated"
           />
           <div v-else class="chat-empty-placeholder">
@@ -1069,6 +1070,18 @@ export default {
     const terminalCtl = ref(null)
     const embeddedTerminalWorkspaceRef = ref(null)
     provide('terminalCtl', terminalCtl)
+
+    /** 对话区「在终端执行」：展开底部嵌入终端并聚焦 */
+    const ensureBottomTerminalVisible = async () => {
+      showTerminal.value = true
+      await nextTick()
+      try {
+        terminalCtl.value?.focusTerminal?.()
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    provide('ensureBottomTerminalVisible', ensureBottomTerminalVisible)
 
     const { localGoProxyOk, localGoProxyLastError, pingLocalGoProxy } = useLocalGoProxyStatus()
     provide('localGoProxyOk', localGoProxyOk)
@@ -2419,8 +2432,8 @@ const totalCards = ref(0)
               const sid = entityIdStr(localCard.source_id)
               if (sid && /^\d+$/.test(sid)) {
                 if (await detailOk(sid)) return sid
-                // detailOk 只查本地列表，不调 API；本地列表不存在时仍用 source_id
-                return sid
+                // 本地列表无此 source_id 时不要盲信（可能是跨项目脏关联），避免打开错行 403
+                return null
               }
             }
           }
@@ -3182,6 +3195,9 @@ const totalCards = ref(0)
     }
     provide('openAiComposerPrefill', openAiComposerPrefill)
 
+    /** sessionId → 诊断证据（用例失败步骤等），供聊天面板带入 Agent */
+    const diagnosticEvidenceBySession = ref({})
+
     async function openDiagnosticTerminal(opts) {
       showTerminal.value = true
       showAIAssistant.value = true
@@ -3190,6 +3206,13 @@ const totalCards = ref(0)
         await createNewSession()
       }
       await nextTick()
+      const sid = currentSession.value
+      if (opts && opts.evidence && sid != null) {
+        diagnosticEvidenceBySession.value = {
+          ...diagnosticEvidenceBySession.value,
+          [String(sid)]: opts.evidence,
+        }
+      }
       chatComposerPreset.value = { token: Date.now(), text }
     }
     provide('openDiagnosticTerminal', openDiagnosticTerminal)
@@ -10330,6 +10353,19 @@ const totalCards = ref(0)
         explicitEcStr = entityIdStr(explicitCidRaw)
         if (explicitEcStr && /^\d+$/.test(explicitEcStr) && Array.isArray(cards.value)) {
           cardRow = cards.value.find((c) => sameEntityId(c.id, explicitEcStr)) || null
+          // Card.source_id 与本次修改的源表 id 不一致时，禁止用该卡跳转（脏关联会打开错项目行 → 403）
+          if (cardRow) {
+            const sid = entityIdStr(cardRow.source_id)
+            if (sid && /^\d+$/.test(sid) && !sameEntityId(sid, ridStr)) {
+              logListNav('cardRowRejectedSourceMismatch', {
+                navTarget: nt,
+                recordId: ridStr,
+                cardId: explicitEcStr,
+                cardSourceId: sid
+              })
+              cardRow = null
+            }
+          }
         }
       }
       // 显式 card_id 在本地找不到时，尝试用 recordId 匹配卡片 source_id（dtop.card_id 可能不准确）
@@ -10611,6 +10647,24 @@ const totalCards = ref(0)
             if (!skipListFetchBatch) {
               await awaitCoalescedFetchBadcasesForModifyList()
             }
+
+            // 跳过 target_id 精度丢失或实体已被删除的无效记录（本地缓存中找不到）
+            const entityExistsLocally = (tgt, eid) => {
+              const idStr = entityIdStr(eid)
+              if (!idStr) return false
+              if (tgt === 'badcase' && Array.isArray(badcases.value)) {
+                return badcases.value.some((b) => sameEntityId(b.id, idStr))
+              }
+              if (tgt === 'bug' && Array.isArray(bugs.value)) {
+                return bugs.value.some((b) => sameEntityId(b.id, idStr))
+              }
+              if (tgt === 'testcase' && Array.isArray(testcases.value)) {
+                return testcases.value.some((tc) => sameEntityId(tc.id, idStr))
+              }
+              // card 不做验证
+              return true
+            }
+
             // 批量路径不走递归：直接统一设置 highlight/tab/scroll
             const firstItem = items.find((x) => x.executed !== true) || items[0]
             if (firstItem && firstItem.targetId) {
@@ -10621,6 +10675,24 @@ const totalCards = ref(0)
                 else if (tgt === 'badcase') urlContentType.value = 'badcase'
                 else if (tgt === 'testcase') urlContentType.value = 'test_case'
                 else if (tgt === 'card') urlContentType.value = null
+
+                // 若实体不在本地缓存中（target_id 精度丢失/实体已删除），跳过导航与打开编辑器
+                if (!entityExistsLocally(tgt, hId)) {
+                  console.warn('[MODIFY] 跳过本地不存在的实体（可能 target_id 精度丢失或已删除）:', {
+                    target: tgt,
+                    targetId: hId
+                  })
+                  // 自动清理孤立记录，避免每 15s 轮询重复触发
+                  resolveDiffReviewState({
+                    target: tgt,
+                    targetId: hId,
+                    action: 'reject'
+                  }).catch((e) =>
+                    console.warn('[MODIFY] 清理孤立 diff review 失败:', e)
+                  )
+                  return
+                }
+
                 highlightRowId.value = hId
                 // 若仅有详情字段变更，打开详情编辑器
                 const detailOnlyItem = items.find((x) => {
@@ -12335,6 +12407,7 @@ const totalCards = ref(0)
       clearMessages,
       // 会话管理
       currentSession,
+      diagnosticEvidenceBySession,
       sessions,
       showHistory,
       sessionHistory,

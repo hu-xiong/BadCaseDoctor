@@ -496,7 +496,17 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
   }
   if (_obsIdx != null && runningStep) {
     const tn = observationTool || (outputData && typeof outputData === 'object' ? outputData.tool : '')
-    if (tn && ['grep', 'create', 'modify', 'delete', 'search', 'database_query'].includes(String(tn))) {
+    // 已挂 grep 定位结果的步骤勿被后续 modify observation 改名，避免「定位结果」出现在 modify 折叠下
+    const _hasGrepNav =
+      runningStep.grepNavigation &&
+      runningStep.grepNavigation.type === 'multiple' &&
+      Array.isArray(runningStep.grepNavigation.items) &&
+      runningStep.grepNavigation.items.length > 0
+    if (
+      tn &&
+      ['grep', 'create', 'modify', 'delete', 'search', 'database_query'].includes(String(tn)) &&
+      !(_hasGrepNav && String(tn).toLowerCase() !== 'grep')
+    ) {
       runningStep.title = String(tn)
     }
   }
@@ -1250,13 +1260,23 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
         aiMessage.steps,
         resolveStreamStepIndex
       )
-      let _grepStepForMeta =
-        _giNav != null
-          ? aiMessage.steps[_giNav]
-          : [...(aiMessage.steps || [])].reverse().find(
-              (s) => s && (s.title === 'grep' || (s.title && String(s.title).includes('grep')))
-            )
-      if (!_grepStepForMeta && runningStep) _grepStepForMeta = runningStep
+      const _pickGrepStep = (preferIdx) => {
+        const steps = aiMessage.steps || []
+        const byTitle = [...steps]
+          .reverse()
+          .find((s) => s && (s.title === 'grep' || String(s.title || '').includes('grep')))
+        if (preferIdx != null && steps[preferIdx]) {
+          const cand = steps[preferIdx]
+          const title = String(cand.title || '').toLowerCase()
+          // index 错位到 modify 时，改挂到真正的 grep 步
+          if (title === 'grep' || title.includes('grep') || !title || title === 'tool') {
+            return cand
+          }
+          if (byTitle) return byTitle
+        }
+        return byTitle || (runningStep && String(runningStep.title || '').includes('grep') ? runningStep : null) || runningStep
+      }
+      let _grepStepForMeta = _pickGrepStep(_giNav)
       if (_grepStepForMeta && isGrepEmptyHitsPayload(outputData, 'grep')) {
         _grepStepForMeta.grepEmptyHits = true
       }
@@ -1278,14 +1298,11 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
             aiMessage.steps,
             resolveStreamStepIndex
           )
-          let grepStep =
-            _gi != null
-              ? aiMessage.steps[_gi]
-              : [...(aiMessage.steps || [])].reverse().find(
-                  (s) => s && (s.title === 'grep' || (s.title && String(s.title).includes('grep')))
-                )
-          if (!grepStep && runningStep) grepStep = runningStep
+          const grepStep = _pickGrepStep(_gi)
           if (grepStep) {
+            if (!String(grepStep.title || '').toLowerCase().includes('grep')) {
+              grepStep.title = 'grep'
+            }
             try {
               grepStep.grepNavigation = JSON.parse(JSON.stringify(navigationData))
             } catch {

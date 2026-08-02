@@ -56,6 +56,11 @@ export function createReactAiMessageState(id) {
     /** SSE client_action kind=terminal_exec：待本机执行队列（handleReactAgentMode 尾部消费） */
     pendingTerminalExecQueue: [],
     /** 终端子 Agent 卡片（展示命令与执行状态） */
-    clientTerminalExecCards: []
+    clientTerminalExecCards: [],
+    /** SSE client_action kind=browser_local：本机 Chrome 启停队列 */
+    pendingBrowserLocalQueue: [],
+    clientBrowserLocalCards: [],
+    /** SSE lane=cdp_test_task：浏览器测试任务进度卡片 */
+    cdpTestTaskCards: []
   }
 }

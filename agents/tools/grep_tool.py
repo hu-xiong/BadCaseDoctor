@@ -507,6 +507,39 @@ class GrepTool(BaseTool):
                         except Exception as _hex:
                             print(f"[GREP-HYBRID] 跳过: {_hex}", flush=True)
 
+                        # 全字段 SQL 全表扫已移除：检索仅 ES hybrid + recent_created 兜底
+                        # → 但 ES 不可用时（无 elasticsearch 包/索引不存在/连接失败）需要 SQL 回退
+                        _es_available = _hybrid_meta.get("es_ran") if isinstance(_hybrid_meta, dict) else False
+                        if not _es_available and keywords and str(keywords).strip():
+                            _need_sql_bug = raw_target in ("all", "bug") and not bug_list
+                            _need_sql_bc  = raw_target in ("all", "badcase") and not badcase_list
+                            if _need_sql_bug or _need_sql_bc:
+                                _progress(grep_tool_progress("phase1_sql_fallback", loc))
+                                _t_sql = time.perf_counter()
+                                print(
+                                    f"[GREP-SQL-FALLBACK] ES 不可用，回落 SQL 全字段检索: "
+                                    f"bug={_need_sql_bug} badcase={_need_sql_bc} keywords={keywords!r}",
+                                    flush=True,
+                                )
+                                if _need_sql_bug:
+                                    try:
+                                        _sql_bugs = await self._get_bug_list(project_id, keywords=keywords, status=status, plan_id=plan_id, assignee=assignee)
+                                        if _sql_bugs:
+                                            bug_list = _sql_bugs
+                                            _hybrid_bug = True
+                                    except Exception as _sql_bug_e:
+                                        print(f"[GREP-SQL-FALLBACK] bug SQL 回退失败: {_sql_bug_e}", flush=True)
+                                if _need_sql_bc:
+                                    try:
+                                        _sql_bcs = await self._get_badcase_list(project_id, keywords=keywords, status=status, plan_id=plan_id, assignee=assignee)
+                                        if _sql_bcs:
+                                            badcase_list = _sql_bcs
+                                            _hybrid_bc = True
+                                    except Exception as _sql_bc_e:
+                                        print(f"[GREP-SQL-FALLBACK] badcase SQL 回退失败: {_sql_bc_e}", flush=True)
+                                _grep_seg["sql_fallback_ms"] = round((time.perf_counter() - _t_sql) * 1000.0, 1)
+                                _progress(grep_tool_progress("phase1_sql_fallback_done", loc))
+
                         if _hybrid_meta.get("es_ran"):
                             _es_hits_n = int(_hybrid_meta.get("hits_n") or 0)
                             _pre_rr_bug = len(bug_list or [])
@@ -2087,6 +2120,28 @@ class GrepTool(BaseTool):
             print(f"[GREP] 查询所有 BadCase，project_id={project_id}")
             badcases = query.order_by(BadCase.created_at.desc()).limit(100).all()
         else:
+            badcases = query.order_by(BadCase.created_at.desc()).limit(20).all()
+
+        # 与 Bug 对齐：当前侧栏迭代子树无命中时，回退全项目关键词检索
+        if (
+            not badcases
+            and _plan_scope
+            and (keyword_list or (assignee and str(assignee).strip()))
+            and not status
+        ):
+            print(
+                "[GREP] 计划子树内无 BadCase 命中，回退为全项目按关键词/负责人检索"
+            )
+            query = db.session.query(BadCase).filter_by(project_id=project_id)
+            query = self._apply_entity_keyword_filter(
+                query,
+                BadCase,
+                "badcase",
+                keywords,
+                keyword_list,
+                assignee=assignee,
+                assignee_str_col=BadCase.assignee,
+            )
             badcases = query.order_by(BadCase.created_at.desc()).limit(20).all()
         
         result = []

@@ -37,9 +37,11 @@ def sync_db_to_cloud():
     - db_path: 覆盖默认 instance/badcase_doctor.db
     """
     cfg = CloudSandboxHttpConfig.from_env()
-    # 如果环境变量未配置，默认使用当前云端沙盒地址，确保可用
     if not cfg.base_url:
-        cfg.base_url = "http://117.72.33.38:5000"
+        return jsonify({
+            "success": False,
+            "error": "SANDBOX_REMOTE_URL is not configured",
+        }), 400
     data = request.get_json(silent=True) or {}
 
     tenant_id = (data.get("tenant_id") or "").strip()

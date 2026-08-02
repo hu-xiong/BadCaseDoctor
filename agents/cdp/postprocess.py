@@ -69,6 +69,19 @@ async def enrich_cdp_observation(
                 )
                 if isinstance(result_context, dict) and result_context.get("cdp_test_run"):
                     observation["cdp_test_run"] = result_context["cdp_test_run"]
+
+            # testcase 模式：session/navigate/login 后自动跑用例 steps
+            from agents.cdp.auto_run_testcase import maybe_auto_run_testcases
+
+            observation = await maybe_auto_run_testcases(
+                engine,
+                observation,
+                action=act,
+                params=par,
+                project_id=project_id,
+                plan_id=plan_id,
+                result_context=result_context,
+            )
     except Exception:
         pass
 

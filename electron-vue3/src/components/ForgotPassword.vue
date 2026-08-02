@@ -4,7 +4,7 @@
     <div class="forgot-password-card">
       <div class="text-center mb-4">
         <h2 class="text-primary">忘记密码</h2>
-        <p class="text-muted">请输入您的邮箱地址，我们将发送重置链接</p>
+        <p class="text-muted">请输入您的邮箱地址，我们将发送重置验证码</p>
       </div>
       
       <form @submit.prevent="handleForgotPassword">
@@ -22,7 +22,7 @@
         
         <div class="d-grid gap-2">
           <button type="submit" class="btn btn-primary" :disabled="loading">
-            {{ loading ? '发送中...' : '发送重置链接' }}
+            {{ loading ? '发送中...' : '发送验证码' }}
           </button>
         </div>
       </form>
@@ -39,6 +39,7 @@
 <script>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { forgotPassword } from '../api.js'
 
 export default {
   name: 'ForgotPassword',
@@ -53,12 +54,15 @@ export default {
     const handleForgotPassword = async () => {
       loading.value = true
       try {
-        // 模拟发送重置链接
-        await new Promise(resolve => setTimeout(resolve, 1000))
-        alert('重置链接已发送到您的邮箱')
-        router.push('/login')
+        const res = await forgotPassword({ email: form.value.email })
+        if (res?.data?.success === false) {
+          throw new Error(res?.data?.error || '发送失败')
+        }
+        alert(res?.data?.message || '验证码已发送到您的邮箱')
+        router.push({ path: '/reset-password', query: { email: form.value.email } })
       } catch (error) {
         console.error('发送重置链接失败:', error)
+        alert(error?.response?.data?.error || error?.message || '发送失败')
       } finally {
         loading.value = false
       }
@@ -97,176 +101,19 @@ export default {
 }
 
 @keyframes gradientShift {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
 }
 
 .forgot-password-card {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  border-radius: 20px;
+  background: white;
   padding: 40px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+  border-radius: 15px;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
   width: 100%;
   max-width: 400px;
   position: relative;
   z-index: 1;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  animation: slideIn 0.6s ease-out;
 }
-
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateY(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.forgot-password-card h2 {
-  color: #333;
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-
-.forgot-password-card p {
-  color: #666;
-  margin-bottom: 30px;
-}
-
-.form-label {
-  font-weight: 500;
-  color: #333;
-  margin-bottom: 8px;
-}
-
-.form-control {
-  border: 2px solid #e1e5e9;
-  border-radius: 10px;
-  padding: 12px 16px;
-  font-size: 14px;
-  transition: all 0.3s ease;
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.form-control:focus {
-  border-color: #667eea;
-  box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
-  outline: none;
-}
-
-.btn-primary {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border: none;
-  border-radius: 10px;
-  padding: 12px 24px;
-  font-weight: 500;
-  transition: all 0.3s ease;
-}
-
-.btn-primary:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-}
-
-.btn-primary:disabled {
-  transform: none;
-  box-shadow: none;
-}
-
-.text-decoration-none {
-  color: #667eea;
-  transition: color 0.3s ease;
-}
-
-.text-decoration-none:hover {
-  color: #764ba2;
-}
-
-.text-center {
-  text-align: center;
-}
-
-.mb-4 {
-  margin-bottom: 1.5rem;
-}
-
-.mb-3 {
-  margin-bottom: 1rem;
-}
-
-.mt-3 {
-  margin-top: 1rem;
-}
-
-.d-grid {
-  display: grid;
-}
-
-.gap-2 {
-  gap: 0.5rem;
-}
-
-.text-muted {
-  color: #6c757d;
-}
-
-.text-primary {
-  color: #667eea;
-}
-
-.btn {
-  padding: 8px 16px;
-  border-radius: 6px;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.2s ease;
-  text-decoration: none;
-  display: inline-block;
-}
-
-.btn:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
-}
-
-.form-label {
-  display: inline-block;
-  margin-bottom: 0.5rem;
-  font-weight: 500;
-}
-
-.form-control {
-  display: block;
-  width: 100%;
-  padding: 0.375rem 0.75rem;
-  font-size: 1rem;
-  font-weight: 400;
-  line-height: 1.5;
-  color: #495057;
-  background-color: #fff;
-  background-clip: padding-box;
-  border: 1px solid #ced4da;
-  border-radius: 0.25rem;
-  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
-}
-
-.form-control:focus {
-  color: #495057;
-  background-color: #fff;
-  border-color: #667eea;
-  outline: 0;
-  box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
-}
-</style> 
+</style>

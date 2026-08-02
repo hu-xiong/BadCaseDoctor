@@ -1,0 +1,27 @@
+[Unit]
+Description=BadCaseDoctor Flask API
+After=network.target mysql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=badcase
+Group=badcase
+WorkingDirectory=/opt/badcase-doctor
+EnvironmentFile=-/opt/badcase-doctor/.env
+Environment=FLASK_ENV=production
+Environment=FLASK_DEBUG=0
+Environment=WSGI_HOST=127.0.0.1
+Environment=PORT=5000
+Environment=BADCASE_MANAGE_LOCAL_PROXY=0
+ExecStart=/opt/badcase-doctor/venv/bin/python server_wsgi.py
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+# 安全加固（按需放开）
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

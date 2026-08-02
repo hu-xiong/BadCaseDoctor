@@ -10,6 +10,8 @@ from werkzeug.security import generate_password_hash
 
 from db_extensions import db
 
+
+def _adapt_create_table_columns_for_dialect(columns):
     """CREATE TABLE 列定义：SQLite 用 AUTOINCREMENT，MySQL 用 AUTO_INCREMENT。"""
     dialect = (db.engine.dialect.name or "").lower()
     if dialect != "mysql":
@@ -735,33 +737,36 @@ def sync_database_schema():
 
         reset_agent_tasks_stuck_running()
         
-        # 创建测试用户（如果不存在）
-        test_user = User.query.filter_by(email='test@example.com').first()
-        if not test_user:
-            test_user = User(
-                email='test@example.com',
-                password_hash=generate_password_hash('123456'),
-                name='测试用户',
-                is_verified=True
-            )
-            db.session.add(test_user)
-            print("已创建测试用户: test@example.com / 123456")
-        
-        # 创建指定用户账号（如果不存在）
-        specified_user = User.query.filter_by(email='2629258027@qq.com').first()
-        if not specified_user:
-            specified_user = User(
-                email='2629258027@qq.com',
-                password_hash=generate_password_hash('123456'),
-                name='hx',
-                is_verified=True
-            )
-            db.session.add(specified_user)
-            print("已创建指定用户: 2629258027@qq.com / 123456")
+        # 演示账号仅显式开启时种入（SEED_DEMO_USERS=1），生产默认跳过且绝不重置密码
+        _seed_demo = (os.getenv("SEED_DEMO_USERS") or "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        if _seed_demo:
+            test_user = User.query.filter_by(email='test@example.com').first()
+            if not test_user:
+                test_user = User(
+                    email='test@example.com',
+                    password_hash=generate_password_hash('123456'),
+                    name='测试用户',
+                    is_verified=True
+                )
+                db.session.add(test_user)
+                print("已创建测试用户: test@example.com / 123456")
+
+            specified_user = User.query.filter_by(email='2629258027@qq.com').first()
+            if not specified_user:
+                specified_user = User(
+                    email='2629258027@qq.com',
+                    password_hash=generate_password_hash('123456'),
+                    name='hx',
+                    is_verified=True
+                )
+                db.session.add(specified_user)
+                print("已创建指定用户: 2629258027@qq.com / 123456")
+            else:
+                print("演示用户已存在，跳过密码重置: 2629258027@qq.com")
         else:
-            # 如果用户已存在，更新密码为123456
-            specified_user.password_hash = generate_password_hash('123456')
-            print("已更新用户密码: 2629258027@qq.com / 123456")
+            print("跳过演示账号种入（设 SEED_DEMO_USERS=1 开启）")
         
         db.session.commit()
         

@@ -23,12 +23,13 @@ def cdp_enabled() -> bool:
 
 
 def cdp_headless() -> bool:
+    """默认有头（可见浏览器）；服务器/CI 设 CDP_HEADLESS=1。"""
     try:
         from config import Config
 
-        return bool(getattr(Config, "CDP_HEADLESS", True))
+        return bool(getattr(Config, "CDP_HEADLESS", False))
     except Exception:
-        return _bool(os.getenv("CDP_HEADLESS", "1"), True)
+        return _bool(os.getenv("CDP_HEADLESS", "0"), False)
 
 
 def cdp_default_timeout_ms() -> int:

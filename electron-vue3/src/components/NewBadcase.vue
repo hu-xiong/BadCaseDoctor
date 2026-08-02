@@ -3,7 +3,7 @@
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
       <div class="loading-spinner"></div>
-      <div class="loading-text">正在加载项目信息...</div>
+      <div class="loading-text">{{ t('cardForm.loadingProject') }}</div>
     </div>
     
     <!-- 顶部导航栏：嵌入模式隐藏第一栏（布局/人头），保留第二栏（返回/操作） -->
@@ -97,7 +97,7 @@
           <input 
             v-model="badcase.title" 
             class="title-input" 
-            placeholder="请输入BadCase标题"
+            :placeholder="t('badcaseForm.titlePlaceholder')"
             maxlength="100"
           />
           <div class="title-count">{{ badcase.title.length }} / 100</div>
@@ -106,7 +106,7 @@
         <!-- 状态和负责人信息 -->
         <div class="status-section">
           <div class="status-item">
-            <span class="status-label">流程状态:</span>
+            <span class="status-label">{{ t('cardForm.flowStatus') }}:</span>
             <div class="status-dropdown" @click="toggleStatusDropdown">
               <div class="status-pill">
                 <span class="status-text">{{ getStatusText(badcase.status) }}</span>
@@ -126,7 +126,7 @@
             </div>
           </div>
           <div class="status-item">
-            <span class="status-label">负责人:</span>
+            <span class="status-label">{{ t('cardForm.assignee') }}:</span>
             <div class="assignee-dropdown" @click="toggleAssigneeDropdown">
               <div class="assignee-pill">
                 <span class="person-icon">👤</span>
@@ -139,7 +139,7 @@
                   <input 
                     type="text" 
                     v-model="assigneeSearchText"
-                    placeholder="输入关键字搜索"
+                    :placeholder="t('cardForm.searchKeyword')"
                     class="search-input"
                     @click.stop
                   />
@@ -148,7 +148,7 @@
                 
                 <!-- 当前用户 -->
                 <div class="assignee-section">
-                  <div class="section-title">当前用户</div>
+                  <div class="section-title">{{ t('cardForm.currentUser') }}</div>
                   <div 
                     v-if="currentUser"
                     class="assignee-option"
@@ -162,19 +162,19 @@
                     <div class="assignee-info">
                       <div class="assignee-name">{{ personPrimaryLabel(currentUser) }}</div>
                       <div v-if="personSecondaryLabel(currentUser) || currentUser.department" class="assignee-id">
-                        {{ personSecondaryLabel(currentUser) || currentUser.department || '未设置部门' }}
+                        {{ personSecondaryLabel(currentUser) || currentUser.department || t('cardForm.noDepartment') }}
                       </div>
                     </div>
                   </div>
                   <div v-else class="no-user-tip">
                     <span class="tip-icon">⚠️</span>
-                    <span class="tip-text">未获取到当前用户信息</span>
+                    <span class="tip-text">{{ t('cardForm.noCurrentUser') }}</span>
                   </div>
                 </div>
                 
                 <!-- 最近选择的 -->
                 <div class="assignee-section">
-                  <div class="section-title">最近选择的</div>
+                  <div class="section-title">{{ t('cardForm.recentSelected') }}</div>
                   <div 
                     v-if="recentAssignees.length > 0"
                     v-for="assignee in recentAssignees" 
@@ -195,13 +195,13 @@
                   </div>
                   <div v-else class="no-recent-tip">
                     <span class="tip-icon">ℹ️</span>
-                    <span class="tip-text">暂无最近选择的用户</span>
+                    <span class="tip-text">{{ t('cardForm.noRecentUsers') }}</span>
                   </div>
                 </div>
                 
                 <!-- 项目成员 -->
                 <div v-if="projectMembers.length > 0" class="assignee-section">
-                  <div class="section-title">项目成员 ({{ projectMembers.length }}人)</div>
+                  <div class="section-title">{{ t('cardForm.projectMembersCount', { n: projectMembers.length }) }}</div>
                   <div 
                     v-for="member in projectMembers" 
                     :key="member.id"
@@ -222,32 +222,32 @@
                 
                 <!-- 无项目成员时的提示 -->
                 <div v-else-if="badcase.project_id && projectMembers.length === 0" class="assignee-section">
-                  <div class="section-title">项目成员 (0人)</div>
+                  <div class="section-title">{{ t('cardForm.projectMembersZero') }}</div>
                   <div class="no-members-tip">
                     <span class="tip-icon">ℹ️</span>
-                    <span class="tip-text">该项目暂无成员，请先添加项目成员</span>
+                    <span class="tip-text">{{ t('cardForm.noProjectMembers') }}</span>
                   </div>
                 </div>
                 
                 <!-- 未选择项目时的提示 -->
                 <div v-else-if="!badcase.project_id" class="assignee-section">
-                  <div class="section-title">项目成员</div>
+                  <div class="section-title">{{ t('cardForm.projectMembers') }}</div>
                   <div class="no-members-tip">
                     <span class="tip-icon">⚠️</span>
-                    <span class="tip-text">请先选择所属项目</span>
+                    <span class="tip-text">{{ t('cardForm.selectProjectFirst') }}</span>
                   </div>
                 </div>
               </div>
             </div>
           </div>
           <div class="status-item">
-            <span class="status-label">所属计划:</span>
+            <span class="status-label">{{ t('cardForm.plan') }}:</span>
             <div class="plan-dropdown" @click="togglePlanDropdown">
               <!-- 当前选中的计划显示区域 -->
               <div class="plan-selected-display">
                 <span class="refresh-icon" @click.stop="refreshProjectPlans">🔄</span>
                 <span class="plan-selected-text">
-                  所属计划 {{ getSelectedPlanDisplayText }}
+                  {{ t('cardForm.plan') }} {{ getSelectedPlanDisplayText }}
                 </span>
                 <span class="arrow-icon" :class="{ 'rotated': showPlanDropdown }">▼</span>
               </div>
@@ -258,7 +258,7 @@
                   <input 
                     type="text" 
                     v-model="planSearchText"
-                    placeholder="搜索计划"
+                    :placeholder="t('cardForm.searchPlan')"
                     class="search-input"
                     @click.stop
                     @keyup.enter="searchPlans"
@@ -266,7 +266,7 @@
                   <button class="search-btn" @click="searchPlans">
                     <span class="search-icon">🔍</span>
                   </button>
-                  <button v-if="planSearchText" class="clear-search-btn" @click="clearPlanSearch" title="清除搜索">
+                  <button v-if="planSearchText" class="clear-search-btn" @click="clearPlanSearch" :title="t('cardForm.clearSearch')">
                     <span class="clear-icon">✕</span>
                   </button>
                 </div>
@@ -302,7 +302,7 @@
                       <!-- 计划名称 -->
                       <span class="plan-name">
                         {{ plan.label }}
-                        <span v-if="plan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                        <span v-if="plan.is_pinned" class="pin-indicator" :title="t('cardForm.pinned')">📌</span>
                       </span>
                       
                       <!-- 计划信息（BadCase和Bug数量） -->
@@ -341,7 +341,7 @@
                         <!-- 子计划名称 -->
                         <span class="plan-name">
                           {{ childPlan.label }}
-                          <span v-if="childPlan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                          <span v-if="childPlan.is_pinned" class="pin-indicator" :title="t('cardForm.pinned')">📌</span>
                         </span>
                         
                         <!-- 子计划信息 -->
@@ -365,7 +365,7 @@
                             <span class="plan-icon">{{ grandChildPlan.icon || '📁' }}</span>
                             <span class="plan-name">
                               {{ grandChildPlan.label }}
-                              <span v-if="grandChildPlan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                              <span v-if="grandChildPlan.is_pinned" class="pin-indicator" :title="t('cardForm.pinned')">📌</span>
                             </span>
                             <span class="plan-info" v-if="grandChildPlan.badcase_count > 0 || grandChildPlan.bug_count > 0">
                               <span v-if="grandChildPlan.badcase_count > 0" class="count-badge badcase">{{ grandChildPlan.badcase_count }}</span>
@@ -379,7 +379,7 @@
                   
                   <!-- 如果没有计划，显示提示信息 -->
                   <div v-if="filteredPlans.length === 0" class="no-plans" style="padding: 20px; text-align: center; color: #666;">
-                    暂无计划数据
+                    {{ t('cardForm.noPlans') }}
                   </div>
                 </div>
               </div>
@@ -389,12 +389,12 @@
         
         <!-- 相似问题（选填） -->
         <div class="problem-section" :class="{ 'has-diff': hasPendingField('base_problem') }">
-          <h3 class="problem-title">相似问题（选填）:</h3>
+          <h3 class="problem-title">{{ t('badcaseForm.similarProblem') }}:</h3>
           <InlineFieldDiffBox
             v-if="hasPendingField('base_problem')"
             :original="String(pendingFieldMod('base_problem')?.old ?? '')"
             :modified="String(pendingFieldMod('base_problem')?.new ?? '')"
-            empty-original-label="未设置"
+            :empty-original-label="t('badcaseForm.notSet')"
             height="100px"
             @apply="applyFieldChange('base_problem')"
             @cancel="cancelFieldChange('base_problem')"
@@ -403,7 +403,7 @@
             v-else
             v-model="badcase.base_problem"
             class="problem-textarea"
-            placeholder="若无相似问题可留空；有则简要描述…"
+            :placeholder="t('badcaseForm.similarProblemPlaceholder')"
             maxlength="500"
           ></textarea>
           <div class="problem-count">{{ (badcase.base_problem || '').length }} / 500</div>
@@ -413,14 +413,14 @@
         <div class="editor-section" :class="{ 'has-diff': hasPendingField('reproduction_steps') }">
           <div class="editor-content">
             <div class="editor-title-row">
-              <h3 class="editor-title">BadCase复现步骤:</h3>
-              <button type="button" class="toolbar-btn" title="添加附件到侧栏" @click="addAttachment">📎</button>
+              <h3 class="editor-title">{{ t('badcaseForm.reproSteps') }}:</h3>
+              <button type="button" class="toolbar-btn" :title="t('cardForm.addAttachment')" @click="addAttachment">📎</button>
             </div>
             <InlineFieldDiffBox
               v-if="hasPendingField('reproduction_steps')"
               :original="htmlToPlainText(pendingFieldMod('reproduction_steps')?.old || '')"
               :modified="htmlToPlainText(pendingFieldMod('reproduction_steps')?.new || '')"
-              empty-original-label="未设置"
+              :empty-original-label="t('badcaseForm.notSet')"
               height="160px"
               @apply="applyFieldChange('reproduction_steps')"
               @cancel="cancelFieldChange('reproduction_steps')"
@@ -429,7 +429,7 @@
               v-else
               v-model="badcase.reproduction_steps"
               class="editor-textarea"
-              placeholder="请详细描述BadCase的复现步骤..."
+              :placeholder="t('badcaseForm.reproStepsPlaceholder')"
             />
             <div class="editor-count">{{ stepsLength }} / 2000</div>
           </div>
@@ -437,12 +437,12 @@
         
         <!-- 答案输入框 -->
         <div class="answer-section" :class="{ 'has-diff': hasPendingField('answer') }">
-          <h3 class="answer-title">答案:</h3>
+          <h3 class="answer-title">{{ t('badcaseForm.answer') }}:</h3>
           <InlineFieldDiffBox
             v-if="hasPendingField('answer')"
             :original="String(pendingFieldMod('answer')?.old ?? '')"
             :modified="String(pendingFieldMod('answer')?.new ?? '')"
-            empty-original-label="未设置"
+            :empty-original-label="t('badcaseForm.notSet')"
             height="120px"
             @apply="applyFieldChange('answer')"
             @cancel="cancelFieldChange('answer')"
@@ -451,7 +451,7 @@
             v-else
             v-model="badcase.answer"
             class="answer-textarea"
-            placeholder="请输入答案..."
+            :placeholder="t('badcaseForm.answerPlaceholder')"
             maxlength="1000"
           ></textarea>
           <div class="answer-count">{{ badcase.answer.length }} / 1000</div>
@@ -459,13 +459,13 @@
         
         <!-- 正确答案输入框 -->
         <div class="correct-answer-section" :class="{ 'has-diff': hasPendingField('correct_answer') }">
-          <h3 class="correct-answer-title">正确答案:</h3>
+          <h3 class="correct-answer-title">{{ t('badcaseForm.correctAnswer') }}:</h3>
           <InlineFieldDiffBox
             v-if="hasPendingField('correct_answer')"
             :original="String(pendingFieldMod('correct_answer')?.old ?? '')"
             :modified="String(pendingFieldMod('correct_answer')?.new ?? '')"
-            empty-original-label="未设置"
-            label="正确答案修改预览"
+            :empty-original-label="t('badcaseForm.notSet')"
+            :label="t('badcaseForm.correctAnswerDiffLabel')"
             height="120px"
             @apply="applyFieldChange('correct_answer')"
             @cancel="cancelFieldChange('correct_answer')"
@@ -474,7 +474,7 @@
             v-else
             v-model="badcase.correct_answer"
             class="correct-answer-textarea"
-            placeholder="请输入正确答案..."
+            :placeholder="t('badcaseForm.correctAnswerPlaceholder')"
             maxlength="1000"
           ></textarea>
           <div class="correct-answer-count">{{ badcase.correct_answer.length }} / 1000</div>
@@ -483,12 +483,12 @@
         <!-- 问题分类和优先级 -->
         <div class="category-section">
           <div class="form-row" :class="{ 'has-diff': hasPendingField('case_category') }">
-            <label class="form-label required">问题分类:</label>
+            <label class="form-label required">{{ t('badcaseForm.caseCategory') }}:</label>
             <div v-if="hasPendingField('case_category')" class="field-diff-panel-inline">
               <div class="diff-content">
-                <span class="diff-old">{{ pendingFieldMod('case_category')?.old || '未设置' }}</span>
+                <span class="diff-old">{{ formatBadcaseCategoryLabel(pendingFieldMod('case_category')?.old) }}</span>
                 <span class="diff-arrow">→</span>
-                <span class="diff-new">{{ pendingFieldMod('case_category')?.new }}</span>
+                <span class="diff-new">{{ formatBadcaseCategoryLabel(pendingFieldMod('case_category')?.new) }}</span>
                 <div class="diff-actions">
                   <button type="button" @click="applyFieldChange('case_category')" class="btn-confirm-sm" title="采纳（立即落库）">✓</button>
                   <button type="button" @click="cancelFieldChange('case_category')" class="btn-cancel-sm" title="取消">✗</button>
@@ -500,17 +500,17 @@
               class="form-select"
               :class="{ 'field-with-diff': hasPendingField('case_category') }"
             >
-              <option value="">请选择问题分类</option>
-              <option value="功能缺陷">功能缺陷</option>
-              <option value="性能问题">性能问题</option>
-              <option value="界面问题">界面问题</option>
-              <option value="兼容性问题">兼容性问题</option>
-              <option value="安全问题">安全问题</option>
-              <option value="其他">其他</option>
+              <option value="">{{ t('badcaseForm.selectCaseCategory') }}</option>
+              <option value="功能缺陷">{{ t('badcaseForm.categoryFunctional') }}</option>
+              <option value="性能问题">{{ t('badcaseForm.categoryPerformance') }}</option>
+              <option value="界面问题">{{ t('badcaseForm.categoryUi') }}</option>
+              <option value="兼容性问题">{{ t('badcaseForm.categoryCompatibility') }}</option>
+              <option value="安全问题">{{ t('badcaseForm.categorySecurity') }}</option>
+              <option value="其他">{{ t('badcaseForm.categoryOther') }}</option>
             </select>
           </div>
           <div class="form-row" :class="{ 'has-diff': hasPendingField('priority') }">
-            <label class="form-label required">优先级:</label>
+            <label class="form-label required">{{ t('badcaseForm.priority') }}:</label>
             <div v-if="hasPendingField('priority')" class="field-diff-panel-inline">
               <div class="diff-content">
                 <span class="diff-old">{{ formatBadcasePriorityLabel(pendingFieldMod('priority')?.old) }}</span>
@@ -527,10 +527,10 @@
               class="form-select"
               :class="{ 'field-with-diff': hasPendingField('priority') }"
             >
-              <option value="p1">P1 - 紧急</option>
-              <option value="p2">P2 - 高</option>
-              <option value="p3">P3 - 中</option>
-              <option value="p4">P4 - 低</option>
+              <option value="p1">{{ t('badcaseForm.priorityP1') }}</option>
+              <option value="p2">{{ t('badcaseForm.priorityP2') }}</option>
+              <option value="p3">{{ t('badcaseForm.priorityP3') }}</option>
+              <option value="p4">{{ t('badcaseForm.priorityP4') }}</option>
             </select>
           </div>
         </div>
@@ -539,12 +539,12 @@
         <div class="footer-section">
           <div class="footer-tip">
             <span class="tip-icon">💡</span>
-            通过配置层级限制，可以约束父子卡片的类型关系
+            {{ t('cardForm.hierarchyTip') }}
           </div>
           <div class="footer-actions">
-            <button class="action-btn cancel-btn" @click="goBack">取消</button>
+            <button class="action-btn cancel-btn" @click="goBack">{{ t('common.cancel') }}</button>
             <button class="action-btn save-btn" @click="saveBadcase" :disabled="saveLoading">
-              {{ saveLoading ? '保存中...' : '保存' }}
+              {{ saveLoading ? t('cardForm.saving') : t('common.save') }}
             </button>
                     </div>
                   </div>
@@ -556,23 +556,23 @@
           v-show="!isRightSidebarOpen"
           type="button"
           class="sidebar-expand-tab"
-          title="展开侧栏"
-          aria-label="展开侧栏"
+          :title="t('cardForm.expandSidebar')"
+          :aria-label="t('cardForm.expandSidebar')"
           @click="isRightSidebarOpen = true"
         >
           <img src="../assets/resize-icon.svg" alt="" class="resize-icon resize-icon--expand" />
         </button>
         <div class="sidebar-right" :class="{ 'sidebar-right--open': isRightSidebarOpen }">
-        <div class="resize-handle" role="button" tabindex="0" title="收起侧栏" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
+        <div class="resize-handle" role="button" tabindex="0" :title="t('cardForm.collapseSidebar')" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
           <img src="../assets/resize-icon.svg" alt="" class="resize-icon" :class="{ 'rotated': isRightSidebarOpen }" />
         </div>
         <!-- 所属项目 -->
         <div class="sidebar-section">
-          <h3 class="sidebar-title">所属项目</h3>
+          <h3 class="sidebar-title">{{ t('cardForm.project') }}</h3>
           <div class="project-select">
-            <label class="select-label">项目名称:</label>
+            <label class="select-label">{{ t('cardForm.projectName') }}:</label>
             <select v-model="badcase.project_id" class="form-select" @change="handleProjectChange">
-              <option value="">请选择</option>
+              <option value="">{{ t('cardForm.pleaseSelect') }}</option>
               <option v-for="project in availableProjects" :key="project.id" :value="project.id.toString()">
                 {{ project.name }}
               </option>
@@ -587,22 +587,22 @@
            <div class="section-header">
              <div class="header-left">
                <span class="header-icon">📄</span>
-               <span class="header-title">关联文档</span>
+               <span class="header-title">{{ t('cardForm.relatedDocs') }}</span>
              </div>
              <button class="ai-recommend-btn">
                <span class="ai-icon">🤖</span>
-               <span class="ai-text">推荐关联</span>
+               <span class="ai-text">{{ t('cardForm.recommendLink') }}</span>
              </button>
            </div>
            <div class="document-fields">
              <div class="field-row">
-               <span class="field-label">文档类型:</span>
-               <span class="field-value">{{ badcase.document_type || '其他文档' }}</span>
+               <span class="field-label">{{ t('cardForm.docType') }}:</span>
+               <span class="field-value">{{ badcase.document_type || t('cardForm.otherDoc') }}</span>
              </div>
              <div class="field-row">
-               <span class="field-label">文件链接:</span>
+               <span class="field-label">{{ t('cardForm.fileLink') }}:</span>
                <button class="copy-link-btn" @click="copyDocumentLink">
-                 复制知识库文档链接
+                 {{ t('cardForm.copyKbLink') }}
                </button>
              </div>
            </div>
@@ -613,7 +613,7 @@
            <div class="section-header">
              <div class="header-left">
                <span class="header-icon">📎</span>
-               <span class="header-title">附件</span>
+               <span class="header-title">{{ t('cardForm.attachments') }}</span>
              </div>
              <button class="add-attachment-btn" @click="addAttachment">
                <span class="plus-icon">+</span>
@@ -625,7 +625,7 @@
                <button class="remove-attachment-btn" @click="removeAttachment(index)">×</button>
              </div>
              <div v-if="badcase.attachments.length === 0" class="no-attachments">
-               暂无附件
+               {{ t('cardForm.noAttachments') }}
              </div>
            </div>
            <input 
@@ -642,18 +642,18 @@
            class="sidebar-section comment-section"
            :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }"
          >
-           <h3 class="sidebar-title">评论记录</h3>
+           <h3 class="sidebar-title">{{ t('testcaseComment.historyTitle') }}</h3>
            <div v-if="hasEntityFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
              <div class="diff-header">
-               <span class="diff-label">追加评论 · 修改预览</span>
+               <span class="diff-label">{{ t('testcaseComment.appendDiff') }}</span>
                <div class="diff-actions">
-                 <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" title="采纳">✓</button>
-                 <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" title="取消">✗</button>
+                 <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" :title="t('cardForm.adoptTitle')">✓</button>
+                 <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" :title="t('cardForm.rejectTitle')">✗</button>
                </div>
              </div>
              <div class="diff-content">
                <div class="diff-row">
-                 <span class="diff-tag new">新评论</span>
+                 <span class="diff-tag new">{{ t('testcaseComment.newComment') }}</span>
                  <span class="diff-value diff-value-multiline">{{ formatEntityDiffValue('append_comment', entityFieldDiff('append_comment')?.new) }}</span>
                </div>
              </div>
@@ -667,28 +667,28 @@
              >
                <div class="comment-item-meta">
                  <span class="comment-author">{{ c.user_name || '—' }}</span>
-                 <span v-if="c.parent_id" class="comment-reply-tag">回复 @{{ c.parent_user_name || '—' }}</span>
+                 <span v-if="c.parent_id" class="comment-reply-tag">{{ t('testcaseComment.replyTo', { name: c.parent_user_name || '—' }) }}</span>
                  <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
-                 <span v-if="c.source_message_id" class="comment-op-tag">来自对话操作</span>
-                 <span v-if="c.pending" class="comment-pending-tag">提交中</span>
+                 <span v-if="c.source_message_id" class="comment-op-tag">{{ t('testcaseComment.linkedOp') }}</span>
+                 <span v-if="c.pending" class="comment-pending-tag">{{ t('testcaseComment.pending') }}</span>
                  <button
                    v-if="isEdit && badcaseId && !c.pending"
                    type="button"
                    class="comment-reply-btn"
                    @click="startReplyToComment(c)"
                  >
-                   回复
+                   {{ t('testcaseComment.reply') }}
                  </button>
                </div>
                <div class="comment-item-body" v-html="c.content"></div>
              </div>
            </div>
-           <div v-else class="comment-empty">暂无评论</div>
+           <div v-else class="comment-empty">{{ t('testcaseComment.empty') }}</div>
            <div v-if="replyingTo" class="comment-reply-hint">
-             正在回复 <strong>{{ replyingTo.user_name || '—' }}</strong>
-             <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">取消</button>
+             {{ t('testcaseComment.replying', { name: replyingTo.user_name || '—' }) }}
+             <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">{{ t('common.cancel') }}</button>
            </div>
-           <h4 class="comment-input-subtitle">{{ replyingTo ? '输入回复' : '输入评论' }}</h4>
+           <h4 class="comment-input-subtitle">{{ replyingTo ? t('testcaseComment.inputReplyTitle') : t('testcaseComment.inputTitle') }}</h4>
            <div class="comment-input-container">
              <template v-if="!commentEditorActive">
                <textarea
@@ -696,7 +696,7 @@
                  readonly
                  rows="3"
                  :value="commentDraftText"
-                 placeholder="点击输入评论…"
+                 :placeholder="t('testcaseComment.placeholderClick')"
                  @click="activateCommentEditor"
                />
                <div class="comment-count">{{ commentDraftLength }} / 500</div>
@@ -705,11 +705,11 @@
                <RichTextHtmlEditor
                  v-model="commentDraft"
                  variant="compact"
-                 placeholder="请输入评论"
+                 :placeholder="t('testcaseComment.inputTitle')"
                  class="rich-editor"
                />
                <div class="comment-editor-actions">
-                 <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">收起</button>
+                 <button type="button" class="comment-collapse-btn" @click="finishCommentEditor">{{ t('testcaseComment.collapse') }}</button>
                  <button
                    v-if="isEdit && badcaseId"
                    type="button"
@@ -717,7 +717,7 @@
                    :disabled="commentSubmitting || !commentDraftLength"
                    @click="submitCommentDraft"
                  >
-                   发表评论
+                   {{ t('testcaseComment.submit') }}
                  </button>
                </div>
                <div class="editor-count">{{ commentDraftLength }} / 500</div>
@@ -971,15 +971,15 @@ export default {
 
     /** 编辑态：面包屑与副标题用 BadCase 标题，避免长期显示泛化的「编辑BadCase」 */
     const editContextCrumb = computed(() => {
-      if (!isEdit.value) return '编辑BadCase'
+      if (!isEdit.value) return t('project.editBadcase')
       const raw = String(badcase.title || '').trim()
-      if (!raw) return '编辑BadCase'
+      if (!raw) return t('project.editBadcase')
       return raw.length > 22 ? `${raw.slice(0, 21)}…` : raw
     })
     const pageHeadline = computed(() => {
-      if (!isEdit.value) return '新建BadCase'
+      if (!isEdit.value) return t('project.newBadcase')
       const raw = String(badcase.title || '').trim()
-      if (!raw) return '编辑BadCase'
+      if (!raw) return t('project.editBadcase')
       return raw.length > 40 ? `${raw.slice(0, 39)}…` : raw
     })
 
@@ -1073,15 +1073,30 @@ export default {
 
     /** 优先级 diff 展示：统一 p1/P1 等为与下拉选项一致的文案 */
     const formatBadcasePriorityLabel = (v) => {
-      if (v == null || String(v).trim() === '') return '未设置'
+      if (v == null || String(v).trim() === '') return t('badcaseForm.notSet')
       const s = String(v).trim().toLowerCase()
       const map = {
-        p1: 'P1 - 紧急',
-        p2: 'P2 - 高',
-        p3: 'P3 - 中',
-        p4: 'P4 - 低'
+        p1: t('badcaseForm.priorityP1'),
+        p2: t('badcaseForm.priorityP2'),
+        p3: t('badcaseForm.priorityP3'),
+        p4: t('badcaseForm.priorityP4')
       }
       return map[s] || String(v).trim()
+    }
+
+    /** 问题分类：库内存中文值，界面按 locale 展示 */
+    const formatBadcaseCategoryLabel = (v) => {
+      if (v == null || String(v).trim() === '') return t('badcaseForm.notSet')
+      const s = String(v).trim()
+      const map = {
+        功能缺陷: t('badcaseForm.categoryFunctional'),
+        性能问题: t('badcaseForm.categoryPerformance'),
+        界面问题: t('badcaseForm.categoryUi'),
+        兼容性问题: t('badcaseForm.categoryCompatibility'),
+        安全问题: t('badcaseForm.categorySecurity'),
+        其他: t('badcaseForm.categoryOther')
+      }
+      return map[s] || s
     }
 
     const aliasPendingModKey = (mods, fromKey, toKey) => {
@@ -2403,32 +2418,35 @@ export default {
 
     // 检查负责人是否被选中
     const isAssigneeSelected = (assigneeValue) => {
+      const want = String(assigneeValue ?? '')
+      if (!want) return false
       // 优先使用 assignee_id（后端返回的用户ID）
-      if (badcase.assignee_id) {
-        return badcase.assignee_id.toString() === assigneeValue.toString()
+      if (badcase.assignee_id != null && badcase.assignee_id !== '') {
+        return String(badcase.assignee_id) === want
       }
       // 兼容旧逻辑：检查数组
       if (Array.isArray(badcase.assignee)) {
-        return badcase.assignee.includes(assigneeValue)
+        return badcase.assignee.some((x) => String(x) === want)
       }
       // 兼容字符串比较
-      return badcase.assignee && badcase.assignee.toString() === assigneeValue.toString()
+      return badcase.assignee != null && String(badcase.assignee) === want
     }
 
-    // 切换负责人选择状态
+    // 切换负责人选择状态（再点已选中的项 = 取消指派）
     const toggleAssignee = (assigneeValue) => {
-      // 更新 assignee_id（用于选中状态判断）
-      badcase.assignee_id = parseInt(assigneeValue)
-      
-      // 同时更新 assignee 数组（兼容旧逻辑）
-      if (!badcase.assignee) {
+      const want = String(assigneeValue ?? '')
+      if (!want) return
+      if (isAssigneeSelected(want)) {
+        badcase.assignee_id = null
         badcase.assignee = []
+        console.log('取消负责人指派')
+        return
       }
-      
-      // 单选模式：清空并设置为当前选中值
-      badcase.assignee = [assigneeValue]
-      
-      console.log('切换负责人:', assigneeValue, 'assignee_id:', badcase.assignee_id)
+      const parsed = parseInt(want, 10)
+      badcase.assignee_id = Number.isFinite(parsed) ? parsed : want
+      // 单选模式
+      badcase.assignee = [want]
+      console.log('切换负责人:', want, 'assignee_id:', badcase.assignee_id)
     }
 
     // 切换计划下拉框显示
@@ -2889,6 +2907,8 @@ export default {
           if (dbBaselineForPending) {
             prunePendingModsAlreadyPersistedInDb(dbBaselineForPending)
           }
+          // prunePendingModsAlreadyPersistedInDb 可能把 pendingDiff 置 null，需重新检查
+          if (!pendingDiff.value?.modifications) return
           for (const [field, data] of Object.entries(pendingDiff.value.modifications)) {
             if (String(field).startsWith('_')) continue
             if (
@@ -2949,6 +2969,7 @@ export default {
     })
     
     return {
+      t,
       loading,
       saveLoading,
       isEdit,
@@ -2983,6 +3004,7 @@ export default {
       expandedPlans,
       getStatusText,
       formatBadcasePriorityLabel,
+      formatBadcaseCategoryLabel,
       saveBadcase,
       toggleStatusDropdown,
       selectStatus,

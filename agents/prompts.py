@@ -387,7 +387,7 @@ _PROMPT_CDP_EXPLORE_BLOCK = """
 
 _PROMPT_CDP_TEST_TASK_BLOCK = """
 **cdp 测试任务（test task）：**
-- 当用户**描述了怎么测**（步骤/先…再…）或要求**用某迭代计划的测试用例**执行时，系统自动开启 **cdp_test_run** 任务，逐步记录 CDP 操作与通过/失败。
+- 当用户**描述可执行测试步骤**（先…再…点击/打开）或要求**执行/跑某迭代计划的测试用例**时，系统自动开启 **cdp_test_run** 任务，逐步记录 CDP 操作与通过/失败。优先用 **cdp action=run_testcase**（testcase_id 或 steps）或 **run_step** 逐步驱动；纯「怎么测/如何测」问答不要开浏览器任务，先 grep 后给出步骤与预期说明。
 - 用例模式：先 grep(target=testcase, plan_id=当前迭代) 定位用例，再 cdp 按用例 steps 逐步执行；任务结束会回写用例 execution_result（单用例时）。
 - 手动模式：按用户描述的步骤依次 cdp snapshot/click/fill/assert。
 - 观测结果中带 `cdp_test_run` 字段可查看本次任务汇总；SSE lane=cdp_test_task 推送 opened/step/done。
@@ -429,8 +429,12 @@ def build_cdp_login_prompt_detail(
         explore_block = _PROMPT_CDP_EXPLORE_BLOCK
     task_block = ""
     zh_blob = _prompt_text_blob(todo=todo, user_input=user_input)
-    if any(k in zh_blob or k in blob for k in (
-        "测试用例", "怎么测", "如何测", "测试步骤", "执行用例", "跑用例", "按用例", "test case", "testcase",
+    _advise_only = any(k in zh_blob for k in ("怎么测", "如何测", "怎样测", "怎么测试", "如何测试")) and not any(
+        k in zh_blob for k in ("执行", "跑", "跑一下", "测一下", "验证一下", "跑用例", "执行用例")
+    )
+    if (not _advise_only) and any(k in zh_blob or k in blob for k in (
+        "测试用例", "测试步骤", "执行用例", "跑用例", "按用例", "执行测试", "test case", "testcase",
+        "先打开", "然后点击",
     )):
         task_block = _PROMPT_CDP_TEST_TASK_BLOCK
     return _PROMPT_CDP_LOGIN_DETAIL_BLOCK.format(config_lines=lines) + explore_block + task_block

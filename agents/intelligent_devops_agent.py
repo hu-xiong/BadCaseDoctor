@@ -15,6 +15,7 @@ from .tools.search_tool import SearchTool
 from .tools.login_state_tool import LoginStateTool
 from .tools.log_analyzer_tool import LogAnalyzerTool
 from .tools.accuracy_tester_tool import AccuracyTesterTool
+from .agent_engine_config import agent_engine_backend
 
 class ConversationMemory:
     """对话记忆管理"""
@@ -88,6 +89,10 @@ def register_core_builtin_tools(
     from agents.tools.terminal_tool import TerminalTool
 
     _reg(TerminalTool())
+
+    from agents.tools.client_browser_tool import ClientBrowserTool
+
+    _reg(ClientBrowserTool())
 
     from agents.tools.modify_tool import ModifyTool
 
@@ -173,13 +178,14 @@ class IntelligentDevOpsAgent:
     4. 多工具协调 -> 复杂问题诊断
     """
     
-    def __init__(self, llm, db_session=None):
+    def __init__(self, llm, db_session=None, engine_backend: str | None = None):
         """
         初始化 Agent
         
         Args:
             llm: 语言模型（千帆）
             db_session: 数据库会话
+            engine_backend: 可选，覆盖 AGENT_ENGINE（``react`` / ``langgraph``）
         """
         perf = (os.getenv("PERF_LOG") == "1")
         t0 = time.perf_counter()
@@ -199,15 +205,33 @@ class IntelligentDevOpsAgent:
             else:
                 self.tool_registry = ToolRegistry()
 
-        # 初始化 ReAct 引擎（极简设计）- 必须在 _register_tools 之前
+        # 初始化执行引擎（必须在 _register_tools 之前；skill 工具依赖 engine）
         t_engine0 = time.perf_counter()
-        self.react_engine = SimplifiedReActEngine(
-            llm=llm,
-            tool_registry=self.tool_registry
-        )
+        _backend = (engine_backend or "").strip().lower() or agent_engine_backend()
+        if _backend in ("langgraph", "lg", "graph"):
+            _backend = "langgraph"
+        else:
+            _backend = "react"
+        self.engine_backend = _backend
+        if _backend == "langgraph":
+            from .langgraph_engine import LangGraphReactEngine
+
+            self.react_engine = LangGraphReactEngine(
+                llm=llm,
+                tool_registry=self.tool_registry,
+            )
+            print("[AGENT] 使用 LangGraph 引擎 (AGENT_ENGINE=langgraph)", flush=True)
+        else:
+            self.react_engine = SimplifiedReActEngine(
+                llm=llm,
+                tool_registry=self.tool_registry,
+            )
         self.react_engine.db = db_session
         if perf:
-            print(f"[PERF][agent] react_engine_init_ms={(time.perf_counter()-t_engine0)*1000:.1f}")
+            print(
+                f"[PERF][agent] react_engine_init_ms={(time.perf_counter()-t_engine0)*1000:.1f} "
+                f"backend={_backend}"
+            )
 
         # 注册工具（在 react_engine 之后，因为 skill_tool 需要 react_engine）
         t_reg0 = time.perf_counter()
@@ -295,6 +319,7 @@ class IntelligentDevOpsAgent:
         agent_session_id: str = None,
         chat_session_id: int = None,
         long_memory_context: dict = None,
+        conversation_history: list = None,
         hint_project_name: str = None,
         hint_plan_name: str = None,
         client_shell: dict = None,
@@ -322,7 +347,15 @@ class IntelligentDevOpsAgent:
 
         # ReAct：run_stream 已在引擎出口转为 v1（type/payload），此处只透传
         # 卡片层适配：将卡片上下文注入 user_input，避免改动引擎签名的同时让模型“以卡片为主”决策工具参数
+        from agents.conversation_history import (
+            build_recent_url_hint,
+            normalize_conversation_history,
+        )
         from agents.locale_prompts import format_ui_context_for_prompt
+
+        _hist = normalize_conversation_history(conversation_history)
+        if _hist:
+            print(f"[AGENT] conversation_history messages={len(_hist)}", flush=True)
 
         _effective_input = user_input
         _ui_block = format_ui_context_for_prompt(
@@ -331,6 +364,9 @@ class IntelligentDevOpsAgent:
         )
         if _ui_block:
             _effective_input = f"{_ui_block}{user_input}"
+        _url_hint = build_recent_url_hint(_hist, locale=locale)
+        if _url_hint and "http://" not in (user_input or "") and "https://" not in (user_input or ""):
+            _effective_input = f"{_url_hint}\n{_effective_input}"
         if card_id is not None and str(card_id).strip():
             try:
                 _ct = str(card_type).strip() if card_type is not None else ""
@@ -348,6 +384,7 @@ class IntelligentDevOpsAgent:
             agent_session_id=agent_session_id,
             chat_session_id=chat_session_id,
             long_memory_prefetch=long_memory_context,
+            conversation_history=_hist,
             hint_project_name=hint_project_name,
             hint_plan_name=hint_plan_name,
             client_shell=client_shell if isinstance(client_shell, dict) else None,

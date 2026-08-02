@@ -84,6 +84,22 @@ class BrowserSession:
     async def page_info(self) -> Dict[str, str]:
         return {"url": self.page.url, "title": await self.page.title()}
 
+    def list_pages(self) -> List[Any]:
+        try:
+            return list(self.context.pages)
+        except Exception:
+            return [self.page] if self.page else []
+
+    async def switch_page(self, index: int) -> None:
+        pages = self.list_pages()
+        if index < 0 or index >= len(pages):
+            raise CdpError(SESSION_NOT_FOUND, f"tab index 越界: {index} (n={len(pages)})")
+        self.page = pages[index]
+        self._cdp = None
+        self.last_snapshot = None
+        await self.page.bring_to_front()
+        await self.touch()
+
     async def close(self) -> None:
         try:
             if self._cdp:
@@ -109,6 +125,71 @@ _CHROMIUM_LAUNCH_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
 ]
+
+
+def _launch_channel_candidates() -> List[Optional[str]]:
+    """
+    Playwright 自带 Chromium 可能因 PLAYWRIGHT_BROWSERS_PATH（如 Cursor sandbox 缓存）
+    不完整而 launch 失败；优先显式 channel，再回退本机 Chrome/Edge。
+    """
+    raw = (os.getenv("CDP_BROWSER_CHANNEL") or os.getenv("CDP_CHROME_CHANNEL") or "").strip()
+    out: List[Optional[str]] = []
+    if raw:
+        out.append(raw)
+    # None = Playwright 自带 chromium
+    out.append(None)
+    for ch in ("chrome", "msedge", "chrome-beta", "msedge-beta"):
+        if ch not in out:
+            out.append(ch)
+    return out
+
+
+def _is_missing_browser_executable_error(ex: BaseException) -> bool:
+    msg = str(ex).lower()
+    return "executable doesn't exist" in msg or (
+        "doesn't exist" in msg and "launch" in msg
+    )
+
+
+async def _launch_chromium(pw: Any, *, headless: bool) -> Any:
+    last_ex: Optional[BaseException] = None
+    for channel in _launch_channel_candidates():
+        kwargs: Dict[str, Any] = {
+            "headless": headless,
+            "args": list(_CHROMIUM_LAUNCH_ARGS),
+        }
+        if channel:
+            kwargs["channel"] = channel
+        try:
+            browser = await pw.chromium.launch(**kwargs)
+            if channel:
+                print(f"[CDP] chromium.launch ok channel={channel!r} headless={headless}", flush=True)
+            return browser
+        except Exception as ex:
+            last_ex = ex
+            if channel is None and _is_missing_browser_executable_error(ex):
+                print(
+                    f"[CDP] Playwright 自带 Chromium 不可用，尝试本机 Chrome/Edge: {ex}",
+                    flush=True,
+                )
+                continue
+            if channel and _is_missing_browser_executable_error(ex):
+                continue
+            # 非「缺可执行文件」类错误：仍尝试下一 channel，最后汇总
+            print(
+                f"[CDP] chromium.launch 失败 channel={channel!r}: {type(ex).__name__}: {ex}",
+                flush=True,
+            )
+            continue
+    hint = (
+        "无法启动浏览器。请安装 Google Chrome / Microsoft Edge，"
+        "或执行: python -m playwright install chromium"
+        "（并检查 PLAYWRIGHT_BROWSERS_PATH 是否指向不完整缓存）。"
+    )
+    raise CdpError(
+        PLAYWRIGHT_UNAVAILABLE,
+        f"{hint} 最后错误: {last_ex}",
+    ) from last_ex
 
 
 def _is_stale_browser_error(ex: BaseException) -> bool:
@@ -221,10 +302,7 @@ class CdpSessionManager:
             await self._close_browser_pool_unlocked(owner_key)
         pw = await self._ensure_pw()
         t0 = time.perf_counter()
-        browser = await pw.chromium.launch(
-            headless=want,
-            args=_CHROMIUM_LAUNCH_ARGS,
-        )
+        browser = await _launch_chromium(pw, headless=want)
         self._browser_pools[owner_key] = _BrowserPoolSlot(browser=browser, headless=want)
         if os.getenv("PERF_LOG") == "1":
             print(
@@ -372,6 +450,10 @@ class CdpSessionManager:
             self._sessions[sid] = session
         for old in evicted:
             await old.close()
+        try:
+            await self.ensure_console_hook(sid, owner_key=owner)
+        except Exception:
+            pass
         if url:
             nav = await self.navigate(sid, url, owner_key=owner)
             if not nav.get("success"):
@@ -487,6 +569,296 @@ class CdpSessionManager:
 
     def actor(self, session_id: str, *, owner_key: Optional[str] = None) -> ElementActor:
         return ElementActor(self._get(session_id, owner_key=owner_key))
+
+    async def list_tabs(
+        self, session_id: str, *, owner_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        await session.touch()
+        tabs = []
+        for i, p in enumerate(session.list_pages()):
+            try:
+                tabs.append(
+                    {
+                        "index": i,
+                        "tabId": f"t{i}",
+                        "url": p.url,
+                        "title": await p.title(),
+                        "active": p is session.page,
+                    }
+                )
+            except Exception as ex:
+                tabs.append({"index": i, "tabId": f"t{i}", "error": str(ex)[:120]})
+        return {
+            "success": True,
+            "tool": "cdp_tabs",
+            "session_id": session_id,
+            "tabs": tabs,
+            "tabCount": len(tabs),
+        }
+
+    async def open_tab(
+        self,
+        session_id: str,
+        url: Optional[str] = None,
+        *,
+        owner_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        await session.touch()
+        page = await session.context.new_page()
+        session.page = page
+        session._cdp = None
+        session.last_snapshot = None
+        if url:
+            try:
+                assert_url_allowed(url)
+                await page.goto(url, wait_until="domcontentloaded", timeout=cdp_default_timeout_ms())
+            except Exception as ex:
+                return {"success": False, "tool": "cdp_open", "error": str(ex), "session_id": session_id}
+        return {
+            "success": True,
+            "tool": "cdp_open",
+            "session_id": session_id,
+            "page": await session.page_info(),
+            "tabs": (await self.list_tabs(session_id, owner_key=owner_key)).get("tabs"),
+        }
+
+    async def focus_tab(
+        self,
+        session_id: str,
+        *,
+        index: Optional[int] = None,
+        tab_id: Optional[str] = None,
+        owner_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        idx = index
+        if idx is None and tab_id:
+            s = str(tab_id).strip().lower()
+            if s.startswith("t") and s[1:].isdigit():
+                idx = int(s[1:])
+            elif s.isdigit():
+                idx = int(s)
+        if idx is None:
+            return {"success": False, "error": "focus 需要 index 或 tabId(t0)"}
+        try:
+            await session.switch_page(int(idx))
+        except CdpError as e:
+            return e.to_dict() | {"tool": "cdp_focus"}
+        return {
+            "success": True,
+            "tool": "cdp_focus",
+            "session_id": session_id,
+            "index": idx,
+            "page": await session.page_info(),
+        }
+
+    async def close_tab(
+        self,
+        session_id: str,
+        *,
+        index: Optional[int] = None,
+        owner_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        pages = session.list_pages()
+        if len(pages) <= 1:
+            return {"success": False, "error": "仅剩一个标签，请用 session close 关闭整会话"}
+        idx = 0 if index is None else int(index)
+        if idx < 0 or idx >= len(pages):
+            return {"success": False, "error": f"tab index 越界: {idx}"}
+        target = pages[idx]
+        await target.close()
+        remain = session.list_pages()
+        session.page = remain[-1]
+        session._cdp = None
+        session.last_snapshot = None
+        await session.touch()
+        return {
+            "success": True,
+            "tool": "cdp_close_tab",
+            "session_id": session_id,
+            "closed_index": idx,
+            "page": await session.page_info(),
+            "tabCount": len(remain),
+        }
+
+    async def screenshot(
+        self,
+        session_id: str,
+        *,
+        full_page: bool = False,
+        owner_key: Optional[str] = None,
+        tag: str = "shot",
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        await session.touch()
+        from .screenshot import capture_and_upload_cdp_screenshot, capture_page_png, upload_png_bytes
+
+        try:
+            if full_page:
+                png = await session.page.screenshot(type="png", full_page=True)
+                url = upload_png_bytes(
+                    png,
+                    folder="cdp",
+                    filename=f"cdp_full_{session_id[:12]}_{int(time.time())}.png",
+                )
+            else:
+                url = await capture_and_upload_cdp_screenshot(
+                    session.page, session_id=session_id, tag=tag
+                )
+                if not url:
+                    png = await capture_page_png(session.page)
+                    url = upload_png_bytes(
+                        png,
+                        folder="cdp",
+                        filename=f"cdp_{session_id[:12]}_{int(time.time())}.png",
+                    )
+            return {
+                "success": True,
+                "tool": "cdp_screenshot",
+                "session_id": session_id,
+                "screenshot_url": url,
+                "full_page": full_page,
+                "page": await session.page_info(),
+            }
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_screenshot", "error": str(ex)}
+
+    async def pdf(
+        self, session_id: str, *, owner_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        await session.touch()
+        try:
+            data = await session.page.pdf(format="A4", print_background=True)
+            from .screenshot import upload_png_bytes
+
+            # 复用上传：以 .pdf 扩展名存 MinIO（同一上传函数按 filename）
+            path_url = None
+            try:
+                from io import BytesIO
+
+                buf = BytesIO(data)
+                buf.filename = f"cdp_{session_id[:12]}_{int(time.time())}.pdf"  # type: ignore
+                try:
+                    from app_services.minio_storage import upload_file_to_minio
+                except ImportError:
+                    from app import upload_file_to_minio  # type: ignore
+                result = upload_file_to_minio(buf, folder_path="cdp")
+                if isinstance(result, dict) and result.get("success"):
+                    path_url = result.get("url")
+            except Exception:
+                path_url = None
+            return {
+                "success": True,
+                "tool": "cdp_pdf",
+                "session_id": session_id,
+                "pdf_url": path_url,
+                "bytes": len(data),
+                "page": await session.page_info(),
+            }
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_pdf", "error": str(ex)}
+
+    async def extract_readable(
+        self,
+        session_id: str,
+        *,
+        query: Optional[str] = None,
+        selector: Optional[str] = None,
+        max_chars: int = 12000,
+        owner_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """对齐 OpenClaw extract：抽取可读文本；有 query 时返回文本供上层 LLM 回答。"""
+        session = self._get(session_id, owner_key=owner_key)
+        await session.touch()
+        try:
+            if selector:
+                loc = session.page.locator(selector)
+                text = await loc.inner_text(timeout=cdp_default_timeout_ms())
+            else:
+                text = await session.page.inner_text("body", timeout=cdp_default_timeout_ms())
+            text = (text or "").strip()
+            if max_chars > 0 and len(text) > max_chars:
+                text = text[:max_chars] + "…(truncated)"
+            out: Dict[str, Any] = {
+                "success": True,
+                "tool": "cdp_extract",
+                "session_id": session_id,
+                "text": text,
+                "chars": len(text),
+                "page": await session.page_info(),
+            }
+            if query:
+                out["query"] = query
+                out["hint"] = "请用 text 字段内容回答 query；本层不强制二次调模型"
+            return out
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_extract", "error": str(ex)}
+
+    async def console_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 50,
+        owner_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        session = self._get(session_id, owner_key=owner_key)
+        await session.touch()
+        # Playwright 无内置历史缓冲；用 evaluate 抓 performance/console 代理不可靠。
+        # 返回最近通过 page.on 未接线时的空列表 + 提示；同时抓 document 错误。
+        try:
+            errs = await session.page.evaluate(
+                """() => (window.__badcaseConsole || []).slice(-80)"""
+            )
+            if not isinstance(errs, list):
+                errs = []
+            return {
+                "success": True,
+                "tool": "cdp_console",
+                "session_id": session_id,
+                "messages": errs[-max(1, int(limit)) :],
+                "note": "若为空，会话创建 后会注入 console hook（见 ensure_console_hook）",
+                "page": await session.page_info(),
+            }
+        except Exception as ex:
+            return {"success": False, "tool": "cdp_console", "error": str(ex)}
+
+    async def ensure_console_hook(
+        self, session_id: str, *, owner_key: Optional[str] = None
+    ) -> None:
+        session = self._get(session_id, owner_key=owner_key)
+        try:
+            await session.page.add_init_script(
+                """
+                (() => {
+                  if (window.__badcaseConsoleHooked) return;
+                  window.__badcaseConsoleHooked = true;
+                  window.__badcaseConsole = [];
+                  const push = (level, args) => {
+                    try {
+                      window.__badcaseConsole.push({
+                        level,
+                        text: Array.from(args).map(a => {
+                          try { return typeof a === 'string' ? a : JSON.stringify(a); }
+                          catch { return String(a); }
+                        }).join(' ').slice(0, 500),
+                        t: Date.now(),
+                      });
+                      if (window.__badcaseConsole.length > 200) window.__badcaseConsole.shift();
+                    } catch (e) {}
+                  };
+                  ['log','info','warn','error'].forEach(level => {
+                    const orig = console[level].bind(console);
+                    console[level] = (...args) => { push(level, args); return orig(...args); };
+                  });
+                })();
+                """
+            )
+        except Exception:
+            pass
 
     async def close(self, session_id: str, *, owner_key: Optional[str] = None) -> Dict[str, Any]:
         owner: Optional[str] = None

@@ -110,17 +110,87 @@ def vision_image_block_labels(locale: Optional[str]) -> tuple[str, str, str]:
     )
 
 
+def format_diagnostic_evidence_for_prompt(
+    evidence: Optional[Dict[str, Any]], locale: Optional[str] = None
+) -> str:
+    """将诊断终端挂载的失败证据格式化为 Agent 可读块。"""
+    if not isinstance(evidence, dict) or not evidence:
+        return ""
+    en = is_english_locale(locale)
+    title = str(evidence.get("title") or "").strip()
+    tc_id = evidence.get("testcase_id")
+    er = str(evidence.get("execution_result") or "").strip()
+    steps = evidence.get("steps") if isinstance(evidence.get("steps"), list) else []
+    defects = evidence.get("related_defects") if isinstance(evidence.get("related_defects"), list) else []
+
+    if en:
+        lines = ["[Diagnostic evidence] Failure context from the test case editor:"]
+        if tc_id is not None:
+            lines.append(f"- testcase_id={tc_id}")
+        if title:
+            lines.append(f"- title={title!r}")
+        if er:
+            lines.append(f"- execution_result={er}")
+    else:
+        lines = ["[诊断证据] 来自用例编辑页的失败上下文："]
+        if tc_id is not None:
+            lines.append(f"- testcase_id={tc_id}")
+        if title:
+            lines.append(f"- title={title!r}")
+        if er:
+            lines.append(f"- execution_result={er}")
+
+    for i, s in enumerate(steps[:12]):
+        if isinstance(s, str):
+            lines.append(f"  {i + 1}. {s[:200]}")
+            continue
+        if not isinstance(s, dict):
+            continue
+        desc = str(s.get("step") or s.get("description") or s.get("action") or "").strip()
+        exp = str(s.get("expected") or s.get("expected_result") or "").strip()
+        if not desc and not exp:
+            continue
+        if en:
+            lines.append(f"  {i + 1}. {desc}" + (f" → expected: {exp}" if exp else ""))
+        else:
+            lines.append(f"  {i + 1}. {desc}" + (f" → 预期: {exp}" if exp else ""))
+
+    if defects:
+        if en:
+            lines.append(f"- related_defects={defects[:8]!r}")
+        else:
+            lines.append(f"- related_defects={defects[:8]!r}")
+
+    if en:
+        lines.append(
+            "Prefer terminal/cdp/grep using this evidence; do not invent unrelated failure causes."
+        )
+    else:
+        lines.append(
+            "请优先基于上述证据用 terminal/cdp/grep 排查；勿臆造无关根因。"
+        )
+    return "\n".join(lines) + "\n\n"
+
+
 def format_ui_context_for_prompt(ui_context: Optional[Dict[str, Any]], locale: Optional[str] = None) -> str:
     """
     将前端当前界面焦点格式化为 Agent 可读上下文。
     强调：主键为雪花 ID，禁止从截图臆造 9、11 等小整数。
+    同时支持 diagnostic_evidence（无 record_id 也可注入）。
     """
     if not isinstance(ui_context, dict) or not ui_context:
         return ""
+
+    parts: list[str] = []
+    diag = ui_context.get("diagnostic_evidence") or ui_context.get("diagnosticEvidence")
+    if isinstance(diag, dict) and diag:
+        parts.append(format_diagnostic_evidence_for_prompt(diag, locale))
+
     target = str(ui_context.get("target") or "").strip().lower()
     rid = ui_context.get("record_id") or ui_context.get("recordId")
     if rid is None or str(rid).strip() == "":
-        return ""
+        return "".join(parts)
+
     title = str(ui_context.get("title") or "").strip()
     plan_id = ui_context.get("plan_id") or ui_context.get("planId")
     card_id = ui_context.get("card_id") or ui_context.get("cardId")
@@ -143,7 +213,8 @@ def format_ui_context_for_prompt(ui_context: Optional[Dict[str, Any]], locale: O
             "For copy/create based on «this/current bug», use this record_id or grep by title first; "
             "never trust row numbers or IDs read only from images."
         )
-        return "\n".join(lines) + "\n\n"
+        parts.append("\n".join(lines) + "\n\n")
+        return "".join(parts)
     lines = [
         "[界面上下文] 用户当前在应用中聚焦的记录（权威来源；勿从截图臆造 ID）：",
         f"- target={target or '未知'}",
@@ -161,7 +232,8 @@ def format_ui_context_for_prompt(ui_context: Optional[Dict[str, Any]], locale: O
         "用户说「这个/当前 bug」复制新建时，须使用上述 record_id，或先 grep 标题再取 first_bug_id；"
         "禁止仅依据截图中的行号或小数字当作主键。"
     )
-    return "\n".join(lines) + "\n\n"
+    parts.append("\n".join(lines) + "\n\n")
+    return "".join(parts)
 
 
 def react_think_prelude_after_gate(locale: Optional[str]) -> str:

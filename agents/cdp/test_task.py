@@ -237,11 +237,14 @@ def finalize_cdp_test_run(
         return row.to_dict()
 
     steps = list(row.steps_json or [])
-    fail = row.fail_count or sum(1 for s in steps if not s.get("success"))
-    passed = row.pass_count or sum(1 for s in steps if s.get("success"))
+    fail = int(row.fail_count or 0) or sum(1 for s in steps if not s.get("success"))
+    passed = int(row.pass_count or 0) or sum(1 for s in steps if s.get("success"))
 
     if status_override:
         status = status_override
+    elif not steps:
+        # 0 步不得标 PASS：保持未真正执行
+        status = "blocked"
     elif fail > 0 and passed > 0:
         status = "partial"
     elif fail > 0:
@@ -249,7 +252,7 @@ def finalize_cdp_test_run(
     elif passed > 0:
         status = "passed"
     else:
-        status = "passed"
+        status = "blocked"
 
     summaries = [s.get("summary") for s in steps if s.get("summary")]
     row.status = status
@@ -262,17 +265,44 @@ def finalize_cdp_test_run(
     db.commit()
 
     spec = row.spec_json if isinstance(row.spec_json, dict) else {}
-    tc_ids = spec.get("testcase_ids") or []
-    if len(tc_ids) == 1 and user_id:
+    tc_ids = list(spec.get("testcase_ids") or [])
+    if not tc_ids and isinstance(spec.get("testcases"), list):
+        for t in spec["testcases"]:
+            if isinstance(t, dict) and t.get("id") is not None:
+                try:
+                    tc_ids.append(int(t["id"]))
+                except (TypeError, ValueError):
+                    pass
+    # 去重保序
+    _seen = set()
+    tc_ids = [x for x in tc_ids if not (x in _seen or _seen.add(x))]
+
+    if tc_ids and user_id:
         try:
-            tc = db.query(TestCase).get(int(tc_ids[0]))
-            if tc:
-                tc.last_executed = _utcnow()
-                tc.executed_by = int(user_id)
-                tc.execution_result = ExecutionResult.FAIL if fail else ExecutionResult.PASS
-                db.commit()
+            if not steps:
+                er = ExecutionResult.BLOCKED
+            elif fail > 0:
+                er = ExecutionResult.FAIL
+            else:
+                er = ExecutionResult.PASS
+            now = _utcnow()
+            uid = int(user_id)
+            for tid in tc_ids:
+                try:
+                    tc = db.query(TestCase).get(int(tid))
+                except (TypeError, ValueError):
+                    tc = None
+                if not tc:
+                    continue
+                tc.last_executed = now
+                tc.executed_by = uid
+                tc.execution_result = er
+            db.commit()
         except Exception:
-            pass
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
     return row.to_dict()
 
@@ -282,6 +312,21 @@ def get_active_run_id(result_context: Optional[Dict[str, Any]]) -> Optional[str]
         return None
     rid = result_context.get("cdp_test_run_id")
     return str(rid).strip() if rid else None
+
+
+def finalize_active_cdp_test_if_any(
+    engine: Any,
+    result_context: Optional[Dict[str, Any]] = None,
+    *,
+    user_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """对话正常结束时收口仍为 running 的测试任务。"""
+    run_id = get_active_run_id(result_context)
+    if not run_id:
+        return None
+    return finalize_cdp_test_task(
+        engine, run_id, result_context=result_context, user_id=user_id
+    )
 
 
 def buffer_test_task_sse(result_context: Optional[Dict[str, Any]], event: str, **fields: Any) -> None:

@@ -69,7 +69,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import axios from 'axios'
+import { api } from '../api.js'
 import { persistLocale } from '../i18n/index.js'
 import UserProfile from './UserProfile.vue'
 import TeamManagement from './TeamManagement.vue'
@@ -133,7 +133,7 @@ async function fetchCreditsSummary() {
   creditsLoading.value = true
   credits.value = null
   try {
-    const res = await axios.get('/api/payment/credits')
+    const res = await api.get('/api/payment/credits')
     credits.value = typeof res.data?.credits === 'number' ? res.data.credits : 0
   } catch {
     credits.value = null

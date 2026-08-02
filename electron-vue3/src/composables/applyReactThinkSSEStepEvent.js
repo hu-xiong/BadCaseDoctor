@@ -49,6 +49,32 @@ function resolveThinkTargetStep(aiMessage, rawIndex, resolveStreamStepIndex) {
   return { j, st: steps[j] }
 }
 
+/** LangGraph 多轮：agent_thought / reasoning_timing 的 index 到达时补齐 steps[n]，避免耗时落到 step0 或丢失 */
+function ensureThinkStepRow(aiMessage, rawIndex, ctx) {
+  if (!aiMessage || rawIndex == null || rawIndex === '') return
+  if (typeof ctx?.ensureReactStepsForStreamIndex !== 'function') return
+  ctx.ensureReactStepsForStreamIndex(aiMessage, rawIndex)
+}
+
+/** 思考结束但未收到 reasoning_timing 时，用墙钟补 thoughtTiming（供眉标 Xs） */
+export function synthesizeThoughtTimingIfMissing(st, endMs = Date.now()) {
+  if (!st || typeof st !== 'object') return
+  if (st.thoughtPhaseEndAtMs == null) st.thoughtPhaseEndAtMs = endMs
+  if (st.thoughtTiming?.durationMs != null && Number.isFinite(Number(st.thoughtTiming.durationMs))) {
+    return
+  }
+  const start = st.stepStartedAt
+  if (start == null || !Number.isFinite(Number(start))) return
+  const durationMs = Math.max(0, Number(st.thoughtPhaseEndAtMs) - Number(start))
+  const briefThr = 800
+  st.thoughtTiming = {
+    durationMs,
+    kind: durationMs < briefThr ? 'brief' : 'normal',
+    segment: 'think',
+    briefThresholdMs: briefThr
+  }
+}
+
 /** 进入决策块时冻结「思考」墙钟 */
 function freezeThoughtPhaseEndForActionXmlWait(st, aiMessage) {
   if (!st || st.thoughtPhaseEndAtMs != null || st.stepStartedAt == null) return
@@ -183,6 +209,9 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
           segment: segment || 'think',
           briefThresholdMs: briefThr
         }
+        if (st.stepStartedAt == null && durationMs > 0) {
+          st.stepStartedAt = Date.now() - durationMs
+        }
         if (st.thoughtPhaseEndAtMs == null) {
           if (st.stepStartedAt != null) {
             st.thoughtPhaseEndAtMs = st.stepStartedAt + durationMs
@@ -198,11 +227,13 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
         if (stepEvent.brief_threshold_ms != null) {
           aiMessage.reasoningBriefThresholdMs = briefThr
         }
+        if (stepEvent.index != null) ensureThinkStepRow(aiMessage, stepEvent.index, ctx)
         let j =
           stepEvent.index != null ? resolveStreamStepIndex(stepEvent.index, aiMessage.steps) : null
         if (j == null && Array.isArray(aiMessage.steps) && aiMessage.steps.length) j = 0
         if (j != null && aiMessage.steps[j]) applyThoughtTimingToStep(aiMessage.steps[j], 'think')
       } else if ((seg === 'decide' || seg === 'observe') && stepEvent.index != null) {
+        ensureThinkStepRow(aiMessage, stepEvent.index, ctx)
         const j = resolveStreamStepIndex(stepEvent.index, aiMessage.steps)
         if (j != null && aiMessage.steps[j]) {
           const st = aiMessage.steps[j]
@@ -223,6 +254,7 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       return true
     }
     case 'agent_thought': {
+      if (stepEvent.index != null) ensureThinkStepRow(aiMessage, stepEvent.index, ctx)
       const thinkTarget = resolveThinkTargetStep(
         aiMessage,
         stepEvent.index,
@@ -233,6 +265,8 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       const rp = stepEvent.react_phase
       const isThink =
         !rp || rp === 'think' || (typeof sseIsReactThinkPhase === 'function' && sseIsReactThinkPhase(rp))
+      const thinkEnded =
+        Number(stepEvent.think_status) === 1 || Number(stepEvent.processType) === 1
 
       let pieceVisible = typeof piece === 'string' ? piece : ''
       if (typeof piece === 'string' && piece && isThink) {
@@ -287,6 +321,8 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
       }
       if (j != null && aiMessage.steps[j] && typeof piece === 'string' && piece) {
         const st = aiMessage.steps[j]
+        if (st.stepStartedAt == null) st.stepStartedAt = Date.now()
+        st.status = st.status === 'pending' ? 'running' : st.status
         st.agentThoughtDraft = (st.agentThoughtDraft || '') + pieceVisible
         const vis = pieceVisible.replace(/[\u200B-\u200D\uFEFF\u2060]/g, '').trim()
         if (vis.length > 0 && st.phaseWait?.active) {
@@ -295,6 +331,16 @@ export function applyReactThinkSSEStepEvent(aiMessage, stepEvent, ctx) {
             st.phaseWait = null
           }
         }
+      }
+      // agent_thought_done：未带 reasoning_timing 时用墙钟补眉标耗时
+      if (thinkEnded) {
+        aiMessage._reasoningPhaseLive = false
+        const endTarget = resolveThinkTargetStep(
+          aiMessage,
+          stepEvent.index,
+          resolveStreamStepIndex
+        )
+        if (endTarget.st) synthesizeThoughtTimingIfMissing(endTarget.st)
       }
       return true
     }
@@ -474,10 +520,14 @@ export function finalizeMessageFirstThinkStream(aiMessage) {
   if (Array.isArray(aiMessage.steps)) {
     const now = Date.now()
     for (const st of aiMessage.steps) {
-      if (st && st.thoughtPhaseEndAtMs == null && st.stepStartedAt != null) {
+      if (!st) continue
+      if (st.thoughtPhaseEndAtMs == null && st.stepStartedAt != null) {
         st.thoughtPhaseEndAtMs = now
       }
-      if (st && st.phaseWait?.active) {
+      if (thoughtStepHasSubstantiveProse(st, aiMessage)) {
+        synthesizeThoughtTimingIfMissing(st, st.thoughtPhaseEndAtMs ?? now)
+      }
+      if (st.phaseWait?.active) {
         st.phaseWait = null
       }
     }

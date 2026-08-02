@@ -57,6 +57,18 @@ def local_proxy_manifest():
     )
 
 
+@client_scripts_bp.route("/local-proxy/supervisor", methods=["GET"])
+def local_proxy_supervisor_status():
+    """本机 Flask 是否托管 go-local-proxy（启停状态；供前端展示）。"""
+    try:
+        from local_proxy_supervisor import supervisor_status
+
+        st = supervisor_status()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, **st})
+
+
 @client_scripts_bp.route("/local-proxy/save", methods=["POST"])
 @login_required
 def save_local_proxy_to_disk():

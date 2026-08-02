@@ -3,14 +3,14 @@
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
       <div class="loading-spinner"></div>
-      <div class="loading-text">正在加载项目信息...</div>
+      <div class="loading-text">{{ t('cardForm.loadingProject') }}</div>
     </div>
     
     <!-- 顶部标题栏：嵌入模式也需要返回等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
         <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
-        <span class="header-title">{{ isEdit ? '编辑Bug' : '新建Bug' }}</span>
+        <span class="header-title">{{ isEdit ? t('project.editBug') : t('project.newBug') }}</span>
         <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
       </div>
     </div>
@@ -25,8 +25,8 @@
           :class="{ 'pending-diff-panel--embedded': embedded }"
         >
           <div class="pending-diff-header">
-            <div class="pending-diff-title">待采纳改动</div>
-            <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
+            <div class="pending-diff-title">{{ t('cardForm.pendingChanges') }}</div>
+            <div class="pending-diff-subtitle">{{ t('cardForm.pendingChangesSubtitle') }}</div>
           </div>
 
           <template v-for="(data, field) in pendingDiff.modifications" :key="field">
@@ -40,8 +40,8 @@
                 <span class="pending-diff-field-label">{{ pendingDiffFieldLabel(field) }}</span>
               </div>
               <div class="pending-diff-actions">
-                <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
-                <button class="btn-icon-reject" title="拒绝该字段" @click="cancelFieldChange(field)">✗</button>
+                <button class="btn-icon-approve" :title="t('cardForm.adoptField')" @click="applyFieldChange(field)">✓</button>
+                <button class="btn-icon-reject" :title="t('cardForm.rejectField')" @click="cancelFieldChange(field)">✗</button>
               </div>
             </div>
             <div v-if="isShortListPendingField(field)" class="pending-diff-inline-row">
@@ -67,7 +67,7 @@
           <input 
             v-model="bug.title" 
             class="title-input" 
-            placeholder="请输入Bug标题"
+            :placeholder="t('bugForm.titlePlaceholder')"
             maxlength="100"
           />
           <div class="title-count">{{ bug.title.length }} / 100</div>
@@ -76,7 +76,7 @@
         <!-- 状态和负责人信息 -->
         <div class="status-section">
           <div class="status-item">
-            <span class="status-label">流程状态:</span>
+            <span class="status-label">{{ t('cardForm.flowStatus') }}:</span>
             <div class="status-dropdown" @click="toggleStatusDropdown">
               <div class="status-pill">
                 <span class="status-text">{{ getStatusText(bug.status) }}</span>
@@ -96,7 +96,7 @@
             </div>
           </div>
           <div class="status-item">
-            <span class="status-label">负责人:</span>
+            <span class="status-label">{{ t('cardForm.assignee') }}:</span>
             <div class="assignee-dropdown" @click="toggleAssigneeDropdown">
               <div class="assignee-pill">
                 <span class="person-icon">👤</span>
@@ -109,7 +109,7 @@
                   <input 
                     type="text" 
                     v-model="assigneeSearchText"
-                    placeholder="输入关键字搜索"
+                    :placeholder="t('cardForm.searchKeyword')"
                     class="search-input"
                     @click.stop
                   />
@@ -118,7 +118,7 @@
                 
                 <!-- 当前用户 -->
                 <div class="assignee-section">
-                  <div class="section-title">当前用户</div>
+                  <div class="section-title">{{ t('cardForm.currentUser') }}</div>
                   <div 
                     v-if="currentUser"
                     class="assignee-option"
@@ -132,19 +132,19 @@
                     <div class="assignee-info">
                       <div class="assignee-name">{{ personPrimaryLabel(currentUser) }}</div>
                       <div v-if="personSecondaryLabel(currentUser) || currentUser.department" class="assignee-id">
-                        {{ personSecondaryLabel(currentUser) || currentUser.department || '未设置部门' }}
+                        {{ personSecondaryLabel(currentUser) || currentUser.department || t('cardForm.noDepartment') }}
                       </div>
                     </div>
                   </div>
                   <div v-else class="no-user-tip">
                     <span class="tip-icon">⚠️</span>
-                    <span class="tip-text">未获取到当前用户信息</span>
+                    <span class="tip-text">{{ t('cardForm.noCurrentUser') }}</span>
                   </div>
                 </div>
                 
                 <!-- 最近选择的 -->
                 <div class="assignee-section">
-                  <div class="section-title">最近选择的</div>
+                  <div class="section-title">{{ t('cardForm.recentSelected') }}</div>
                   <div 
                     v-if="recentAssignees.length > 0"
                     v-for="assignee in recentAssignees" 
@@ -165,13 +165,13 @@
                   </div>
                   <div v-else class="no-recent-tip">
                     <span class="tip-icon">ℹ️</span>
-                    <span class="tip-text">暂无最近选择的用户</span>
+                    <span class="tip-text">{{ t('cardForm.noRecentUsers') }}</span>
                   </div>
                 </div>
                 
                 <!-- 项目成员 -->
                 <div v-if="projectMembers.length > 0" class="assignee-section">
-                  <div class="section-title">项目成员 ({{ projectMembers.length }}人)</div>
+                  <div class="section-title">{{ t('cardForm.projectMembersCount', { n: projectMembers.length }) }}</div>
                   <div 
                     v-for="member in projectMembers" 
                     :key="member.id"
@@ -192,32 +192,32 @@
                 
                 <!-- 无项目成员时的提示 -->
                 <div v-else-if="bug.project_id && projectMembers.length === 0" class="assignee-section">
-                  <div class="section-title">项目成员 (0人)</div>
+                  <div class="section-title">{{ t('cardForm.projectMembersZero') }}</div>
                   <div class="no-members-tip">
                     <span class="tip-icon">ℹ️</span>
-                    <span class="tip-text">该项目暂无成员，请先添加项目成员</span>
+                    <span class="tip-text">{{ t('cardForm.noProjectMembers') }}</span>
                   </div>
                 </div>
                 
                 <!-- 未选择项目时的提示 -->
                 <div v-else-if="!bug.project_id" class="assignee-section">
-                  <div class="section-title">项目成员</div>
+                  <div class="section-title">{{ t('cardForm.projectMembers') }}</div>
                   <div class="no-members-tip">
                     <span class="tip-icon">⚠️</span>
-                    <span class="tip-text">请先选择所属项目</span>
+                    <span class="tip-text">{{ t('cardForm.selectProjectFirst') }}</span>
                   </div>
                 </div>
               </div>
             </div>
           </div>
           <div class="status-item">
-            <span class="status-label">所属计划:</span>
+            <span class="status-label">{{ t('cardForm.plan') }}:</span>
             <div class="plan-dropdown" @click="togglePlanDropdown">
               <!-- 当前选中的计划显示区域 -->
               <div class="plan-selected-display">
                 <span class="refresh-icon" @click.stop="refreshProjectPlans">🔄</span>
                 <span class="plan-selected-text">
-                  所属计划 {{ getSelectedPlanDisplayText }}
+                  {{ t('cardForm.plan') }} {{ getSelectedPlanDisplayText }}
                 </span>
                 <span class="arrow-icon" :class="{ 'rotated': showPlanDropdown }">▼</span>
               </div>
@@ -228,7 +228,7 @@
                   <input 
                     type="text" 
                     v-model="planSearchText"
-                    placeholder="搜索计划"
+                    :placeholder="t('cardForm.searchPlan')"
                     class="search-input"
                     @click.stop
                     @keyup.enter="searchPlans"
@@ -236,7 +236,7 @@
                   <button class="search-btn" @click="searchPlans">
                     <span class="search-icon">🔍</span>
                   </button>
-                  <button v-if="planSearchText" class="clear-search-btn" @click="clearPlanSearch" title="清除搜索">
+                  <button v-if="planSearchText" class="clear-search-btn" @click="clearPlanSearch" :title="t('cardForm.clearSearch')">
                     <span class="clear-icon">✕</span>
                   </button>
                 </div>
@@ -272,7 +272,7 @@
                       <!-- 计划名称 -->
                       <span class="plan-name">
                         {{ plan.label }}
-                        <span v-if="plan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                        <span v-if="plan.is_pinned" class="pin-indicator" :title="t('cardForm.pinned')">📌</span>
                       </span>
                       
                       <!-- 计划信息（Bug数量） -->
@@ -310,7 +310,7 @@
                         <!-- 子计划名称 -->
                         <span class="plan-name">
                           {{ childPlan.label }}
-                          <span v-if="childPlan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                          <span v-if="childPlan.is_pinned" class="pin-indicator" :title="t('cardForm.pinned')">📌</span>
                         </span>
                         
                         <!-- 子计划信息 -->
@@ -333,7 +333,7 @@
                             <span class="plan-icon">{{ grandChildPlan.icon || '📁' }}</span>
                             <span class="plan-name">
                               {{ grandChildPlan.label }}
-                              <span v-if="grandChildPlan.is_pinned" class="pin-indicator" title="已置顶">📌</span>
+                              <span v-if="grandChildPlan.is_pinned" class="pin-indicator" :title="t('cardForm.pinned')">📌</span>
                             </span>
                             <span class="plan-info" v-if="grandChildPlan.bug_count > 0">
                               <span class="count-badge bug">{{ grandChildPlan.bug_count }}</span>
@@ -346,7 +346,7 @@
                   
                   <!-- 如果没有计划，显示提示信息 -->
                   <div v-if="filteredPlans.length === 0" class="no-plans" style="padding: 20px; text-align: center; color: #666;">
-                    暂无计划数据
+                    {{ t('cardForm.noPlans') }}
                   </div>
                 </div>
               </div>
@@ -360,33 +360,33 @@
           <!-- diff 显示区域 -->
           <div v-if="bugReproPendingKey" class="field-diff-panel">
             <div class="diff-header">
-              <span class="diff-label">复现步骤修改预览:</span>
+              <span class="diff-label">{{ t('bugForm.reproStepsDiff') }}:</span>
               <div class="diff-actions">
-                <button @click="applyFieldChange('reproduction_steps')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button @click="cancelFieldChange('reproduction_steps')" class="btn-cancel" title="取消">✗</button>
+                <button @click="applyFieldChange('reproduction_steps')" class="btn-confirm" :title="t('cardForm.adoptTitle')">✓</button>
+                <button @click="cancelFieldChange('reproduction_steps')" class="btn-cancel" :title="t('cardForm.rejectTitle')">✗</button>
               </div>
             </div>
             <div class="diff-content">
               <div class="diff-old">
-                <span class="diff-tag old">原值</span>
-                <span class="diff-value">{{ bugReproStepsOldDisplay || '未设置' }}</span>
+                <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
+                <span class="diff-value">{{ bugReproStepsOldDisplay || t('cardForm.notSet') }}</span>
               </div>
               <div class="diff-arrow">→</div>
               <div class="diff-new">
-                <span class="diff-tag new">新值</span>
+                <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                 <span class="diff-value">{{ pendingDiff.modifications[bugReproPendingKey]?.new }}</span>
               </div>
             </div>
           </div>
           <div class="editor-content">
             <div class="editor-title-row">
-              <h3 class="editor-title">Bug复现步骤:</h3>
-              <button type="button" class="toolbar-btn" title="添加附件到侧栏" @click="addAttachment">📎</button>
+              <h3 class="editor-title">{{ t('bugForm.reproSteps') }}:</h3>
+              <button type="button" class="toolbar-btn" :title="t('cardForm.addAttachment')" @click="addAttachment">📎</button>
             </div>
             <RichTextHtmlEditor
               v-model="bug.reproduction_steps"
               class="editor-textarea"
-              placeholder="请详细描述Bug的复现步骤..."
+              :placeholder="t('bugForm.reproStepsPlaceholder')"
             />
             <div class="editor-count">{{ stepsLength }} / 2000</div>
           </div>
@@ -394,13 +394,13 @@
         
         <!-- 期望结果输入框 -->
         <div class="answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.expected_result }">
-          <h3 class="answer-title">期望结果:</h3>
+          <h3 class="answer-title">{{ t('bugForm.expectedResult') }}:</h3>
           <InlineFieldDiffBox
             v-if="pendingDiff?.modifications?.expected_result"
             :original="String(bugExpectedResultOldDisplay || pendingDiff.modifications.expected_result?.old || '')"
             :modified="String(pendingDiff.modifications.expected_result?.new ?? '')"
-            empty-original-label="未设置"
-            label="期望结果修改预览"
+            :empty-original-label="t('cardForm.notSet')"
+            :label="t('bugForm.expectedResultDiff')"
             height="120px"
             @apply="applyFieldChange('expected_result')"
             @cancel="cancelFieldChange('expected_result')"
@@ -409,7 +409,7 @@
             v-else
             v-model="bug.expected_result"
             class="answer-textarea"
-            placeholder="请输入期望结果..."
+            :placeholder="t('bugForm.expectedResultPlaceholder')"
             maxlength="1000"
           ></textarea>
           <div class="answer-count">{{ bug.expected_result.length }} / 1000</div>
@@ -417,13 +417,13 @@
         
         <!-- 实际结果输入框 -->
         <div class="correct-answer-section" :class="{ 'has-diff': pendingDiff?.modifications?.actual_result }">
-          <h3 class="correct-answer-title">实际结果:</h3>
+          <h3 class="correct-answer-title">{{ t('bugForm.actualResult') }}:</h3>
           <InlineFieldDiffBox
             v-if="pendingDiff?.modifications?.actual_result"
             :original="String(pendingDiff.modifications.actual_result?.old ?? '')"
             :modified="String(pendingDiff.modifications.actual_result?.new ?? '')"
-            empty-original-label="未设置"
-            label="实际结果修改预览"
+            :empty-original-label="t('cardForm.notSet')"
+            :label="t('bugForm.actualResultDiff')"
             height="120px"
             @apply="applyFieldChange('actual_result')"
             @cancel="cancelFieldChange('actual_result')"
@@ -432,7 +432,7 @@
             v-else
             v-model="bug.actual_result"
             class="correct-answer-textarea"
-            placeholder="请输入实际结果..."
+            :placeholder="t('bugForm.actualResultPlaceholder')"
             maxlength="1000"
           ></textarea>
           <div class="correct-answer-count">{{ bug.actual_result.length }} / 1000</div>
@@ -441,7 +441,7 @@
         <!-- 问题分类和优先级 -->
         <div class="category-section">
           <div class="form-row form-row--stack-field" :class="{ 'has-diff': pendingDiff?.modifications?.case_category }">
-            <label class="form-label required">问题分类:</label>
+            <label class="form-label required">{{ t('cardForm.caseCategory') }}:</label>
             <div class="form-row-field-col">
               <div
                 v-if="pendingDiff?.modifications?.case_category"
@@ -449,20 +449,20 @@
                 class="field-diff-panel field-diff-panel--stacked"
               >
                 <div class="diff-header">
-                  <span class="diff-label">问题分类修改预览:</span>
+                  <span class="diff-label">{{ t('cardForm.caseCategoryDiff') }}:</span>
                   <div class="diff-actions">
-                    <button type="button" @click="applyFieldChange('case_category')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                    <button type="button" @click="cancelFieldChange('case_category')" class="btn-cancel" title="取消">✗</button>
+                    <button type="button" @click="applyFieldChange('case_category')" class="btn-confirm" :title="t('cardForm.adoptTitle')">✓</button>
+                    <button type="button" @click="cancelFieldChange('case_category')" class="btn-cancel" :title="t('cardForm.rejectTitle')">✗</button>
                   </div>
                 </div>
                 <div class="diff-content">
                   <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
-                    <span class="diff-value">{{ pendingDiff.modifications.case_category?.old || '未设置' }}</span>
+                    <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
+                    <span class="diff-value">{{ formatBugCategoryLabel(pendingDiff.modifications.case_category?.old) }}</span>
                   </div>
                   <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
-                    <span class="diff-value">{{ pendingDiff.modifications.case_category?.new }}</span>
+                    <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
+                    <span class="diff-value">{{ formatBugCategoryLabel(pendingDiff.modifications.case_category?.new) }}</span>
                   </div>
                 </div>
               </div>
@@ -471,18 +471,18 @@
                 class="form-select"
                 :class="{ 'field-with-diff': pendingDiff?.modifications?.case_category }"
               >
-            <option value="">请选择问题分类</option>
-            <option value="功能缺陷">功能缺陷</option>
-            <option value="性能问题">性能问题</option>
-            <option value="界面问题">界面问题</option>
-            <option value="兼容性问题">兼容性问题</option>
-            <option value="安全问题">安全问题</option>
-            <option value="其他">其他</option>
+            <option value="">{{ t('cardForm.selectCaseCategory') }}</option>
+            <option value="功能缺陷">{{ t('cardForm.categoryFunctional') }}</option>
+            <option value="性能问题">{{ t('cardForm.categoryPerformance') }}</option>
+            <option value="界面问题">{{ t('cardForm.categoryUi') }}</option>
+            <option value="兼容性问题">{{ t('cardForm.categoryCompatibility') }}</option>
+            <option value="安全问题">{{ t('cardForm.categorySecurity') }}</option>
+            <option value="其他">{{ t('cardForm.categoryOther') }}</option>
             </select>
             </div>
           </div>
           <div class="form-row form-row--stack-field" :class="{ 'has-diff': pendingDiff?.modifications?.priority }">
-            <label class="form-label required">优先级:</label>
+            <label class="form-label required">{{ t('cardForm.priority') }}:</label>
             <div class="form-row-field-col">
               <div
                 v-if="pendingDiff?.modifications?.priority"
@@ -490,29 +490,29 @@
                 class="field-diff-panel field-diff-panel--stacked"
               >
                 <div class="diff-header">
-                  <span class="diff-label">优先级修改预览:</span>
+                  <span class="diff-label">{{ t('cardForm.priorityDiff') }}:</span>
                   <div class="diff-actions">
-                    <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                    <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
+                    <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" :title="t('cardForm.adoptTitle')">✓</button>
+                    <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" :title="t('cardForm.rejectTitle')">✗</button>
                   </div>
                 </div>
                 <div class="diff-content">
                   <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
+                    <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                     <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.old) }}</span>
                   </div>
                   <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
+                    <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                     <span class="diff-value">{{ formatBugPriorityLabel(pendingDiff.modifications.priority.new) }}</span>
                   </div>
                 </div>
               </div>
               <select v-model="bug.priority" class="form-select" :class="{ 'field-with-diff': pendingDiff?.modifications?.priority }">
-              <option value="">请选择优先级</option>
-              <option value="p1">P1 - 紧急</option>
-              <option value="p2">P2 - 高</option>
-              <option value="p3">P3 - 中</option>
-              <option value="p4">P4 - 低</option>
+              <option value="">{{ t('cardForm.selectPriority') }}</option>
+              <option value="p1">{{ t('cardForm.priorityP1') }}</option>
+              <option value="p2">{{ t('cardForm.priorityP2') }}</option>
+              <option value="p3">{{ t('cardForm.priorityP3') }}</option>
+              <option value="p4">{{ t('cardForm.priorityP4') }}</option>
             </select>
             </div>
           </div>
@@ -521,12 +521,12 @@
         <div class="footer-section">
           <div class="footer-tip">
             <span class="tip-icon">💡</span>
-            通过配置层级限制，可以约束父子卡片的类型关系
+            {{ t('cardForm.hierarchyTip') }}
           </div>
           <div class="footer-actions">
-            <button class="action-btn cancel-btn" @click="goBack">取消</button>
+            <button class="action-btn cancel-btn" @click="goBack">{{ t('common.cancel') }}</button>
             <button class="action-btn save-btn" @click="saveBug" :disabled="saveLoading">
-              {{ saveLoading ? '保存中...' : '保存' }}
+              {{ saveLoading ? t('cardForm.saving') : t('common.save') }}
             </button>
                     </div>
                   </div>
@@ -538,24 +538,24 @@
           v-show="!isRightSidebarOpen"
           type="button"
           class="sidebar-expand-tab"
-          title="展开侧栏"
-          aria-label="展开侧栏"
+          :title="t('cardForm.expandSidebar')"
+          :aria-label="t('cardForm.expandSidebar')"
           @click="isRightSidebarOpen = true"
         >
           <img src="../assets/resize-icon.svg" alt="" class="resize-icon resize-icon--expand" />
         </button>
         <div class="sidebar-right" :class="{ 'sidebar-right--open': isRightSidebarOpen }">
-        <div class="resize-handle" role="button" tabindex="0" title="收起侧栏" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
+        <div class="resize-handle" role="button" tabindex="0" :title="t('cardForm.collapseSidebar')" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
           <img src="../assets/resize-icon.svg" alt="" class="resize-icon" :class="{ 'rotated': isRightSidebarOpen }" />
         </div>
         
         <!-- 所属项目 -->
         <div class="sidebar-section">
-          <h3 class="sidebar-title">所属项目</h3>
+          <h3 class="sidebar-title">{{ t('cardForm.project') }}</h3>
           <div class="project-select">
-            <label class="select-label">项目名称:</label>
+            <label class="select-label">{{ t('cardForm.projectName') }}:</label>
             <select v-model="bug.project_id" class="form-select" @change="handleProjectChange">
-              <option value="">请选择</option>
+              <option value="">{{ t('cardForm.pleaseSelect') }}</option>
               <option v-for="project in availableProjects" :key="project.id" :value="project.id.toString()">
                 {{ project.name }}
               </option>
@@ -570,22 +570,22 @@
            <div class="section-header">
              <div class="header-left">
                <span class="header-icon">📄</span>
-               <span class="header-title">关联文档</span>
+               <span class="header-title">{{ t('cardForm.relatedDocs') }}</span>
              </div>
              <button class="ai-recommend-btn">
                <span class="ai-icon">🤖</span>
-               <span class="ai-text">推荐关联</span>
+               <span class="ai-text">{{ t('cardForm.recommendLink') }}</span>
              </button>
            </div>
            <div class="document-fields">
              <div class="field-row">
-               <span class="field-label">文档类型:</span>
-               <span class="field-value">{{ bug.document_type || '其他文档' }}</span>
+               <span class="field-label">{{ t('cardForm.docType') }}:</span>
+               <span class="field-value">{{ bug.document_type || t('cardForm.otherDoc') }}</span>
              </div>
              <div class="field-row">
-               <span class="field-label">文件链接:</span>
+               <span class="field-label">{{ t('cardForm.fileLink') }}:</span>
                <button class="copy-link-btn" @click="copyDocumentLink">
-                 复制知识库文档链接
+                 {{ t('cardForm.copyKbLink') }}
                </button>
              </div>
            </div>
@@ -596,7 +596,7 @@
            <div class="section-header">
              <div class="header-left">
                <span class="header-icon">📎</span>
-               <span class="header-title">附件</span>
+               <span class="header-title">{{ t('cardForm.attachments') }}</span>
              </div>
              <button class="add-attachment-btn" @click="addAttachment">
                <span class="plus-icon">+</span>
@@ -608,7 +608,7 @@
                <button class="remove-attachment-btn" @click="removeAttachment(index)">×</button>
              </div>
              <div v-if="bug.attachments.length === 0" class="no-attachments">
-               暂无附件
+               {{ t('cardForm.noAttachments') }}
              </div>
            </div>
            <input 
@@ -625,18 +625,18 @@
            class="sidebar-section comment-section"
            :class="{ 'has-diff': hasEntityFieldDiff('append_comment') }"
          >
-           <h3 class="sidebar-title">评论记录</h3>
+           <h3 class="sidebar-title">{{ t('testcaseComment.historyTitle') }}</h3>
            <div v-if="hasEntityFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
              <div class="diff-header">
-               <span class="diff-label">追加评论 · 修改预览</span>
+               <span class="diff-label">{{ t('testcaseComment.appendDiff') }}</span>
                <div class="diff-actions">
-                 <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" title="采纳">✓</button>
-                 <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" title="取消">✗</button>
+                 <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" :title="t('cardForm.adoptTitle')">✓</button>
+                 <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" :title="t('cardForm.rejectTitle')">✗</button>
                </div>
              </div>
              <div class="diff-content">
                <div class="diff-row">
-                 <span class="diff-tag new">新评论</span>
+                 <span class="diff-tag new">{{ t('testcaseComment.newComment') }}</span>
                  <span class="diff-value diff-value-multiline">{{ formatEntityDiffValue('append_comment', entityFieldDiff('append_comment')?.new) }}</span>
                </div>
              </div>
@@ -650,28 +650,28 @@
              >
                <div class="comment-item-meta">
                  <span class="comment-author">{{ c.user_name || '—' }}</span>
-                 <span v-if="c.parent_id" class="comment-reply-tag">回复 @{{ c.parent_user_name || '—' }}</span>
+                 <span v-if="c.parent_id" class="comment-reply-tag">{{ t('testcaseComment.replyTo', { name: c.parent_user_name || '—' }) }}</span>
                  <span class="comment-time">{{ formatCommentTime(c.created_at) }}</span>
-                 <span v-if="c.source_message_id" class="comment-op-tag">来自对话操作</span>
-                 <span v-if="c.pending" class="comment-pending-tag">提交中</span>
+                 <span v-if="c.source_message_id" class="comment-op-tag">{{ t('testcaseComment.linkedOp') }}</span>
+                 <span v-if="c.pending" class="comment-pending-tag">{{ t('testcaseComment.pending') }}</span>
                  <button
                    v-if="isEdit && bugId && !c.pending"
                    type="button"
                    class="comment-reply-btn"
                    @click="startReplyToComment(c)"
                  >
-                   回复
+                   {{ t('testcaseComment.reply') }}
                  </button>
                </div>
                <div class="comment-item-body" v-html="c.content"></div>
              </div>
            </div>
-           <div v-else class="comment-empty">暂无评论</div>
+           <div v-else class="comment-empty">{{ t('testcaseComment.empty') }}</div>
            <div v-if="replyingTo" class="comment-reply-hint">
-             正在回复 <strong>{{ replyingTo.user_name || '—' }}</strong>
-             <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">取消</button>
+             {{ t('testcaseComment.replying', { name: replyingTo.user_name || '—' }) }}
+             <button type="button" class="comment-reply-cancel" @click="cancelReplyToComment">{{ t('common.cancel') }}</button>
            </div>
-           <h4 class="comment-input-subtitle">{{ replyingTo ? '输入回复' : '输入评论' }}</h4>
+           <h4 class="comment-input-subtitle">{{ replyingTo ? t('testcaseComment.inputReplyTitle') : t('testcaseComment.inputTitle') }}</h4>
            <div ref="commentInputContainerRef" class="comment-input-container">
              <template v-if="!commentEditorActive">
                <textarea
@@ -679,7 +679,7 @@
                  readonly
                  rows="3"
                  :value="commentDraftText"
-                 placeholder="点击输入评论…"
+                 :placeholder="t('testcaseComment.placeholderClick')"
                  @click="activateCommentEditor"
                />
                <div class="comment-count">{{ commentDraftLength }} / 500</div>
@@ -689,7 +689,7 @@
                  v-model="commentDraft"
                  variant="compact"
                  submit-on-enter
-                 placeholder="请输入评论（Enter 发送，Shift+Enter 换行）"
+                 :placeholder="t('testcaseComment.placeholderEditor')"
                  class="rich-editor"
                  @submit="submitCommentDraft"
                />
@@ -701,7 +701,7 @@
                    :disabled="commentSubmitting || !commentDraftLength"
                    @click="submitCommentDraft"
                  >
-                   发表评论
+                   {{ t('testcaseComment.submit') }}
                  </button>
                </div>
                <div class="editor-count">{{ commentDraftLength }} / 500</div>
@@ -720,6 +720,7 @@
 <script>
 import { ref, reactive, onMounted, onActivated, onUnmounted, computed, nextTick, inject, watch, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { BACKEND_BASE_URL, createBug, getBugDetail, getCardDetail, updateBug, addBugComment, getProjectDetail, getProjectEditContext, getProjectPlans, getProjectMembers, getCurrentUser, getProjects, getPlanDetail } from '../api.js'
 import { snowflakeIdStr, normalizePlanId, isEmptyPlanKey } from '../utils/snowflakeId.js'
 import {
@@ -788,6 +789,7 @@ export default {
   },
   emits: ['close', 'titleLoaded', 'entitySnapshot'],
   setup(props, { emit }) {
+    const { t } = useI18n()
     const router = useRouter()
     const route = useRoute()
     const embeddedProjectWorkspace = inject('embeddedProjectWorkspace', null)
@@ -940,6 +942,7 @@ export default {
       browser: '',
       os: '',
       assignee: [],
+      assignee_id: null,
       plan: '',
       reproduction_steps: '',
       comment: '',
@@ -1134,6 +1137,7 @@ export default {
           bug.plan = ''
           // 清空负责人选择
           bug.assignee = []
+          bug.assignee_id = null
           availablePlans.value = []
           // 清空项目成员
           projectMembers.value = []
@@ -1473,8 +1477,19 @@ export default {
       if (row.status != null) bug.status = row.status
       if (row.project_id != null) bug.project_id = String(row.project_id)
       if (row.plan != null) bug.plan = normalizePlanId(row.plan) || ''
-      if (Array.isArray(row.assignee)) bug.assignee = [...row.assignee]
-      else if (row.assignee != null) bug.assignee = [String(row.assignee)]
+      if (row.assignee_id != null && row.assignee_id !== '') {
+        bug.assignee_id = row.assignee_id
+        bug.assignee = [String(row.assignee_id)]
+      } else if (Array.isArray(row.assignee)) {
+        bug.assignee = row.assignee.map((x) => String(x))
+        bug.assignee_id = bug.assignee.length ? bug.assignee[0] : null
+      } else if (row.assignee != null) {
+        bug.assignee = [String(row.assignee)]
+        bug.assignee_id = row.assignee
+      } else {
+        bug.assignee = []
+        bug.assignee_id = null
+      }
       if (row.attachments) bug.attachments = row.attachments
       if (bug.project_id) {
         bug.associate_project = true
@@ -1565,8 +1580,10 @@ export default {
             // 处理负责人：后端是单个 assignee_id，前端期待数组 [id]
             if (response.data.bug.assignee_id) {
               bug.assignee = [response.data.bug.assignee_id.toString()]
+              bug.assignee_id = response.data.bug.assignee_id
             } else {
               bug.assignee = []
+              bug.assignee_id = null
             }
             
             // 处理附件
@@ -2160,21 +2177,29 @@ export default {
 
     // 检查负责人是否被选中
     const isAssigneeSelected = (assigneeValue) => {
-      return bug.assignee && bug.assignee.includes(assigneeValue)
+      const want = String(assigneeValue ?? '')
+      if (!want) return false
+      if (bug.assignee_id != null && bug.assignee_id !== '') {
+        return String(bug.assignee_id) === want
+      }
+      if (Array.isArray(bug.assignee)) {
+        return bug.assignee.some((x) => String(x) === want)
+      }
+      return bug.assignee != null && String(bug.assignee) === want
     }
 
-    // 切换负责人选择状态
+    // 切换负责人（再点已选中的项 = 取消指派；后端仅支持单负责人）
     const toggleAssignee = (assigneeValue) => {
-      if (!bug.assignee) {
+      const want = String(assigneeValue ?? '')
+      if (!want) return
+      if (isAssigneeSelected(want)) {
+        bug.assignee_id = null
         bug.assignee = []
+        return
       }
-      
-      const index = bug.assignee.indexOf(assigneeValue)
-      if (index > -1) {
-        bug.assignee.splice(index, 1)
-      } else {
-        bug.assignee.push(assigneeValue)
-      }
+      const parsed = parseInt(want, 10)
+      bug.assignee_id = Number.isFinite(parsed) ? parsed : want
+      bug.assignee = [want]
     }
 
     // 切换计划下拉框显示
@@ -2243,15 +2268,29 @@ export default {
     }
 
     const formatBugPriorityLabel = (v) => {
-      if (v == null || String(v).trim() === '') return '未设置'
+      if (v == null || String(v).trim() === '') return t('cardForm.notSet')
       const s = String(v).trim().toLowerCase()
       const map = {
-        p1: 'P1 - 紧急',
-        p2: 'P2 - 高',
-        p3: 'P3 - 中',
-        p4: 'P4 - 低'
+        p1: t('cardForm.priorityP1'),
+        p2: t('cardForm.priorityP2'),
+        p3: t('cardForm.priorityP3'),
+        p4: t('cardForm.priorityP4')
       }
       return map[s] || String(v).trim()
+    }
+
+    const formatBugCategoryLabel = (v) => {
+      if (v == null || String(v).trim() === '') return t('cardForm.notSet')
+      const s = String(v).trim()
+      const map = {
+        功能缺陷: t('cardForm.categoryFunctional'),
+        性能问题: t('cardForm.categoryPerformance'),
+        界面问题: t('cardForm.categoryUi'),
+        兼容性问题: t('cardForm.categoryCompatibility'),
+        安全问题: t('cardForm.categorySecurity'),
+        其他: t('cardForm.categoryOther')
+      }
+      return map[s] || s
     }
 
     const applyPendingModificationsToBugForm = () => {
@@ -2728,6 +2767,7 @@ export default {
     })
     
     return {
+      t,
       loading,
       saveLoading,
       isEdit,
@@ -2747,6 +2787,8 @@ export default {
       filteredPlans,
       expandedPlans,
       getStatusText,
+      formatBugPriorityLabel,
+      formatBugCategoryLabel,
       saveBug,
       toggleStatusDropdown,
       selectStatus,
@@ -2778,7 +2820,6 @@ export default {
       confirmFieldChange,
       cancelFieldChange,
       applyFieldChange,
-      formatBugPriorityLabel,
       copyDocumentLink,
       addAttachment,
       handleFileUpload,

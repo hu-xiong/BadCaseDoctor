@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # MySQL数据库
   mysql:
     image: mysql:8.0
     container_name: badcasedoctor-mysql
@@ -16,8 +15,13 @@ services:
       - mysql-data:/var/lib/mysql
     networks:
       - badcasedoctor-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
-  # Redis缓存
   redis:
     image: redis:7-alpine
     container_name: badcasedoctor-redis
@@ -27,31 +31,81 @@ services:
       - redis-data:/data
     networks:
       - badcasedoctor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
-  # Go后端服务
+  # Python 主应用（Flask + Waitress/Gunicorn）
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: badcasedoctor-web
+    env_file:
+      - .env
+    environment:
+      FLASK_ENV: production
+      FLASK_DEBUG: "0"
+      FLASK_HOST: "0.0.0.0"
+      PORT: "5000"
+      WSGI_HOST: "0.0.0.0"
+      WSGI_PORT: "5000"
+      DATABASE_URL: "mysql+pymysql://badcasedoctor:password@mysql:3306/badcasedoctor?charset=utf8mb4"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      BADCASE_MANAGE_LOCAL_PROXY: "0"
+      AGENT_SKIP_CREDITS: ${AGENT_SKIP_CREDITS:-1}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+      PAYMENT_MOCK_ENABLED: ${PAYMENT_MOCK_ENABLED:-1}
+      SEED_DEMO_USERS: ${SEED_DEMO_USERS:-0}
+      TRUST_PROXY: "1"
+      WSGI_TIMEOUT: "3600"
+      WSGI_THREADS: "8"
+      WEB_CONCURRENCY: "2"
+      CORS_ALLOW_NULL_ORIGIN: ${CORS_ALLOW_NULL_ORIGIN:-1}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-}
+    ports:
+      - "5000:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - badcasedoctor-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  # Go 后端（可选；主业务当前以 Python web 为准）
   backend:
     build:
       context: ./backend-go
       dockerfile: Dockerfile
     container_name: badcasedoctor-backend
+    profiles: ["go"]
     environment:
       DATABASE_URL: "badcasedoctor:password@tcp(mysql:3306)/badcasedoctor?charset=utf8mb4&parseTime=True&loc=Local"
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ""
-      JWT_SECRET: "your-jwt-secret-key-here"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env for backend-go profile}
       ENVIRONMENT: production
       PORT: 8000
-      SMTP_HOST: "smtp.gmail.com"
-      SMTP_PORT: "587"
-      SMTP_USERNAME: "your-email@gmail.com"
-      SMTP_PASSWORD: "your-app-password"
-      FROM_EMAIL: "your-email@gmail.com"
     ports:
       - "8000:8000"
     depends_on:
-      - mysql
-      - redis
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - badcasedoctor-network
     restart: unless-stopped

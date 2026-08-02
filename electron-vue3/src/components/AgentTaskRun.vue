@@ -780,22 +780,33 @@ const thoughtFoldShowSpinner = (s) => {
   return stepWallClockElapsedMs(s, s.stepStartedAt) >= STEP_SPINNER_DELAY_MS
 }
 
-/** 思考结束后右侧显示耗时（沿用简要思考不展示时间的阈值） */
+/** 思考结束后右侧显示耗时（有 timing 即展示；极短 <100ms 仍隐藏，避免闪 0.0s） */
 const thoughtFoldDurationRight = (s) => {
   void thoughtUiTick.value
   if (!thoughtProseStreamFinished(s)) return ''
-  if (!(thoughtBodySubstantive(s) || hasReasoningBody(s))) return ''
-  const timing = s.thoughtTiming
-  if (timing && timing.durationMs != null) {
-    const thr = timing.briefThresholdMs ?? 800
-    if (timing.durationMs < thr) return ''
-    return `${(timing.durationMs / 1000).toFixed(1)}s`
+  let ms =
+    s.thoughtTiming && s.thoughtTiming.durationMs != null
+      ? Number(s.thoughtTiming.durationMs)
+      : null
+  // timing 缺失或过短时，用墙钟 / 工具开始前间隙回退
+  if (s.stepStartedAt != null) {
+    const endAt =
+      s.thoughtPhaseEndAtMs != null
+        ? Number(s.thoughtPhaseEndAtMs)
+        : typeof s.toolExecStartedAt === 'number'
+          ? Number(s.toolExecStartedAt)
+          : null
+    if (endAt != null && Number.isFinite(endAt)) {
+      const wall = Math.max(0, endAt - Number(s.stepStartedAt))
+      if (ms == null || !Number.isFinite(ms) || (ms < 100 && wall >= 100)) ms = wall
+    }
   }
-  if (s.thoughtPhaseEndAtMs != null && s.stepStartedAt != null) {
-    const sec = Math.max(0, (s.thoughtPhaseEndAtMs - s.stepStartedAt) / 1000)
-    return `${sec.toFixed(1)}s`
+  if (ms == null || !Number.isFinite(ms)) {
+    if (!(thoughtBodySubstantive(s) || hasReasoningBody(s))) return ''
+    return ''
   }
-  return ''
+  if (ms < 100) return ''
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
 const toolExecRunning = (s) =>

@@ -3,7 +3,8 @@ const path = require('path')
 const os = require('os')
 const fs = require('fs')
 const { execFileSync, spawn } = require('child_process')
-const isDev = process.env.NODE_ENV === 'development'
+// 以是否打包为准，避免 NODE_ENV 未设时误连 Vite
+const isDev = !app.isPackaged
 
 // node-pty 支持本地终端
 let pty = null
@@ -122,14 +123,23 @@ function createWindow() {
     // 打开开发者工具
     mainWindow.webContents.openDevTools()
   } else {
-    // 生产环境：加载构建后的文件
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+    // 打包后资源在 app.asar/dist；开发未打包时相对仓库 electron-vue3/dist
+    const prodIndex = path.join(app.getAppPath(), 'dist', 'index.html')
+    mainWindow.loadFile(prodIndex)
   }
 
   // 窗口关闭时清理
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+}
+
+// 打包后页面为 file://，请求本地 HTTP API 时放宽 SameSite Cookie 限制（需后端 CORS_ALLOW_NULL_ORIGIN）
+if (!isDev) {
+  app.commandLine.appendSwitch(
+    'disable-features',
+    'SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure'
+  )
 }
 
 // 应用准备就绪时创建窗口

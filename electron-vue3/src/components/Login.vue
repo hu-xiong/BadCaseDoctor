@@ -173,7 +173,7 @@
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { login, register, sendVerificationCode } from '../api.js'
+import { login, register, sendVerificationCode, forgotPassword } from '../api.js'
 import { setUser } from '../store/user.js'
 import { navigateAfterAuth } from '../utils/loginNavigate.js'
 
@@ -294,13 +294,19 @@ export default {
     const handleForgotPassword = async () => {
       forgotPasswordLoading.value = true
       try {
-        // 这里可以调用忘记密码的API
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        const res = await forgotPassword({ email: forgotPasswordForm.email })
+        if (res?.data?.success === false) {
+          throw new Error(res?.data?.error || t('auth.sendResetFailed'))
+        }
         showForgotPassword.value = false
         alert(t('auth.resetSent'))
+        router.push({
+          path: '/reset-password',
+          query: { email: forgotPasswordForm.email }
+        })
       } catch (error) {
         console.error('发送重置链接失败:', error)
-        alert(t('auth.sendResetFailed'))
+        alert(error?.response?.data?.error || error?.message || t('auth.sendResetFailed'))
       } finally {
         forgotPasswordLoading.value = false
       }

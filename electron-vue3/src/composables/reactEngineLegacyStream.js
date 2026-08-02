@@ -6,7 +6,8 @@ import {
   finalizeMessageFirstThinkStream,
   mergeMessageThinkDraftsIntoReactStepZero,
   maybeRevealPlanMemoAfterThink,
-  sealPriorStepsBeforeThinkRound
+  sealPriorStepsBeforeThinkRound,
+  synthesizeThoughtTimingIfMissing
 } from './applyReactThinkSSEStepEvent.js'
 import { mergeBuiltStepsPreservingPlaceholderThinkClock } from './agentReactV1Ui.js'
 import {
@@ -451,6 +452,8 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
       if (runningStep.thoughtPhaseEndAtMs == null) {
         runningStep.thoughtPhaseEndAtMs = Date.now()
       }
+      // 工具开始前补齐思考耗时（LangGraph 第二轮常丢 reasoning_timing）
+      synthesizeThoughtTimingIfMissing(runningStep, runningStep.thoughtPhaseEndAtMs)
       runningStep.toolExecStartedAt = Date.now()
       if (!runningStep.progressLog) runningStep.progressLog = []
       if (!runningStep.inputParams && (stepEvent.params || stepEvent.tool || stepEvent.reason)) {

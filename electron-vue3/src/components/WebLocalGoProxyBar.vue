@@ -44,6 +44,12 @@
       >
         {{ localGoProxyLastError }}
       </p>
+      <p
+        v-else-if="!proxyActionBusy && proxyManagedByBackend"
+        class="wlgp-popover-body wlgp-popover-body--compact"
+      >
+        {{ t('embeddedTerminal.localProxyManagedByBackend') }}
+      </p>
       <p v-else-if="!proxyActionBusy && proxyPopoverBodyShort" class="wlgp-popover-body wlgp-popover-body--compact">
         {{ proxyPopoverBodyShort }}
       </p>
@@ -80,7 +86,7 @@
 </template>
 
 <script setup>
-import { ref, computed, inject, watch, nextTick, onMounted } from 'vue'
+import { ref, computed, inject, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import LocalProxyInstallModal from './LocalProxyInstallModal.vue'
 import { isElectronShell } from '../utils/electronPtySocketAdapter.js'
@@ -104,6 +110,12 @@ import {
   persistExplicitProxyExePath
 } from '../utils/localProxyInstall.js'
 import { tryWakeThenPing } from '../utils/localProxyWake.js'
+import {
+  tryStartInstalledLocalProxy,
+  resolveInstalledLocalProxyPath,
+  EVT_OPEN_LOCAL_PROXY_INSTALL,
+  dispatchLocalProxyBecameOk
+} from '../utils/localProxyStartAndResume.js'
 
 const { t } = useI18n()
 
@@ -115,12 +127,15 @@ const props = defineProps({
 const localGoProxyOk = inject('localGoProxyOk', sharedLocalGoProxyRef)
 const localGoProxyLastError = inject('localGoProxyLastError', sharedLocalGoProxyLastError)
 const pingLocalGoProxy = inject('pingLocalGoProxy', sharedPingLocalGoProxy)
+const terminalCtl = inject('terminalCtl', null)
+const ensureBottomTerminalVisible = inject('ensureBottomTerminalVisible', null)
 
 const proxyActionBusy = ref(false)
 const proxyDownloadPct = ref(null)
 const proxyProgressIndeterminate = ref(false)
 const proxyDownloadPhase = ref('idle')
 const proxyInlineError = ref('')
+const proxyManagedByBackend = ref(false)
 
 const showLocalProxyInstallModal = ref(false)
 const pendingProxyBlob = ref(null)
@@ -232,6 +247,33 @@ function onProxyDownloadProgress(pct, phase) {
   }
 }
 
+async function startProxyAfterInstall(preferredPath = '') {
+  const path = String(preferredPath || resolveInstalledLocalProxyPath() || '').trim()
+  if (path) persistExplicitProxyExePath(path)
+  refreshProxyInstallSnapshot()
+  const ctl =
+    terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl
+      ? terminalCtl.value
+      : terminalCtl
+  const ok = await tryStartInstalledLocalProxy({
+    ping: pingLocalGoProxy,
+    exePath: path,
+    injectCommand: (cmd) => ctl?.injectCommand?.(cmd),
+    ensureTerminalVisible: async () => {
+      if (typeof ensureBottomTerminalVisible === 'function') {
+        await ensureBottomTerminalVisible()
+      }
+    },
+    retries: 12,
+    delayMs: 800
+  })
+  if (ok) {
+    dispatchLocalProxyBecameOk({ path })
+    showLocalProxyInstallModal.value = false
+  }
+  return ok
+}
+
 async function onLocalProxyInstallConfirm(payload) {
   const targetPath = String(payload?.targetPath || '').trim()
   try {
@@ -239,10 +281,16 @@ async function onLocalProxyInstallConfirm(payload) {
     if (!targetPath) return
     persistExplicitProxyExePath(targetPath)
     refreshProxyInstallSnapshot()
-    await pingLocalGoProxy()
-    showLocalProxyInstallModal.value = false
+    proxyInstallSaveBusy.value = true
+    proxyInstallModalError.value = ''
+    const ok = await startProxyAfterInstall(targetPath)
+    if (!ok) {
+      proxyInstallModalError.value = t('embeddedTerminal.localProxyStartAfterInstallHint')
+    }
   } catch (e) {
     proxyInstallModalError.value = String(e?.message || e)
+  } finally {
+    proxyInstallSaveBusy.value = false
   }
 }
 
@@ -257,7 +305,7 @@ async function onLocalProxyInstallDownload() {
   proxyProgressIndeterminate.value = false
   proxyDownloadPct.value = null
   try {
-    await saveLocalProxyBlobWithoutFetch(blob, fn, {
+    const saved = await saveLocalProxyBlobWithoutFetch(blob, fn, {
       terminalCwd: String(props.workingDirectory || '').trim(),
       projectId: props.projectId,
       tryReuseDir: false,
@@ -265,6 +313,14 @@ async function onLocalProxyInstallDownload() {
     })
     refreshProxyInstallSnapshot()
     proxyInstallDownloaded.value = true
+    // 保存成功后尽量立刻启动：有推断/显式路径则唤醒；否则仍留在弹窗让用户确认路径
+    const pathGuess =
+      String(readExplicitProxyExePath() || '').trim() ||
+      String(readProxyInstallRecord()?.inferredFullPath || '').trim()
+    if (pathGuess || (saved && saved.mode && saved.mode !== 'download')) {
+      if (pathGuess) persistExplicitProxyExePath(pathGuess)
+      await startProxyAfterInstall(pathGuess)
+    }
   } catch (e) {
     if (e && e.name === 'AbortError') {
       return
@@ -343,8 +399,32 @@ async function onLocalProxyPillClick() {
   }
 }
 
+function onExternalOpenInstall() {
+  void onLocalProxyPillClick()
+}
+
+async function refreshSupervisorHint() {
+  try {
+    const { api } = await import('../api.js')
+    const { data } = await api.get('/api/client-scripts/local-proxy/supervisor')
+    proxyManagedByBackend.value = !!(data && data.ok && data.owned && data.running_child)
+  } catch {
+    proxyManagedByBackend.value = false
+  }
+}
+
 onMounted(() => {
   refreshProxyInstallSnapshot()
+  void refreshSupervisorHint()
+  if (typeof window !== 'undefined') {
+    window.addEventListener(EVT_OPEN_LOCAL_PROXY_INSTALL, onExternalOpenInstall)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener(EVT_OPEN_LOCAL_PROXY_INSTALL, onExternalOpenInstall)
+  }
 })
 </script>
 

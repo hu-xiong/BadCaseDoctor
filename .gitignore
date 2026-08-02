@@ -17,12 +17,15 @@ htmlcov/
 .vscode/
 .env
 .env.*
+!.env.example
+!electron-vue3/.env.production.example
 .DS_Store
 Thumbs.db
 .cache/
 dist/
 build/
 electron-vue3/dist/
+electron-vue3/release/
 electron-vue3/node_modules/
 electron-vue3/.vite/
 .cursor/
@@ -45,3 +48,7 @@ client_binaries/*
 !client_binaries/.gitkeep
 
 observability/
+
+# mem0 本地向量库 / history
+data/mem0_qdrant/
+data/mem0_history.db

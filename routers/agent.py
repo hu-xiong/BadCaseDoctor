@@ -36,6 +36,108 @@ from llm.task_complexity import classify_image_intent
 
 logger = logging.getLogger(__name__)
 
+
+def _agent_gate_response(user_id, project_id, *, require_project: bool = True):
+    """
+    Agent 入口闸门：项目权限 + 额度。
+    返回 None 表示放行；否则返回 (Response, http_status)。
+    """
+    pid = project_id
+    if pid is not None and str(pid).strip() != "":
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return jsonify({"code": 400, "message": "project_id 无效", "error": "invalid_project"}), 400
+    else:
+        pid = None
+
+    if require_project and pid is None:
+        return jsonify({
+            "code": 400,
+            "message": "请先选择所属项目",
+            "error": "project_required",
+        }), 400
+
+    if pid is not None:
+        try:
+            from app import has_project_permission
+
+            if not has_project_permission(user_id, pid, "collaborator"):
+                return jsonify({
+                    "code": 403,
+                    "message": "无该项目权限",
+                    "error": "forbidden_project",
+                }), 403
+        except Exception:
+            logger.exception("[AGENT-GATE] permission check failed")
+            return jsonify({"code": 500, "message": "权限校验失败", "error": "perm_check_failed"}), 500
+
+    # 限流（先于扣额度，避免白扣费）
+    try:
+        from utils.agent_rate_limit import check_agent_rate_limit
+
+        ok_rl, rl_err = check_agent_rate_limit(user_id, action="react")
+        if not ok_rl:
+            msg = (
+                "请求过于频繁，请稍后再试"
+                if rl_err == "rate_limited"
+                else "并发 Agent 任务过多，请等待当前任务结束"
+            )
+            try:
+                retry_after = int((os.getenv("AGENT_RATE_RETRY_AFTER") or "60").strip() or "60")
+            except ValueError:
+                retry_after = 60
+            retry_after = max(1, min(retry_after, 3600))
+            resp = jsonify({
+                "code": 429,
+                "message": msg,
+                "error": rl_err or "rate_limited",
+            })
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(retry_after)
+            return resp
+    except Exception:
+        logger.exception("[AGENT-GATE] rate limit check failed")
+
+    try:
+        from routers.payment import agent_credits_enforced, consume_user_credit
+
+        if agent_credits_enforced():
+            ok, remaining, err = consume_user_credit(user_id)
+            if not ok:
+                # 额度失败时释放刚占的并发槽
+                try:
+                    from utils.agent_rate_limit import release_agent_slot
+
+                    release_agent_slot(user_id)
+                except Exception:
+                    pass
+                if err == "insufficient":
+                    return jsonify({
+                        "code": 402,
+                        "message": "额度不足，请购买订阅",
+                        "error": "insufficient_credits",
+                        "remaining_credits": remaining,
+                    }), 402
+                return jsonify({
+                    "code": 500,
+                    "message": "额度扣减失败",
+                    "error": err or "credit_error",
+                }), 500
+            logger.info("[AGENT-GATE] credit consumed user=%s remaining=%s", user_id, remaining)
+    except Exception:
+        logger.exception("[AGENT-GATE] credit check failed")
+        try:
+            from utils.agent_rate_limit import release_agent_slot
+
+            release_agent_slot(user_id)
+        except Exception:
+            pass
+        return jsonify({"code": 500, "message": "额度校验失败", "error": "credit_check_failed"}), 500
+
+    return None
+
+
 def model_supports_images(model_name: str) -> bool:
     """判断模型是否支持图片输入"""
     if not model_name:
@@ -354,63 +456,75 @@ def execute_agent():
                 'message': '用户输入不能为空',
                 'data': None
             }), 400
-        
-        # 初始化模型用于意图识别
-        print(f"[AGENT] 初始化模型: {model_name or 'default'}...")
-        llm = get_llm(model=model_name)
-        
-        # 如果是自动模式，先识别意图
-        detected_agent = None
-        detected_intent = None
-        
-        if agent_mode == 'auto':
-            print(f"[AGENT] 开始识别用户意图...")
-            intent_start = time.time()
-            
-            with MetricsRecorder('intent_detection'):
-                intent_result = _detect_intent(user_input, conversation_history, llm, locale=ui_locale)
-            
-            detected_agent = intent_result.get('agent', 'unknown')
-            detected_intent = intent_result.get('intent', 'unknown')
-            
-            # 记录意图识别指标
-            record_intent_detection(detected_intent, status='success')
-            
-            print(f"[AGENT] 意图识别完成 - Agent: {detected_agent}, 意图: {detected_intent}, 耗时: {time.time() - intent_start:.4f}s")
-        else:
-            # 直接使用指定的 Agent
-            detected_agent = agent_mode
-            print(f"[AGENT] 使用指定的 Agent: {detected_agent}")
-        
-        # 分发到对应的 Agent 执行
-        print(f"[AGENT] 分发到 Agent: {detected_agent}")
-        
-        with MetricsRecorder('agent_execute', labels={'agent_type': detected_agent}):
-            agent_result = _dispatch_to_agent(
-                detected_agent,
-                user_input,
-                conversation_history,
-                current_user.id,
-                llm,
-                project_id  # 传入项目ID
-            )
-        
-        # 记录 Agent 执行指标
-        record_agent_execute(detected_agent, status='success')
-        
-        total_time = time.time() - start_time
-        print(f"[AGENT] === Agent 执行完成，总耗时: {total_time:.4f}s ===\n")
-        
-        return jsonify({
-            'code': 200,
-            'message': '成功',
-            'data': {
-                'detected_agent': detected_agent,
-                'detected_intent': detected_intent,
-                'result': agent_result,
-                'execution_time': total_time
-            }
-        })
+
+        _gate = _agent_gate_response(current_user.id, project_id, require_project=True)
+        if _gate is not None:
+            return _gate
+
+        try:
+            # 初始化模型用于意图识别
+            print(f"[AGENT] 初始化模型: {model_name or 'default'}...")
+            llm = get_llm(model=model_name)
+
+            # 如果是自动模式，先识别意图
+            detected_agent = None
+            detected_intent = None
+
+            if agent_mode == 'auto':
+                print(f"[AGENT] 开始识别用户意图...")
+                intent_start = time.time()
+
+                with MetricsRecorder('intent_detection'):
+                    intent_result = _detect_intent(user_input, conversation_history, llm, locale=ui_locale)
+
+                detected_agent = intent_result.get('agent', 'unknown')
+                detected_intent = intent_result.get('intent', 'unknown')
+
+                # 记录意图识别指标
+                record_intent_detection(detected_intent, status='success')
+
+                print(f"[AGENT] 意图识别完成 - Agent: {detected_agent}, 意图: {detected_intent}, 耗时: {time.time() - intent_start:.4f}s")
+            else:
+                # 直接使用指定的 Agent
+                detected_agent = agent_mode
+                print(f"[AGENT] 使用指定的 Agent: {detected_agent}")
+
+            # 分发到对应的 Agent 执行
+            print(f"[AGENT] 分发到 Agent: {detected_agent}")
+
+            with MetricsRecorder('agent_execute', labels={'agent_type': detected_agent}):
+                agent_result = _dispatch_to_agent(
+                    detected_agent,
+                    user_input,
+                    conversation_history,
+                    current_user.id,
+                    llm,
+                    project_id  # 传入项目ID
+                )
+
+            # 记录 Agent 执行指标
+            record_agent_execute(detected_agent, status='success')
+
+            total_time = time.time() - start_time
+            print(f"[AGENT] === Agent 执行完成，总耗时: {total_time:.4f}s ===\n")
+
+            return jsonify({
+                'code': 200,
+                'message': '成功',
+                'data': {
+                    'detected_agent': detected_agent,
+                    'detected_intent': detected_intent,
+                    'result': agent_result,
+                    'execution_time': total_time
+                }
+            })
+        finally:
+            try:
+                from utils.agent_rate_limit import release_agent_slot
+
+                release_agent_slot(current_user.id)
+            except Exception:
+                pass
         
     except Exception as e:
         print(f"[AGENT] !!! 发生异常: {str(e)}")
@@ -739,6 +853,7 @@ def react_agent_stream_cancel():
 
 
 @agent_bp.route('/react', methods=['POST'])
+@login_required
 def react_agent():
     """
     综合型 AI 运维 Agent - ReAct 推理循环 (支持流式)
@@ -772,6 +887,14 @@ def react_agent():
         react_request_id = (
             (data.get('request_id') or data.get('react_request_id') or '').strip() or str(uuid.uuid4())
         )
+        _resume_early = (data.get('resume_run_id') or data.get('resumeRunId') or '').strip()
+        _gate = _agent_gate_response(
+            current_user.id,
+            project_id,
+            require_project=not bool(_resume_early),
+        )
+        if _gate is not None:
+            return _gate
         try:
             from memory.prompt_page_pipeline import preflight_agent_request
 
@@ -804,6 +927,9 @@ def react_agent():
         long_memory_context = data.get('long_memory_context') or data.get('longMemoryContext')
         if not isinstance(long_memory_context, dict):
             long_memory_context = None
+        conversation_history = data.get('conversation_history') or data.get('conversationHistory')
+        if not isinstance(conversation_history, list):
+            conversation_history = []
 
         logger.info("[REACT] 请求参数:")
         logger.info("  - user_input 长度: %s", len(user_input))
@@ -901,7 +1027,16 @@ def react_agent():
             )
         from app import db
         t_agent0 = time.perf_counter()
-        agent = IntelligentDevOpsAgent(llm=llm, db_session=db.session)
+        _engine_override = (
+            (data.get("agent_engine") or data.get("engine") or "").strip() or None
+        )
+        agent = IntelligentDevOpsAgent(
+            llm=llm, db_session=db.session, engine_backend=_engine_override
+        )
+        logger.info(
+            "[REACT] agent_engine=%s",
+            getattr(agent, "engine_backend", "react"),
+        )
         if perf:
             logger.info(
                 "[PERF][react_api][%s] agent_init_ms=%.1f fresh_agent=%s",
@@ -1254,6 +1389,7 @@ def react_agent():
                             agent_session_id=react_request_id,
                             chat_session_id=_chat_session_id,
                             long_memory_context=long_memory_context,
+                            conversation_history=conversation_history,
                             hint_project_name=hint_project_name,
                             hint_plan_name=hint_plan_name,
                             client_shell=client_shell,
@@ -1287,12 +1423,40 @@ def react_agent():
                                     q.put(_sse_sanitize_for_json(chunk))
                             except Exception:
                                 q.put(chunk)
+                        # 对话正常结束：收口仍在 running 的 CDP 测试任务并推 SSE
+                        try:
+                            from agents.cdp.test_task import (
+                                finalize_active_cdp_test_if_any,
+                                pop_test_task_sse_buffer,
+                            )
+
+                            _rctx = getattr(getattr(agent, "react_engine", None), "_unified_result_ctx", None)
+                            if isinstance(_rctx, dict) and _rctx.get("cdp_test_run_id"):
+                                finalize_active_cdp_test_if_any(
+                                    getattr(agent, "react_engine", agent),
+                                    _rctx,
+                                    user_id=int(getattr(current_user, "id", 0) or 0) or None,
+                                )
+                                for _tt_ev in pop_test_task_sse_buffer(_rctx):
+                                    if isinstance(_tt_ev, dict) and not is_wire_v1_packet(_tt_ev):
+                                        for wire_packet in engine_dict_to_wire_packets(_tt_ev):
+                                            q.put(_sse_sanitize_for_json(wire_packet))
+                                    else:
+                                        q.put(_sse_sanitize_for_json(_tt_ev))
+                        except Exception:
+                            logger.debug("[REACT] cdp_test finalize-on-end skipped", exc_info=True)
                     except Exception as e:
                         logger.exception("[REACT-execution] 异常: %s", str(e))
                         _task_ok = False
                         _task_err = str(e)
                         q.put({'type': 'err', 'payload': {'message': str(e)}})
                     finally:
+                        try:
+                            from utils.agent_rate_limit import release_agent_slot
+
+                            release_agent_slot(getattr(current_user, "id", "") or "")
+                        except Exception:
+                            pass
                         try:
                             record_auto_route_outcome(
                                 user_id=str(getattr(current_user, "id", "") or ""),

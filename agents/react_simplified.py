@@ -37,7 +37,7 @@ SSE：todos/plan/todo_start/observation 等与前端同步进度。
 - REACT_DECIDE_FC_MAX_TOKENS：Function Calling 决策（``chat_completion_with_tools``）可选输出上限；**未设置时回落到** ``REACT_DECIDE_MAX_TOKENS``（仍不设则不传 max_tokens）
 - **grep 后下一轮 decide**（缩短观察结束→Thought 间隔）：上一工具为 ``grep`` 时，默认对 decide 侧 JSON 做**更紧裁剪**（``REACT_DECIDE_AFTER_GREP_SHRINK=1`` 默认开，``=0`` 关闭）；``REACT_DECIDE_AFTER_GREP_LIST_CAP``（默认 8）、``REACT_DECIDE_AFTER_GREP_STR_CHARS``（默认 280）、``REACT_DECIDE_AFTER_GREP_MAX_DEPTH``（默认 12），与通用 ``REACT_DECIDE_PROMPT_*`` 取 **更严（更小）** 值。另可设 ``REACT_DECIDE_AFTER_GREP_MAX_TOKENS`` 覆盖该轮流式 decide 输出上限；FC 轮次另可读 ``REACT_DECIDE_AFTER_GREP_FC_MAX_TOKENS``，未设则回落到 ``REACT_DECIDE_AFTER_GREP_MAX_TOKENS``
 - P0 体积/延迟（仅环境变量）：首轮说明默认已跳过（``REACT_SKIP_THINK_HINT=0`` 可开）；``REACT_TOOL_DESC_MAX_CHARS`` 等为**截断**，与「尽量不截断」冲突时勿开
-- REACT_LONG_MEMORY_QUERY_EACH_MESSAGE：``1`` 时每条对话按当前 ``user_input`` 做向量检索注入；**默认 0**——由前端打开项目时 ``POST /api/memory/retrieve``（``mode: recent``）拉取后，随 ``long_memory_context`` 传入 ``/api/agent/react``。
+- REACT_LONG_MEMORY_QUERY_EACH_MESSAGE：``1`` 时每条对话按当前 ``user_input`` 做 mem0 向量检索注入；**默认 0**——由前端打开项目时 ``POST /api/memory/retrieve``（``mode: recent``）拉取后，随 ``long_memory_context`` 传入 ``/api/agent/react``。成功结束后若 ``MEM0_AUTO_CAPTURE`` 开启则异步 ``mem0.add`` 沉淀。
 - REACT_NEED_TODO_LIST_HEURISTIC：模型未给出 ``need_todo_list`` 时的降级；**默认 1**（多步/多工具线索 → 生成计划）；``0`` 时恒按「需要可解析计划」处理（保守）。
 - REACT_THINK_JSON_PLAN=1（默认）：THINK 要求一次性输出 ``{"plan":[{id,description,status},...]}``；解析见 ``parse_react_json_plan``。
 - REACT_SELF_DRIVE_TOOL_LOOP=1：每步用 ``_extract_todo_params`` 直接决策工具，跳过本步 decide LLM（仍走 observe 等后续）。
@@ -2074,11 +2074,15 @@ class SimplifiedReActEngine:
 
     @staticmethod
     def _react_modify_grep_expand_single_id_to_batch_enabled() -> bool:
-        """grep 多条命中但模型只传 target_id 为其中一条时，是否扩展为整批 target_ids（默认开）。"""
+        """
+        grep 多条命中但模型只传 target_id 为其中一条时，是否扩展为整批 target_ids。
+        默认关：用户常点名单条标题，模型已选对 id，扩批会导致沙箱预览与 modify 对不上。
+        需要「改这一批」时设 REACT_MODIFY_GREP_EXPAND_SINGLE_ID_TO_BATCH=1。
+        """
         v = (
-            os.getenv("REACT_MODIFY_GREP_EXPAND_SINGLE_ID_TO_BATCH", "1") or "1"
+            os.getenv("REACT_MODIFY_GREP_EXPAND_SINGLE_ID_TO_BATCH", "0") or "0"
         ).strip().lower()
-        return v not in ("0", "false", "no", "off", "")
+        return v in ("1", "true", "yes", "on")
 
     @staticmethod
     def _coerce_modify_id_list(raw: Any) -> List[int]:
@@ -2141,6 +2145,56 @@ class SimplifiedReActEngine:
                 out.append(ix)
         return out
 
+    def _pick_best_modify_id_by_user_title(
+        self,
+        result_context: Dict[str, Any],
+        target_type: str,
+        user_hint: str,
+        cand_ids: List[int],
+    ) -> Optional[int]:
+        """用户话术含具体标题时，从 grep 命中里选最匹配的一条，避免误批量。"""
+        hint = (user_hint or "").strip()
+        if not hint or not cand_ids:
+            return None
+        title_kw = (self._extract_title_keywords_for_grep(hint, "") or "").strip()
+        if not title_kw or len(title_kw) < 2:
+            return None
+        if target_type == "bug":
+            rows = result_context.get("grep_modify_raw_bug_list") or result_context.get("bug_list") or []
+        elif target_type == "testcase":
+            rows = result_context.get("grep_modify_raw_testcase_list") or result_context.get("testcase_list") or []
+        elif target_type == "card":
+            rows = result_context.get("grep_modify_raw_card_list") or result_context.get("card_list") or []
+        else:
+            rows = result_context.get("grep_modify_raw_badcase_list") or result_context.get("badcase_list") or []
+        best_id = None
+        best_score = -1
+        cand_set = set(int(x) for x in cand_ids)
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                rid = int(row.get("id") or row.get("card_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if rid not in cand_set:
+                continue
+            title = str(row.get("title") or "")
+            score = 0
+            if title_kw and title_kw in title:
+                score = 100 + len(title_kw)
+            elif title and title in hint:
+                score = 80 + min(len(title), 40)
+            else:
+                # 分词弱匹配
+                hits = sum(1 for ch in title_kw if ch and ch in title)
+                if hits >= max(2, len(title_kw) // 2):
+                    score = hits
+            if score > best_score:
+                best_score = score
+                best_id = rid
+        return best_id if best_score > 0 else None
+
     def _enrich_modify_params_target_ids(
         self,
         params: Dict[str, Any],
@@ -2148,14 +2202,19 @@ class SimplifiedReActEngine:
         target_type: str,
         *,
         log_prefix: str = "",
+        user_hint: str = "",
     ) -> None:
         """
         白名单模型传入的 target_ids / target_id 数组；grep 列表非空时只保留列表内 id。
-        grep 多条命中时：未带 id 则注入 target_ids；仅带一条 target_id 且为该批成员之一时，
-        默认扩展为整批 target_ids（REACT_MODIFY_GREP_EXPAND_SINGLE_ID_TO_BATCH=0 可关）。
+        grep 多条命中时：未带 id 则优先按用户标题选单条，否则才注入整批 target_ids；
+        仅带一条 target_id 时默认不扩批（REACT_MODIFY_GREP_EXPAND_SINGLE_ID_TO_BATCH=1 可开）。
         """
         ctx_ids = self._context_row_ids_for_modify_target(result_context, target_type)
         ctx_set = set(ctx_ids)
+        hint = (
+            user_hint
+            or str(params.get("_resolve_user_input") or params.get("natural_query") or "")
+        ).strip()
 
         def _filt(cand: List[int]) -> List[int]:
             if not ctx_set:
@@ -2197,13 +2256,23 @@ class SimplifiedReActEngine:
             not params.get("target_ids")
             and params.get("target_id") is None
             and len(ctx_ids) >= 2
-            and self._react_modify_grep_multi_batch_enabled()
         ):
-            params["target_ids"] = sorted(ctx_ids)
-            print(
-                f"{log_prefix}grep 多条命中 → 单次批量 modify target_ids={params['target_ids']}",
-                flush=True,
+            picked = self._pick_best_modify_id_by_user_title(
+                result_context, target_type, hint, ctx_ids
             )
+            if picked is not None:
+                params["target_id"] = picked
+                params.pop("target_ids", None)
+                print(
+                    f"{log_prefix}grep 多条命中 → 按标题选单条 target_id={picked}",
+                    flush=True,
+                )
+            elif self._react_modify_grep_multi_batch_enabled():
+                params["target_ids"] = sorted(ctx_ids)
+                print(
+                    f"{log_prefix}grep 多条命中 → 单次批量 modify target_ids={params['target_ids']}",
+                    flush=True,
+                )
         elif (
             self._react_modify_grep_multi_batch_enabled()
             and self._react_modify_grep_expand_single_id_to_batch_enabled()
@@ -7063,6 +7132,9 @@ class SimplifiedReActEngine:
                             user_input,
                             _round_todo_effective,
                         )
+                        self._widen_grep_target_to_include_cards_unless_explicit(
+                            tool_params, user_input, _round_todo_effective
+                        )
                         self._normalize_grep_plan_scope(tool_params)
                         if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
                             print(
@@ -7520,6 +7592,14 @@ class SimplifiedReActEngine:
                             "event": "cdp_records_created",
                             "data": observation["cdp_auto_created"],
                         }
+                if tool_name == "accuracy_tester" and isinstance(observation, dict):
+                    for _ap in observation.get("create_previews") or []:
+                        if isinstance(_ap, dict):
+                            yield {
+                                "event": "create_preview",
+                                "data": _ap,
+                                "source": "accuracy_tester_badcase",
+                            }
                 _clr = observation.get("client_local_run")
                 if isinstance(_clr, dict) and _clr:
                     for _pkt in engine_dict_to_wire_packets({"event": "client_local_run", **_clr}):
@@ -7725,15 +7805,26 @@ class SimplifiedReActEngine:
                     and observation.get("success") is True
                     and observation.get("terminal_pause_for_client") is True
                 )
+                _browser_pause = (
+                    tool_name == "client_browser"
+                    and observation.get("success") is True
+                    and observation.get("browser_pause_for_client") is True
+                )
+                _bridge_pause = (
+                    tool_name == "client_local_bridge"
+                    and observation.get("success") is True
+                    and isinstance(observation.get("client_local_run"), dict)
+                )
+                _client_pause = _terminal_pause or _browser_pause or _bridge_pause
                 _plan_n = len(unified_plan_steps) if unified_plan_steps else 0
                 _plan_round_done = (
                     _plan_n > 0
                     and observation.get("success") is True
                     and not _await_user
-                    and not _terminal_pause
+                    and not _client_pause
                     and (_plan_step_idx >= _plan_n)
                 )
-                if _await_user or _plan_round_done or _terminal_pause:
+                if _await_user or _plan_round_done or _client_pause:
                     _steps_done = round_idx + 1
                     # 等待后台增量总结线程完成
                     await self._wait_for_background_summary(running_summary_state)
@@ -7748,7 +7839,15 @@ class SimplifiedReActEngine:
                                 else (
                                     "终端命令已在本机执行，输出已自动作为下一条上下文提交。"
                                     if _terminal_pause
-                                    else "\n".join(findings_acc).strip()
+                                    else (
+                                        "已下发本机浏览器操作，等待本地代理执行结果后继续。"
+                                        if _browser_pause
+                                        else (
+                                            "请先在对话卡片中安装并启动本地代理；探测到上线后将自动续跑。"
+                                            if _bridge_pause
+                                            else "\n".join(findings_acc).strip()
+                                        )
+                                    )
                                 )
                             )
                         )
@@ -7888,6 +7987,7 @@ class SimplifiedReActEngine:
         agent_session_id: Optional[str] = None,
         chat_session_id: Optional[int] = None,
         long_memory_prefetch: Optional[Dict[str, Any]] = None,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
         hint_project_name: Optional[str] = None,
         hint_plan_name: Optional[str] = None,
         client_shell: Optional[Dict[str, Any]] = None,
@@ -7899,7 +7999,9 @@ class SimplifiedReActEngine:
         流式执行 ReAct（Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下记录。
         内部仍用 ``event`` 字典；本方法在出口统一转为 SSE v1（``type`` + ``payload``），上层无需再映射。
         """
+        _ = conversation_history  # 统一 XML 路径依赖上层注入的 user_input 提示；LangGraph 会完整入 messages
         _last_wire_phase: Optional[str] = None
+        _auto_capture_scheduled = False
         async for raw in self._run_unified_xml_stream(
             user_input,
             project_id=project_id,
@@ -7918,6 +8020,19 @@ class SimplifiedReActEngine:
         ):
             if not isinstance(raw, dict):
                 continue
+            if (
+                not _auto_capture_scheduled
+                and raw.get("event") == "done"
+                and str(raw.get("status") or "") not in ("", "error")
+            ):
+                _auto_capture_scheduled = True
+                self._schedule_auto_capture_long_memory(
+                    user_input=user_input,
+                    assistant_text=str(raw.get("summary") or ""),
+                    project_id=project_id,
+                    plan_id=plan_id,
+                    agent_session_id=agent_session_id,
+                )
             if is_wire_v1_packet(raw):
                 pkts: List[Dict[str, Any]] = [raw]
             else:
@@ -7935,6 +8050,39 @@ class SimplifiedReActEngine:
                             _last_wire_phase = rp
                 yield pkt
 
+    def _schedule_auto_capture_long_memory(
+        self,
+        *,
+        user_input: str,
+        assistant_text: str,
+        project_id: int = None,
+        plan_id: int = None,
+        agent_session_id: Optional[str] = None,
+    ) -> None:
+        """ReAct 成功结束后异步写入 mem0（不阻塞 SSE）。"""
+        try:
+            from config import Config
+
+            if not getattr(Config, "LONG_MEMORY_ENABLED", False):
+                return
+            if not getattr(Config, "MEM0_AUTO_CAPTURE", False):
+                return
+            user_id = getattr(self, "user_id", None) or getattr(self, "_user_id", None)
+            if not user_id:
+                return
+            from memory.long_memory_manager import LongMemoryManager
+
+            LongMemoryManager().schedule_capture_conversation(
+                user_id=str(user_id),
+                user_input=str(user_input or ""),
+                assistant_text=str(assistant_text or ""),
+                project_id=str(project_id) if project_id is not None else None,
+                plan_id=str(plan_id) if plan_id is not None else None,
+                agent_session_id=str(agent_session_id) if agent_session_id is not None else None,
+            )
+        except Exception as e:
+            print(f"[LONG-MEMORY] schedule auto capture failed: {e}", flush=True)
+
     async def _inject_long_memory_into_context(
         self,
         *,
@@ -7945,7 +8093,7 @@ class SimplifiedReActEngine:
         agent_session_id: Optional[str] = None,
     ) -> None:
         """
-        在 ReAct context 注入长期记忆（ES 向量检索）。
+        在 ReAct context 注入长期记忆（mem0 向量检索）。
         设计原则：
         - 不影响主流程：失败则静默降级为空
         - 体积可控：只注入短文本（long_memory_text）与少量条目摘要（long_memory_items）
@@ -9280,7 +9428,8 @@ class SimplifiedReActEngine:
             kw = (todo or "")[:200].strip()
         if not kw:
             kw = " "
-        target = "bug"
+        # 默认 all：标题修改常落在 BadCase/Card，且避免被侧栏 plan_id 锁死在空迭代
+        target = "all"
         exp = self._infer_modify_target_explicit(user_input, todo)
         if exp:
             target = exp
@@ -9573,6 +9722,17 @@ class SimplifiedReActEngine:
             if m:
                 kw = (m.group(1) or '').strip().strip('"“”\'‘’')
                 if kw and len(kw) <= 50:
+                    return kw
+        # 优先：修改/把/将 XXX 的优先级|状态|负责人…（标题里可含「的」）
+        for pattern in [
+            r'修改\s*(.+?)\s*的\s*(?:优先级|priority|状态|status|负责人|指派|标题|严重|等级)',
+            r'把\s*(.+?)\s*的\s*(?:优先级|priority|状态|status|负责人|指派|标题|严重|等级)',
+            r'将\s*(.+?)\s*的\s*(?:优先级|priority|状态|status|负责人|指派|标题|严重|等级)',
+        ]:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if m:
+                kw = m.group(1).strip()
+                if kw and len(kw) <= 80:
                     return kw
         # 修改/把/将 XXX 的 … -> XXX（非贪婪，取到第一个「的」为止）
         for pattern in [

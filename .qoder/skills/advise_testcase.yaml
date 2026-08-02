@@ -1,0 +1,45 @@
+name: advise_testcase
+description: 测试问答——说明怎么测、预期是什么、如何设计步骤（不打开浏览器执行）
+trigger:
+  intents: [怎么测, 如何测, 怎样测, 如何测试, 测试思路, 测试方法, 问答]
+  entities: [测试用例, testcase, 用例, 功能]
+  patterns:
+    - 怎么测
+    - 如何测
+    - 怎样测这个
+    - 这个功能怎么测
+    - 测试步骤应该怎么写
+    - 预期结果是什么
+
+tools:
+  - name: grep
+    purpose: 先定位相关测试用例/缺陷，再基于内容回答
+    params:
+      mode: locate
+      target: testcase
+      keywords: ${user_keywords}
+      project_id: ${project_id}
+
+workflow:
+  - step: 1
+    tool: grep
+    description: 查询相关测试用例或文档上下文
+    depends_on: null
+
+examples:
+  - 登录功能怎么测？
+  - 这条用例如何测，预期是什么？
+  - 支付失败场景的测试思路
+
+prompt_template: |
+  你正在执行 **advise_testcase**（测试问答，非执行）：
+  1) 先 grep 相关 testcase/bug/badcase；
+  2) 用自然语言回答：测什么、怎么测、关键预期、风险点；
+  3) **不要**调用 cdp / run_testcase / explore；用户若说「跑一下/执行用例」再走执行链路。
+
+metadata:
+  category: test_advisory
+  priority: high
+  version: 1.0.0
+  created_at: 2026-08-02
+  author: BadCase Doctor Team

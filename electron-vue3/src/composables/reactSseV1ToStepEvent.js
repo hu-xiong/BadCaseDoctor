@@ -119,6 +119,25 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
     }
   }
 
+  if (chunk.type === 'stream' && chunk.payload?.lane === 'cdp_test_task') {
+    const pl = chunk.payload || {}
+    return {
+      event: 'cdp_test_task',
+      lifecycle: pl.lifecycle,
+      run_id: pl.run_id,
+      mode: pl.mode,
+      title: pl.title,
+      status: pl.status,
+      summary: pl.summary,
+      pass_count: pl.pass_count,
+      fail_count: pl.fail_count,
+      step: pl.step,
+      steps: pl.steps,
+      testcases: pl.testcases,
+      react_phase: pl.react_phase
+    }
+  }
+
   if (chunk.type === 'stream' && chunk.payload?.lane === 'engine') {
     return chunk.payload.data
   }

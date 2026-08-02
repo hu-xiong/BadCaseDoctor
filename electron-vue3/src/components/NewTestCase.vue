@@ -3,14 +3,14 @@
     <!-- 加载指示器 -->
     <div v-if="loading" class="loading-overlay">
       <div class="loading-spinner"></div>
-      <div class="loading-text">正在加载项目信息...</div>
+      <div class="loading-text">{{ t('cardForm.loadingProject') }}</div>
     </div>
     
     <!-- 顶部标题栏：嵌入模式也需要返回等操作，保留显示 -->
     <div class="header-bar">
       <div class="header-left">
         <span v-if="!embedded || isEdit" class="back-arrow" @click="goBack">←</span>
-        <span class="header-title">{{ isEdit ? '编辑测试用例' : '新建测试用例' }}</span>
+        <span class="header-title">{{ isEdit ? t('project.editTestCase') : t('project.newTestCase') }}</span>
         <span class="project-name" v-if="projectInfo.name">/ {{ projectInfo.name }}</span>
       </div>
     </div>
@@ -25,8 +25,8 @@
           class="pending-diff-panel"
         >
           <div class="pending-diff-header">
-            <div class="pending-diff-title">待采纳改动</div>
-            <div class="pending-diff-subtitle">逐字段采纳/拒绝；采纳会立即落库</div>
+            <div class="pending-diff-title">{{ t('cardForm.pendingChanges') }}</div>
+            <div class="pending-diff-subtitle">{{ t('cardForm.pendingChangesSubtitle') }}</div>
           </div>
 
           <template v-for="(data, field) in pendingDiff.modifications" :key="field">
@@ -40,8 +40,8 @@
                 <span class="pending-diff-field-label">{{ testcaseFieldLabel(field) }}</span>
               </div>
               <div class="pending-diff-actions">
-                <button class="btn-icon-approve" title="采纳该字段" @click="applyFieldChange(field)">✓</button>
-                <button class="btn-icon-reject" title="拒绝该字段" @click="cancelFieldChange(field)">✗</button>
+                <button class="btn-icon-approve" :title="t('cardForm.adoptField')" @click="applyFieldChange(field)">✓</button>
+                <button class="btn-icon-reject" :title="t('cardForm.rejectField')" @click="cancelFieldChange(field)">✗</button>
               </div>
             </div>
             <MonacoDiffEditor
@@ -61,7 +61,7 @@
           <input 
             v-model="testcase.title" 
             class="title-input" 
-            placeholder="请输入测试用例标题"
+            :placeholder="t('testcaseForm.titlePlaceholder')"
             maxlength="100"
           />
           <div class="title-count">{{ testcase.title.length }} / 100</div>
@@ -70,7 +70,7 @@
         <!-- 状态和维护人信息 -->
         <div class="status-section">
           <div class="status-item">
-            <span class="status-label">状态:</span>
+            <span class="status-label">{{ t('cardForm.status') }}:</span>
             <div class="status-dropdown" @click="toggleStatusDropdown">
               <div class="status-pill">
                 <span class="status-text">{{ getStatusText(testcase.status) }}</span>
@@ -90,7 +90,7 @@
             </div>
           </div>
           <div class="status-item">
-            <span class="status-label">负责人:</span>
+            <span class="status-label">{{ t('cardForm.assignee') }}:</span>
             <div class="assignee-dropdown" @click="toggleAssigneeDropdown">
               <div class="assignee-pill">
                 <span class="person-icon">👤</span>
@@ -103,7 +103,7 @@
                   <input 
                     type="text" 
                     v-model="assigneeSearchText"
-                    placeholder="输入关键字搜索"
+                    :placeholder="t('cardForm.searchKeyword')"
                     class="search-input"
                     @click.stop
                   />
@@ -112,7 +112,7 @@
                 
                 <!-- 当前用户 -->
                 <div class="assignee-section">
-                  <div class="section-title">当前用户</div>
+                  <div class="section-title">{{ t('cardForm.currentUser') }}</div>
                   <div 
                     v-if="currentUser"
                     class="assignee-option"
@@ -130,13 +130,13 @@
                   </div>
                   <div v-else class="no-user-tip">
                     <span class="tip-icon">⚠️</span>
-                    <span class="tip-text">未获取到当前用户信息</span>
+                    <span class="tip-text">{{ t('cardForm.noCurrentUser') }}</span>
                   </div>
                 </div>
                 
                 <!-- 项目成员 -->
                 <div v-if="projectMembers.length > 0" class="assignee-section">
-                  <div class="section-title">项目成员 ({{ projectMembers.length }}人)</div>
+                  <div class="section-title">{{ t('cardForm.projectMembersCount', { n: projectMembers.length }) }}</div>
                   <div 
                     v-for="member in projectMembers" 
                     :key="member.id"
@@ -157,31 +157,31 @@
                 
                 <!-- 无项目成员时的提示 -->
                 <div v-else-if="testcase.project_id && projectMembers.length === 0" class="assignee-section">
-                  <div class="section-title">项目成员 (0人)</div>
+                  <div class="section-title">{{ t('cardForm.projectMembersZero') }}</div>
                   <div class="no-members-tip">
                     <span class="tip-icon">ℹ️</span>
-                    <span class="tip-text">该项目暂无成员，请先添加项目成员</span>
+                    <span class="tip-text">{{ t('cardForm.noProjectMembers') }}</span>
                   </div>
                 </div>
                 
                 <!-- 未选择项目时的提示 -->
                 <div v-else-if="!testcase.project_id" class="assignee-section">
-                  <div class="section-title">项目成员</div>
+                  <div class="section-title">{{ t('cardForm.projectMembers') }}</div>
                   <div class="no-members-tip">
                     <span class="tip-icon">⚠️</span>
-                    <span class="tip-text">请先选择所属项目</span>
+                    <span class="tip-text">{{ t('cardForm.selectProjectFirst') }}</span>
                   </div>
                 </div>
               </div>
             </div>
           </div>
           <div class="status-item">
-            <span class="status-label">所属计划:</span>
+            <span class="status-label">{{ t('cardForm.plan') }}:</span>
             <div class="plan-dropdown" @click="togglePlanDropdown">
               <div class="plan-selected-display">
                 <span class="refresh-icon" @click.stop="refreshProjectPlans">🔄</span>
                 <span class="plan-selected-text">
-                  所属计划 {{ getSelectedPlanDisplayText }}
+                  {{ t('cardForm.plan') }} {{ getSelectedPlanDisplayText }}
                 </span>
                 <span class="arrow-icon" :class="{ 'rotated': showPlanDropdown }">▼</span>
               </div>
@@ -237,7 +237,7 @@
               <label class="field-label">{{ testcaseFieldLabel('preconditions') }}</label>
               <div v-if="hasDetailFieldDiff('preconditions')" class="field-diff-panel">
                 <div class="diff-header">
-                  <span class="diff-label">修改预览:</span>
+                  <span class="diff-label">{{ t('cardForm.diffPreview') }}:</span>
                   <div class="diff-actions">
                     <button @click="applyFieldChange('preconditions')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button @click="cancelFieldChange('preconditions')" class="btn-cancel" title="取消">✗</button>
@@ -245,12 +245,12 @@
                 </div>
                 <div class="diff-content">
                   <div class="diff-old">
-                    <span class="diff-tag old">原值</span>
+                    <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                     <span class="diff-value">{{ formatDiffFieldValue('preconditions', detailFieldDiff('preconditions')?.old) }}</span>
                   </div>
                   <div class="diff-arrow">→</div>
                   <div class="diff-new">
-                    <span class="diff-tag new">新值</span>
+                    <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                     <span class="diff-value">{{ formatDiffFieldValue('preconditions', detailFieldDiff('preconditions')?.new) }}</span>
                   </div>
                 </div>
@@ -260,7 +260,7 @@
                   ref="preconditionsEditorRef"
                   v-model="testcase.preconditions"
                   class="editor-textarea"
-                  placeholder="请输入前置条件..."
+                  :placeholder="t('testcaseForm.preconditionsPlaceholder')"
                 />
               </div>
             </div>
@@ -270,7 +270,7 @@
               <label class="field-label">{{ testcaseFieldLabel('steps') }}</label>
               <div v-if="hasDetailFieldDiff('steps')" class="field-diff-panel">
                 <div class="diff-header">
-                  <span class="diff-label">{{ testcaseFieldLabel('steps') }} · 修改预览</span>
+                  <span class="diff-label">{{ testcaseFieldLabel('steps') }} · {{ t('cardForm.diffPreview') }}</span>
                   <div class="diff-actions">
                     <button type="button" @click="applyFieldChange('steps')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button type="button" @click="cancelFieldChange('steps')" class="btn-cancel" title="取消">✗</button>
@@ -278,11 +278,11 @@
                 </div>
                 <div class="diff-content">
                   <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
+                    <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                     <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('steps', detailFieldDiff('steps')?.old) }}</span>
                   </div>
                   <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
+                    <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                     <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('steps', detailFieldDiff('steps')?.new) }}</span>
                   </div>
                 </div>
@@ -290,9 +290,9 @@
               <div class="steps-table">
                 <div class="steps-header">
                   <div class="step-col-number">#</div>
-                  <div class="step-col-desc">步骤描述</div>
-                  <div class="step-col-expected">预期结果</div>
-                  <div class="step-col-actions">操作</div>
+                  <div class="step-col-desc">{{ t('testcaseForm.stepDesc') }}</div>
+                  <div class="step-col-expected">{{ t('testcaseForm.expectedResult') }}</div>
+                  <div class="step-col-actions">{{ t('testcaseForm.actions') }}</div>
                 </div>
                 <div 
                   v-for="(step, index) in testcase.steps" 
@@ -304,14 +304,14 @@
                     <input 
                       v-model="step.step" 
                       class="step-input"
-                      placeholder="输入步骤描述"
+                      :placeholder="t('testcaseForm.stepDescPlaceholder')"
                     />
                   </div>
                   <div class="step-col-expected">
                     <input 
                       v-model="step.expected" 
                       class="step-input"
-                      placeholder="输入预期结果"
+                      :placeholder="t('testcaseForm.expectedPlaceholder')"
                     />
                   </div>
                   <div class="step-col-actions">
@@ -322,7 +322,7 @@
                 </div>
                 <div class="add-step-row">
                   <button @click="addStep" class="add-step-btn">
-                    + 添加步骤
+                    + {{ t('testcaseForm.addStep') }}
                   </button>
                 </div>
               </div>
@@ -330,14 +330,14 @@
 
             <!-- 属性区域 -->
             <div class="properties-container">
-              <h3 class="properties-title">属性</h3>
+              <h3 class="properties-title">{{ t('testcaseForm.properties') }}</h3>
               <div class="properties-grid">
                 <!-- 用例类型 -->
                 <div class="property-field property-field--stacked" :class="{ 'has-diff': hasDetailFieldDiff('case_type') }" id="diff-field-case_type">
                   <label class="field-label">{{ testcaseFieldLabel('case_type') }}</label>
                   <div v-if="hasDetailFieldDiff('case_type')" class="field-diff-panel field-diff-panel--stacked">
                     <div class="diff-header">
-                      <span class="diff-label">{{ testcaseFieldLabel('case_type') }} · 修改预览</span>
+                      <span class="diff-label">{{ testcaseFieldLabel('case_type') }} · {{ t('cardForm.diffPreview') }}</span>
                       <div class="diff-actions">
                         <button type="button" @click="applyFieldChange('case_type')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                         <button type="button" @click="cancelFieldChange('case_type')" class="btn-cancel" title="取消">✗</button>
@@ -345,20 +345,20 @@
                     </div>
                     <div class="diff-content">
                       <div class="diff-row">
-                        <span class="diff-tag old">原值</span>
+                        <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                         <span class="diff-value">{{ formatDiffFieldValue('case_type', detailFieldDiff('case_type')?.old) }}</span>
                       </div>
                       <div class="diff-row">
-                        <span class="diff-tag new">新值</span>
+                        <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                         <span class="diff-value">{{ formatDiffFieldValue('case_type', detailFieldDiff('case_type')?.new) }}</span>
                       </div>
                     </div>
                   </div>
                   <select v-model="testcase.case_type" class="field-select" :class="{ 'field-with-diff': hasDetailFieldDiff('case_type') }">
-                    <option value="功能测试">功能测试</option>
-                    <option value="接口测试">接口测试</option>
-                    <option value="性能测试">性能测试</option>
-                    <option value="安全测试">安全测试</option>
+                    <option value="功能测试">{{ t('testcaseForm.caseTypeFunctional') }}</option>
+                    <option value="接口测试">{{ t('testcaseForm.caseTypeApi') }}</option>
+                    <option value="性能测试">{{ t('testcaseForm.caseTypePerf') }}</option>
+                    <option value="安全测试">{{ t('testcaseForm.caseTypeSecurity') }}</option>
                   </select>
                 </div>
 
@@ -367,7 +367,7 @@
                   <label class="field-label">{{ testcaseFieldLabel('priority') }}</label>
                   <div v-if="hasDetailFieldDiff('priority')" class="field-diff-panel field-diff-panel--stacked">
                     <div class="diff-header">
-                      <span class="diff-label">{{ testcaseFieldLabel('priority') }} · 修改预览</span>
+                      <span class="diff-label">{{ testcaseFieldLabel('priority') }} · {{ t('cardForm.diffPreview') }}</span>
                       <div class="diff-actions">
                         <button type="button" @click="applyFieldChange('priority')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                         <button type="button" @click="cancelFieldChange('priority')" class="btn-cancel" title="取消">✗</button>
@@ -375,11 +375,11 @@
                     </div>
                     <div class="diff-content">
                       <div class="diff-row">
-                        <span class="diff-tag old">原值</span>
+                        <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                         <span class="diff-value">{{ formatDiffFieldValue('priority', detailFieldDiff('priority')?.old) }}</span>
                       </div>
                       <div class="diff-row">
-                        <span class="diff-tag new">新值</span>
+                        <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                         <span class="diff-value">{{ formatDiffFieldValue('priority', detailFieldDiff('priority')?.new) }}</span>
                       </div>
                     </div>
@@ -397,7 +397,7 @@
                   <label class="field-label">{{ testcaseFieldLabel('test_type') }}</label>
                   <div v-if="hasDetailFieldDiff('test_type')" class="field-diff-panel field-diff-panel--stacked">
                     <div class="diff-header">
-                      <span class="diff-label">{{ testcaseFieldLabel('test_type') }} · 修改预览</span>
+                      <span class="diff-label">{{ testcaseFieldLabel('test_type') }} · {{ t('cardForm.diffPreview') }}</span>
                       <div class="diff-actions">
                         <button type="button" @click="applyFieldChange('test_type')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                         <button type="button" @click="cancelFieldChange('test_type')" class="btn-cancel" title="取消">✗</button>
@@ -405,19 +405,19 @@
                     </div>
                     <div class="diff-content">
                       <div class="diff-row">
-                        <span class="diff-tag old">原值</span>
+                        <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                         <span class="diff-value">{{ formatDiffFieldValue('test_type', detailFieldDiff('test_type')?.old) }}</span>
                       </div>
                       <div class="diff-row">
-                        <span class="diff-tag new">新值</span>
+                        <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                         <span class="diff-value">{{ formatDiffFieldValue('test_type', detailFieldDiff('test_type')?.new) }}</span>
                       </div>
                     </div>
                   </div>
                   <select v-model="testcase.test_type" class="field-select" :class="{ 'field-with-diff': hasDetailFieldDiff('test_type') }">
-                    <option value="手动">手动</option>
-                    <option value="自动">自动</option>
-                    <option value="探索">探索</option>
+                    <option value="手动">{{ t('testcaseForm.testTypeManual') }}</option>
+                    <option value="自动">{{ t('testcaseForm.testTypeAuto') }}</option>
+                    <option value="探索">{{ t('testcaseForm.testTypeExploratory') }}</option>
                   </select>
                 </div>
               </div>
@@ -435,7 +435,7 @@
               <label class="field-label">{{ testcaseFieldLabel('related_defects') }}</label>
               <div v-if="hasDetailFieldDiff('related_defects')" class="field-diff-panel field-diff-panel--stacked">
                 <div class="diff-header">
-                  <span class="diff-label">{{ testcaseFieldLabel('related_defects') }} · 修改预览</span>
+                  <span class="diff-label">{{ testcaseFieldLabel('related_defects') }} · {{ t('cardForm.diffPreview') }}</span>
                   <div class="diff-actions">
                     <button type="button" @click="applyFieldChange('related_defects')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button type="button" @click="cancelFieldChange('related_defects')" class="btn-cancel" title="取消">✗</button>
@@ -443,11 +443,11 @@
                 </div>
                 <div class="diff-content">
                   <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
+                    <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                     <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('related_defects', detailFieldDiff('related_defects')?.old) }}</span>
                   </div>
                   <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
+                    <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                     <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('related_defects', detailFieldDiff('related_defects')?.new) }}</span>
                   </div>
                 </div>
@@ -464,7 +464,7 @@
                   <button @click="removeDefect(index)" class="remove-defect-btn">×</button>
                 </div>
                 <button @click="openAddDefectDialog" class="add-defect-btn">
-                  + 添加缺陷
+                  + {{ t('testcaseForm.addDefect') }}
                 </button>
               </div>
             </div>
@@ -480,7 +480,7 @@
               <label class="field-label">{{ testcaseFieldLabel('execution_result') }}</label>
               <div v-if="hasDetailFieldDiff('execution_result')" class="field-diff-panel field-diff-panel--stacked">
                 <div class="diff-header">
-                  <span class="diff-label">{{ testcaseFieldLabel('execution_result') }} · 修改预览</span>
+                  <span class="diff-label">{{ testcaseFieldLabel('execution_result') }} · {{ t('cardForm.diffPreview') }}</span>
                   <div class="diff-actions">
                     <button type="button" @click="applyFieldChange('execution_result')" class="btn-confirm" title="采纳（立即落库）">✓</button>
                     <button type="button" @click="cancelFieldChange('execution_result')" class="btn-cancel" title="取消">✗</button>
@@ -488,11 +488,11 @@
                 </div>
                 <div class="diff-content">
                   <div class="diff-row">
-                    <span class="diff-tag old">原值</span>
+                    <span class="diff-tag old">{{ t('cardForm.oldValue') }}</span>
                     <span class="diff-value">{{ formatDiffFieldValue('execution_result', detailFieldDiff('execution_result')?.old) }}</span>
                   </div>
                   <div class="diff-row">
-                    <span class="diff-tag new">新值</span>
+                    <span class="diff-tag new">{{ t('cardForm.newValue') }}</span>
                     <span class="diff-value">{{ formatDiffFieldValue('execution_result', detailFieldDiff('execution_result')?.new) }}</span>
                   </div>
                 </div>
@@ -502,11 +502,11 @@
                 class="form-select field-select"
                 :class="{ 'field-with-diff': hasDetailFieldDiff('execution_result') }"
               >
-                <option value="">未执行</option>
-                <option value="pass">通过</option>
-                <option value="fail">失败</option>
-                <option value="blocked">阻塞</option>
-                <option value="skip">跳过</option>
+                <option value="">{{ t('testcaseExecution.notRun') }}</option>
+                <option value="pass">{{ t('testcaseExecution.pass') }}</option>
+                <option value="fail">{{ t('testcaseExecution.fail') }}</option>
+                <option value="blocked">{{ t('testcaseExecution.blocked') }}</option>
+                <option value="skip">{{ t('testcaseExecution.skip') }}</option>
               </select>
             </div>
             <div
@@ -514,9 +514,9 @@
               class="form-group"
             >
               <button type="button" class="action-btn save-btn" @click="onOpenDiagnosticTerminal">
-                打开诊断终端
+                {{ t('testcaseForm.openDiagnosticTerminal') }}
               </button>
-              <p class="field-hint">在底部打开终端并预填 AI 描述，便于生成排查命令。</p>
+              <p class="field-hint">{{ t('testcaseForm.diagnosticHint') }}</p>
             </div>
           </div>
         </div>
@@ -525,9 +525,9 @@
         <!-- 保存和取消按钮：固定在底部，始终可见可点 -->
         <div class="footer-section">
           <div class="footer-actions">
-            <button class="action-btn cancel-btn" @click="goBack">取消</button>
+            <button class="action-btn cancel-btn" @click="goBack">{{ t('common.cancel') }}</button>
             <button class="action-btn save-btn" @click="saveTestCase" :disabled="saving">
-              {{ saving ? '保存中...' : '保存' }}
+              {{ saving ? t('cardForm.saving') : t('common.save') }}
             </button>
           </div>
         </div>
@@ -539,27 +539,27 @@
           v-show="!isRightSidebarOpen"
           type="button"
           class="sidebar-expand-tab"
-          title="展开侧栏"
-          aria-label="展开侧栏"
+          :title="t('cardForm.expandSidebar')"
+          :aria-label="t('cardForm.expandSidebar')"
           @click="isRightSidebarOpen = true"
         >
           <img src="../assets/resize-icon.svg" alt="" class="resize-icon resize-icon--expand" />
         </button>
         <div class="sidebar-right" :class="{ 'sidebar-right--open': isRightSidebarOpen }">
-        <div class="resize-handle" role="button" tabindex="0" title="收起侧栏" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
+        <div class="resize-handle" role="button" tabindex="0" :title="t('cardForm.collapseSidebar')" @click="toggleRightSidebar" @keydown.enter.prevent="toggleRightSidebar" @keydown.space.prevent="toggleRightSidebar">
           <img src="../assets/resize-icon.svg" alt="" class="resize-icon" :class="{ 'rotated': isRightSidebarOpen }" />
         </div>
         <!-- 所属项目 -->
         <div class="sidebar-section">
-          <h3 class="sidebar-title">所属项目</h3>
+          <h3 class="sidebar-title">{{ t('cardForm.project') }}</h3>
           <div class="project-select">
-            <label class="select-label">项目名称:</label>
+            <label class="select-label">{{ t('cardForm.projectName') }}:</label>
             <select
               class="form-select"
               :value="testcase.project_id == null ? '' : String(testcase.project_id)"
               @change="onProjectSelectChange"
             >
-              <option value="">请选择</option>
+              <option value="">{{ t('cardForm.pleaseSelect') }}</option>
               <option v-for="project in availableProjects" :key="project.id" :value="String(project.id)">
                 {{ project.name }}
               </option>
@@ -573,22 +573,22 @@
           <div class="section-header">
             <div class="header-left">
               <span class="header-icon">📄</span>
-              <span class="header-title">关联文档</span>
+              <span class="header-title">{{ t('cardForm.relatedDocs') }}</span>
             </div>
             <button class="ai-recommend-btn">
               <span class="ai-icon">🤖</span>
-              <span class="ai-text">推荐关联</span>
+              <span class="ai-text">{{ t('cardForm.recommendLink') }}</span>
             </button>
           </div>
           <div class="document-fields">
             <div class="field-row">
-              <span class="field-label">文档类型:</span>
-              <span class="field-value">{{ testcase.document_type || '其他文档' }}</span>
+              <span class="field-label">{{ t('cardForm.docType') }}:</span>
+              <span class="field-value">{{ testcase.document_type || t('cardForm.otherDoc') }}</span>
             </div>
             <div class="field-row">
-              <span class="field-label">文件链接:</span>
+              <span class="field-label">{{ t('cardForm.fileLink') }}:</span>
               <button class="copy-link-btn" @click="copyDocumentLink">
-                复制知识库文档链接
+                {{ t('cardForm.copyKbLink') }}
               </button>
             </div>
           </div>
@@ -599,7 +599,7 @@
           <div class="section-header">
             <div class="header-left">
               <span class="header-icon">📎</span>
-              <span class="header-title">附件</span>
+              <span class="header-title">{{ t('cardForm.attachments') }}</span>
             </div>
             <button class="add-attachment-btn" @click="addAttachment">
               <span class="plus-icon">+</span>
@@ -611,7 +611,7 @@
               <button class="remove-attachment-btn" @click="removeAttachment(index)">×</button>
             </div>
             <div v-if="!testcase.attachments || testcase.attachments.length === 0" class="no-attachments">
-              暂无附件
+              {{ t('cardForm.noAttachments') }}
             </div>
           </div>
           <input 
@@ -632,15 +632,15 @@
           <h3 class="sidebar-title">{{ t('testcaseComment.historyTitle') }}</h3>
           <div v-if="hasDetailFieldDiff('append_comment')" class="field-diff-panel field-diff-panel--stacked comment-diff-panel">
             <div class="diff-header">
-              <span class="diff-label">{{ testcaseFieldLabel('append_comment') }} · 修改预览</span>
+              <span class="diff-label">{{ testcaseFieldLabel('append_comment') }} · {{ t('cardForm.diffPreview') }}</span>
               <div class="diff-actions">
-                <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" title="采纳（立即落库）">✓</button>
-                <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" title="取消">✗</button>
+                <button type="button" @click="applyFieldChange('append_comment')" class="btn-confirm" :title="t('cardForm.adoptTitle')">✓</button>
+                <button type="button" @click="cancelFieldChange('append_comment')" class="btn-cancel" :title="t('cardForm.rejectTitle')">✗</button>
               </div>
             </div>
             <div class="diff-content">
               <div class="diff-row">
-                <span class="diff-tag new">新评论</span>
+                <span class="diff-tag new">{{ t('testcaseComment.newComment') }}</span>
                 <span class="diff-value diff-value-multiline">{{ formatDiffFieldValue('append_comment', detailFieldDiff('append_comment')?.new) }}</span>
               </div>
             </div>
@@ -1231,20 +1231,29 @@ export default {
     }
 
     const isAssigneeSelected = (assigneeValue) => {
-      return testcase.assignee && testcase.assignee.includes(assigneeValue)
+      const want = String(assigneeValue ?? '')
+      if (!want) return false
+      if (testcase.assignee_id != null && testcase.assignee_id !== '') {
+        return String(testcase.assignee_id) === want
+      }
+      if (Array.isArray(testcase.assignee)) {
+        return testcase.assignee.some((x) => String(x) === want)
+      }
+      return testcase.assignee != null && String(testcase.assignee) === want
     }
 
+    // 切换负责人（再点已选中的项 = 取消指派；后端仅支持单负责人）
     const toggleAssignee = (assigneeValue) => {
-      if (!testcase.assignee) {
+      const want = String(assigneeValue ?? '')
+      if (!want) return
+      if (isAssigneeSelected(want)) {
+        testcase.assignee_id = null
         testcase.assignee = []
+        return
       }
-      
-      const index = testcase.assignee.indexOf(assigneeValue)
-      if (index > -1) {
-        testcase.assignee.splice(index, 1)
-      } else {
-        testcase.assignee.push(assigneeValue)
-      }
+      const parsed = parseInt(want, 10)
+      testcase.assignee_id = Number.isFinite(parsed) ? parsed : want
+      testcase.assignee = [want]
     }
 
     const togglePlanDropdown = () => {
@@ -1293,7 +1302,7 @@ export default {
 
     const getSelectedPlanDisplayText = computed(() => {
       if (isEmptyPlanKey(testcase.plan)) {
-        return '请选择计划'
+        return t('cardForm.selectPlan')
       }
       const key = snowflakeIdStr(testcase.plan) || String(testcase.plan)
       const plan = testcasePlans.value.find(
@@ -2633,9 +2642,37 @@ export default {
       if (!openDiagnosticTerminal) return
       const title = (testcase.title || '测试用例').trim()
       const idPart = testcaseId ? `#${testcaseId}` : ''
-      const aiText =
-        `请结合当前项目环境，生成用于排查「测试用例 ${idPart} ${title}」执行失败的 shell 命令（例如查看日志、健康检查、服务状态等）。`
-      openDiagnosticTerminal({ aiText })
+      const er = String(testcase.execution_result || '').trim()
+      const steps = Array.isArray(testcase.steps) ? testcase.steps : []
+      const stepLines = steps.slice(0, 12).map((s, i) => {
+        if (typeof s === 'string') return `${i + 1}. ${s}`
+        const desc = s?.step || s?.description || s?.action || ''
+        const exp = s?.expected || s?.expected_result || ''
+        return `${i + 1}. ${desc}${exp ? ` → 预期: ${exp}` : ''}`
+      }).filter(Boolean)
+      const defects = Array.isArray(testcase.related_defects) ? testcase.related_defects : []
+      const defectLine = defects.length
+        ? `关联缺陷: ${defects.map((d) => (typeof d === 'object' ? (d.id || d.title) : d)).filter(Boolean).join(', ')}`
+        : ''
+      const evidence = [
+        `【失败用例】${idPart} ${title}`,
+        er ? `执行结果: ${er}` : '',
+        testcase.preconditions ? `前置条件: ${String(testcase.preconditions).replace(/<[^>]+>/g, '').slice(0, 300)}` : '',
+        stepLines.length ? `步骤摘要:\n${stepLines.join('\n')}` : '',
+        defectLine,
+        '',
+        '请结合上述证据与当前项目环境，生成排查用的 shell 命令（日志、健康检查、服务状态、最近错误等），并简要说明每条命令用途。',
+      ].filter((x) => x !== '').join('\n')
+      openDiagnosticTerminal({
+        aiText: evidence,
+        evidence: {
+          testcase_id: testcaseId,
+          title,
+          execution_result: er,
+          steps: steps.slice(0, 20),
+          related_defects: defects,
+        },
+      })
     }
 
     return {

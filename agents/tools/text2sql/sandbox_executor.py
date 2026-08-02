@@ -709,7 +709,7 @@ class CloudSandboxConfig:
     云端沙箱配置（HTTP）
 
     通过环境变量覆盖：
-    - SANDBOX_REMOTE_URL: 例如 https://example.com 或 http://117.72.33.38:8080
+    - SANDBOX_REMOTE_URL: 例如 https://sandbox.example.com
     - SANDBOX_REMOTE_TOKEN: Bearer Token
     - SANDBOX_TENANT_ID: 租户标识（可选）
     - SANDBOX_REMOTE_TIMEOUT_S: 任务整体超时（秒）

@@ -159,7 +159,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import axios from 'axios'
+import { api, BACKEND_BASE_URL } from '../api.js'
 
 const isLoading = ref(false)
 const error = ref(null)
@@ -196,7 +196,7 @@ const refreshMetrics = async () => {
   error.value = null
   
   try {
-    const response = await axios.get('http://localhost:5000/metrics')
+    const response = await api.get('/metrics', { responseType: 'text', transformResponse: [(d) => d] })
     const metricsText = response.data
     
     // 解析 Prometheus 文本格式指标
@@ -205,7 +205,7 @@ const refreshMetrics = async () => {
     lastUpdateTime.value = new Date().toLocaleTimeString()
   } catch (err) {
     console.error('Failed to fetch metrics:', err)
-    error.value = '无法连接到后端指标端点，请确保后端运行在 http://localhost:5000'
+    error.value = `无法连接到后端指标端点，请确保后端运行在 ${BACKEND_BASE_URL || '(同源代理)'}`
   } finally {
     isLoading.value = false
   }

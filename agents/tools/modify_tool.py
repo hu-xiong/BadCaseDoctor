@@ -2,6 +2,7 @@
 对话修改Bug/BadCase工具
 支持行级别对比显示修改内容，集成Text2SQL智能查询
 """
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, Union
 from agents.tool_registry import BaseTool
@@ -31,7 +32,7 @@ from agents.locale_prompts import (
     react_batch_modify_summary,
 )
 from config import Config
-from utils.entity_id import coerce_plausible_entity_pk
+from utils.entity_id import coerce_plausible_entity_pk, is_plausible_entity_pk
 import difflib
 import json
 import os
@@ -41,6 +42,22 @@ from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import time
 import uuid
+
+
+@contextmanager
+def _flask_app_context_if_needed():
+    """
+    已有 app_context 时不再嵌套 push。
+    嵌套 pop 会触发 SQLAlchemy session.remove，连接池紧张时后续查询可干等十余秒。
+    """
+    from flask import has_app_context
+    from app import app as flask_app
+
+    if has_app_context():
+        yield
+        return
+    with flask_app.app_context():
+        yield
 
 # Text2SQL Agent
 try:
@@ -312,11 +329,11 @@ class ModifyTool(BaseTool):
         except Exception:
             return None
         try:
-            from app import app as flask_app, db as flask_db, Card
+            from app import db as flask_db, Card
 
-            with flask_app.app_context():
+            with _flask_app_context_if_needed():
                 row = (
-                    flask_db.session.query(Card)
+                    flask_db.session.query(Card.id)
                     .filter(Card.id == cid, Card.project_id == pid)
                     .first()
                 )
@@ -337,29 +354,20 @@ class ModifyTool(BaseTool):
         except (TypeError, ValueError):
             return False
         try:
-            from app import app as flask_app, db as flask_db, Bug, BadCase, TestCase
+            from app import db as flask_db, Bug, BadCase, TestCase
 
-            with flask_app.app_context():
-                if tl == "bug":
-                    return (
-                        flask_db.session.query(Bug.id)
-                        .filter(Bug.id == tid, Bug.project_id == pid)
-                        .first()
-                        is not None
-                    )
-                if tl == "badcase":
-                    return (
-                        flask_db.session.query(BadCase.id)
-                        .filter(BadCase.id == tid, BadCase.project_id == pid)
-                        .first()
-                        is not None
-                    )
-                return (
-                    flask_db.session.query(TestCase.id)
-                    .filter(TestCase.id == tid, TestCase.project_id == pid)
-                    .first()
-                    is not None
-                )
+            with _flask_app_context_if_needed():
+                # session.get 走主键，比 filter.first 更轻；再校验 project_id
+                model = {"bug": Bug, "badcase": BadCase, "testcase": TestCase}.get(tl)
+                if model is None:
+                    return False
+                row = flask_db.session.get(model, tid)
+                if row is None:
+                    return False
+                try:
+                    return int(getattr(row, "project_id", None)) == pid
+                except (TypeError, ValueError):
+                    return getattr(row, "project_id", None) == pid
         except Exception:
             return False
 
@@ -376,9 +384,9 @@ class ModifyTool(BaseTool):
         except Exception:
             return target, False
         try:
-            from app import app as flask_app, db as flask_db, Card
+            from app import db as flask_db, Card
 
-            with flask_app.app_context():
+            with _flask_app_context_if_needed():
                 card = (
                     flask_db.session.query(Card)
                     .filter(Card.id == cid, Card.project_id == pid)
@@ -561,7 +569,7 @@ class ModifyTool(BaseTool):
 
             def _safe_result(name: str, fut, default):
                 try:
-                    return fut.result(timeout=45)
+                    return fut.result(timeout=8)
                 except Exception as e:
                     print(f"[MODIFY] reconcile 并发任务 {name} 失败，回退默认值: {e}", flush=True)
                     return default
@@ -634,8 +642,8 @@ class ModifyTool(BaseTool):
         except Exception:
             return None
         try:
-            from app import app as flask_app, db as flask_db
-            with flask_app.app_context():
+            from app import db as flask_db
+            with _flask_app_context_if_needed():
                 # 1) 优先查 Card 表（卡片层权威映射）
                 try:
                     from app import Card
@@ -1545,6 +1553,19 @@ class ModifyTool(BaseTool):
             return keys <= {"assignee", "status"}
         return False
 
+    def _modifications_eligible_for_light_prep(
+        self, target: str, modifications: Dict[str, Any]
+    ) -> bool:
+        """light_prep：跳过 reconcile/撞号消解（含常见 priority；不含直落库）。"""
+        if not modifications:
+            return False
+        keys = set(modifications.keys())
+        if target in ("bug", "testcase"):
+            return keys <= {"assignee_id", "status", "priority"}
+        if target == "badcase":
+            return keys <= {"assignee", "status", "priority"}
+        return False
+
     def _light_prep_skip_full_reconcile(
         self,
         target: str,
@@ -1554,6 +1575,7 @@ class ModifyTool(BaseTool):
     ) -> bool:
         """
         grep/主循环已给出源表主键且仅改低风险字段时，跳过 _reconcile_modify_target_from_db 的多次往返查询。
+        雪花主键 + 已声明源表时默认信任定位结果，避免再打存在性查询（连接池紧张时可达十余秒）。
         """
         if not self._env_flag_enabled("MODIFY_LIGHT_PREP", "1"):
             return False
@@ -1562,8 +1584,13 @@ class ModifyTool(BaseTool):
         tl = (str(target or "")).strip().lower()
         if tl not in ("bug", "badcase", "testcase"):
             return False
-        if not self._modifications_eligible_for_fast_apply(tl, modifications):
+        if not self._modifications_eligible_for_light_prep(tl, modifications):
             return False
+        if not is_plausible_entity_pk(target_id):
+            return False
+        # 已由 grep/agent 注入的雪花源表 id：直接放行，不做存在性探测
+        if self._env_flag_enabled("MODIFY_LIGHT_PREP_TRUST_SNOWFLAKE", "1"):
+            return True
         try:
             return self._modify_source_row_exists_cached(
                 tl, int(target_id), int(project_id)
@@ -1855,14 +1882,24 @@ class ModifyTool(BaseTool):
             except (TypeError, ValueError):
                 _located_fast = False
         # 仅传 target_id 但该数字实为 Card 主键时，转为 card_id 并按 Card.source_type 校正 target
-        # 注意：Bug/BadCase/TestCase 与 Card 各自自增主键，极易同号；若上游已声明源表且该行存在，禁止覆盖为 card。
+        # 注意：Bug/BadCase/TestCase 与 Card 各自主键可能撞号；上游已声明源表 + 雪花 id 时跳过撞号消解与存在性探测。
         if not _located_fast and not card_id and target_id and project_id:
             tl_amb = (str(target or "")).strip().lower()
-            skip_card_id_collision = tl_amb in (
-                "bug",
-                "badcase",
-                "testcase",
-            ) and self._modify_source_row_exists_cached(tl_amb, target_id, project_id)
+            skip_card_id_collision = False
+            if tl_amb in ("bug", "badcase", "testcase") and is_plausible_entity_pk(
+                target_id
+            ):
+                skip_card_id_collision = True
+                if _modify_perf_detail_enabled():
+                    print(
+                        f"[MODIFY] skip card collision: target={tl_amb!r} "
+                        f"snowflake_id={target_id}",
+                        flush=True,
+                    )
+            elif tl_amb in ("bug", "badcase", "testcase"):
+                skip_card_id_collision = self._modify_source_row_exists_cached(
+                    tl_amb, target_id, project_id
+                )
             if not skip_card_id_collision:
                 amb = self._disambiguate_numeric_id_as_card_id(target_id, project_id)
                 if amb is not None:
@@ -1944,9 +1981,9 @@ class ModifyTool(BaseTool):
         # 数据层：Card 与 Bug 的 source_* 老数据补全，便于 _normalize_target_using_card_row / 导航
         if card_id and project_id:
             try:
-                from app import app as flask_app, db as flask_db, repair_card_source_link_if_missing, Card
+                from app import db as flask_db, repair_card_source_link_if_missing, Card
 
-                with flask_app.app_context():
+                with _flask_app_context_if_needed():
                     cid_rep = int(card_id)
                     crow = flask_db.session.query(Card).filter(Card.id == cid_rep).first()
                     if crow is not None:
@@ -2072,7 +2109,7 @@ class ModifyTool(BaseTool):
         )
         if _skip_intent_resolve and _modify_perf_detail_enabled():
             print(
-                "[MODIFY] fast_path: 跳过 resolve_modify_target_and_id（已定位 + 仅 status/负责人）",
+                "[MODIFY] fast_path: 跳过 resolve_modify_target_and_id（已定位 + light_prep 字段）",
                 flush=True,
             )
         if modifications and len(batch_target_ids) <= 1 and not _skip_intent_resolve:
@@ -2187,7 +2224,8 @@ class ModifyTool(BaseTool):
         _progress(modify_tool_progress("located_validate", loc, target_id=target_id))
         
         print(
-            f"[MODIFY] 开始执行: target={target}, target_id={target_id}, modifications keys={list(modifications.keys())}",
+            f"[MODIFY] 开始执行: target={target}, target_id={target_id}, project_id={project_id!r}, "
+            f"modifications keys={list(modifications.keys())}",
             flush=True,
         )
         if not target_id:
@@ -3010,17 +3048,36 @@ class ModifyTool(BaseTool):
                 )
 
             _t_bc = time.perf_counter()
-            badcase = flask_db.session.query(BadCase).filter(
-                BadCase.id == target_id,
-                BadCase.project_id == project_id
-            ).first()
+            try:
+                tid_i = int(target_id)
+            except (TypeError, ValueError):
+                tid_i = target_id
+            try:
+                pid_i = int(project_id) if project_id is not None else None
+            except (TypeError, ValueError):
+                pid_i = project_id
+            # 先按主键取行再校验 project，避免 filter 类型/绑定偶发 miss；错项目则拒绝
+            badcase = flask_db.session.get(BadCase, tid_i)
+            if badcase is not None and pid_i is not None:
+                try:
+                    row_pid = int(getattr(badcase, "project_id", None))
+                except (TypeError, ValueError):
+                    row_pid = getattr(badcase, "project_id", None)
+                if row_pid != pid_i:
+                    print(
+                        f"[MODIFY] orm_badcase project mismatch id={tid_i} "
+                        f"query_project_id={pid_i!r} row_project_id={row_pid!r}",
+                        flush=True,
+                    )
+                    badcase = None
             _perf_mark("orm_badcase_query", _t_bc)
             
             if not badcase:
                 if perf_fetch:
                     print(
                         f"[PERF][modify_original_fetch] path=orm_badcase hit=0 "
-                        f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} id={target_id}",
+                        f"orm_ms={(time.perf_counter() - _t_orm0) * 1000.0:.1f} "
+                        f"id={tid_i} project_id={pid_i!r}",
                         flush=True,
                     )
                 return None
@@ -5478,6 +5535,12 @@ class ModifyTool(BaseTool):
                     f"[MODIFY] 批量更新完成: target={target}, ids={ids}, affected={affected}, source_delegate={any_src}"
                 )
                 return affected > 0 or any_src
+
+            # bug / badcase / testcase：先 UPDATE，再按行同步 Card
+            if not update_map:
+                return False
+            pid = int(project_id)
+            affected = q.update(update_map, synchronize_session=False) or 0
             from app import Bug, BadCase, TestCase
 
             _model = {"bug": Bug, "badcase": BadCase, "testcase": TestCase}[target]

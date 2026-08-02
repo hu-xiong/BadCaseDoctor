@@ -2,13 +2,16 @@
 import asyncio
 import json
 
-from flask import Blueprint, request, Response
-from flask_login import current_user
+import os
+
+from flask import Blueprint, jsonify, request, Response
+from flask_login import current_user, login_required
 
 from llm.failure_attribution import record_auto_route_outcome
 from llm.factory import get_llm
 from llm.model_router import resolve_route
 from llm.task_complexity import classify_image_intent
+from utils.agent_rate_limit import check_agent_rate_limit, release_agent_slot
 
 chat_bp = Blueprint('chat', __name__)
 
@@ -20,15 +23,34 @@ def _chat_session_id(data: dict, uid: str, project_id) -> str:
     return f"chat:{uid or 'anon'}:{project_id or 0}"
 
 
-@chat_bp.route('/chat', methods=['POST'])
+@chat_bp.route('/api/chat', methods=['POST'])
+@login_required
 def chat_stream():
     print("=========")
     data = request.json or {}
-    user_input = data.get("inputMessage", "")
+    user_input = data.get("inputMessage", "") or data.get("message", "")
     images = data.get("images") or []
-    project_id = data.get("projectId")
-    image_intent = classify_image_intent(user_input) if images else None
+    project_id = data.get("projectId") or data.get("project_id")
     uid = str(getattr(current_user, "id", "") or "") if current_user.is_authenticated else ""
+
+    ok_rl, rl_err = check_agent_rate_limit(uid or "anon", action="chat")
+    if not ok_rl:
+        try:
+            retry_after = int((os.getenv("AGENT_RATE_RETRY_AFTER") or "60").strip() or "60")
+        except ValueError:
+            retry_after = 60
+        retry_after = max(1, min(retry_after, 3600))
+        msg = (
+            "请求过于频繁，请稍后再试"
+            if rl_err == "rate_limited"
+            else "并发任务过多，请稍后再试"
+        )
+        resp = jsonify({"success": False, "error": rl_err or "rate_limited", "message": msg})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
+
+    image_intent = classify_image_intent(user_input) if images else None
     session_id = _chat_session_id(data, uid, project_id)
     _route = resolve_route(
         data.get("model"),
@@ -72,6 +94,7 @@ def chat_stream():
             print(f"[CHAT] 视觉描述失败: {ve}")
 
     if not user_input:
+        release_agent_slot(uid or "anon")
         return Response("data: {\"error\": \"Missing 'content'\"}\n\n", mimetype='text/event-stream')
 
     llm = get_llm(model=model_name)
@@ -151,6 +174,10 @@ def chat_stream():
                     error_message=_err,
                     task_was_simple=(_route.task_complexity == "simple"),
                 )
+            except Exception:
+                pass
+            try:
+                release_agent_slot(uid or "anon")
             except Exception:
                 pass
 

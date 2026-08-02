@@ -8,7 +8,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def main():
-    base = os.getenv("SANDBOX_REMOTE_URL", "http://117.72.33.38:5000").rstrip("/")
+    base = (os.getenv("SANDBOX_REMOTE_URL") or "").rstrip("/")
+    if not base:
+        print("请设置 SANDBOX_REMOTE_URL，例如: http://your-host:5000", file=sys.stderr)
+        raise SystemExit(2)
     print("=" * 60)
     print("沙箱一键（本地无 Docker）")
     print("=" * 60)

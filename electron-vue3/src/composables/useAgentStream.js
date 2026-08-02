@@ -23,6 +23,11 @@ export { consumeAgentSseV1Chunk } from './consumeAgentSseV1Chunk.js'
 export { reactSseV1ChunkToLegacyStepEvent } from './reactSseV1ToStepEvent.js'
 export { applyReactThinkSSEStepEvent } from './applyReactThinkSSEStepEvent.js'
 
+import JSONBigInt from 'json-bigint'
+
+/** 雪花 ID > Number.MAX_SAFE_INTEGER，SSE 必须用 json-bigint，避免精度丢失 */
+const _sseJsonBig = JSONBigInt({ storeAsString: true })
+
 /**
  * 将 UTF-8 增量文本折叠为按行切分，并解析 `data: {json}` 为对象数组。
  * @param {string} buffer 上次未完结的半行
@@ -40,9 +45,13 @@ export function foldAgentSseText(buffer, chunkText) {
     const rest = trimmed.slice(5).replace(/^\s*/, '')
     if (!rest || rest === '[DONE]') continue
     try {
-      chunks.push(JSON.parse(rest))
+      chunks.push(_sseJsonBig.parse(rest))
     } catch {
-      /* 半包或异常行，跳过 */
+      try {
+        chunks.push(JSON.parse(rest))
+      } catch {
+        /* 半包或异常行，跳过 */
+      }
     }
   }
   return { nextBuffer, chunks }

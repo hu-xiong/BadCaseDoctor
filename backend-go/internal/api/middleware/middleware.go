@@ -38,7 +38,9 @@ func JWTAuth() gin.HandlerFunc {
 		// 验证token
 		jwtSecret := os.Getenv("JWT_SECRET")
 		if jwtSecret == "" {
-			jwtSecret = "your-secret-key-here" // 默认值，实际应该从配置中获取
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT_SECRET not configured"})
+			c.Abort()
+			return
 		}
 
 		claims, err := utils.ValidateToken(tokenString, jwtSecret)

@@ -15,7 +15,10 @@ import time
 # 添加项目根目录
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-BASE_URL = os.getenv("SANDBOX_REMOTE_URL", "http://117.72.33.38:5000")
+BASE_URL = (os.getenv("SANDBOX_REMOTE_URL") or "").rstrip("/")
+if not BASE_URL:
+    print("请设置 SANDBOX_REMOTE_URL", file=sys.stderr)
+    raise SystemExit(2)
 
 
 def req(method: str, path: str, body: bytes = None, headers: dict = None):

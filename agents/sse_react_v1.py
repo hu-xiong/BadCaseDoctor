@@ -306,7 +306,10 @@ def _pack_tool_error(step_data: Dict[str, Any], body: Dict[str, Any]) -> List[Di
 
 
 def _pack_tool_end(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # 旧 ReAct 用 data=；LangGraph 曾用 observation= — 两者都要认，否则前端会收到「无返回数据」
     raw = step_data.get("data")
+    if raw is None:
+        raw = step_data.get("observation")
     if observation_body_is_tool_failure(raw):
         return _pack_tool_error(step_data, raw if isinstance(raw, dict) else {"error": str(raw)})
     if isinstance(raw, dict) or raw is None:
@@ -587,6 +590,20 @@ def _pack_client_terminal_exec(step_data: Dict[str, Any]) -> List[Dict[str, Any]
     return [{"type": "client_action", "payload": deep_sse_json_safe(pl)}]
 
 
+def _pack_client_browser(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """本机 Chrome：前端调 go-local-proxy /browser/start|stop|status。"""
+    cb = step_data.get("client_browser") if isinstance(step_data.get("client_browser"), dict) else {}
+    pl: Dict[str, Any] = {
+        "kind": "browser_local",
+        "action": cb.get("action") or step_data.get("action") or "start",
+        "url": cb.get("url") or step_data.get("url") or "",
+        "headless": bool(cb.get("headless") if "headless" in cb else step_data.get("headless")),
+        "react_phase": step_data.get("react_phase"),
+    }
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": "client_action", "payload": deep_sse_json_safe(pl)}]
+
+
 def _pack_tool_error_event(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """标准工具失败信号（与 ``observation`` 失败态并存，便于单独订阅 UI）。"""
     det = step_data.get("details")
@@ -661,6 +678,7 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "done": _pack_done,
     "error": _pack_error,
     "reasoning": _pack_stream_think,
+    "reasoning_timing": _pack_stream_engine_raw,
     "agent_thought": _pack_stream_agent_thought,
     "agent_thought_done": _pack_agent_thought_done,
     "todos_stream": _pack_stream_plan_raw,
@@ -680,6 +698,7 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "tool_error": _pack_tool_error_event,
     "client_local_run": _pack_client_local_run,
     "client_terminal_exec": _pack_client_terminal_exec,
+    "client_browser": _pack_client_browser,
 }
 
 

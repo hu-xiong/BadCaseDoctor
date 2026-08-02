@@ -4,11 +4,19 @@ import JSONBigInt from 'json-bigint'
 
 const jsonBig = JSONBigInt({ storeAsString: true })
 
-// 开发环境走 Vite 代理（与页面同源），登录 Cookie 才能可靠带到 /api，避免直连 :5000 与 127.0.0.1/localhost 混用导致会话丢失。
-// 生产 / Electron 打包仍指向实际后端（可通过 VITE_BACKEND_URL 覆盖）。
-export const BACKEND_BASE_URL =
-  import.meta.env.VITE_BACKEND_URL ||
-  (import.meta.env.DEV ? '' : 'http://localhost:5000')
+// 开发：空串走 Vite 同源代理。生产 Web：空串走相对路径（nginx 反代）。
+// Electron 打包：必须在 .env.production 设置 VITE_BACKEND_URL（勿再默认 localhost）。
+const configuredBackend = String(import.meta.env.VITE_BACKEND_URL || '').trim()
+export const BACKEND_BASE_URL = configuredBackend || ''
+
+if (
+  typeof window !== 'undefined' &&
+  !import.meta.env.DEV &&
+  !configuredBackend &&
+  window.location?.protocol === 'file:'
+) {
+  console.error('[api] Packaged Electron requires VITE_BACKEND_URL in .env.production')
+}
 
 const api = axios.create({
     baseURL: BACKEND_BASE_URL,
@@ -66,6 +74,16 @@ export function warmupAgent(models) {
 // 发送邮箱验证码
 export function sendVerificationCode(data) {
   return api.post('/api/send_verification_code', data)
+}
+
+/** 忘记密码：向已注册邮箱发送重置验证码 */
+export function forgotPassword(data) {
+  return api.post('/api/forgot_password', data)
+}
+
+/** 重置密码：email + verification_code + password */
+export function resetPassword(data) {
+  return api.post('/api/reset_password', data)
 }
 // 获取项目列表
 export function getProjects() {

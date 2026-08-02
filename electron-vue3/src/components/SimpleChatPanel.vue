@@ -260,6 +260,33 @@
           </AgentTaskRun>
 
           <div
+            v-if="message.cdpTestTaskCards && message.cdpTestTaskCards.length"
+            class="cdp-test-task-section"
+          >
+            <div
+              v-for="(tc, tcIdx) in message.cdpTestTaskCards"
+              :key="'cdpt-' + message.id + '-' + tcIdx"
+              class="cdp-test-task-card findings-card"
+            >
+              <div class="client-local-run-head">
+                <span class="card-icon">🧪</span>
+                <span class="card-title">{{ tc.title || t('chat.cdpTestTaskTitle') }}</span>
+                <span class="cdp-test-task-status">{{ tc.status || 'running' }}</span>
+              </div>
+              <p class="text-muted small">
+                {{ t('chat.cdpTestTaskCounts', { pass: tc.pass_count || 0, fail: tc.fail_count || 0 }) }}
+              </p>
+              <p v-if="tc.summary" class="small">{{ tc.summary }}</p>
+              <ul v-if="tc.steps && tc.steps.length" class="cdp-test-task-steps small">
+                <li v-for="(st, si) in tc.steps.slice(-8)" :key="si">
+                  <span :class="st.success ? 'ok' : 'fail'">{{ st.success ? '✓' : '✗' }}</span>
+                  {{ st.action || st.summary || st.url || ('step ' + (si + 1)) }}
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <div
             v-if="message.clientLocalRunCards && message.clientLocalRunCards.length"
             class="client-local-run-section"
           >
@@ -273,6 +300,27 @@
                 <span class="card-title">{{ lc.title || t('chat.localRunDownload') }}</span>
               </div>
               <p class="client-local-run-body text-muted small">{{ lc.body || t('chat.localRunIntro') }}</p>
+              <div class="client-local-run-primary-actions">
+                <button
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="localProxyOneClickBusy"
+                  @click="onOneClickInstallAndStart(message)"
+                >
+                  {{ localProxyOneClickBusy ? t('chat.localRunOneClickBusy') : t('chat.localRunOneClickInstall') }}
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-outline-secondary"
+                  :disabled="localProxyOneClickBusy"
+                  @click="onLocalRunIAmRunning(message)"
+                >
+                  {{ t('chat.localRunIAmRunning') }}
+                </button>
+              </div>
+              <p v-if="message.awaitProxyResume && !proxyOkNow()" class="client-local-run-tip small text-muted">
+                {{ t('chat.localRunProxyWaiting') }}
+              </p>
 
               <template v-if="lc.artifacts && lc.artifacts.length">
                 <p class="client-local-run-os small text-muted">
@@ -305,6 +353,13 @@
                       <button type="button" class="btn btn-sm btn-success" @click="copyLocalRunLine(localRunWinRunLine(art))">
                         {{ t('chat.localRunCopyRun') }}
                       </button>
+                      <button
+                        type="button"
+                        class="btn btn-sm btn-primary"
+                        @click="execLocalRunInTerminal(localRunWinDownloadThenRun(art))"
+                      >
+                        {{ t('chat.localRunExecDownloadThenRun') }}
+                      </button>
                     </template>
                     <template v-else>
                       <button type="button" class="btn btn-sm btn-outline-secondary" @click="copyLocalRunLine(localRunUnixWget(art))">
@@ -315,6 +370,13 @@
                       </button>
                       <button type="button" class="btn btn-sm btn-success" @click="copyLocalRunLine(localRunUnixChmodRun(art))">
                         {{ t('chat.localRunCopyRun') }}
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-sm btn-primary"
+                        @click="execLocalRunInTerminal(localRunUnixDownloadThenRun(art))"
+                      >
+                        {{ t('chat.localRunExecDownloadThenRun') }}
                       </button>
                     </template>
                   </div>
@@ -340,11 +402,95 @@
                   <button type="button" class="btn btn-sm btn-success" @click="copyLocalRunLine(localRunLegacyRunLine(lc))">
                     {{ t('chat.localRunCopyRun') }}
                   </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-primary"
+                    @click="execLocalRunInTerminal(localRunLegacyDownloadThenRun(lc))"
+                  >
+                    {{ t('chat.localRunExecDownloadThenRun') }}
+                  </button>
                 </div>
                 <pre class="client-local-run-pre" aria-label="wget">{{ localRunLegacyWgetLine(lc) }}</pre>
                 <pre class="client-local-run-pre" aria-label="run">{{ localRunLegacyRunLine(lc) }}</pre>
               </template>
               <p v-if="localRunCopyTip" class="client-local-run-tip small text-success">{{ localRunCopyTip }}</p>
+              <p v-if="localRunExecTip" class="client-local-run-tip small text-warning">{{ localRunExecTip }}</p>
+            </div>
+          </div>
+
+          <div
+            v-if="message.clientTerminalExecCards && message.clientTerminalExecCards.length"
+            class="client-terminal-exec-section"
+          >
+            <div
+              v-for="(tc, tcIdx) in message.clientTerminalExecCards"
+              :key="'tce-' + message.id + '-' + tcIdx"
+              class="client-terminal-exec-card findings-card"
+            >
+              <div class="client-terminal-exec-head">
+                <img :src="terminalExecCardIcon" alt="" class="client-terminal-exec-icon" />
+                <span class="card-title">{{ t('chat.terminalExecTitle') }}</span>
+                <span
+                  class="badge"
+                  :class="{
+                    'bg-secondary': tc.status === 'queued' || tc.status === 'skipped',
+                    'bg-primary': tc.status === 'running',
+                    'bg-success': tc.status === 'done',
+                    'bg-danger': tc.status === 'error' || tc.status === 'cancelled',
+                    'bg-warning text-dark': tc.status === 'proxy_down'
+                  }"
+                >{{ t(terminalExecStatusLabelKey(tc)) }}</span>
+                <span v-if="tc.timeout" class="badge bg-light text-dark border">{{
+                  t('chat.terminalExecTimeoutBadge', { sec: tc.timeout })
+                }}</span>
+              </div>
+              <p v-if="tc.cwd" class="client-terminal-exec-cwd small text-muted">
+                {{ t('chat.terminalExecCwd') }}: {{ tc.cwd }}
+              </p>
+              <pre class="client-terminal-exec-pre">{{ tc.command }}</pre>
+              <div class="client-terminal-exec-actions">
+                <button
+                  v-if="tc.status === 'queued' || tc.status === 'proxy_down' || tc.status === 'error'"
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="tc.status === 'running' || isSending"
+                  @click="onRunTerminalExecCard(message, tcIdx)"
+                >{{ t('chat.terminalExecRun') }}</button>
+                <button
+                  v-if="tc.status === 'queued'"
+                  type="button"
+                  class="btn btn-sm btn-outline-secondary"
+                  @click="onSkipTerminalExecCard(message, tcIdx)"
+                >{{ t('chat.terminalExecSkip') }}</button>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-outline-secondary"
+                  @click="onOpenTerminalExecInPane(tc)"
+                >{{ t('chat.terminalExecOpenInPane') }}</button>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-outline-secondary"
+                  @click="copyLocalRunLine(tc.command)"
+                >{{ t('chat.terminalExecCopyCommand') }}</button>
+                <div class="client-terminal-exec-autorun">
+                  <label class="small text-muted">{{ t('chat.terminalExecAutoRun') }}</label>
+                  <select
+                    class="form-select form-select-sm"
+                    :value="terminalAutoRunMode"
+                    :aria-label="t('chat.terminalExecMenuAria')"
+                    @change="onTerminalAutoRunModeChange($event)"
+                  >
+                    <option value="ask">{{ t('chat.terminalExecAskEveryTime') }}</option>
+                    <option value="allowlist">{{ t('chat.terminalExecUseAllowlist') }}</option>
+                    <option value="everything">{{ t('chat.terminalExecRunEverything') }}</option>
+                  </select>
+                </div>
+              </div>
+              <pre
+                v-if="tc.resultText"
+                class="client-terminal-exec-result"
+              >{{ tc.resultText }}</pre>
+              <p v-if="tcIdx === 0" class="client-terminal-exec-hint small text-muted">{{ t('chat.terminalExecHint') }}</p>
             </div>
           </div>
           
@@ -622,13 +768,13 @@
             </div>
           </div>
           
-          <!-- 统一总结：标题秒数 = 整轮 wall time（execution_time），与正文里「总耗时」一致；勿用 thinking_time（仅首轮规划） -->
+          <!-- 统一总结：标题固定「总结」，不展示整轮秒数 -->
             <div v-if="hasUnifiedSummary(message)" class="unified-summary-section">
             <div class="unified-summary-header">
               {{
                 message.unifiedSummaryLoading
                   ? t('chat.summaryHeaderLoading')
-                  : t('chat.summarySeconds', { s: (message.agentResult.execution_time ?? message.agentResult.thinking_time ?? 0).toFixed(2) })
+                  : t('chat.summaryHeader')
               }}
             </div>
             <div class="unified-summary-content reasoning-content">
@@ -641,11 +787,10 @@
                 </span>
               </div>
               <div
-                v-else-if="unifiedSummaryBodyIsMarkdown(message)"
+                v-else
                 class="reasoning-text unified-summary-text reasoning-markdown react-sse-md-wrap"
                 v-html="formatReasoningMarkdown(getUnifiedSummaryBody(message))"
               ></div>
-              <div v-else class="reasoning-text unified-summary-text">{{ getUnifiedSummaryBody(message) }}</div>
               <CreatePreview 
                 v-if="message.createPreview && message.createPreview.preview" 
                 :previewData="message.createPreview"
@@ -784,7 +929,18 @@
 import { ref, reactive, nextTick, onMounted, onUnmounted, watch, computed, toRaw, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
-import { BACKEND_BASE_URL, getChatSession, addChatMessage, saveAgentBugs, generateSessionTitle } from '../api.js'
+import {
+  BACKEND_BASE_URL,
+  getChatSession,
+  addChatMessage,
+  saveAgentBugs,
+  generateSessionTitle,
+  createBug,
+  createBadcase,
+  createTestCase,
+  createCard,
+  createPlan
+} from '../api.js'
 import { apiLocaleParam } from '../i18n/index.js'
 import EvidenceCard from './EvidenceCard.vue'
 import StepTimeline from './StepTimeline.vue'
@@ -809,13 +965,34 @@ import {
   DETAIL_FIELDS,
   extractToolName
 } from '../composables/useAgentStream.js'
-import { pruneTrailingPhantomAgentSteps } from '../composables/reactObservationStream.js'
+import {
+  pruneTrailingPhantomAgentSteps,
+  ensureReactStepsForStreamIndex
+} from '../composables/reactObservationStream.js'
 import { isElectronPtyAvailable } from '../utils/electronPtySocketAdapter.js'
 import { snowflakeIdStr } from '../utils/snowflakeId.js'
 import {
   localGoProxyOk as sharedLocalGoProxyRef,
   pingLocalGoProxy as sharedPingLocalGoProxy
 } from '../composables/useLocalGoProxyStatus'
+import terminalExecCardIcon from '../assets/terminal-exec-card-icon.png'
+import {
+  flushPendingTerminalExecQueue,
+  runOneTerminalExecCard,
+  patchTerminalExecCard,
+  terminalExecStatusLabelKey
+} from '../composables/flushPendingTerminalExec.js'
+import {
+  getTerminalAutoRunMode,
+  setTerminalAutoRunMode
+} from '../utils/terminalAutoRunPrefs.js'
+import {
+  dispatchOpenLocalProxyInstall,
+  tryStartInstalledLocalProxy,
+  retryWaitingBrowserLocalCards,
+  EVT_LOCAL_PROXY_BECAME_OK
+} from '../utils/localProxyStartAndResume.js'
+import { tryWakeThenPing } from '../utils/localProxyWake.js'
 
 // Props
 const props = defineProps({
@@ -834,6 +1011,12 @@ const props = defineProps({
     type: String,
     required: false,
     default: ''
+  },
+  /** 诊断终端打开时挂载的失败证据（用例步骤/执行结果等） */
+  diagnosticEvidence: {
+    type: Object,
+    required: false,
+    default: null
   }
 })
 
@@ -843,11 +1026,22 @@ const { t } = useI18n()
 
 /** 由 ProjectDetail 在打开项目时拉取（mode=recent），避免每条对话在后端做向量检索 */
 const projectLongMemoryContext = inject('projectLongMemoryContext', null)
+/** 当前工作台聚焦的记录（雪花 id）；与诊断证据合并进 ui_context */
+const agentUiContext = inject('agentUiContext', null)
 
 const localGoProxyOk = inject('localGoProxyOk', sharedLocalGoProxyRef)
 const pingLocalGoProxy = inject('pingLocalGoProxy', sharedPingLocalGoProxy)
+const terminalCtl = inject('terminalCtl', null)
+const ensureBottomTerminalVisible = inject('ensureBottomTerminalVisible', null)
 /** 浏览器 + Agent：本地代理未运行时顶部提示 */
 const agentLocalProxyHint = ref('')
+const terminalAutoRunMode = ref(getTerminalAutoRunMode())
+const localRunExecTip = ref('')
+let localRunExecTipTimer = null
+const localProxyOneClickBusy = ref(false)
+/** 防止代理上线续跑重入 */
+let proxyResumeInFlight = false
+let lastProxyResumeAt = 0
 const longMemoryContextForReact = () => {
   try {
     const r = projectLongMemoryContext
@@ -860,6 +1054,31 @@ const longMemoryContextForReact = () => {
   } catch (e) {
     return {}
   }
+}
+
+/** 同会话短时历史（不含当前占位 AI 气泡）；与 mem0 长期记忆分开 */
+const conversationHistoryForReact = () => {
+  const max = 8
+  const rows = []
+  const list = Array.isArray(messages.value) ? messages.value : []
+  for (const m of list) {
+    if (!m) continue
+    // 跳过刚 push 的空 AI 占位
+    if (m === list[list.length - 1] && !m.isUser) continue
+    const role = m.isUser ? 'user' : 'assistant'
+    let content = ''
+    if (m.isUser) {
+      content = String(m.content || m.rawUserText || '').trim()
+    } else {
+      content = String(
+        m.finalResponse || m.content || m.understanding || m.agentResult?.summary || ''
+      ).trim()
+    }
+    if (!content) continue
+    if (content.length > 1200) content = `${content.slice(0, 1180)}…`
+    rows.push({ role, content })
+  }
+  return rows.length ? { conversation_history: rows.slice(-max) } : {}
 }
 
 const localeForApi = () => apiLocaleParam()
@@ -1088,6 +1307,12 @@ function isPlaceholderSessionTitle(title) {
     const fn = art?.filename || 'badcase-local-proxy.exe'
     return `.\\${fn}`
   }
+  const localRunWinDownloadThenRun = (art) => {
+    const dl = localRunWinPowerShellDownload(art)
+    const run = localRunWinRunLine(art)
+    if (!dl) return run
+    return `${dl}; if ($?) { ${run} }`
+  }
 
   const localRunUnixWget = (art) => {
     const url = localRunArtifactUrl(art)
@@ -1106,6 +1331,12 @@ function isPlaceholderSessionTitle(title) {
     const q = JSON.stringify(fn)
     const bare = q.slice(1, -1)
     return `chmod +x ${q} && ./${bare}`
+  }
+  const localRunUnixDownloadThenRun = (art) => {
+    const dl = localRunUnixCurl(art) || localRunUnixWget(art)
+    const run = localRunUnixChmodRun(art)
+    if (!dl) return run
+    return `${dl} && ${run}`
   }
 
   const localRunAbsoluteUrl = (card) => {
@@ -1140,6 +1371,12 @@ function isPlaceholderSessionTitle(title) {
     const bare = q.slice(1, -1)
     return `chmod +x ${q} && ./${bare}`
   }
+  const localRunLegacyDownloadThenRun = (card) => {
+    const dl = localRunLegacyCurlLine(card) || localRunLegacyWgetLine(card)
+    const run = localRunLegacyRunLine(card)
+    if (!dl) return run
+    return `${dl} && ${run}`
+  }
   const localRunCopyTip = ref('')
   let localRunCopyTimer = null
   const copyLocalRunLine = async (text) => {
@@ -1154,6 +1391,170 @@ function isPlaceholderSessionTitle(title) {
       }, 2200)
     } catch (e) {
       console.error('[localRun] clipboard', e)
+    }
+  }
+
+  const proxyOkNow = () => {
+    const ok =
+      localGoProxyOk && typeof localGoProxyOk === 'object' && 'value' in localGoProxyOk
+        ? localGoProxyOk.value
+        : null
+    return ok === true || isElectronPtyAvailable()
+  }
+
+  const execLocalRunInTerminal = async (cmd) => {
+    const line = String(cmd || '').trim()
+    if (!line) return
+    if (!proxyOkNow()) {
+      localRunExecTip.value = t('chat.localRunExecNeedProxy')
+      if (localRunExecTipTimer) clearTimeout(localRunExecTipTimer)
+      localRunExecTipTimer = setTimeout(() => {
+        localRunExecTip.value = ''
+      }, 5000)
+      // 仍尝试注入：若嵌入终端已连上可跑；否则用户能看到面板状态
+    }
+    try {
+      if (typeof ensureBottomTerminalVisible === 'function') {
+        await ensureBottomTerminalVisible()
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    const ctl = terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl ? terminalCtl.value : terminalCtl
+    if (ctl && typeof ctl.injectCommand === 'function') {
+      ctl.injectCommand(line)
+      localRunCopyTip.value = t('chat.localRunExecInTerminal')
+      if (localRunCopyTimer) clearTimeout(localRunCopyTimer)
+      localRunCopyTimer = setTimeout(() => {
+        localRunCopyTip.value = ''
+      }, 2200)
+    } else {
+      await copyLocalRunLine(line)
+    }
+  }
+
+  const onOneClickInstallAndStart = async (message) => {
+    if (localProxyOneClickBusy.value) return
+    if (message) message.awaitProxyResume = true
+    localProxyOneClickBusy.value = true
+    localRunExecTip.value = ''
+    try {
+      if (typeof ensureBottomTerminalVisible === 'function') {
+        await ensureBottomTerminalVisible()
+      }
+      // 等底部终端与 WebLocalGoProxyBar 挂载后再打开安装弹窗
+      await nextTick()
+      await new Promise((r) => setTimeout(r, 220))
+      dispatchOpenLocalProxyInstall()
+      // 并行：若本机已装过，尝试唤醒/注入启动
+      const ctl =
+        terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl
+          ? terminalCtl.value
+          : terminalCtl
+      const already = await tryStartInstalledLocalProxy({
+        ping: pingLocalGoProxy,
+        injectCommand: (cmd) => ctl?.injectCommand?.(cmd),
+        ensureTerminalVisible: ensureBottomTerminalVisible,
+        retries: 4,
+        delayMs: 700
+      })
+      if (already) {
+        localRunCopyTip.value = t('chat.localRunProxyResumed')
+        if (localRunCopyTimer) clearTimeout(localRunCopyTimer)
+        localRunCopyTimer = setTimeout(() => {
+          localRunCopyTip.value = ''
+        }, 2200)
+      }
+    } catch (e) {
+      console.error('[localProxy] one-click install', e)
+      localRunExecTip.value = String(e?.message || e)
+    } finally {
+      localProxyOneClickBusy.value = false
+    }
+  }
+
+  const onLocalRunIAmRunning = async (message) => {
+    if (message) message.awaitProxyResume = true
+    try {
+      await tryWakeThenPing({ retries: 3, delayMs: 600, ping: pingLocalGoProxy })
+    } catch (_) {
+      /* ignore */
+    }
+    if (proxyOkNow()) {
+      localRunCopyTip.value = t('chat.localRunProxyResumed')
+      if (localRunCopyTimer) clearTimeout(localRunCopyTimer)
+      localRunCopyTimer = setTimeout(() => {
+        localRunCopyTip.value = ''
+      }, 2200)
+      // watch(localGoProxyOk) 会触发续跑；若已是 true 则手动触发
+      void resumePendingAfterProxyOnline()
+    } else {
+      localRunExecTip.value = t('chat.localRunExecNeedProxy')
+      if (localRunExecTipTimer) clearTimeout(localRunExecTipTimer)
+      localRunExecTipTimer = setTimeout(() => {
+        localRunExecTip.value = ''
+      }, 5000)
+    }
+  }
+
+  const onTerminalAutoRunModeChange = (ev) => {
+    const v = String(ev?.target?.value || 'everything')
+    setTerminalAutoRunMode(v)
+    terminalAutoRunMode.value = getTerminalAutoRunMode()
+  }
+
+  const onSkipTerminalExecCard = (message, idx) => {
+    patchTerminalExecCard(message, idx, { status: 'skipped' })
+    const card = message?.clientTerminalExecCards?.[idx]
+    if (!card || !Array.isArray(message.pendingTerminalExecQueue)) return
+    message.pendingTerminalExecQueue = message.pendingTerminalExecQueue.filter(
+      (it) =>
+        !(
+          String(it.command || '') === String(card.command || '') &&
+          String(it.cwd || '') === String(card.cwd || '')
+        )
+    )
+  }
+
+  const onOpenTerminalExecInPane = async (tc) => {
+    const cmd = String(tc?.command || '').trim()
+    if (!cmd) return
+    try {
+      if (typeof ensureBottomTerminalVisible === 'function') {
+        await ensureBottomTerminalVisible()
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    const ctl = terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl ? terminalCtl.value : terminalCtl
+    if (ctl && typeof ctl.injectCommand === 'function') {
+      ctl.injectCommand(cmd)
+    } else {
+      await copyLocalRunLine(cmd)
+    }
+  }
+
+  const onRunTerminalExecCard = async (message, idx) => {
+    if (isSending.value) return
+    const outcome = await runOneTerminalExecCard(message, idx, {
+      localProxyOkRef: localGoProxyOk,
+      abortSignal: abortController.value?.signal,
+      confirmFn: (msg) => (typeof window !== 'undefined' ? window.confirm(msg) : false),
+      onAfter: () => scrollToBottom()
+    })
+    const card = message?.clientTerminalExecCards?.[idx]
+    if (card && Array.isArray(message.pendingTerminalExecQueue)) {
+      message.pendingTerminalExecQueue = message.pendingTerminalExecQueue.filter(
+        (it) =>
+          !(
+            String(it.command || '') === String(card.command || '') &&
+            String(it.cwd || '') === String(card.cwd || '')
+          )
+      )
+    }
+    // 手动执行后把结果回传助手，便于继续后续步骤
+    if (outcome?.text && !isSending.value) {
+      await sendText(`【本机终端执行结果】\n\n${outcome.text}`)
     }
   }
 
@@ -2137,10 +2538,10 @@ const getUnifiedSummaryBody = (message) => {
   return body
 }
 
-/** 底部统一总结是否用 Markdown 渲染（增量运行总览含固定 ## 标题） */
+/** 底部统一总结始终走 Markdown（加粗/列表/标题等） */
 const unifiedSummaryBodyIsMarkdown = (message) => {
   const t = getUnifiedSummaryBody(message)
-  return typeof t === 'string' && /(\n|^)##\s/.test(t)
+  return typeof t === 'string' && t.trim().length > 0
 }
 
 // 处理导航指令（展开计划并定位 Bug / BadCase / 测试用例）
@@ -2175,34 +2576,60 @@ const handleNavigation = (navigation) => {
   console.log('[NAV] 已发送导航事件，detail:', event.detail)
 }
 
-// 确认修改
+// 确认修改（兼容旧入口；主路径已改为左侧列表采纳）
 const handleConfirmModify = async (modifyData) => {
   console.log('[MODIFY] 用户确认修改:', modifyData)
-  
-  // 清除modifyNavigation
   const currentMessage = messages.value[messages.value.length - 1]
-  if (currentMessage) {
-    currentMessage.modifyNavigation = null
+  if (currentMessage) currentMessage.modifyNavigation = null
+  const pid = props.projectId
+  if (!pid) {
+    alert('缺少项目 ID，无法确认修改')
+    return
   }
-  
-  // 调用modify工具，confirm=true
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/projects/${pid}/modify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
-        user_input: `确认修改${modifyData.target} ID=${modifyData.target_id}`,
-        project_id: props.projectId,
-        model: selectedModel.value,
-        session_id: props.sessionId,
-        confirm_modify: modifyData, // 传递modify数据
-        locale: localeForApi()
+        target: modifyData.target,
+        target_id: modifyData.target_id,
+        modifications: modifyData.modifications || modifyData.preview || {},
+        confirm: true,
+        message_id: modifyData._messageId || currentMessage?.id,
+        natural_query: typeof modifyData._naturalQuery === 'string' ? modifyData._naturalQuery : ''
       })
     })
-    
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || result?.success === false) {
+      throw new Error(result?.error || `HTTP ${response.status}`)
+    }
     console.log('[MODIFY] 修改已提交')
   } catch (error) {
     console.error('[MODIFY] 修改失败:', error)
+    alert(error?.message || '确认修改失败')
+  }
+}
+
+async function rollbackModifyViaApi(item) {
+  const pid = props.projectId
+  if (!pid || !item?.result?.before) return
+  const targetId = item.bug_id ?? item.target_id ?? item.targetId ?? item.id
+  const target = item.target || 'bug'
+  const response = await fetch(`${BACKEND_BASE_URL}/api/projects/${pid}/modify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      target,
+      target_id: targetId,
+      modifications: item.result.before,
+      confirm: true
+    })
+  })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok || result?.success === false) {
+    throw new Error(result?.error || `HTTP ${response.status}`)
   }
 }
 
@@ -2750,29 +3177,13 @@ const handleApproveItem = async (item) => {
 // 审核单个修改项 - 拒绝
 const handleRejectItem = async (item) => {
   console.log('[MODIFY] 用户拒绝单项修改:', item)
-  // 需要回滚该修改
-  if (item.result?.before) {
-    try {
-      const response = await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_input: `回滚修改，恢复原状态`,
-          project_id: props.projectId,
-          model: selectedModel.value,
-          session_id: props.sessionId,
-          locale: localeForApi(),
-          rollback_modify: {
-            target: 'bug',
-            target_id: item.bug_id,
-            modifications: item.result.before
-          }
-        })
-      })
-      console.log('[MODIFY] 回滚请求已发送')
-    } catch (error) {
-      console.error('[MODIFY] 回滚失败:', error)
-    }
+  if (!item.result?.before) return
+  try {
+    await rollbackModifyViaApi(item)
+    console.log('[MODIFY] 回滚请求已发送')
+  } catch (error) {
+    console.error('[MODIFY] 回滚失败:', error)
+    alert(error?.message || '回滚失败')
   }
 }
 
@@ -2785,55 +3196,69 @@ const handleApproveAll = async (results) => {
 // 全部拒绝
 const handleRejectAll = async (results) => {
   console.log('[MODIFY] 用户拒绝全部修改:', results)
-  // 需要回滚所有修改
-  for (const item of results) {
-    if (item.result?.before) {
-      try {
-        await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            user_input: `回滚修改`,
-            project_id: props.projectId,
-            model: selectedModel.value,
-            session_id: props.sessionId,
-            locale: localeForApi(),
-            rollback_modify: {
-              target: 'bug',
-              target_id: item.bug_id,
-              modifications: item.result.before
-            }
-          })
-        })
-      } catch (error) {
-        console.error('[MODIFY] 回滚失败:', error)
-      }
+  for (const item of results || []) {
+    if (!item?.result?.before) continue
+    try {
+      await rollbackModifyViaApi(item)
+    } catch (error) {
+      console.error('[MODIFY] 回滚失败:', error)
     }
   }
 }
 
-// 确认创建
+// 确认创建：走真实 REST（对齐 ProjectDetail.confirmCreate）
 const handleConfirmCreate = async (createData) => {
   console.log('[CREATE] 用户确认创建:', createData)
-  
-  // 调用create工具，confirm=true
+  const target = String(createData?.target || '').toLowerCase()
+  const preview = { ...(createData?.preview || createData || {}) }
+  const pid = props.projectId
+  if (pid != null && preview.project_id == null) preview.project_id = pid
+
   try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/devops/chat_stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_input: `确认创建${createData.target}`,
-        project_id: props.projectId,
-        model: selectedModel.value,
-        session_id: props.sessionId,
-        locale: localeForApi(),
-        confirm_create: createData  // 传递create数据
+    let res
+    if (target === 'testcase' || target === 'test_case') {
+      res = await createTestCase(preview)
+    } else if (target === 'bug') {
+      res = await createBug(preview)
+    } else if (target === 'badcase') {
+      res = await createBadcase(preview)
+    } else if (target === 'card') {
+      const rawTy = String(preview.type || 'bug').toLowerCase()
+      res = await createCard({
+        title: preview.title,
+        type: rawTy === 'bad_case' ? 'badcase' : rawTy,
+        project_id: Number(pid),
+        priority: preview.priority || 'p3',
+        description: preview.description,
+        assignee_id: preview.assignee_id,
+        plan_id: preview.plan_id ?? preview.planId
       })
-    })
-    
-    console.log('[CREATE] 创建已提交')
+    } else if (target === 'plan') {
+      res = await createPlan({
+        name: preview.name || preview.title || '',
+        description: preview.description || '',
+        status: preview.status || 'active',
+        priority: preview.priority || 'medium',
+        start_date: preview.start_date != null ? String(preview.start_date).slice(0, 10) : undefined,
+        end_date: preview.end_date != null ? String(preview.end_date).slice(0, 10) : undefined,
+        parent_id: preview.parent_id ?? preview.parentId ?? null,
+        project_id: Number(pid)
+      })
+    } else {
+      throw new Error(`不支持的创建类型: ${target || '(空)'}`)
+    }
+    const data = res?.data || res
+    if (data?.success === false) throw new Error(data?.error || '创建失败')
+    console.log('[CREATE] 创建成功', data)
+    window.dispatchEvent(
+      new CustomEvent('agent-create-confirmed', {
+        detail: { target, preview, result: data },
+        bubbles: true
+      })
+    )
   } catch (error) {
     console.error('[CREATE] 创建失败:', error)
+    alert(error?.response?.data?.error || error?.message || '创建失败')
   }
 }
 
@@ -2954,11 +3379,11 @@ const rebuildModifyGroupsFromBatchNav = (modifyNav, mergeFn) => {
   const normalizedItems = modifyNav.batch_results
     .map((r, idx) => {
       const rawId = r?.target_id ?? r?.targetId ?? r?.id
-      const tid = Number(rawId)
-      if (!Number.isFinite(tid)) return null
+      const idStr = snowflakeIdStr(rawId)
+      if (!idStr) return null
       return {
         ...r,
-        target_id: tid,
+        target_id: idStr,
         batchOrder: Number.isFinite(Number(r?.batchOrder)) ? Number(r.batchOrder) : idx
       }
     })
@@ -3102,6 +3527,9 @@ function rawApiMessageToUi(msg) {
     Array.isArray(_histAgent.react_plan_steps) && _histAgent.react_plan_steps.length > 0
       ? _histAgent.react_plan_steps
       : null
+  const _histTermCards = Array.isArray(_histAgent.client_terminal_exec_cards)
+    ? _histAgent.client_terminal_exec_cards
+    : []
   return {
     id: msg.id,
     isUser: false,
@@ -3120,6 +3548,7 @@ function rawApiMessageToUi(msg) {
     navigation: msg.navigation ? JSON.parse(msg.navigation) : null,
     modifyNavigation: modifyNav,
     modifyGroups: modifyGroups,
+    clientTerminalExecCards: _histTermCards,
     finalResponse: _histFr || msg.final_response || '',
     time: new Date(msg.created_at).toLocaleTimeString(),
     isHistorical: true
@@ -3555,6 +3984,79 @@ const handleSend = async (e) => {
   await sendText(text, imgs)
 }
 
+/**
+ * 本地代理刚上线：重试 waiting 的 browser 卡片，并把结果/就绪信号续跑给 Agent。
+ */
+async function resumePendingAfterProxyOnline() {
+  if (proxyResumeInFlight || isSending.value) return
+  if (Date.now() - lastProxyResumeAt < 2500) return
+  const list = Array.isArray(messages.value) ? messages.value : []
+  const msg = [...list]
+    .reverse()
+    .find(
+      (m) =>
+        m &&
+        !m.isUser &&
+        !m.isHistorical &&
+        (m.awaitProxyResume ||
+          (Array.isArray(m.clientBrowserLocalCards) &&
+            m.clientBrowserLocalCards.some(
+              (c) => c && (c.status === 'waiting_proxy' || c.status === 'error')
+            )))
+    )
+  if (!msg) return
+
+  proxyResumeInFlight = true
+  lastProxyResumeAt = Date.now()
+  localRunCopyTip.value = t('chat.localRunProxyResumed')
+  try {
+    const browserPart = await retryWaitingBrowserLocalCards(msg)
+    msg.awaitProxyResume = false
+    const lines = [
+      '【本地代理已就绪】本机 go-local-proxy 已连接。',
+      browserPart.retried
+        ? `已重试本机浏览器步骤：成功 ${browserPart.ok}/${browserPart.retried}。\n${browserPart.texts.join('\n')}`
+        : '请继续此前因代理未就绪而暂停的浏览器/调试步骤。'
+    ]
+    await sendText(lines.filter(Boolean).join('\n'))
+  } catch (e) {
+    console.error('[CHAT] resume after proxy online failed:', e)
+  } finally {
+    proxyResumeInFlight = false
+    if (localRunCopyTimer) clearTimeout(localRunCopyTimer)
+    localRunCopyTimer = setTimeout(() => {
+      localRunCopyTip.value = ''
+    }, 2200)
+  }
+}
+
+watch(
+  () =>
+    localGoProxyOk && typeof localGoProxyOk === 'object' && 'value' in localGoProxyOk
+      ? localGoProxyOk.value
+      : localGoProxyOk,
+  (ok, prev) => {
+    if (ok === true && prev !== true) {
+      void resumePendingAfterProxyOnline()
+    }
+  }
+)
+
+function onLocalProxyBecameOkEvent() {
+  void resumePendingAfterProxyOnline()
+}
+
+onMounted(() => {
+  if (typeof window !== 'undefined') {
+    window.addEventListener(EVT_LOCAL_PROXY_BECAME_OK, onLocalProxyBecameOkEvent)
+  }
+})
+onUnmounted(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener(EVT_LOCAL_PROXY_BECAME_OK, onLocalProxyBecameOkEvent)
+  }
+})
+
 const beginEditUserMessage = (msg) => {
   if (!msg) return
   editingUserMessageId.value = msg.id
@@ -3641,9 +4143,10 @@ const handleStop = () => {
 }
 
 // ReAct Agent 模式 - 调用后端 ReAct 接口 (流式处理)
-const handleReactAgentMode = async (userMessage, images = []) => {
+const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) => {
   console.log('[MODEL-DEBUG] 当前选择的模型', selectedModel.value)
-  
+  const terminalContinueDepth = Math.max(0, Number(reactOpts?.terminalContinueDepth) || 0)
+
   const aiMessage = reactive(createReactAiMessageState(Date.now() + 1))
   
   messages.value.push(aiMessage)
@@ -3670,15 +4173,42 @@ const handleReactAgentMode = async (userMessage, images = []) => {
         project_id: currentProjectId.value || props.projectId,
         images: images || [],
         locale: localeForApi(),
+        chat_session_id: props.sessionId || undefined,
         ...(String(props.projectDisplayName || '').trim()
           ? { project_display_name: String(props.projectDisplayName).trim() }
           : {}),
-        ...longMemoryContextForReact()
+        ...(() => {
+          const base =
+            agentUiContext && typeof agentUiContext === 'object' && 'value' in agentUiContext
+              ? agentUiContext.value
+              : agentUiContext
+          const ui = base && typeof base === 'object' ? { ...base } : {}
+          if (props.diagnosticEvidence && typeof props.diagnosticEvidence === 'object') {
+            ui.diagnostic_evidence = props.diagnosticEvidence
+          }
+          return Object.keys(ui).length ? { ui_context: ui } : {}
+        })(),
+        ...longMemoryContextForReact(),
+        ...conversationHistoryForReact()
       })
     })
     
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
+      let detail = `HTTP ${response.status}`
+      try {
+        const errBody = await response.json()
+        if (errBody?.message) detail = String(errBody.message)
+        else if (errBody?.error) detail = String(errBody.error)
+      } catch (_) { /* ignore */ }
+      if (response.status === 401) detail = '未登录，请重新登录'
+      else if (response.status === 402) detail = detail || '额度不足，请购买订阅'
+      else if (response.status === 403) detail = detail || '无该项目权限'
+      else if (response.status === 429) {
+        detail = detail || '请求过于频繁，请稍后再试'
+        const ra = parseInt(response.headers.get('Retry-After') || '', 10)
+        if (Number.isFinite(ra) && ra > 0) detail += `（约 ${ra} 秒后重试）`
+      }
+      throw new Error(detail)
     }
     
     const reader = response.body.getReader()
@@ -3695,7 +4225,9 @@ const handleReactAgentMode = async (userMessage, images = []) => {
         scheduleReasoningTypewriter,
         scheduleTodosStreamTypewriter,
         sseIsReactThinkPhase,
-        logReactThinkStepDetail
+        logReactThinkStepDetail,
+        ensureReactStepsForStreamIndex: (msg, idx) =>
+          ensureReactStepsForStreamIndex(msg, idx, buildReactStepsFromTodoStrings)
       },
       engineCtx: {
         flushReasoningTypewriter,
@@ -3798,6 +4330,69 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     }
   }
 
+  // SSE 结束后：按 Auto-Run 策略在本机执行 terminal_exec 队列，并回写卡片
+  let terminalFollowUp = ''
+  if (
+    Array.isArray(aiMessage.pendingTerminalExecQueue) &&
+    aiMessage.pendingTerminalExecQueue.length &&
+    aiMessage?.agentResult?.status !== 'cancelled' &&
+    !stopSignal?.aborted
+  ) {
+    try {
+      if (typeof pingLocalGoProxy === 'function') await pingLocalGoProxy()
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      const flushed = await flushPendingTerminalExecQueue(aiMessage, {
+        localProxyOkRef: localGoProxyOk,
+        abortSignal: stopSignal,
+        confirmFn: (msg) => (typeof window !== 'undefined' ? window.confirm(msg) : false),
+        t,
+        onAfter: () => scrollToBottom()
+      })
+      terminalFollowUp = String(flushed?.followUpText || '').trim()
+    } catch (e) {
+      console.error('[CHAT-TERMINAL] flush pending exec failed:', e)
+    }
+  }
+
+  // 等待本轮 browser_local 异步启停落定；代理未就绪则挂起等上线续跑，不立刻跟进
+  let browserFollowUp = ''
+  if (
+    Array.isArray(aiMessage.clientBrowserLocalCards) &&
+    aiMessage.clientBrowserLocalCards.length &&
+    aiMessage?.agentResult?.status !== 'cancelled' &&
+    !stopSignal?.aborted
+  ) {
+    const deadline = Date.now() + 20000
+    while (Date.now() < deadline && !stopSignal?.aborted) {
+      const cards = aiMessage.clientBrowserLocalCards
+      const pending = cards.some((c) => c && c.status === 'running')
+      if (!pending) break
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    const cards = aiMessage.clientBrowserLocalCards || []
+    const waiting = cards.some((c) => c && c.status === 'waiting_proxy')
+    if (waiting) {
+      aiMessage.awaitProxyResume = true
+    } else {
+      const lines = cards.map((c) => {
+        if (!c) return ''
+        if (c.status === 'done') {
+          return `browser ${c.action || 'start'}${c.url ? ` ${c.url}` : ''}: ok` +
+            (c.result?.cdp_http ? ` cdp=${c.result.cdp_http}` : '')
+        }
+        return `browser ${c.action || 'start'}: ${c.status}${c.error ? ` — ${c.error}` : ''}`
+      }).filter(Boolean)
+      if (lines.length) {
+        browserFollowUp = `【本机浏览器执行结果】\n\n${lines.join('\n')}`
+      }
+    }
+  }
+
+  const clientFollowUp = [terminalFollowUp, browserFollowUp].filter(Boolean).join('\n\n---\n\n')
+
   // 保存最终结果到数据库（纯对话路径写入 direct_chat_reply，便于刷新后仍走气泡而非「总结」）
   const _persistAgent = { ...(aiMessage.agentResult || {}) }
   if (aiMessage.reactDirectChatReply) _persistAgent.direct_chat_reply = true
@@ -3811,6 +4406,9 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     } catch {
       // ignore
     }
+  }
+  if (Array.isArray(aiMessage.clientTerminalExecCards) && aiMessage.clientTerminalExecCards.length) {
+    _persistAgent.client_terminal_exec_cards = aiMessage.clientTerminalExecCards
   }
 
   // 保存最终结果到数据库（toRaw + 安全 stringify，避免 reactive 循环引用导致整段失败）
@@ -3828,6 +4426,32 @@ const handleReactAgentMode = async (userMessage, images = []) => {
     modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
     final_response: aiMessage.finalResponse
   })
+
+  // 本机命令/浏览器结果作为下一条用户上下文继续 ReAct（与后端 pause 文案对齐）
+  // 安装代理卡挂起时不自动续跑，等代理上线由 resumePendingAfterProxyOnline 触发
+  if (
+    clientFollowUp &&
+    !aiMessage.awaitProxyResume &&
+    terminalContinueDepth < 3 &&
+    !stopSignal?.aborted &&
+    aiMessage?.agentResult?.status !== 'cancelled'
+  ) {
+    const userFollow = {
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      content: clientFollowUp,
+      isUser: true,
+      time: new Date().toLocaleTimeString()
+    }
+    messages.value.push(userFollow)
+    await saveMessageToDb({
+      is_user: true,
+      content: userFollow.content
+    })
+    scrollToBottom()
+    await handleReactAgentMode(clientFollowUp, [], {
+      terminalContinueDepth: terminalContinueDepth + 1
+    })
+  }
 }
 
 // Agent 模式 - 调用后端 Agent 接口
@@ -3854,6 +4478,7 @@ const handleAgentMode = async (userMessage) => {
       headers: {
         'Content-Type': 'application/json'
       },
+      credentials: 'include',
       body: JSON.stringify({
         user_input: userMessage,
         model: selectedModel.value,
@@ -3868,7 +4493,13 @@ const handleAgentMode = async (userMessage) => {
     })
     
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
+      let detail = `HTTP ${response.status}`
+      if (response.status === 429) {
+        const ra = parseInt(response.headers.get('Retry-After') || '', 10)
+        detail = '请求过于频繁，请稍后再试'
+        if (Number.isFinite(ra) && ra > 0) detail += `（约 ${ra} 秒后重试）`
+      } else if (response.status === 401) detail = '未登录，请重新登录'
+      throw new Error(detail)
     }
     
     const data = await response.json()
@@ -3949,6 +4580,7 @@ const handleChatMode = async (userMessage, images = []) => {
       headers: {
         'Content-Type': 'application/json'
       },
+      credentials: 'include',
       signal: chatStopSignal,
       body: JSON.stringify({
         inputMessage: userMessage,
@@ -3960,7 +4592,14 @@ const handleChatMode = async (userMessage, images = []) => {
     })
     
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
+      let detail = `HTTP ${response.status}`
+      if (response.status === 401) detail = '未登录，请重新登录'
+      else if (response.status === 429) {
+        const ra = parseInt(response.headers.get('Retry-After') || '', 10)
+        detail = '请求过于频繁，请稍后再试'
+        if (Number.isFinite(ra) && ra > 0) detail += `（约 ${ra} 秒后重试）`
+      }
+      throw new Error(detail)
     }
     
     const reader = response.body.getReader()
@@ -4148,6 +4787,8 @@ onMounted(() => {
   window.addEventListener('modify-cancelled', handleModifyCancelled)
   window.addEventListener('modify-confirmed', handleModifyConfirmed)
   window.addEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
+  window.addEventListener('create-adopted-from-list', handleCreateAdoptedFromList)
+  window.addEventListener('agent-create-confirmed', handleAgentCreateConfirmed)
 
   // 历史消息：滚动到顶部时按需加载更早内容（先出最新一屏）
   nextTick(() => {
@@ -4156,6 +4797,61 @@ onMounted(() => {
     root.addEventListener('scroll', loadOlderHistoryIfNeeded, { passive: true })
   })
 })
+
+/** 列表侧确认创建成功后，同步聊天区「新建预览」为已采纳 */
+const markCreateAdoptedInMessages = ({ messageId, createdId, target } = {}) => {
+  if (createdId == null) return
+  const idStr = snowflakeIdStr(createdId) || String(createdId)
+  messages.value.forEach((msg, msgIdx) => {
+    if (messageId != null && String(msg.id) !== String(messageId)) return
+    let updated = false
+    const nav = msg.modifyNavigation
+    if (nav?.is_create) {
+      msg.modifyNavigation = {
+        ...nav,
+        confirmation_required: false,
+        success: true,
+        created_id: idStr,
+        navigate_to_existing: true,
+        target_id: idStr,
+        target: target || nav.target
+      }
+      updated = true
+    }
+    if (msg.createPreview?.preview) {
+      msg.createPreview = {
+        ...msg.createPreview,
+        confirmation_required: false,
+        success: true,
+        created_id: idStr,
+        target: target || msg.createPreview.target
+      }
+      updated = true
+    }
+    if (updated) messages.value[msgIdx] = { ...msg }
+  })
+}
+
+const handleCreateAdoptedFromList = (event) => {
+  markCreateAdoptedInMessages(event?.detail || {})
+}
+
+const handleAgentCreateConfirmed = (event) => {
+  const d = event?.detail || {}
+  const createdId =
+    d?.result?.bug?.id ??
+    d?.result?.testcase?.id ??
+    d?.result?.badcase?.id ??
+    d?.result?.plan?.id ??
+    d?.result?.data?.id ??
+    d?.result?.id ??
+    null
+  markCreateAdoptedInMessages({
+    createdId,
+    target: d.target,
+    messageId: d.messageId
+  })
+}
 
 // 处理修改取消事件
 const handleModifyCancelled = (event) => {
@@ -4357,6 +5053,8 @@ onUnmounted(() => {
   window.removeEventListener('modify-cancelled', handleModifyCancelled)
   window.removeEventListener('modify-confirmed', handleModifyConfirmed)
   window.removeEventListener('request-pending-modify-for-plan', handleRequestPendingModifyForPlan)
+  window.removeEventListener('create-adopted-from-list', handleCreateAdoptedFromList)
+  window.removeEventListener('agent-create-confirmed', handleAgentCreateConfirmed)
 
   const root = messagesContainer.value
   if (root) root.removeEventListener('scroll', loadOlderHistoryIfNeeded)
@@ -5446,6 +6144,25 @@ watch(() => props.sessionId, (newSessionId) => {
   overflow: hidden;
 }
 
+.cdp-test-task-section {
+  margin: 12px 0;
+}
+.cdp-test-task-card {
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.cdp-test-task-status {
+  margin-left: auto;
+  font-size: 12px;
+  opacity: 0.8;
+  text-transform: uppercase;
+}
+.cdp-test-task-steps {
+  margin: 6px 0 0;
+  padding-left: 1.1em;
+}
+.cdp-test-task-steps .ok { color: #2e7d32; }
+.cdp-test-task-steps .fail { color: #c62828; }
 .client-local-run-section {
   margin: 12px 0;
 }
@@ -5462,6 +6179,12 @@ watch(() => props.sessionId, (newSessionId) => {
 .client-local-run-body {
   margin: 0 0 10px;
   line-height: 1.5;
+}
+.client-local-run-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
 }
 .client-local-run-actions {
   display: flex;
@@ -5500,6 +6223,67 @@ watch(() => props.sessionId, (newSessionId) => {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.client-terminal-exec-section {
+  margin: 12px 0;
+}
+.client-terminal-exec-card {
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.client-terminal-exec-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.client-terminal-exec-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+.client-terminal-exec-cwd {
+  margin: 0 0 6px;
+}
+.client-terminal-exec-pre,
+.client-terminal-exec-result {
+  font-size: 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.client-terminal-exec-result {
+  background: #1e293b;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.client-terminal-exec-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.client-terminal-exec-autorun {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.client-terminal-exec-autorun .form-select {
+  width: auto;
+  min-width: 9rem;
+}
+.client-terminal-exec-hint {
+  margin: 4px 0 0;
+  line-height: 1.45;
 }
 
 .findings-header {

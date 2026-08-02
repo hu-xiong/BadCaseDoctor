@@ -100,7 +100,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { getProjects, deleteProject as deleteProjectApi } from '../api.js'
+import { getProjects, deleteProject as deleteProjectApi, BACKEND_BASE_URL } from '../api.js'
 import api from '../api.js'
 import { ensureUserDefaultProject } from '../utils/ensureUserDefaultProject.js'
 import { setLastProjectId } from '../utils/lastProject.js'
@@ -220,12 +220,12 @@ export default {
                  
                  if (filename) {
                    // 使用我们的base64缓存API
-                   project.avatar = `http://localhost:5000/api/avatar/base64/${encodeURIComponent(filename)}`
+                   project.avatar = `${BACKEND_BASE_URL}/api/avatar/base64/${encodeURIComponent(filename)}`
                    console.log(`项目 ${project.id} 头像URL转换为base64缓存API: ${project.avatar}`)
                  }
                } else {
                  // 是文件名，直接使用base64缓存API
-                 project.avatar = `http://localhost:5000/api/avatar/base64/${encodeURIComponent(project.avatar)}`
+                 project.avatar = `${BACKEND_BASE_URL}/api/avatar/base64/${encodeURIComponent(project.avatar)}`
                  console.log(`项目 ${project.id} 头像URL使用base64缓存API: ${project.avatar}`)
                }
             }

@@ -158,12 +158,33 @@ app = Flask(__name__)
 app.json_encoder = EnumJSONEncoder
 app.config.from_object(Config)
 
-# Flask应用配置
-app.config['SECRET_KEY'] = 'hxReligi12.-badcase-doctor-secret-key-2025'  # 添加SECRET_KEY配置
-# Session Cookie 配置：浏览器 /api 请求携带登录态
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # 允许同站请求携带 Cookie
+# nginx / SLB 反代后正确识别 https 与 Host（request.host_url、url_for 等）
+if (os.getenv("TRUST_PROXY") or "1").strip().lower() in ("1", "true", "yes", "on"):
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# SECRET_KEY 仅来自 Config / 环境变量，禁止在此硬编码覆盖
+if (os.getenv("FLASK_ENV") or "").strip().lower() == "production":
+    _sk = (app.config.get("SECRET_KEY") or "").strip()
+    if not _sk or _sk in ("dev-only-change-me", "your-secret-key-here"):
+        raise RuntimeError("生产环境必须设置强随机 SECRET_KEY")
+# Session Cookie：Electron file:// 跨域需 SESSION_COOKIE_SAMESITE=None（配合 CORS_ALLOW_NULL_ORIGIN）
+from utils.cors_config import session_cookie_samesite as _session_cookie_samesite
+
+app.config['SESSION_COOKIE_SAMESITE'] = _session_cookie_samesite("Lax")
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = False  # 开发环境使用 HTTP
+_secure_cookie = (os.getenv("SESSION_COOKIE_SECURE") or "").strip().lower()
+if _secure_cookie in ("1", "true", "yes", "on"):
+    app.config['SESSION_COOKIE_SECURE'] = True
+elif _secure_cookie in ("0", "false", "no", "off"):
+    app.config['SESSION_COOKIE_SECURE'] = False
+else:
+    # SameSite=None 时浏览器要求 Secure；否则生产默认 True，开发 False
+    if app.config['SESSION_COOKIE_SAMESITE'] == "None":
+        app.config['SESSION_COOKIE_SECURE'] = True
+    else:
+        app.config['SESSION_COOKIE_SECURE'] = (os.getenv("FLASK_ENV") or "").strip().lower() == "production"
 # SQLALCHEMY_DATABASE_URI 仅来自 Config / 环境变量 DATABASE_URL，主业务库固定为 MySQL（见下方校验）
 
 # 数据库连接池（默认加大；可用环境变量覆盖，避免多进程×多 worker 撑爆 MySQL max_connections）
@@ -214,21 +235,12 @@ if not _main_db_uri.startswith('mysql'):
         + (f" 当前: {_main_db_uri[:120]}" if _main_db_uri else ' 当前: (未配置)')
     )
 
-# 添加CORS支持
-CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8080', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173', 'http://127.0.0.1:8080'])
+# CORS：支持 CORS_ORIGINS / CORS_ALLOW_NULL_ORIGIN（Electron file:// 的 Origin 为 "null"）
+from utils.cors_config import cors_origins_list as _cors_origins_list
 
-# 全局 OPTIONS 处理器 - 处理 CORS 预检请求
-@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
-@app.route('/<path:path>', methods=['OPTIONS'])
-def handle_options(path):
-    """处理所有 OPTIONS 请求（CORS 预检）"""
-    response = app.make_response(('', 204))
-    response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    response.headers['Access-Control-Max-Age'] = '86400'
-    return response
+_CORS_ORIGINS = _cors_origins_list()
+CORS(app, supports_credentials=True, origins=_CORS_ORIGINS)
+# OPTIONS 预检交由 flask-cors 处理（避免与自定义 handler 双写）
 
 # 邮件配置 - 使用环境变量
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.163.com')
@@ -262,12 +274,12 @@ MINIO_CONFIG = {
     'max_sum_file_size': Config.MINIO_MAX_SUM_FILE_SIZE,
 }
 
-# Redis配置
+# Redis配置（仅来自环境变量 / Config，禁止仓库内硬编码主机与密码）
 REDIS_CONFIG = {
-    'host': '117.72.33.38',
-    'port': 26378,
-    'password': 'Religi12,.',
-    'db': 0,
+    'host': Config.REDIS_HOST or '127.0.0.1',
+    'port': int(Config.REDIS_PORT or 6379),
+    'password': Config.REDIS_PASSWORD or None,
+    'db': int(getattr(Config, 'REDIS_DATABASE', 0) or 0),
     'decode_responses': False  # 不自动解码，因为我们要存储二进制数据
 }
 
@@ -331,6 +343,43 @@ def get_redis_client():
     return _redis_client
 
 # ==================== Prometheus 指标端点 ====================
+
+@app.route('/health', methods=['GET'])
+@app.route('/healthz', methods=['GET'])
+def health_liveness():
+    """轻量存活探针（无 DB），供 SLB / K8s / Docker HEALTHCHECK。"""
+    from app_services.health_probes import liveness_payload
+
+    return jsonify(liveness_payload()), 200
+
+
+@app.route('/ready', methods=['GET'])
+@app.route('/readyz', methods=['GET'])
+def health_readiness():
+    """就绪探针：DB 必通；Redis 可选（未配置时不挡就绪）。"""
+    from app_services.health_probes import readiness_payload
+
+    db_ok = False
+    try:
+        db.session.execute(db.text('SELECT 1'))
+        db_ok = True
+    except Exception as ex:
+        print(f"[ready] db failed: {ex}", flush=True)
+    finally:
+        db.session.remove()
+    redis_ok = None
+    try:
+        rc = get_redis_client()
+        if rc is not None:
+            rc.ping()
+            redis_ok = True
+        else:
+            redis_ok = False
+    except Exception:
+        redis_ok = False
+    payload, code = readiness_payload(db_ok, redis_ok)
+    return jsonify(payload), code
+
 
 @app.route('/api/ping', methods=['GET'])
 def api_ping():
@@ -730,6 +779,25 @@ mail = Mail(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
+
+@app.after_request
+def _security_headers(resp):
+    """基础安全响应头（不覆盖业务已设置的值）。"""
+    try:
+        if not resp:
+            return resp
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        if request.is_secure:
+            resp.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+    except Exception:
+        pass
+    return resp
+
 
 # 压缩 JSON 响应（尤其是聊天历史/终端输出这类大 payload）
 @app.after_request
@@ -1638,19 +1706,51 @@ def ensure_badcase_card_link(badcase, auto_create=False, commit=True):
     确保 BadCase 与 Card 双向关联，返回 card_id 或 None。
     auto_create=True 时若无任何关联则新建 Card（与 api_create_bug 一致；仅用于创建 API，
     勿在 modify 预览/取数路径开启，否则会改写 card_id 导致从原卡片 Tab 消失）。
+
+    若 badcase.card_id 指向的 Card.source_id 已是其它 BadCase，视为脏数据：断开并尝试按
+    Card.source_id 反查正确卡片。切勿把错误 card_id 交给前端导航（会打开错行并 403）。
     """
     if badcase is None:
         return None
+    try:
+        bid = int(badcase.id)
+    except (TypeError, ValueError):
+        return None
+
     cid_raw = getattr(badcase, 'card_id', None)
     try:
         if cid_raw is not None and int(cid_raw) > 0:
             card = Card.query.get(int(cid_raw))
             if card is not None:
-                if _link_card_source_to_badcase(card, badcase):
-                    db.session.add(card)
+                sid = getattr(card, 'source_id', None)
+                st = (getattr(card, 'source_type', None) or '').strip().lower()
+                st_norm = 'badcase' if st in ('badcase', 'bad_case', '') else st
+                try:
+                    sid_i = int(sid) if sid is not None else None
+                except (TypeError, ValueError):
+                    sid_i = None
+                # Card 已绑定其它源行：不得继续返回该 card_id
+                if sid_i is not None and sid_i != bid and st_norm in ('badcase', 'bad_case'):
+                    print(
+                        f"[BadCase] 断开错误 card 关联: badcase_id={bid} "
+                        f"card_id={int(cid_raw)} card.source_id={sid_i} "
+                        f"card.project_id={getattr(card, 'project_id', None)}",
+                        flush=True,
+                    )
+                    badcase.card_id = None
+                    db.session.add(badcase)
                     if commit:
-                        db.session.commit()
-                return int(cid_raw)
+                        try:
+                            db.session.commit()
+                        except Exception as e:
+                            db.session.rollback()
+                            print(f"[BadCase] 清除错误 card_id commit 失败: {e}", flush=True)
+                else:
+                    if _link_card_source_to_badcase(card, badcase):
+                        db.session.add(card)
+                        if commit:
+                            db.session.commit()
+                    return int(cid_raw)
     except (TypeError, ValueError):
         pass
 
@@ -3116,30 +3216,7 @@ def import_database():
 def chat():
     return render_template('chat.html')
 
-@app.route('/api/chat', methods=['POST'])
-@login_required
-def api_chat():
-    data = request.get_json()
-    message = data.get('message', '')
-    context = data.get('context', [])
-    tools = data.get('tools', [])
-
-    # 这里预留大模型和工具调度逻辑，当前返回模拟数据
-    # 后续可集成Qwen3-Code模型和MCP工具
-    reply = f"[模拟回复] 收到：{message}"
-    tool_calls = [
-        {"tool": "search_doc", "result": "[模拟] 文档召回内容"},
-        {"tool": "get_prompt", "result": "[模拟] 提示词内容"}
-    ] if tools else []
-    flow_info = {"step": "tool_dispatch", "desc": "已调用相关工具"} if tools else {"step": "reply", "desc": "直接回复"}
-    docs = ["[模拟] 相关文档1", "[模拟] 相关文档2"] if tools else []
-
-    return jsonify({
-        "reply": reply,
-        "tool_calls": tool_calls,
-        "flow_info": flow_info,
-        "docs": docs
-    })
+# 流式聊天由 routers.chat:/api/chat 提供（勿再挂 mock JSON）
 
 # ==================== Browser-use Agent API ==================== #
 
@@ -5389,6 +5466,54 @@ def api_send_verification_code():
         return jsonify({'success': True, 'message': '验证码已发送'})
     except Exception as e:
         return jsonify({'success': False, 'error': f'发送邮件失败: {str(e)}'}), 500
+
+
+@app.route('/api/forgot_password', methods=['POST'])
+def api_forgot_password():
+    """发送密码重置验证码（JSON，供 Electron / SPA）。"""
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip()
+    if not email:
+        return jsonify({'success': False, 'error': '邮箱不能为空'}), 400
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({'success': False, 'error': '邮箱不存在'}), 404
+    code = generate_verification_code()
+    user.verification_code = code
+    user.verification_expires = datetime.utcnow() + timedelta(minutes=10)
+    db.session.commit()
+    try:
+        send_email(
+            to=email,
+            subject='BadCase Doctor 密码重置验证码',
+            body=f'您的验证码是: {code}，有效期10分钟。',
+        )
+        return jsonify({'success': True, 'message': '验证码已发送'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'发送邮件失败: {str(e)}'}), 500
+
+
+@app.route('/api/reset_password', methods=['POST'])
+def api_reset_password():
+    """用邮箱 + 验证码重置密码（JSON）。"""
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip()
+    verification_code = (data.get('verification_code') or data.get('code') or '').strip()
+    new_password = data.get('password') or data.get('new_password') or ''
+    if not email or not verification_code or not new_password:
+        return jsonify({'success': False, 'error': '邮箱、验证码和新密码均为必填'}), 400
+    if len(str(new_password)) < 6:
+        return jsonify({'success': False, 'error': '密码至少 6 位'}), 400
+    user = User.query.filter_by(email=email, verification_code=verification_code).first()
+    if not user or not user.verification_expires or user.verification_expires < datetime.utcnow():
+        return jsonify({'success': False, 'error': '验证码无效或已过期'}), 400
+    if check_password_hash(user.password_hash, new_password):
+        return jsonify({'success': False, 'error': '新密码不能与旧密码相同'}), 400
+    user.password_hash = generate_password_hash(new_password)
+    user.verification_code = None
+    user.verification_expires = None
+    db.session.commit()
+    return jsonify({'success': True, 'message': '密码重置成功'})
 
 
 def _safe_parse_project_login_configs(raw):
@@ -8869,33 +8994,36 @@ def sync_database_schema():
 
         reset_agent_tasks_stuck_running()
         
-        # 创建测试用户（如果不存在）
-        test_user = User.query.filter_by(email='test@example.com').first()
-        if not test_user:
-            test_user = User(
-                email='test@example.com',
-                password_hash=generate_password_hash('123456'),
-                name='测试用户',
-                is_verified=True
-            )
-            db.session.add(test_user)
-            print("已创建测试用户: test@example.com / 123456")
-        
-        # 创建指定用户账号（如果不存在）
-        specified_user = User.query.filter_by(email='2629258027@qq.com').first()
-        if not specified_user:
-            specified_user = User(
-                email='2629258027@qq.com',
-                password_hash=generate_password_hash('123456'),
-                name='hx',
-                is_verified=True
-            )
-            db.session.add(specified_user)
-            print("已创建指定用户: 2629258027@qq.com / 123456")
+        # 演示账号仅显式开启时种入（SEED_DEMO_USERS=1），生产默认跳过且绝不重置密码
+        _seed_demo = (os.getenv("SEED_DEMO_USERS") or "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        if _seed_demo:
+            test_user = User.query.filter_by(email='test@example.com').first()
+            if not test_user:
+                test_user = User(
+                    email='test@example.com',
+                    password_hash=generate_password_hash('123456'),
+                    name='测试用户',
+                    is_verified=True
+                )
+                db.session.add(test_user)
+                print("已创建测试用户: test@example.com / 123456")
+
+            specified_user = User.query.filter_by(email='2629258027@qq.com').first()
+            if not specified_user:
+                specified_user = User(
+                    email='2629258027@qq.com',
+                    password_hash=generate_password_hash('123456'),
+                    name='hx',
+                    is_verified=True
+                )
+                db.session.add(specified_user)
+                print("已创建指定用户: 2629258027@qq.com / 123456")
+            else:
+                print("演示用户已存在，跳过密码重置: 2629258027@qq.com")
         else:
-            # 如果用户已存在，更新密码为123456
-            specified_user.password_hash = generate_password_hash('123456')
-            print("已更新用户密码: 2629258027@qq.com / 123456")
+            print("跳过演示账号种入（设 SEED_DEMO_USERS=1 开启）")
         
         db.session.commit()
         
@@ -9215,6 +9343,17 @@ def api_create_plan():
         print(f"接收到的数据: {data}")
         print(f"当前用户ID: {current_user.id}")
             
+        if not isinstance(data, dict):
+            return jsonify({'success': False, 'error': '无效的请求体'}), 400
+        # Agent 预览可能缺日期：服务端兜底，避免确认创建 400
+        _today = datetime.utcnow().date()
+        if not data.get('start_date'):
+            data['start_date'] = _today.isoformat()
+        if not data.get('end_date'):
+            data['end_date'] = (_today + timedelta(days=14)).isoformat()
+        if not data.get('name') and data.get('title'):
+            data['name'] = data.get('title')
+
         # 验证必填字段
         required_fields = ['name', 'start_date', 'end_date', 'project_id']
         for field in required_fields:
@@ -11881,103 +12020,134 @@ if __name__ == '__main__':
     else:
         print("ℹ️ 热重载已关闭（FLASK_DEBUG=0 或 FLASK_ENV=production）")
 
-    if _use_waitress and not _use_reload:
-        try:
-            try:
-                _threads = int((os.getenv("WSGI_THREADS") or "200").strip())
-            except ValueError:
-                _threads = 200
-            _threads = max(8, min(_threads, 512))
-            print(
-                f"🚀 使用 waitress（Keep-Alive / 线程池）：http://{_host}:{_port} threads={_threads}",
-                flush=True,
-            )
-            print(
-                "   调线程：环境变量 WSGI_THREADS=200（默认已是 200）；关 waitress：BADCASE_USE_WAITRESS=0",
-                flush=True,
-            )
-            print(
-                "   首请求仍可能较慢（远端 MySQL 冷连）；进项目页会先打 /api/ping 预热",
-                flush=True,
-            )
-            _bind_err = _probe_tcp_bind(_host, _port)
-            if _bind_err:
-                print(
-                    f"❌ 无法在 {_host}:{_port} 监听: {_bind_err}",
-                    flush=True,
-                )
-                print(
-                    "   常见原因：① Windows「投射/无线显示器/AirPlay」占用 5000"
-                    "  ② Hyper-V 保留端口段  ③ 已有 python app.py 在跑",
-                    flush=True,
-                )
-                print(
-                    "   排查：netstat -ano | findstr :5000",
-                    flush=True,
-                )
-                print(
-                    "   netsh int ipv4 show excludedportrange protocol=tcp  （管理员 CMD）",
-                    flush=True,
-                )
-                print(
-                    f"   临时换端口：set PORT=5001 && python app.py",
-                    flush=True,
-                )
-                raise SystemExit(1)
-            try:
-                _conn_limit = int((os.getenv("WSGI_CONNECTION_LIMIT") or "1024").strip())
-            except ValueError:
-                _conn_limit = 1024
-            _conn_limit = max(_threads, min(_conn_limit, 4096))
-            from waitress import create_server
+    # 本机 go-local-proxy：随 Flask 启停（环回 + 有二进制时默认托管；BADCASE_MANAGE_LOCAL_PROXY=0 关闭）
+    _stop_local_proxy = lambda: None
+    try:
+        from local_proxy_supervisor import start_managed_local_proxy, stop_managed_local_proxy as _stop_lp
 
-            _wsgi_server = create_server(
-                app,
-                host=_host,
-                port=_port,
-                threads=_threads,
-                channel_timeout=300,
-                connection_limit=_conn_limit,
-            )
+        _stop_local_proxy = _stop_lp
+        _lp = start_managed_local_proxy(flask_host=_host)
+        if _lp.get("owned") and _lp.get("running_child"):
             print(
-                f"✅ 已在 http://{_host}:{_port} 监听 (PID={os.getpid()})，按 Ctrl+C 停止",
+                f"✅ 已托管本地代理 pid={_lp.get('pid')} listen={_lp.get('listen')}（退出后端时自动关闭）",
                 flush=True,
             )
-            _wsgi_server.run()
-        except ImportError:
-            print("⚠️ 未安装 waitress，回退 Flask 开发服务器（pip install waitress）", flush=True)
+        elif _lp.get("skipped") == "already_up":
+            print("ℹ️ 本地代理已在运行（非本进程拉起，退出后端时不会杀掉）", flush=True)
+        elif _lp.get("skipped") == "binary_not_found":
+            print(
+                "ℹ️ 未找到 badcase-local-proxy 二进制，跳过自动托管。"
+                " 放入 client_binaries/ 或设 BADCASE_LOCAL_PROXY_EXE=路径 后重启即可随软件启停。",
+                flush=True,
+            )
+        elif _lp.get("skipped") and _lp.get("skipped") not in ("reloader_parent", "manage_disabled"):
+            print(f"ℹ️ 本地代理未托管：{_lp.get('skipped')} {_lp.get('last_error') or ''}".strip(), flush=True)
+    except Exception as _lp_ex:
+        print(f"⚠️ 本地代理托管跳过: {_lp_ex}", flush=True)
+
+    try:
+        if _use_waitress and not _use_reload:
+            try:
+                try:
+                    _threads = int((os.getenv("WSGI_THREADS") or "200").strip())
+                except ValueError:
+                    _threads = 200
+                _threads = max(8, min(_threads, 512))
+                print(
+                    f"🚀 使用 waitress（Keep-Alive / 线程池）：http://{_host}:{_port} threads={_threads}",
+                    flush=True,
+                )
+                print(
+                    "   调线程：环境变量 WSGI_THREADS=200（默认已是 200）；关 waitress：BADCASE_USE_WAITRESS=0",
+                    flush=True,
+                )
+                print(
+                    "   首请求仍可能较慢（远端 MySQL 冷连）；进项目页会先打 /api/ping 预热",
+                    flush=True,
+                )
+                _bind_err = _probe_tcp_bind(_host, _port)
+                if _bind_err:
+                    print(
+                        f"❌ 无法在 {_host}:{_port} 监听: {_bind_err}",
+                        flush=True,
+                    )
+                    print(
+                        "   常见原因：① Windows「投射/无线显示器/AirPlay」占用 5000"
+                        "  ② Hyper-V 保留端口段  ③ 已有 python app.py 在跑",
+                        flush=True,
+                    )
+                    print(
+                        "   排查：netstat -ano | findstr :5000",
+                        flush=True,
+                    )
+                    print(
+                        "   netsh int ipv4 show excludedportrange protocol=tcp  （管理员 CMD）",
+                        flush=True,
+                    )
+                    print(
+                        f"   临时换端口：set PORT=5001 && python app.py",
+                        flush=True,
+                    )
+                    raise SystemExit(1)
+                try:
+                    _conn_limit = int((os.getenv("WSGI_CONNECTION_LIMIT") or "1024").strip())
+                except ValueError:
+                    _conn_limit = 1024
+                _conn_limit = max(_threads, min(_conn_limit, 4096))
+                from waitress import create_server
+
+                _wsgi_server = create_server(
+                    app,
+                    host=_host,
+                    port=_port,
+                    threads=_threads,
+                    channel_timeout=300,
+                    connection_limit=_conn_limit,
+                )
+                print(
+                    f"✅ 已在 http://{_host}:{_port} 监听 (PID={os.getpid()})，按 Ctrl+C 停止",
+                    flush=True,
+                )
+                _wsgi_server.run()
+            except ImportError:
+                print("⚠️ 未安装 waitress，回退 Flask 开发服务器（pip install waitress）", flush=True)
+                app.run(
+                    debug=False,
+                    use_reloader=False,
+                    host=_host,
+                    port=_port,
+                    threaded=True,
+                )
+        else:
+            if _use_reload and _use_waitress:
+                print(
+                    "ℹ️ 热重载与 waitress 不能同时开；当前用 Flask 开发服（无固定 200 线程池，易与 SSE 抢资源）",
+                    flush=True,
+                )
+                print(
+                    "   要 200 线程：FLASK_DEBUG=0（或 FLASK_DEBUG=0 WSGI_THREADS=200 python app.py）",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"🚀 使用 Flask 开发服务器（threaded=True）：http://{_host}:{_port}"
+                    + ("，热重载已开" if _use_reload else "，热重载已关"),
+                    flush=True,
+                )
+                if not _use_reload:
+                    print(
+                        "   提示：默认已改为 waitress 200 线程；若仍走本模式请设 BADCASE_USE_WAITRESS=0",
+                        flush=True,
+                    )
             app.run(
-                debug=False,
-                use_reloader=False,
+                debug=_use_reload,
+                use_reloader=_use_reload,
                 host=_host,
                 port=_port,
                 threaded=True,
             )
-    else:
-        if _use_reload and _use_waitress:
-            print(
-                "ℹ️ 热重载与 waitress 不能同时开；当前用 Flask 开发服（无固定 200 线程池，易与 SSE 抢资源）",
-                flush=True,
-            )
-            print(
-                "   要 200 线程：FLASK_DEBUG=0（或 FLASK_DEBUG=0 WSGI_THREADS=200 python app.py）",
-                flush=True,
-            )
-        else:
-            print(
-                f"🚀 使用 Flask 开发服务器（threaded=True）：http://{_host}:{_port}"
-                + ("，热重载已开" if _use_reload else "，热重载已关"),
-                flush=True,
-            )
-            if not _use_reload:
-                print(
-                    "   提示：默认已改为 waitress 200 线程；若仍走本模式请设 BADCASE_USE_WAITRESS=0",
-                    flush=True,
-                )
-        app.run(
-            debug=_use_reload,
-            use_reloader=_use_reload,
-            host=_host,
-            port=_port,
-            threaded=True,
-        )
+    finally:
+        try:
+            _stop_local_proxy()
+        except Exception:
+            pass

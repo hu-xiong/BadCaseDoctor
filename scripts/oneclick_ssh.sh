@@ -1,10 +1,14 @@
 #!/bin/bash
 # 本地一键：上传沙箱所需文件到云端 → 云端构建并启动 → 本地自检（会提示输入 SSH 密码）
 # 在项目根目录执行: bash scripts/oneclick_ssh.sh
-# 或: SANDBOX_SSH=root@117.72.33.38 bash scripts/oneclick_ssh.sh
+# 或: SANDBOX_SSH=root@your-host bash scripts/oneclick_ssh.sh
 
 set -e
-SSH="${SANDBOX_SSH:-root@117.72.33.38}"
+SSH="${SANDBOX_SSH:-}"
+if [ -z "$SSH" ]; then
+  echo "请设置 SANDBOX_SSH，例如: SANDBOX_SSH=root@your-host" >&2
+  exit 2
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 

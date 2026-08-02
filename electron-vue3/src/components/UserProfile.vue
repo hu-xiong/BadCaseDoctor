@@ -115,7 +115,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import axios from 'axios'
+import { api } from '../api.js'
 
 const props = defineProps({
   user: Object,
@@ -137,7 +137,7 @@ const userInitial = computed(() => {
 
 const fetchCredits = async () => {
   try {
-    const res = await axios.get('/api/payment/credits')
+    const res = await api.get('/api/payment/credits')
     credits.value = res.data.credits || 0
     totalPurchased.value = res.data.total_purchased || 0
   } catch (error) {

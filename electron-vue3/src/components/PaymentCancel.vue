@@ -2,14 +2,19 @@
   <div class="payment-result cancel">
     <div class="result-card">
       <div class="icon">✕</div>
-      <h1>Payment Cancelled</h1>
-      <p>Your payment was cancelled. No charges were made.</p>
+      <h1>{{ t('subscription.cancelTitle') }}</h1>
+      <p>{{ t('subscription.cancelDesc') }}</p>
       <button class="back-btn" @click="$router.push('/subscription')">
-        Back to Plans
+        {{ t('subscription.cancelBack') }}
       </button>
     </div>
   </div>
 </template>
+
+<script setup>
+import { useI18n } from 'vue-i18n'
+const { t } = useI18n()
+</script>
 
 <style scoped>
 .payment-result {

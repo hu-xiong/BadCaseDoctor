@@ -16,13 +16,25 @@ type Config struct {
 
 // LoadConfig 加载配置
 func LoadConfig() *Config {
-	return &Config{
+	cfg := &Config{
 		Environment:  getEnv("ENVIRONMENT", "development"),
-		DatabaseURL:  getEnv("DATABASE_URL", "mysql://root:hx123456@117.72.33.38:33106/bad_case"),
-		JWTSecret:    getEnv("JWT_SECRET", "your-secret-key-here"),
+		DatabaseURL:  getEnv("DATABASE_URL", ""),
+		JWTSecret:    getEnv("JWT_SECRET", ""),
 		ServerPort:   getEnv("PORT", "8000"),
 		LogLevel:     getEnv("LOG_LEVEL", "info"),
 	}
+	if cfg.Environment == "production" {
+		if cfg.JWTSecret == "" || cfg.JWTSecret == "change-me" || cfg.JWTSecret == "your-secret-key-here" || cfg.JWTSecret == "your-jwt-secret-key-here" {
+			panic("JWT_SECRET must be set to a strong value in production")
+		}
+		if cfg.DatabaseURL == "" {
+			panic("DATABASE_URL must be set in production")
+		}
+	} else if cfg.JWTSecret == "" {
+		// 仅开发兜底；生产已在上方拒绝
+		cfg.JWTSecret = "dev-only-change-me"
+	}
+	return cfg
 }
 
 // getEnv 获取环境变量，如果不存在则返回默认值

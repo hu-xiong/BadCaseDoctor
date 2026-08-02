@@ -11,6 +11,7 @@ import { applyPlanPayloadV1, applyStepPayloadV1, applyTailPayloadV1 } from './ag
 import { reactSseV1ChunkToLegacyStepEvent } from './reactSseV1ToStepEvent.js'
 import { applyReactThinkSSEStepEvent } from './applyReactThinkSSEStepEvent.js'
 import { applyReactEngineLaneLegacyStepEvent } from './reactEngineLegacyStream.js'
+import { ensureReactStepsForStreamIndex } from './reactObservationStream.js'
 import { i18n } from '../i18n/index.js'
 
 function logProtocolVersionOnce(aiMessage, chunk, logFn) {
@@ -64,6 +65,12 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
         if (!msg || msg.reactDirectChatReply) return
         if (msg.steps && msg.steps.length) return
         ensureFirstStepPlaceholder(msg, buildReactStepsFromTodoStrings)
+      }),
+    ensureReactStepsForStreamIndex:
+      (ctx.thinkCtx && ctx.thinkCtx.ensureReactStepsForStreamIndex) ||
+      ((msg, idx) => {
+        if (!msg || typeof buildReactStepsFromTodoStrings !== 'function') return
+        ensureReactStepsForStreamIndex(msg, idx, buildReactStepsFromTodoStrings)
       })
   }
   const engineCtx = ctx.engineCtx
@@ -95,6 +102,8 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
     if (p.kind === 'local_run_script') {
       if (!Array.isArray(aiMessage.clientLocalRunCards)) aiMessage.clientLocalRunCards = []
       aiMessage.clientLocalRunCards.push({ ...p })
+      // 安装代理卡：等用户一键安装上线后自动续跑
+      aiMessage.awaitProxyResume = true
     }
     if (p.kind === 'terminal_exec' && String(p.command || '').trim()) {
       if (!Array.isArray(aiMessage.pendingTerminalExecQueue)) aiMessage.pendingTerminalExecQueue = []
@@ -107,6 +116,43 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
       aiMessage.pendingTerminalExecQueue.push(row)
       if (!Array.isArray(aiMessage.clientTerminalExecCards)) aiMessage.clientTerminalExecCards = []
       aiMessage.clientTerminalExecCards.push({ ...row, status: 'queued' })
+    }
+    if (p.kind === 'browser_local') {
+      if (!Array.isArray(aiMessage.pendingBrowserLocalQueue)) aiMessage.pendingBrowserLocalQueue = []
+      const brow = {
+        action: String(p.action || 'start').trim() || 'start',
+        url: String(p.url || '').trim(),
+        headless: p.headless === true
+      }
+      aiMessage.pendingBrowserLocalQueue.push(brow)
+      if (!Array.isArray(aiMessage.clientBrowserLocalCards)) aiMessage.clientBrowserLocalCards = []
+      const card = { ...brow, status: 'running' }
+      aiMessage.clientBrowserLocalCards.push(card)
+      // 立刻经本机 go-local-proxy 启停 Chrome（与终端队列同机）
+      ;(async () => {
+        try {
+          const {
+            localBrowserStart,
+            localBrowserStop,
+            localBrowserStatus
+          } = await import('../utils/localBrowserProxyClient.js')
+          let res
+          if (brow.action === 'stop') res = await localBrowserStop()
+          else if (brow.action === 'status') res = await localBrowserStatus()
+          else res = await localBrowserStart({ url: brow.url, headless: brow.headless })
+          card.status = 'done'
+          card.result = res
+        } catch (e) {
+          const err = e && e.message ? e.message : String(e)
+          const proxyLikelyDown =
+            /failed to fetch|networkerror|proxy|econnrefused|health|websocket|timeout/i.test(err) ||
+            err === 'Failed to fetch'
+          card.status = proxyLikelyDown ? 'waiting_proxy' : 'error'
+          card.error = err
+          // 仅代理未就绪时挂起，等上线后续跑
+          if (proxyLikelyDown) aiMessage.awaitProxyResume = true
+        }
+      })()
     }
     scrollToBottom()
     return {}
@@ -169,6 +215,45 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
   }
 
   const stepEvent = reactSseV1ChunkToLegacyStepEvent(chunk)
+
+  if (stepEvent && stepEvent.event === 'cdp_test_task') {
+    if (!Array.isArray(aiMessage.cdpTestTaskCards)) aiMessage.cdpTestTaskCards = []
+    const runId = stepEvent.run_id != null ? String(stepEvent.run_id) : ''
+    let card = runId
+      ? aiMessage.cdpTestTaskCards.find((c) => String(c.run_id || '') === runId)
+      : null
+    if (!card) {
+      card = {
+        run_id: runId,
+        mode: stepEvent.mode,
+        title: stepEvent.title || '',
+        status: 'running',
+        summary: '',
+        pass_count: 0,
+        fail_count: 0,
+        steps: []
+      }
+      aiMessage.cdpTestTaskCards.push(card)
+    }
+    if (stepEvent.lifecycle === 'opened') {
+      card.status = 'running'
+      if (stepEvent.title) card.title = stepEvent.title
+      if (stepEvent.mode) card.mode = stepEvent.mode
+    } else if (stepEvent.lifecycle === 'step' && stepEvent.step) {
+      if (!Array.isArray(card.steps)) card.steps = []
+      card.steps.push(stepEvent.step)
+      if (stepEvent.pass_count != null) card.pass_count = stepEvent.pass_count
+      if (stepEvent.fail_count != null) card.fail_count = stepEvent.fail_count
+    } else if (stepEvent.lifecycle === 'done') {
+      card.status = stepEvent.status || 'done'
+      if (stepEvent.summary != null) card.summary = String(stepEvent.summary)
+      if (stepEvent.pass_count != null) card.pass_count = stepEvent.pass_count
+      if (stepEvent.fail_count != null) card.fail_count = stepEvent.fail_count
+      if (Array.isArray(stepEvent.steps)) card.steps = stepEvent.steps
+    }
+    scrollToBottom()
+    return {}
+  }
 
   if (stepEvent && stepEvent.event) {
     if (!aiMessage.understanding && !aiMessage.reactMainLoopFinished) {

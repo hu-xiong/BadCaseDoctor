@@ -305,38 +305,76 @@ class BrowserUseAgent(BaseAgent):
         """
         print(f"=== 对话准确率测试 ===")
         print(f"测试数据: {conversation_test}")
-        
-        # TODO: 实际的对话测试逻辑
-        """
-        test_set = conversation_test.get("test_set", [])
-        results = []
-        
-        for item in test_set:
-            question = item.get("question")
-            expected = item.get("expected_answer")
-            
-            # 方式1: 使用 browser-use 模拟
-            # actual = await browser.send_and_wait(question)
-            
-            # 方式2: 使用 API 调用
-            # actual = await api.chat(question)
-            
-            # 评估答案质量
-            evaluation = llm.evaluate_answer(question, expected, actual)
-            results.append(evaluation)
-        """
-        
+
+        raw_set = conversation_test.get("test_set") or conversation_test.get("cases") or []
+        test_set = []
+        for item in raw_set:
+            if not isinstance(item, dict):
+                continue
+            test_set.append({
+                "name": item.get("name") or item.get("title") or item.get("question") or "case",
+                "input": item.get("input") or item.get("question") or "",
+                "expected": item.get("expected")
+                or item.get("expected_answer")
+                or item.get("correct_answer")
+                or "",
+                "actual": item.get("actual") or item.get("actual_answer"),
+            })
+
+        from agents.tools.accuracy_tester_tool import AccuracyTesterTool
+        import asyncio
+
+        tool = AccuracyTesterTool(llm)
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(
+                    tool.execute(
+                        test_set=test_set,
+                        feature=str(conversation_test.get("feature") or "conversation"),
+                        test_type="conversation",
+                        project_id=conversation_test.get("project_id"),
+                        testcase_ids=conversation_test.get("testcase_ids"),
+                        badcase_ids=conversation_test.get("badcase_ids"),
+                    )
+                )
+            finally:
+                loop.close()
+        except Exception as e:
+            return {
+                "code": 500,
+                "message": f"对话测试失败: {e}",
+                "data": {"error": str(e)},
+            }
+
+        details = result.get("details") or []
+        test_results = [
+            {
+                "question": d.get("input"),
+                "expected_answer": d.get("expected"),
+                "actual_answer": d.get("actual"),
+                "similarity_score": d.get("score"),
+                "is_correct": d.get("passed"),
+                "reason": d.get("reason"),
+            }
+            for d in details
+        ]
+        acc = float(result.get("accuracy") or 0.0) / 100.0
         return {
             "code": 200,
             "message": "对话测试完成",
             "data": {
                 "test_set_id": conversation_test.get("id"),
-                "total_questions": len(conversation_test.get("test_set", [])),
-                "accuracy": 0.85,
-                "avg_response_time": 1200,
-                "test_results": [],
-                "report_url": f"/api/conversation/test/report/{conversation_test.get('id')}"
-            }
+                "total_questions": result.get("total") or len(test_set),
+                "accuracy": acc,
+                "passed": result.get("passed"),
+                "failed": result.get("failed"),
+                "avg_response_time": None,
+                "test_results": test_results,
+                "badcases": result.get("badcases") or [],
+                "summary": result.get("summary"),
+                "report_url": f"/api/conversation/test/report/{conversation_test.get('id')}",
+            },
         }
     
     def _capture_screenshot(self, browser, name: str) -> str:

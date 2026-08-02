@@ -12,7 +12,42 @@
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
-    "electron:dev": "vite & electron ."
+    "electron:dev": "vite & electron .",
+    "postinstall": "electron-builder install-app-deps",
+    "electron:build": "vite build && electron-builder install-app-deps && electron-builder --win nsis",
+    "electron:build:dir": "vite build && electron-builder install-app-deps && electron-builder --win dir"
+  },
+  "build": {
+    "appId": "com.badcasedoctor.app",
+    "productName": "BadCase Doctor",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "src/electron/**/*",
+      "package.json",
+      "node_modules/node-pty/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
   },
   "dependencies": {
     "@vscode/codicons": "^0.0.45",
@@ -31,6 +66,7 @@
     "json-bigint": "^1.0.0",
     "marked": "^17.0.4",
     "monaco-editor": "^0.54.0",
+    "node-pty": "^1.0.0",
     "vue": "^3.4.0",
     "vue-advanced-chat": "^2.1.0",
     "vue-i18n": "^9.14.4",
@@ -41,7 +77,7 @@
     "@types/node": "^22.10.0",
     "@vitejs/plugin-vue": "^4.5.0",
     "electron": "^27.0.0",
-    "node-pty": "^1.0.0",
+    "electron-builder": "^24.13.3",
     "typescript": "~5.7.2",
     "vite": "^5.0.0",
     "vue-tsc": "^2.2.0"

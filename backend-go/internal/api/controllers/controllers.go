@@ -53,7 +53,8 @@ func Register(c *gin.Context) {
 	// 生成JWT token
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
-		jwtSecret = "your-secret-key-here"
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT_SECRET not configured"})
+		return
 	}
 	token, err := utils.GenerateToken(user.ID, user.Email, jwtSecret)
 	if err != nil {
@@ -96,7 +97,8 @@ func Login(c *gin.Context) {
 	// 生成JWT token
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
-		jwtSecret = "your-secret-key-here"
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT_SECRET not configured"})
+		return
 	}
 	token, err := utils.GenerateToken(user.ID, user.Email, jwtSecret)
 	if err != nil {

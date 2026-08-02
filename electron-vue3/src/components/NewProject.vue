@@ -176,11 +176,11 @@ export default {
         return avatarPreview.value
       }
       if (project.value.avatar) {
-        // 如果是MinIO URL，转换为API URL
-        if (project.value.avatar.includes('117.72.33.38:9901')) {
-          const urlParts = project.value.avatar.split('/')
-          const fileName = urlParts[urlParts.length - 1].split('?')[0]
-          return `/api/avatar/${encodeURIComponent(fileName)}`
+        // 直链对象存储时改走后端头像代理，避免写死 MinIO 主机
+        const av = String(project.value.avatar)
+        if (/^https?:\/\//i.test(av) && !av.includes('/api/avatar/')) {
+          const fileName = av.split('/').pop()?.split('?')[0]
+          if (fileName) return `/api/avatar/${encodeURIComponent(fileName)}`
         }
         return project.value.avatar
       }

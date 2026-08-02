@@ -2,14 +2,19 @@
   <div class="payment-result success">
     <div class="result-card">
       <div class="icon">✓</div>
-      <h1>Payment Successful!</h1>
-      <p>Your credits have been added to your account.</p>
+      <h1>{{ t('subscription.successTitle') }}</h1>
+      <p>{{ t('subscription.successDesc') }}</p>
       <button class="back-btn" @click="$router.push('/subscription')">
-        View Your Plan
+        {{ t('subscription.successBack') }}
       </button>
     </div>
   </div>
 </template>
+
+<script setup>
+import { useI18n } from 'vue-i18n'
+const { t } = useI18n()
+</script>
 
 <style scoped>
 .payment-result {

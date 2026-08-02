@@ -54,6 +54,9 @@ const urlSchemeMarker = "badcase-local-proxy://"
 //   {"op":"cancel","id":"1"}
 //   {"op":"session","action":"set_cwd","path":"/tmp"}
 //   {"op":"session","action":"set_env","key":"K","value":"v"}
+//   {"op":"browser_start","id":"1","headless":false,"url":"https://..."}  // 本机拉起 Chrome+CDP
+//   {"op":"browser_stop","id":"1"}
+//   {"op":"browser_status","id":"1"}
 //
 // 服务端 → 客户端
 //   {"op":"pong"}
@@ -63,7 +66,11 @@ const urlSchemeMarker = "badcase-local-proxy://"
 //   {"op":"cancelled","id":"1"}
 //   {"op":"session_ok","id":"","message":"..."}
 //   {"op":"confirm_required","id":"1","reason":"bash_max_subcommands","message":"..."}
+//   {"op":"browser_ok","id":"1","data":"{...status json...}","message":"started"}
+//   {"op":"browser_status","id":"1","data":"{...}"}
 //   {"op":"error","id":"1","message":"..."}
+//
+// HTTP 浏览器：/browser/start|/stop|/status ，CDP 反代 /browser/cdp/* → 本机 Chrome DevTools
 
 type msgIn struct {
 	Op         string            `json:"op"`
@@ -203,6 +210,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/pty", handlePtyTerminal)
+	mux.HandleFunc("/browser/", handleBrowserHTTP)
+	mux.HandleFunc("/browser", handleBrowserHTTP)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		// 允许浏览器从 http://localhost:5173 等页面 fetch 健康检查（与 Web 终端页探测联动）
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -216,7 +225,7 @@ func main() {
 	})
 	mux.HandleFunc(pathWS, handleWebSocket)
 
-	log.Printf("[go-local-proxy] listen %s  http=/health  ws_run=%s  ws_pty=/pty", addr, pathWS)
+	log.Printf("[go-local-proxy] listen %s  http=/health  browser=/browser/*  ws_run=%s  ws_pty=/pty", addr, pathWS)
 	if ptyDebugEnabled() {
 		log.Printf("[go-local-proxy] BADCASE_PTY_DEBUG=1: verbose PTY logs enabled")
 	}
@@ -267,6 +276,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		var in msgIn
 		if err := json.Unmarshal(data, &in); err != nil {
 			write(msgOut{Op: "error", Message: "invalid json"})
+			continue
+		}
+		if handleBrowserWSOp(data, write) {
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(in.Op)) {

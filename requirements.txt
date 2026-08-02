@@ -14,6 +14,7 @@ openai
 langchain_community
 dashscope
 langchain_core
+langgraph>=0.4.0,<1.1
 python-dotenv
 passlib
 email-validator
@@ -23,8 +24,12 @@ boto3
 Pillow
 prometheus-client
 waitress
+gunicorn
+stripe
 
-# Long-term Memory（ES 向量检索）
+# Long-term Memory（mem0 + 本地 Qdrant；ES 仍用于 grep 等工作项索引）
+mem0ai>=1.0.0
+qdrant-client>=1.12.0
 elasticsearch>=8.12.0,<9.0.0
 
 # Text2SQL 依赖
