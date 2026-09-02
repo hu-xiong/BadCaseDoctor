@@ -1830,9 +1830,37 @@ onMounted(async () => {
   })
 
   if (terminalCtl) {
+    const getActiveCwd = () => {
+      try {
+        const id = activeTabId.value ? String(activeTabId.value) : ''
+        if (id && ptySessionMeta.value?.[id]?.cwd) {
+          return String(ptySessionMeta.value[id].cwd).trim()
+        }
+        const metas = ptySessionMeta.value || {}
+        for (const k of Object.keys(metas)) {
+          const c = metas[k]?.cwd != null ? String(metas[k].cwd).trim() : ''
+          if (c) return c
+        }
+        return ''
+      } catch (_) {
+        return ''
+      }
+    }
     terminalCtl.value = {
       injectCommand,
-      focusTerminal: focusEmbeddedTerminalArea
+      focusTerminal: focusEmbeddedTerminalArea,
+      getActiveCwd,
+      /** 供 ReAct client_shell */
+      getClientShell: () => {
+        const isWin =
+          typeof navigator !== 'undefined' &&
+          (/Win/i.test(navigator.userAgent || '') || /Win/i.test(navigator.platform || ''))
+        return {
+          cwd: getActiveCwd() || '',
+          platform: isWin ? 'windows' : 'posix',
+          shell: isWin ? 'powershell' : 'bash'
+        }
+      }
     }
   }
   document.addEventListener('keydown', onAutocompleteKeydown, true)

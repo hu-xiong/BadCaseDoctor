@@ -230,6 +230,11 @@ func main() {
 		log.Printf("[go-local-proxy] BADCASE_PTY_DEBUG=1: verbose PTY logs enabled")
 	}
 	srv := &http.Server{Addr: addr, Handler: mux}
+	startIdleExitWatchdog(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -255,6 +260,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+	idleConnEnter()
+	defer idleConnLeave()
 
 	sess := &connSession{env: make(map[string]string)}
 	var wmu sync.Mutex
@@ -273,6 +280,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		touchClientActivity()
 		var in msgIn
 		if err := json.Unmarshal(data, &in); err != nil {
 			write(msgOut{Op: "error", Message: "invalid json"})

@@ -22,16 +22,24 @@ jobs:
       - name: Install minimal test deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
+          pip install pytest "langgraph>=0.4.0,<1.1" langchain-core "langgraph-checkpoint-sqlite>=2.0.0,<4" "langsmith>=0.3.0,<1"
 
       - name: Import smoke (no DB / stripe not required)
         env:
           PYTHONPATH: .
           PAYMENT_PROVIDER: mock
         run: |
-          python -m py_compile routers/payment.py app_services/health_probes.py utils/cors_config.py server_wsgi.py
+          python -m py_compile routers/payment.py app_services/health_probes.py utils/cors_config.py server_wsgi.py agents/langgraph_engine.py agents/langgraph_bridge.py agents/langgraph_failure.py agents/langgraph_resume.py agents/langgraph_recover.py agents/langgraph_observe.py agents/langgraph_checkpointer.py agents/langsmith_tracing.py evals/langsmith/evaluators.py evals/langsmith/harness.py evals/langsmith/run_eval.py
           python -c "from routers import payment as p; assert p.payment_provider()=='mock'"
           python -c "from utils.cors_config import cors_origins_list; assert 'http://localhost:5173' in cors_origins_list()"
+          python -c "from agents.agent_engine_config import agent_engine_backend; assert agent_engine_backend()=='langgraph'"
+          python -c "from agents.langgraph_checkpointer import get_checkpointer, reset_checkpointer_for_tests; import os; os.environ['LANGGRAPH_CHECKPOINTER']='memory'; reset_checkpointer_for_tests(); assert get_checkpointer() is not None"
+
+      - name: LangGraph engine smoke
+        env:
+          PYTHONPATH: .
+          LANGGRAPH_CHECKPOINTER: memory
+        run: python scripts/smoke_langgraph_engine.py
 
       - name: Run focused unit tests (no DB/app boot)
         env:
@@ -39,6 +47,7 @@ jobs:
           AGENT_RATE_LIMIT: "1"
           AGENT_SKIP_CREDITS: "1"
           PAYMENT_PROVIDER: mock
+          LANGGRAPH_CHECKPOINTER: memory
         run: |
           pytest -q \
             tests/test_ui_context_prompt.py \
@@ -52,4 +61,16 @@ jobs:
             tests/test_cdp_test_intent.py \
             tests/test_cdp_step_driver.py \
             tests/test_cdp_auto_run_testcase.py \
-            tests/test_accuracy_tester_tool.py
+            tests/test_accuracy_tester_tool.py \
+            tests/test_langgraph_bridge.py \
+            tests/test_langgraph_failure.py \
+            tests/test_langgraph_resume.py \
+            tests/test_langgraph_recover.py \
+            tests/test_langgraph_observe.py \
+            tests/test_langgraph_checkpointer.py \
+            tests/test_langsmith_eval.py \
+            tests/test_demo_seed.py \
+            tests/test_client_terminal_resume.py \
+            tests/test_litellm_transport.py \
+            tests/test_task_complexity_smart.py \
+            tests/test_model_router.py

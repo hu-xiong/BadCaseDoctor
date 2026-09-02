@@ -1,0 +1,16 @@
+{
+  "name": "badcase-midscene-runner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Midscene smoke runner for BadCase Doctor explore phase-1",
+  "scripts": {
+    "smoke": "node smoke.mjs",
+    "postinstall": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "@midscene/web": "^1.0.2",
+    "@playwright/test": "^1.51.0",
+    "playwright": "^1.51.0"
+  }
+}

@@ -15,6 +15,9 @@ langchain_community
 dashscope
 langchain_core
 langgraph>=0.4.0,<1.1
+langgraph-checkpoint-sqlite>=2.0.0,<4
+langsmith>=0.3.0,<1
+litellm>=1.50.0,<2
 python-dotenv
 passlib
 email-validator

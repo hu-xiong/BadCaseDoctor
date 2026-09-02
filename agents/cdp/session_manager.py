@@ -694,35 +694,52 @@ class CdpSessionManager:
     ) -> Dict[str, Any]:
         session = self._get(session_id, owner_key=owner_key)
         await session.touch()
-        from .screenshot import capture_and_upload_cdp_screenshot, capture_page_png, upload_png_bytes
+        from .screenshot import upload_png_bytes
+        from .vision_understand import (
+            agent_loop_hint,
+            cdp_screenshot_vision_enabled,
+            describe_png_for_agent,
+        )
 
         try:
-            if full_page:
-                png = await session.page.screenshot(type="png", full_page=True)
-                url = upload_png_bytes(
-                    png,
-                    folder="cdp",
-                    filename=f"cdp_full_{session_id[:12]}_{int(time.time())}.png",
-                )
-            else:
-                url = await capture_and_upload_cdp_screenshot(
-                    session.page, session_id=session_id, tag=tag
-                )
-                if not url:
-                    png = await capture_page_png(session.page)
-                    url = upload_png_bytes(
-                        png,
-                        folder="cdp",
-                        filename=f"cdp_{session_id[:12]}_{int(time.time())}.png",
-                    )
-            return {
+            png = await session.page.screenshot(type="png", full_page=bool(full_page))
+            url = upload_png_bytes(
+                png,
+                folder="cdp",
+                filename=(
+                    f"cdp_{'full_' if full_page else ''}"
+                    f"{session_id[:12]}_{tag}_{int(time.time())}.png"
+                ),
+            )
+            page_info = await session.page_info()
+            out: Dict[str, Any] = {
                 "success": True,
                 "tool": "cdp_screenshot",
                 "session_id": session_id,
                 "screenshot_url": url,
                 "full_page": full_page,
-                "page": await session.page_info(),
+                "page": page_info,
             }
+            # OpenClaw：截图后视觉理解，以文本回传 Agent（主模型可据此闭环决策）
+            if cdp_screenshot_vision_enabled() and png:
+                ctx = ""
+                try:
+                    ctx = f"url={page_info.get('url') or ''} title={page_info.get('title') or ''}"
+                except Exception:
+                    ctx = "browser screenshot"
+                desc = await describe_png_for_agent(png, context=ctx)
+                if desc:
+                    out["vision_description"] = desc
+                    out["screenshot_vision"] = True
+                    out["agent_hint"] = agent_loop_hint(
+                        has_vision=True, kind="screenshot"
+                    )
+                else:
+                    out["screenshot_vision"] = False
+                    out["agent_hint"] = agent_loop_hint(
+                        has_vision=False, kind="screenshot"
+                    )
+            return out
         except Exception as ex:
             return {"success": False, "tool": "cdp_screenshot", "error": str(ex)}
 

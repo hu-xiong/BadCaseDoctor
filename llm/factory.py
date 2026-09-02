@@ -1,5 +1,6 @@
 # llm/factory.py
 import logging
+import os
 
 from .qwen_llm import QwenLLM
 from .zhipu_llm import ZhipuLLM
@@ -26,6 +27,39 @@ def _normalize_requested_model(model: str | None) -> str | None:
         return m
     print(f"[LLM-FACTORY] 不在注册表或未启用的模型名，将忽略并回退默认模型: {m!r}")
     return None
+
+
+def _try_litellm_transport(model: str | None):
+    """
+    LLM_TRANSPORT=litellm 时走 LiteLLM 传输层（选模策略仍在 model_router）。
+    文心 qianfan 无稳定兼容 base 时回退原生。
+    """
+    try:
+        from .litellm_transport import litellm_transport_enabled, resolve_litellm_endpoint
+    except Exception:
+        return None
+    if not litellm_transport_enabled():
+        return None
+    mid = (model or Config.DASHSCOPE_MODEL or "qwen3.5-plus").strip()
+    if mid.lower() == "auto":
+        mid = Config.DASHSCOPE_MODEL or "qwen3.5-plus"
+    ep = resolve_litellm_endpoint(mid)
+    if ep.provider == "qianfan" and not ep.api_base:
+        print("[LLM-FACTORY] LiteLLM: qianfan 未配置 QIANFAN_COMPAT_BASE_URL，回退原生 QianfanLLM")
+        return None
+    try:
+        from .litellm_llm import LiteLLMLLM
+
+        print(
+            f"[LLM-FACTORY] LiteLLM 传输层 model={mid!r} litellm={ep.litellm_model!r} "
+            f"provider={ep.provider}",
+            flush=True,
+        )
+        return LiteLLMLLM(model=mid)
+    except ImportError as e:
+        print(f"[LLM-FACTORY] LiteLLM 不可用，回退原生 SDK: {e}", flush=True)
+        return None
+
 
 def get_llm(provider: str = None, model: str = None):
     global _LLM_PROMPT_BANNER_DONE
@@ -54,13 +88,17 @@ def get_llm(provider: str = None, model: str = None):
             print(_b, flush=True)
     except Exception:
         pass
+
+    _lt = _try_litellm_transport(model)
+    if _lt is not None:
+        return _lt
     
     # 若请求里带了 model，按模型名推断 provider，实现「选哪个用哪个」
     if model:
         ml = model.lower()
         if "glm" in ml:
-            # 下拉框选 GLM-*：按你的要求走百炼（复用 Qwen/DashScope key），统一用 QwenLLM 承载
-            provider = "qwen"
+            # GLM 走智谱官方；若要用百炼托管名请显式传 provider=qwen
+            provider = "zhipu"
         elif "ernie" in ml:
             provider = "qianfan"
         elif "qwen" in ml:
@@ -96,6 +134,42 @@ def get_llm(provider: str = None, model: str = None):
         from .deepseek_llm import DeepSeekLLM
 
         final_model = model or getattr(Config, "DEEPSEEK_V4_MODEL", None) or "deepseek-v4-pro"
+        if not (getattr(Config, "DEEPSEEK_API_KEY", None) or "").strip():
+            # Auto 常会选 deepseek-flash；无 key 时优先有密钥且可用的回退
+            _doubao_key = (getattr(Config, "DOUBAO_API_KEY", None) or "").strip()
+            _doubao_model = (getattr(Config, "DOUBAO_MODEL", None) or "").strip()
+            _doubao_ok = _doubao_key and (
+                _doubao_model.startswith("ep-")
+                or (os.getenv("DOUBAO_ALLOW_NAMED_MODEL") or "").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
+            if _doubao_ok:
+                from .doubao_llm import DoubaoLLM
+
+                fb = _doubao_model or "doubao-1-5-pro-32k"
+                print(
+                    f"[LLM-FACTORY] 未配置 DEEPSEEK_API_KEY，回退 DoubaoLLM model={fb}",
+                    flush=True,
+                )
+                return DoubaoLLM(model=fb)
+            if (getattr(Config, "ZHIPU_API_KEY", None) or "").strip():
+                fb = (getattr(Config, "ZHIPU_MODEL", None) or "glm-4-flash").strip()
+                print(
+                    f"[LLM-FACTORY] 未配置 DEEPSEEK_API_KEY，回退 ZhipuLLM model={fb}",
+                    flush=True,
+                )
+                return ZhipuLLM(model=fb)
+            if (getattr(Config, "DASHSCOPE_API_KEY", None) or os.getenv("DASHSCOPE_API_KEY") or "").strip():
+                fb = model or Config.DASHSCOPE_MODEL
+                print(
+                    f"[LLM-FACTORY] 未配置 DEEPSEEK_API_KEY，回退 QwenLLM model={fb}",
+                    flush=True,
+                )
+                return QwenLLM(model=fb)
+            print(
+                "[LLM-FACTORY] 警告：未配置 DEEPSEEK_API_KEY，且无可用回退模型",
+                flush=True,
+            )
         print(f"[LLM-FACTORY] 创建 DeepSeekLLM, model: {final_model}")
         return DeepSeekLLM(model=final_model)
     elif provider == "doubao":

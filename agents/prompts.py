@@ -377,12 +377,20 @@ _CREATE_INTENT_HINTS = ("create", "新建", "创建", "新增", "添加", "提bu
 _COPY_INTENT_HINTS = ("复制", "拷贝", "clone", "copy_from", "参照", "基于", "和.*一样", "同样")
 _BROWSER_CDP_HINTS = ("cdp", "自动化测试", "浏览器测试", "ui测试", "测登录", "端到端", "探测", "探索性")
 
+_PROMPT_CDP_AGENT_LOOP_BLOCK = """
+**cdp Agent 闭环（对齐 OpenClaw）：**
+- 主路径：`snapshot` 得 `@eN` → `click`/`fill`；UI 变化后必须重新 snapshot，禁止复用旧 ref。
+- 失败时阅读 observation 的 `vision_description` 与 `agent_hint`，再决定下一步；勿空口结束。
+- `stale_ref`：用 `new_snapshot_id` / `focus_hints` 换新 ref，**只重试一次**。
+- 状态不明：`screenshot`（自动返回视觉描述文本）→ 再决策。
+"""
+
 _PROMPT_CDP_EXPLORE_BLOCK = """
 **cdp 探测性测试（explore）：**
-- 先 `action=explore phase=inventory` 列出当前页可点击元素（ref/role/name）。
-- 再 `action=explore phase=dfs` 或 `phase=full` 深度优先点击探测（跳过删除/登出等危险按钮）。
-- 发现明显问题（点击失败、错误文案、错误 URL）时，系统会按侧栏 **plan_id** 生成 Bug 预览；无有效迭代则先生成 **迭代计划** 预览再 Bug 预览（均需用户 confirm）。
-- 推荐流程：`session create`+url → `login`（如需）→ `explore phase=inventory`（先列控件）→ `explore phase=full`（再点击探测）。
+- 默认引擎 **Midscene**（`CDP_EXPLORE_ENGINE=midscene`）：像真人巡检主界面（导航/新建/搜索等），产出已测入口、通过/失败与摘要；勿再手写 DFS 乱点。
+- 仅当需要旧版控件清单/DFS 时用 `phase=inventory|dfs|legacy`。
+- 发现明显问题会按侧栏 **plan_id** 生成 Bug 预览；无有效迭代则先生成 **迭代计划** 预览再 Bug 预览。
+- 推荐流程：`session create`+url → `login`（如需）→ `explore phase=full`（Midscene 巡检）。
 """
 
 _PROMPT_CDP_TEST_TASK_BLOCK = """
@@ -437,7 +445,12 @@ def build_cdp_login_prompt_detail(
         "先打开", "然后点击",
     )):
         task_block = _PROMPT_CDP_TEST_TASK_BLOCK
-    return _PROMPT_CDP_LOGIN_DETAIL_BLOCK.format(config_lines=lines) + explore_block + task_block
+    return (
+        _PROMPT_CDP_LOGIN_DETAIL_BLOCK.format(config_lines=lines)
+        + _PROMPT_CDP_AGENT_LOOP_BLOCK
+        + explore_block
+        + task_block
+    )
 _GREP_INTENT_HINTS = ("grep", "查询", "查找", "定位", "有哪些", "列表", "界面", "卡片", "搜索项目")
 
 

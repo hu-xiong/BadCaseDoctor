@@ -57,6 +57,8 @@ func handlePtyTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+	idleConnEnter()
+	defer idleConnLeave()
 
 	sessions := newPtySessionMap()
 	defer sessions.killAll()
@@ -77,6 +79,7 @@ func handlePtyTerminal(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		touchClientActivity()
 		var in ptyWireIn
 		if err := json.Unmarshal(data, &in); err != nil {
 			writeJSON(ptyWireOut{Event: "term_error", Message: "invalid json"})

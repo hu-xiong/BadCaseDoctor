@@ -392,6 +392,10 @@
     "terminalExecError": "Failed",
     "terminalExecProxyDown": "Local proxy offline",
     "terminalExecSkipped": "Skipped",
+    "resumableHint": "An unfinished Agent run was found (including pending terminal commands).",
+    "resumableContinue": "Resume",
+    "resumableDismiss": "Dismiss",
+    "resumableContinuePrompt": "Please continue the interrupted task; prioritize pending local terminal steps.",
     "terminalExecCwd": "Working directory",
     "terminalExecTimeout": "Timeout {sec}s",
     "terminalExecTimeoutBadge": "{sec}s timeout",
@@ -583,7 +587,8 @@
     "prev": "Previous",
     "next": "Next",
     "copy": "Copy",
-    "copied": "Copied"
+    "copied": "Copied",
+    "retry": "Please retry"
   },
   "auth": {
     "subtitle": "Sign in to your account",
@@ -617,7 +622,10 @@
     "sendResetFailed": "Failed to send reset link",
     "loginErrorDetail": "Sign in failed: {msg}",
     "registerErrorDetail": "Registration failed: {msg}",
-    "sendCodeErrorDetail": "Failed to send code: {msg}"
+    "sendCodeErrorDetail": "Failed to send code: {msg}",
+    "demoHintTitle": "Demo account",
+    "demoHintUse": "Fill demo credentials",
+    "demoHintDetail": "test@example.com / 123456 (requires SEED_DEMO_USERS=1)"
   },
   "dashboard": {
     "overview": "Overview",
@@ -667,7 +675,7 @@
     "deletePreviewPending": "Pending delete",
     "approveCreate": "Accept & create",
     "reject": "Reject",
-    "emptyData": "No {type} yet",
+    "emptyData": "No {type} data",
     "expandDetail": "Expand details",
     "collapseDetail": "Collapse details",
     "approve": "Confirm",
@@ -676,7 +684,8 @@
     "types": {
       "badcase": "BadCase",
       "bug": "Bug",
-      "testCase": "Test case"
+      "testCase": "Test case",
+      "card": "Card"
     },
     "badcaseStatus": {
       "new": "New",
@@ -699,7 +708,7 @@
     "editPermission": "Edit permissions",
     "sidebarTitle": "Iteration plans",
     "refreshAll": "Refresh all",
-    "addPlan": "Add iteration",
+    "addPlan": "New iteration",
     "baselineMgmt": "Baselines",
     "searchPlanPlaceholder": "Search plan name",
     "clearSearch": "Clear search",
@@ -743,6 +752,8 @@
     "planCountHint": "({count} iterations, ends {end})",
     "planName": "Plan name",
     "planNamePlaceholder": "Enter plan name",
+    "continueAddPlan": "Keep adding",
+    "panelComingSoon": "This panel is coming soon",
     "parentPlan": "Parent plan",
     "selectParentPlaceholder": "Select a parent plan",
     "parentAsCurrent": "Current plan will be the parent",
@@ -1071,6 +1082,7 @@
     "placeholder": "Search title, description...",
     "searching": "Searching...",
     "hint": "Enter keywords to search Bug, BadCase, Test case",
+    "emptyHint": "Enter keywords to search Bug, BadCase, Test case",
     "noResults": "No matching results found",
     "view": "View",
     "navigate": "Select",
@@ -1078,7 +1090,59 @@
     "close": "Close",
     "bug": "Bug",
     "badcase": "BadCase",
-    "testcase": "Test case"
+    "testcase": "Test case",
+    "types": {
+      "plan": "Plan",
+      "card": "Card",
+      "bug": "Bug",
+      "badcase": "BadCase",
+      "testcase": "Test case"
+    }
+  },
+  "createPreview": {
+    "createTitle": "New {type}",
+    "labelSep": ":",
+    "moreFields": "{n} more detail fields — see form or list",
+    "confirmCreate": "Confirm create",
+    "unset": "Not set",
+    "empty": "Empty",
+    "yes": "Yes",
+    "no": "No",
+    "targets": {
+      "bug": "Bug",
+      "badcase": "BadCase",
+      "plan": "Iteration plan",
+      "testcase": "Test case"
+    },
+    "fields": {
+      "title": "Title",
+      "name": "Name",
+      "description": "Description",
+      "priority": "Priority",
+      "severity": "Severity",
+      "status": "Status",
+      "plan_id": "Plan",
+      "card_id": "Card",
+      "parent_id": "Parent plan",
+      "assignee_id": "Owner",
+      "assignee": "Owner",
+      "owner": "Owner",
+      "reproduce_steps": "Steps to reproduce",
+      "expected_result": "Expected result",
+      "actual_result": "Actual result",
+      "start_date": "Start date",
+      "end_date": "End date",
+      "bug_type": "Type",
+      "case_category": "Category",
+      "case_type": "Case type",
+      "test_type": "Test type",
+      "document_type": "Document type",
+      "environment": "Environment",
+      "browser": "Browser",
+      "os": "OS",
+      "version": "Version",
+      "cycle": "Cycle"
+    }
   },
   "pluginManagement": {
     "title": "Plugin Management",
@@ -1212,11 +1276,51 @@
     "payFailed": "Payment failed. Please try again.",
     "successTitle": "Payment Successful",
     "successDesc": "Your credits have been added to your account.",
+    "successCredits": "Credits remaining: {n}",
+    "successCreditsLoadFailed": "Could not refresh credits. Check the subscription page later.",
     "successBack": "View Your Plan",
     "cancelTitle": "Payment Cancelled",
     "cancelDesc": "Your payment was cancelled. No charges were made.",
     "cancelBack": "Back to Plans"
+  },
+  "userProfile": {
+    "title": "Profile",
+    "subscriptionInfo": "Subscription",
+    "creditsRemaining": "Credits left",
+    "totalPurchased": "Purchased",
+    "used": "Used",
+    "buyMore": "Buy more",
+    "noSubscription": "You have no subscription yet",
+    "subscribeHint": "Subscribe to use AI diagnosis features"
+  },
+  "teamPanel": {
+    "title": "Team management",
+    "createTeam": "Create team",
+    "empty": "No teams yet",
+    "emptyHint": "Click the button above to create your first team",
+    "noDescription": "No description",
+    "addMember": "Add member",
+    "members": "Members ({n})",
+    "roleLeader": "Leader",
+    "roleMember": "Member",
+    "teamName": "Team name",
+    "teamNamePlaceholder": "Enter team name",
+    "teamDesc": "Description",
+    "teamDescPlaceholder": "Optional description",
+    "addMemberTitle": "Add team member",
+    "selectUser": "Select user",
+    "searchUserPlaceholder": "Search name or email…",
+    "searchHint": "Search by name or email; results filter as you type",
+    "noUserMatch": "No matching users",
+    "noUserMatchHint": "Try another keyword or check spelling",
+    "noAvailableUsers": "No available users",
+    "role": "Role",
+    "permissions": "Permissions",
+    "permViewProject": "View project",
+    "permEditBadcase": "Edit BadCase",
+    "permManagePlans": "Manage plans",
+    "permManageTeam": "Manage team",
+    "permAdmin": "Project admin",
+    "addMemberFail": "Failed to add member: {msg}"
   }
 }
-
-

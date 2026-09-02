@@ -79,8 +79,11 @@ class ElementActor:
         return SnapshotNode(ref="", role="", name="", selector_hint=selector)
 
     async def _stale_ref_recovery(self, err: CdpError) -> Dict[str, Any]:
+        from .vision_understand import agent_loop_hint
+
         extra: Dict[str, Any] = {"stale_ref_recovered": False}
         if not cdp_stale_ref_auto_snapshot():
+            extra["agent_hint"] = agent_loop_hint(stale=True, has_vision=False)
             return extra
         try:
             tree = await self.session.page.accessibility.snapshot(interesting_only=True)
@@ -96,10 +99,35 @@ class ElementActor:
                 {"ref": n.ref, "role": n.role, "name": n.name}
                 for n in light.nodes[:12]
             ]
-            extra["suggest_tool"] = "cdp_click"
+            extra["suggest_tool"] = "cdp_snapshot"
+            extra["agent_hint"] = agent_loop_hint(stale=True, has_vision=False)
+        except Exception:
+            extra["agent_hint"] = agent_loop_hint(stale=True, has_vision=False)
+        return extra
+
+    async def _attach_failure_vision(
+        self,
+        out: Dict[str, Any],
+        *,
+        tag: str,
+        stale: bool = False,
+        context: str = "",
+    ) -> None:
+        """失败时截图 + 视觉描述，供 Agent 闭环决策（OpenClaw 风格）。"""
+        try:
+            from .vision_understand import attach_vision_fields
+
+            await attach_vision_fields(
+                out,
+                self.session.page,
+                context=context or f"action failed tag={tag}",
+                stale=stale,
+                upload=True,
+                session_id=self.session.session_id,
+                tag=tag,
+            )
         except Exception:
             pass
-        return extra
 
     def _wrap_stale(self, err: CdpError) -> CdpError:
         if err.code != STALE_REF:
@@ -139,7 +167,8 @@ class ElementActor:
             }
         except CdpError as e:
             extra = {}
-            if e.code == STALE_REF:
+            stale = e.code == STALE_REF
+            if stale:
                 extra = await self._stale_ref_recovery(e)
             out = e.to_dict()
             out.update(extra)
@@ -148,19 +177,17 @@ class ElementActor:
             if node is not None:
                 out["role"] = node.role
                 out["name"] = node.name
-            if node is not None and out.get("success") is False:
-                try:
-                    from .screenshot import capture_and_upload_cdp_screenshot
-
-                    shot = await capture_and_upload_cdp_screenshot(
-                        self.session.page,
-                        session_id=self.session.session_id,
-                        tag=str(ref or node.ref or "click"),
-                    )
-                    if shot:
-                        out["screenshot_url"] = shot
-                except Exception:
-                    pass
+            if out.get("success") is False:
+                ctx = (
+                    f"click failed ref={ref or ''} role={out.get('role') or ''} "
+                    f"name={out.get('name') or ''} err={out.get('message') or out.get('error') or ''}"
+                )
+                await self._attach_failure_vision(
+                    out,
+                    tag=str(ref or (node.ref if node else None) or "click"),
+                    stale=stale or bool(out.get("stale_ref_recovered")),
+                    context=ctx,
+                )
             return out
 
     async def _perform_click(self, node: SnapshotNode, steps: List[Dict], timeout: int) -> None:
@@ -443,12 +470,24 @@ class ElementActor:
             }
         except CdpError as e:
             extra = {}
-            if e.code == STALE_REF:
+            stale = e.code == STALE_REF
+            if stale:
                 extra = await self._stale_ref_recovery(e)
             out = e.to_dict()
             out.update(extra)
             out["tool"] = "cdp_fill"
             out["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+            if out.get("success") is False:
+                ctx = (
+                    f"fill failed ref={ref or ''} "
+                    f"err={out.get('message') or out.get('error') or ''}"
+                )
+                await self._attach_failure_vision(
+                    out,
+                    tag=str(ref or "fill"),
+                    stale=stale or bool(out.get("stale_ref_recovered")),
+                    context=ctx,
+                )
             return out
 
     async def _perform_fill(self, node: SnapshotNode, text: str, steps: List[Dict], timeout: int) -> None:

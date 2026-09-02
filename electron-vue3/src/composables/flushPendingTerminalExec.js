@@ -3,7 +3,8 @@
  */
 import {
   createTerminalAgent,
-  runTerminalQueueItem
+  runTerminalQueueItem,
+  toClientTerminalResultsPayload
 } from '../utils/terminalSubAgent.js'
 import {
   getTerminalAutoRunMode,
@@ -116,20 +117,21 @@ export async function runOneTerminalExecCard(aiMessage, cardIndex, opts = {}) {
  *   t?: (key: string, params?: object) => string,
  *   onAfter?: () => void
  * }} [opts]
- * @returns {Promise<{ ran: boolean, followUpText: string }>}
+ * @returns {Promise<{ ran: boolean, followUpText: string, results: object[] }>}
  */
 export async function flushPendingTerminalExecQueue(aiMessage, opts = {}) {
   const queue = Array.isArray(aiMessage?.pendingTerminalExecQueue)
     ? aiMessage.pendingTerminalExecQueue
     : []
   if (!queue.length) {
-    return { ran: false, followUpText: '' }
+    return { ran: false, followUpText: '', results: [] }
   }
 
   const cards = Array.isArray(aiMessage.clientTerminalExecCards)
     ? aiMessage.clientTerminalExecCards
     : []
   const results = []
+  const outcomes = []
   let ranAny = false
   let stopRest = false
 
@@ -186,6 +188,7 @@ export async function flushPendingTerminalExecQueue(aiMessage, opts = {}) {
     if (outcome) {
       ranAny = true
       results.push(outcome.text)
+      outcomes.push(outcome)
       if (item.stop_on_error === true && !outcome.ok) {
         stopRest = true
       }
@@ -208,5 +211,9 @@ export async function flushPendingTerminalExecQueue(aiMessage, opts = {}) {
     ? `【本机终端执行结果】\n\n${results.join('\n\n---\n\n')}`
     : ''
 
-  return { ran: ranAny, followUpText }
+  return {
+    ran: ranAny,
+    followUpText,
+    results: toClientTerminalResultsPayload(outcomes)
+  }
 }

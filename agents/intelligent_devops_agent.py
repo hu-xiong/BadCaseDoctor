@@ -325,6 +325,8 @@ class IntelligentDevOpsAgent:
         client_shell: dict = None,
         images: list = None,
         ui_context: dict = None,
+        client_terminal_results: list = None,
+        langgraph_resume: dict = None,
     ):
         """流式处理用户请求。plan_id 为当前迭代计划ID时，grep 会只检索该计划下的记录（人类式先看本迭代）。"""
         _llm = self.llm
@@ -358,12 +360,23 @@ class IntelligentDevOpsAgent:
             print(f"[AGENT] conversation_history messages={len(_hist)}", flush=True)
 
         _effective_input = user_input
+        if isinstance(client_terminal_results, list) and client_terminal_results:
+            from agents.client_terminal_resume import format_terminal_results_prompt
+            from agents.langgraph_resume import user_input_already_has_terminal_block
+
+            _term_block = format_terminal_results_prompt(client_terminal_results, locale=locale)
+            if _term_block:
+                if user_input_already_has_terminal_block(user_input or ""):
+                    # 前端/上一层已带终端块：勿整段替换，以免丢掉原任务文案
+                    _effective_input = user_input
+                else:
+                    _effective_input = f"{_term_block}\n\n---\n\n{user_input}"
         _ui_block = format_ui_context_for_prompt(
             ui_context if isinstance(ui_context, dict) else None,
             locale=locale,
         )
         if _ui_block:
-            _effective_input = f"{_ui_block}{user_input}"
+            _effective_input = f"{_ui_block}{_effective_input}"
         _url_hint = build_recent_url_hint(_hist, locale=locale)
         if _url_hint and "http://" not in (user_input or "") and "https://" not in (user_input or ""):
             _effective_input = f"{_url_hint}\n{_effective_input}"
@@ -391,6 +404,10 @@ class IntelligentDevOpsAgent:
             images=images if isinstance(images, list) else None,
             raw_user_input=user_input,
             ui_context=ui_context if isinstance(ui_context, dict) else None,
+            client_terminal_results=(
+                client_terminal_results if isinstance(client_terminal_results, list) else None
+            ),
+            langgraph_resume=langgraph_resume if isinstance(langgraph_resume, dict) else None,
         ):
             yield pkt
 
@@ -492,11 +509,15 @@ class IntelligentDevOpsAgent:
         """
         formatted = {
             'intent': intent,
-            'status': result['status'],
-            'findings': result['findings'],
-            'context': await self._get_execution_context(result),
+            'status': result.get('status') if isinstance(result, dict) else None,
+            'findings': (result.get('findings') if isinstance(result, dict) else None) or [],
+            'context': await self._get_execution_context(result if isinstance(result, dict) else {}),
             'recommendations': []
         }
+        if not isinstance(result, dict):
+            result = {}
+        if formatted['status'] is None:
+            formatted['status'] = 'ok' if result.get('success') else 'error'
         
         # 根据意图类型提供建议
         if intent == 'run_test':

@@ -101,6 +101,12 @@ const routes = [
     component: () => import('../components/PaymentCancel.vue'),
     meta: { requiresAuth: true }
   },
+  {
+    path: '/metrics-dashboard',
+    name: 'MetricsDashboard',
+    component: () => import('../components/MetricsDashboard.vue'),
+    meta: { requiresAuth: true }
+  },
 ];
 
 const router = createRouter({

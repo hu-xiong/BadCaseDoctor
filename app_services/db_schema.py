@@ -738,10 +738,10 @@ def sync_database_schema():
         reset_agent_tasks_stuck_running()
         
         # 演示账号仅显式开启时种入（SEED_DEMO_USERS=1），生产默认跳过且绝不重置密码
-        _seed_demo = (os.getenv("SEED_DEMO_USERS") or "").strip().lower() in (
-            "1", "true", "yes", "on"
-        )
-        if _seed_demo:
+        from app import Project, User, UserCredits
+        from app_services.demo_seed import ensure_demo_credits_and_project, seed_demo_enabled
+
+        if seed_demo_enabled():
             test_user = User.query.filter_by(email='test@example.com').first()
             if not test_user:
                 test_user = User(
@@ -751,6 +751,7 @@ def sync_database_schema():
                     is_verified=True
                 )
                 db.session.add(test_user)
+                db.session.flush()
                 print("已创建测试用户: test@example.com / 123456")
 
             specified_user = User.query.filter_by(email='2629258027@qq.com').first()
@@ -762,9 +763,15 @@ def sync_database_schema():
                     is_verified=True
                 )
                 db.session.add(specified_user)
+                db.session.flush()
                 print("已创建指定用户: 2629258027@qq.com / 123456")
             else:
                 print("演示用户已存在，跳过密码重置: 2629258027@qq.com")
+
+            for _du in (test_user, specified_user):
+                ensure_demo_credits_and_project(
+                    db, _du, UserCredits=UserCredits, Project=Project
+                )
         else:
             print("跳过演示账号种入（设 SEED_DEMO_USERS=1 开启）")
         

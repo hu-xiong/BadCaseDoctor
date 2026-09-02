@@ -19,9 +19,12 @@ _MANUAL_TEST_MARKERS = (
 )
 
 _EXECUTE_VERBS = (
-    "执行", "跑", "跑一下", "测一下", "验证一下", "用cdp", "用 CDP", "打开浏览器",
+    "执行", "跑", "跑一下", "测一下", "测试下", "测试一下", "测试这个", "测试下这个",
+    "验证一下", "用cdp", "用 CDP", "打开浏览器", "打开网页", "访问",
     "浏览器里", "自动化", "跑用例", "执行用例", "端到端",
 )
+
+_URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 
 _TESTCASE_MARKERS = (
     "测试用例", "testcase", "test case", "用例测试", "跑用例", "执行用例",
@@ -57,12 +60,19 @@ def detect_cdp_test_intent(
         return {"should_open": False, "mode": None, "reason": "explicit_off"}
 
     act = (tool_action or par.get("action") or "").strip().lower()
-    if act in ("session", "close", "list", "list_sessions", "login"):
-        if act != "login" or not _mentions_test(_blob(user_input, todo)):
-            return {"should_open": False, "mode": None}
-
     text = _blob(user_input, todo, ctx.get("matched_skill") or "")
     lower = text.lower()
+    url_boot = detect_browser_url_test_bootstrap(text)
+
+    if act in ("close", "list", "list_sessions"):
+        return {"should_open": False, "mode": None}
+    # session/login：仅当用户明确要测/带 URL 测站时才开任务；否则跳过
+    if act == "session" and not (
+        url_boot or _mentions_test(text) or _has_execute_verb(text) or "探测" in text or "explore" in lower
+    ):
+        return {"should_open": False, "mode": None}
+    if act == "login" and not (_mentions_test(text) or url_boot):
+        return {"should_open": False, "mode": None}
 
     if par.get("test_task") is True or par.get("open_test_task") is True:
         return {
@@ -75,6 +85,14 @@ def detect_cdp_test_intent(
     if _is_advise_only(text) and act not in _CDP_ACTIONS_WITH_TASK:
         return {"should_open": False, "mode": None, "reason": "advise_only"}
 
+    # 「测试下这个网站 http://…」→ 探测性测试（session 后自动 explore）
+    if url_boot or (extract_http_url(text) and (_mentions_test(text) or _has_execute_verb(text))):
+        return {
+            "should_open": True,
+            "mode": "explore",
+            "reason": "url_test_explore",
+        }
+
     testcase_mode = _implies_testcase_run(text, lower, ctx)
     manual_mode = _implies_manual_test(text, lower)
     explore_mode = act == "explore" or "探测" in text or "explore" in lower
@@ -86,14 +104,14 @@ def detect_cdp_test_intent(
             "reason": "testcase_intent",
             "load_plan_testcases": True,
         }
-    if explore_mode and act in _CDP_ACTIONS_WITH_TASK:
+    if explore_mode and act in _CDP_ACTIONS_WITH_TASK.union({"session", "login", ""}):
         return {"should_open": True, "mode": "explore", "reason": "explore_action"}
-    if manual_mode and act in _CDP_ACTIONS_WITH_TASK.union({"login", ""}):
+    if manual_mode and act in _CDP_ACTIONS_WITH_TASK.union({"login", "session", ""}):
         return {"should_open": True, "mode": "manual", "reason": "manual_test_description"}
     if act in ("assert", "explore"):
         return {"should_open": True, "mode": act, "reason": f"action_{act}"}
-    if _mentions_test(text) and act in _CDP_ACTIONS_WITH_TASK and _has_execute_verb(text):
-        return {"should_open": True, "mode": "manual", "reason": "cdp_with_test_wording"}
+    if _mentions_test(text) and act in _CDP_ACTIONS_WITH_TASK.union({"session", "login"}) and _has_execute_verb(text):
+        return {"should_open": True, "mode": "explore", "reason": "cdp_with_test_wording"}
 
     return {"should_open": False, "mode": None}
 
@@ -156,6 +174,50 @@ def _infer_mode(text: str, action: str, ctx: Dict[str, Any]) -> str:
     if action == "explore":
         return "explore"
     return "manual"
+
+
+def extract_http_url(text: str) -> Optional[str]:
+    """从用户话里抽出首个 http(s) URL（去掉尾部常见标点）。"""
+    m = _URL_RE.search(text or "")
+    if not m:
+        return None
+    url = m.group(0).rstrip(")。.,，;；]>\"'")
+    return url or None
+
+
+def detect_browser_url_test_bootstrap(
+    user_input: str = "",
+) -> Optional[Dict[str, Any]]:
+    """
+    「测试/打开/访问 + URL」时，首轮应直接 cdp session（create+url），
+    避免模型空跑结束、前端只显示「处理完成」。
+    """
+    text = (user_input or "").strip()
+    if not text:
+        return None
+    url = extract_http_url(text)
+    if not url:
+        return None
+    # 纯贴链接且无测试/打开意图 → 不强制
+    if _is_advise_only(text):
+        return None
+    want = (
+        _has_execute_verb(text)
+        or _mentions_test(text)
+        or any(k in text for k in ("打开", "访问", "进入", "探测", "探索", "看看", "看下"))
+        or "browser" in text.lower()
+        or "open " in text.lower()
+        or "navigate" in text.lower()
+    )
+    if not want:
+        return None
+    return {
+        "action": "session",
+        "sub_action": "create",
+        "url": url,
+        "auto_login": True,
+        "reason": "browser_url_test_bootstrap",
+    }
 
 
 def extract_testcase_ids_from_context(context: Optional[Dict[str, Any]]) -> List[int]:

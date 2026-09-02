@@ -30,6 +30,10 @@ class TerminalTool(BaseTool):
                 "message": "缺少 command",
             }
         cwd = str(kwargs.get("cwd") or "").strip()
+        if not cwd:
+            cs = kwargs.get("client_shell")
+            if isinstance(cs, dict):
+                cwd = str(cs.get("cwd") or cs.get("workingDirectory") or "").strip()
         try:
             timeout = int(kwargs.get("timeout") or 60)
         except (TypeError, ValueError):

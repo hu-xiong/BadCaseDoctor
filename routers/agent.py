@@ -904,6 +904,14 @@ def react_agent():
             )
         except Exception:
             logger.debug("[PROMPT-PAGES] preflight skipped", exc_info=True)
+        long_memory_context = data.get('long_memory_context') or data.get('longMemoryContext')
+        if not isinstance(long_memory_context, dict):
+            long_memory_context = None
+        conversation_history = data.get('conversation_history') or data.get('conversationHistory')
+        if not isinstance(conversation_history, list):
+            conversation_history = []
+        _ctr_early = data.get("client_terminal_results") or data.get("clientTerminalResults")
+        _resume_for_route = (data.get("resume_run_id") or data.get("resumeRunId") or "").strip()
         image_intent_for_route = classify_image_intent(user_input) if images else None
         _route = resolve_route(
             raw_model_name,
@@ -915,21 +923,20 @@ def react_agent():
             user_input=user_input,
             has_pending_diff=bool(pending_diff_context),
             user_id=str(getattr(current_user, 'id', '') or ''),
+            conversation_turns=len(conversation_history),
+            has_client_terminal_results=isinstance(_ctr_early, list) and bool(_ctr_early),
+            is_resume=bool(_resume_for_route),
         )
         model_name = _route.business_model_id
         logger.info(
-            "[REACT] model_route reason=%s resolved=%s used_auto=%s ms=%.2f",
+            "[REACT] model_route reason=%s resolved=%s used_auto=%s score=%s signals=%s ms=%.2f",
             _route.route_reason,
             model_name,
             _route.used_auto,
+            getattr(_route, "complexity_score", None),
+            getattr(_route, "complexity_signals", None),
             _route.route_resolve_ms,
         )
-        long_memory_context = data.get('long_memory_context') or data.get('longMemoryContext')
-        if not isinstance(long_memory_context, dict):
-            long_memory_context = None
-        conversation_history = data.get('conversation_history') or data.get('conversationHistory')
-        if not isinstance(conversation_history, list):
-            conversation_history = []
 
         logger.info("[REACT] 请求参数:")
         logger.info("  - user_input 长度: %s", len(user_input))
@@ -973,6 +980,7 @@ def react_agent():
                 _chat_session_id = _safe_mysql_int_fk_id(_chat_session_id_raw)
             except Exception:
                 _chat_session_id = None
+        langgraph_resume = None
         if _resume_run_id:
             try:
                 from agents.react_run_store import (
@@ -985,6 +993,9 @@ def react_agent():
                 _run_row = load_run_for_resume(_resume_run_id, _uid)
                 if _run_row:
                     _ck = _run_row.get('checkpoint') or {}
+                    _lgr = _ck.get('langgraph_resume')
+                    if isinstance(_lgr, dict) and _lgr.get('messages'):
+                        langgraph_resume = _lgr
                     user_input = build_resume_user_input(
                         checkpoint=_ck,
                         original_user_input=_run_row.get('user_input') or '',
@@ -994,7 +1005,12 @@ def react_agent():
                     if isinstance(_pdc, list) and _pdc:
                         pending_diff_context = _pdc
                     mark_run_resumed(_resume_run_id, _uid)
-                    logger.info("[REACT] resume_run_id=%s chat_session=%s", _resume_run_id, _run_row.get('chat_session_id'))
+                    logger.info(
+                        "[REACT] resume_run_id=%s chat_session=%s langgraph_resume=%s",
+                        _resume_run_id,
+                        _run_row.get('chat_session_id'),
+                        bool(langgraph_resume),
+                    )
             except Exception:
                 logger.exception("[REACT] resume_run_id load failed: %s", _resume_run_id)
 
@@ -1013,6 +1029,8 @@ def react_agent():
 
         _cs = data.get("client_shell") or data.get("clientShell")
         client_shell = _cs if isinstance(_cs, dict) else None
+        _ctr = data.get("client_terminal_results") or data.get("clientTerminalResults")
+        client_terminal_results = _ctr if isinstance(_ctr, list) else None
         _uc = data.get("ui_context") or data.get("uiContext")
         ui_context = _uc if isinstance(_uc, dict) else None
 
@@ -1045,10 +1063,12 @@ def react_agent():
                 "1",
             )
 
-        # 长期记忆：把 user_id 注入到 ReAct 引擎实例（供 ES 向量检索 scope 过滤）
+        # 长期记忆 / LangGraph 断点：把 user_id 注入引擎（ES scope + interrupt 落库）
         try:
             if hasattr(agent, "react_engine"):
-                setattr(agent.react_engine, "user_id", str(getattr(current_user, "id", "") or ""))
+                _uid_s = str(getattr(current_user, "id", "") or "")
+                setattr(agent.react_engine, "user_id", _uid_s)
+                setattr(agent.react_engine, "_user_id", _uid_s)
         except Exception:
             pass
         
@@ -1395,6 +1415,8 @@ def react_agent():
                             client_shell=client_shell,
                             images=_stream_images,
                             ui_context=ui_context,
+                            client_terminal_results=client_terminal_results,
+                            langgraph_resume=langgraph_resume,
                         ):
                             if perf and not getattr(task, "_first_chunk_logged", False):
                                 setattr(task, "_first_chunk_logged", True)
@@ -1457,6 +1479,13 @@ def react_agent():
                             release_agent_slot(getattr(current_user, "id", "") or "")
                         except Exception:
                             pass
+                        try:
+                            record_agent_execute(
+                                "react",
+                                status="success" if _task_ok else "failure",
+                            )
+                        except Exception:
+                            logger.debug("[REACT] record_agent_execute skipped", exc_info=True)
                         try:
                             record_auto_route_outcome(
                                 user_id=str(getattr(current_user, "id", "") or ""),
@@ -1581,6 +1610,10 @@ def react_agent():
     except Exception as e:
         import traceback
         logger.exception("[REACT] ❌ 错误: %s", str(e))
+        try:
+            record_agent_execute("react", status="failure")
+        except Exception:
+            pass
         return jsonify({'code': 500, 'message': str(e)}), 500
 
 

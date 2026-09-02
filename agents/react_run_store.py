@@ -315,6 +315,10 @@ def build_resume_user_input(
         f"中断原因：{reason}",
         f"原始用户目标：{original_user_input or ck.get('original_user_input') or ''}",
     ]
+    if isinstance(ck.get("langgraph_resume"), dict) and ck["langgraph_resume"].get("messages"):
+        lines.append(
+            "已携带 LangGraph 断点（messages/result_context）；请在此基础上继续，勿重复已成功的工具调用。"
+        )
     if plan:
         lines.append(f"计划步骤（共 {len(plan)} 步）：" + "；".join(str(x) for x in plan[:20]))
     if steps:

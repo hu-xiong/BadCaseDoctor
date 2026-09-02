@@ -420,6 +420,39 @@ def get_credits():
     )
 
 
+@payment_bp.route("/api/payment/history", methods=["GET"])
+@login_required
+def payment_history():
+    """当前用户支付/消耗记录（最近 N 条）。"""
+    from app import PaymentHistory
+
+    try:
+        limit = int(request.args.get("limit") or "50")
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(200, limit))
+    rows = (
+        PaymentHistory.query.filter_by(user_id=current_user.id)
+        .order_by(PaymentHistory.created_at.desc(), PaymentHistory.id.desc())
+        .limit(limit)
+        .all()
+    )
+    items = []
+    for r in rows:
+        items.append(
+            {
+                "id": r.id,
+                "plan_id": r.plan_id,
+                "credits": r.credits,
+                "amount": r.amount,
+                "status": r.status,
+                "session_id": r.stripe_session_id,
+                "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+            }
+        )
+    return jsonify({"items": items, "count": len(items)})
+
+
 @payment_bp.route("/api/payment/use-credit", methods=["POST"])
 @login_required
 def use_credit():
@@ -549,6 +582,21 @@ def consume_user_credit(user_id: int) -> tuple[bool, int, str | None]:
 
         credit.credits -= 1
         credit.updated_at = datetime.utcnow()
+        try:
+            from app import PaymentHistory
+
+            db.session.add(
+                PaymentHistory(
+                    user_id=uid,
+                    plan_id="agent_react",
+                    credits=-1,
+                    amount=0,
+                    stripe_session_id=f"consume:{uid}:{int(datetime.utcnow().timestamp())}",
+                    status="consumed",
+                )
+            )
+        except Exception:
+            pass
         db.session.commit()
         return True, int(credit.credits), None
     except Exception:

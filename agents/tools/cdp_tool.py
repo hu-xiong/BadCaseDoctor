@@ -21,15 +21,18 @@ class CdpTool(BaseTool):
         super().__init__(
             name="cdp",
             description=(
-                "浏览器自动化（对齐 OpenClaw Browser：Playwright + CDP/无障碍树 ref，非 browser-use）。"
+                "浏览器自动化（Playwright + CDP；explore 默认 Midscene 真人式巡检，可回退 legacy DFS）。"
                 "action="
                 "session|tabs|open|focus|close_tab|navigate|snapshot|"
                 "click|click_coords|type|press|hover|scroll|drag|select|fill|"
                 "wait|get_text|screenshot|pdf|evaluate|extract|resize|console|"
                 "login|assert|explore|batch|run_step|run_testcase。"
-                "流程：session create+url → snapshot 得 @e1… → click/fill/assert；"
-                "用例驱动：run_step(step/expected) 或 run_testcase(testcase_id|steps)；"
-                "验证用 assert/extract/screenshot；多标签用 tabs/open/focus。"
+                "闭环："
+                "① session create+url → 测站/探测会自动 explore（Midscene）；"
+                "② 精细操作仍用 snapshot→@eN→click/fill；UI 变化后重新 snapshot；"
+                "③ 登录页用 login；验证码等用户。"
+                "用例：run_step/run_testcase；验证用 assert/extract/screenshot。"
+                "explore：phase=full 走 Midscene；phase=dfs|inventory|legacy 走旧探测。"
                 "参数：session_id、url、ref、selector、text、key、values、x、y、fn、query、"
                 "start_ref、end_ref、index/tabId、actions(batch)、timeout_ms、"
                 "step、expected、steps、testcase_id、step_index。"
@@ -966,6 +969,8 @@ class CdpTool(BaseTool):
 
     async def _explore(self, **kwargs) -> Dict[str, Any]:
         from agents.cdp.explore import run_exploration
+        from agents.cdp.midscene_bridge import explore_engine, run_midscene_exploration
+        from agents.cdp.params import resolve_cdp_target_url
 
         owner = self._owner_key(kwargs)
         sid = kwargs.get("session_id") or self._mgr.latest_session_id(owner_key=owner)
@@ -976,10 +981,43 @@ class CdpTool(BaseTool):
             return nav
         phase = kwargs.get("phase") or kwargs.get("sub_phase") or "full"
         user_query = kwargs.get("natural_query") or kwargs.get("user_query")
+        eng = explore_engine()
+        force_legacy = str(phase).lower() in ("dfs", "inventory", "legacy")
+        if eng != "legacy" and not force_legacy:
+            url = resolve_cdp_target_url(
+                params=kwargs,
+                user_input=user_query,
+                result_context=kwargs.get("result_context"),
+            )
+            if not url:
+                try:
+                    sess = self._mgr.get_session(sid, owner_key=owner)
+                    page_info = await sess.page_info() if sess else {}
+                    url = str((page_info or {}).get("url") or "")
+                except Exception:
+                    url = ""
+            if url:
+                print(f"[CDP] explore engine={eng} via midscene url={url}", flush=True)
+                mid = await run_midscene_exploration(
+                    url=url,
+                    user_query=str(user_query or ""),
+                )
+                if mid.get("fallback_legacy") and eng in ("auto", "midscene"):
+                    # midscene 明确要求时可回退；auto 必回退；纯 midscene 也回退以免阻断
+                    print(
+                        f"[CDP] midscene fallback legacy: {mid.get('error')}",
+                        flush=True,
+                    )
+                elif not mid.get("fallback_legacy"):
+                    mid["session_id"] = sid
+                    return mid
+            else:
+                print("[CDP] midscene skip: no url, fallback legacy explore", flush=True)
+
         return await run_exploration(
             self._mgr,
             sid,
-            phase=str(phase),
+            phase=str(phase) if str(phase).lower() != "legacy" else "full",
             max_depth=_int_or_none(kwargs.get("max_depth")),
             max_clicks=_int_or_none(kwargs.get("max_clicks")),
             owner_key=owner,

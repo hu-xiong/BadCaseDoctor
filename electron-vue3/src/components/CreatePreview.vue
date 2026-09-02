@@ -2,7 +2,7 @@
   <div class="create-preview">
     <div class="preview-header">
       <span class="preview-icon">➕</span>
-      <span class="preview-title">新建{{ getTargetLabel(previewData.target) }}</span>
+      <span class="preview-title">{{ t('createPreview.createTitle', { type: getTargetLabel(previewData.target) }) }}</span>
     </div>
     
     <div class="preview-fields">
@@ -11,23 +11,23 @@
         :key="key + '_' + idx"
         class="field-row"
       >
-        <span class="field-label">{{ getFieldLabel(key) }}：</span>
+        <span class="field-label">{{ getFieldLabel(key) }}{{ t('createPreview.labelSep') }}</span>
         <span class="field-value">{{ formatValue(value) }}</span>
       </div>
 
       <div v-if="restFieldCount > 0" class="field-row field-row--more">
         <span class="field-label">…</span>
-        <span class="field-value">其余 {{ restFieldCount }} 项为详情字段，请在表单或列表中查看</span>
+        <span class="field-value">{{ t('createPreview.moreFields', { n: restFieldCount }) }}</span>
       </div>
     </div>
     
     <!-- 确认按钮 -->
     <div v-if="showConfirm" class="confirm-actions">
       <button @click="handleConfirm" class="btn-confirm">
-        ✓ 确认创建
+        ✓ {{ t('createPreview.confirmCreate') }}
       </button>
       <button @click="handleCancel" class="btn-cancel">
-        ✗ 取消
+        ✗ {{ t('common.cancel') }}
       </button>
     </div>
   </div>
@@ -35,6 +35,9 @@
 
 <script setup>
 import { defineProps, defineEmits, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
 
 /** 与列表列一致（与 SimpleChatPanel / ProjectDetail 列表字段对齐） */
 const PREVIEW_LIST_KEYS = {
@@ -122,45 +125,22 @@ const restFieldCount = computed(() => {
 })
 
 const getTargetLabel = (target) => {
-  const labels = {
-    'bug': 'Bug',
-    'badcase': 'BadCase',
-    'plan': '迭代计划'
-  }
-  return labels[target] || target
+  const key = `createPreview.targets.${target}`
+  const label = t(key)
+  return label === key ? (target || '') : label
 }
 
 const getFieldLabel = (key) => {
-  const labels = {
-    'title': '标题',
-    'name': '名称',
-    'description': '描述',
-    'priority': '优先级',
-    'severity': '严重程度',
-    'status': '状态',
-    'plan_id': '所属计划',
-    'card_id': '所属卡片',
-    'parent_id': '父计划',
-    'assignee_id': '负责人',
-    'reproduce_steps': '复现步骤',
-    'expected_result': '预期结果',
-    'actual_result': '实际结果',
-    'start_date': '开始日期',
-    'end_date': '结束日期',
-    'bug_type': '类型',
-    'case_category': '问题分类',
-    'case_type': '用例类型',
-    'test_type': '测试类型',
-    'document_type': '文档类型'
-  }
-  return labels[key] || key
+  const i18nKey = `createPreview.fields.${key}`
+  const label = t(i18nKey)
+  return label === i18nKey ? key : label
 }
 
 const formatValue = (value) => {
-  if (value === null || value === undefined) return '未设置'
-  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (value === null || value === undefined) return t('createPreview.unset')
+  if (typeof value === 'boolean') return value ? t('createPreview.yes') : t('createPreview.no')
   if (typeof value === 'number') return value
-  if (typeof value === 'string' && value.trim() === '') return '未填写'
+  if (typeof value === 'string' && value.trim() === '') return t('createPreview.empty')
   return value
 }
 

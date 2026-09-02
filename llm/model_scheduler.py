@@ -42,6 +42,39 @@ def _is_thinking(m: ModelSpec) -> bool:
     return "thinking" in mid or m.id == "deepseek-r1"
 
 
+def provider_credentials_ok(provider: str) -> bool:
+    """选模时跳过未配置密钥的 provider，避免 Auto 选到 deepseek 却调不通。"""
+    try:
+        from config import Config
+    except Exception:
+        return True
+    p = (provider or "").strip().lower()
+    if p == "deepseek":
+        return bool((getattr(Config, "DEEPSEEK_API_KEY", None) or "").strip())
+    if p == "doubao":
+        if not (getattr(Config, "DOUBAO_API_KEY", None) or "").strip():
+            return False
+        # 方舟常用接入点 ep-xxx；命名模型常 404，除非显式放行
+        mid = (getattr(Config, "DOUBAO_MODEL", None) or "").strip()
+        if mid.startswith("ep-"):
+            return True
+        allow = (os.getenv("DOUBAO_ALLOW_NAMED_MODEL") or "").strip().lower()
+        return allow in ("1", "true", "yes", "on")
+    if p == "zhipu":
+        return bool((getattr(Config, "ZHIPU_API_KEY", None) or "").strip())
+    if p in ("qwen", "dashscope"):
+        return bool(
+            (getattr(Config, "DASHSCOPE_API_KEY", None) or os.getenv("DASHSCOPE_API_KEY") or "").strip()
+            or (getattr(Config, "QWEN_API_KEY", None) or os.getenv("QWEN_API_KEY") or "").strip()
+        )
+    if p == "qianfan":
+        return bool(
+            (getattr(Config, "QIANFAN_API_KEY", None) or "").strip()
+            or (os.getenv("QIANFAN_ACCESS_KEY") or "").strip()
+        )
+    return True
+
+
 def _filter_candidates(
     candidates: Sequence[ModelSpec],
     *,
@@ -55,6 +88,8 @@ def _filter_candidates(
     out: List[ModelSpec] = []
     for m in candidates:
         if m.id in ex:
+            continue
+        if not provider_credentials_ok(m.provider):
             continue
         if require_vision is True and not m.vision:
             continue

@@ -699,6 +699,12 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "client_local_run": _pack_client_local_run,
     "client_terminal_exec": _pack_client_terminal_exec,
     "client_browser": _pack_client_browser,
+    # LangGraph 失败边 / 人机打断 / 断点快照：整包透传，前端 lane=engine 解析
+    "failure_edge": _pack_stream_engine_raw,
+    "interrupt": _pack_stream_engine_raw,
+    "client_pause": _pack_stream_engine_raw,
+    "langgraph_resume": _pack_stream_engine_raw,
+    "observe": _pack_stream_engine_raw,
 }
 
 

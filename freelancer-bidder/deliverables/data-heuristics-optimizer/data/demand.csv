@@ -1,0 +1,11 @@
+sku,region,forecast_7d,forecast_14d,forecast_30d,priority
+SKU-100,NORTH,45,90,180,high
+SKU-100,SOUTH,30,65,140,medium
+SKU-200,NORTH,55,110,220,high
+SKU-200,SOUTH,20,40,85,low
+SKU-300,NORTH,70,140,280,medium
+SKU-300,SOUTH,40,85,170,medium
+SKU-400,NORTH,25,55,120,high
+SKU-400,SOUTH,15,35,75,high
+SKU-500,NORTH,60,125,250,medium
+SKU-500,SOUTH,35,70,150,low

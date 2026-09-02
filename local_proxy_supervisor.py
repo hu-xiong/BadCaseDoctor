@@ -111,11 +111,17 @@ def _should_manage(flask_host: str = "") -> bool:
         return False
     if mode == "on":
         return True
-    # auto：仅环回监听的本机后端
+    # auto：本机有二进制且代理监听环回（云端无 exe 则自然跳过）
+    if not resolve_local_proxy_exe():
+        return False
+    listen = local_proxy_listen_addr().lower()
+    if "0.0.0.0" in listen or listen.startswith("[::]"):
+        _log.warning("[local-proxy] auto skip: listen is not loopback (%s)", listen)
+        return False
     host = (flask_host or os.getenv("FLASK_HOST") or "127.0.0.1").strip().lower()
-    if host in ("127.0.0.1", "localhost", "::1"):
+    # 本机 Flask 常见 127.0.0.1 / 0.0.0.0；后者仍可托管环回代理
+    if host in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::", ""):
         return True
-    # 明确本机开发标记
     if (os.getenv("BADCASE_LOCAL_DEV") or "").strip().lower() in ("1", "true", "yes", "on"):
         return True
     return False
@@ -206,6 +212,12 @@ def start_managed_local_proxy(flask_host: str = "") -> Dict[str, Any]:
 
     env = os.environ.copy()
     env.setdefault("LISTEN", local_proxy_listen_addr())
+    # 空闲退出：默认 30 分钟无 WS/PTY/browser 活动则代理自杀；0=禁用
+    env.setdefault(
+        "IDLE_EXIT_SEC",
+        (os.getenv("BADCASE_LOCAL_PROXY_IDLE_EXIT_SEC") or os.getenv("IDLE_EXIT_SEC") or "1800").strip()
+        or "1800",
+    )
 
     creationflags = 0
     if sys.platform == "win32":
@@ -255,9 +267,63 @@ def start_managed_local_proxy(flask_host: str = "") -> Dict[str, Any]:
         _log.warning("[local-proxy] started pid=%s but health not ok yet (%s)", proc.pid, _last_error or "timeout")
 
     atexit.register(stop_managed_local_proxy)
+    start_local_proxy_monitor()
     return supervisor_status()
 
 
 def ensure_stop_hooks() -> None:
     """重复 register 无害；供显式调用。"""
     atexit.register(stop_managed_local_proxy)
+
+
+def ensure_local_proxy_running(flask_host: str = "") -> Dict[str, Any]:
+    """
+    按需确保代理在线：已健康则直接返回；否则按托管策略拉起。
+    供前端 / Agent 在 browser start 前调用。
+    """
+    if probe_local_proxy_ok():
+        return {**supervisor_status(), "ensured": "already_up"}
+    st = start_managed_local_proxy(flask_host=flask_host or os.getenv("FLASK_HOST") or "")
+    st = dict(st or {})
+    st["ensured"] = "started" if probe_local_proxy_ok() else "failed"
+    return st
+
+
+_monitor_started = False
+
+
+def start_local_proxy_monitor() -> None:
+    """
+    后台监视：托管子进程异常退出时清状态；可选自动再拉起一次。
+    IDLE 退出由 go-local-proxy 自身完成；此处只同步 owned 状态。
+    """
+    global _monitor_started, _proc, _owned, _last_error
+    if _monitor_started:
+        return
+    _monitor_started = True
+
+    def _loop():
+        global _proc, _owned, _last_error
+        while True:
+            time.sleep(8.0)
+            with _lock:
+                proc = _proc
+                owned = _owned
+            if not owned or proc is None:
+                continue
+            code = proc.poll()
+            if code is None:
+                continue
+            _log.info("[local-proxy] managed process exited code=%s", code)
+            with _lock:
+                if _proc is proc:
+                    _proc = None
+                    _owned = False
+                    _last_error = f"exited code={code}"
+            # 若仍策略允许且 health 不通，尝试再拉起（应对 idle exit 后马上又要测站）
+            auto_re = (os.getenv("BADCASE_LOCAL_PROXY_AUTO_RESTART") or "1").strip().lower()
+            if auto_re in ("0", "false", "no", "off"):
+                continue
+            # 不在监视线程里立刻狂重启：留给 ensure_local_proxy_running 按需拉起
+
+    threading.Thread(target=_loop, name="local-proxy-monitor", daemon=True).start()

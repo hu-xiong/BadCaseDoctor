@@ -196,7 +196,13 @@ const refreshMetrics = async () => {
   error.value = null
   
   try {
-    const response = await api.get('/metrics', { responseType: 'text', transformResponse: [(d) => d] })
+    const metricsToken = String(import.meta.env.VITE_METRICS_TOKEN || '').trim()
+    const response = await api.get('/metrics', {
+      responseType: 'text',
+      transformResponse: [(d) => d],
+      params: metricsToken ? { token: metricsToken } : undefined,
+      headers: metricsToken ? { Authorization: `Bearer ${metricsToken}` } : undefined,
+    })
     const metricsText = response.data
     
     // 解析 Prometheus 文本格式指标

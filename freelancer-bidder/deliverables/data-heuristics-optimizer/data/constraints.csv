@@ -1,0 +1,3 @@
+warehouse,max_inbound_units,service_level_target,transfer_cost_per_unit
+WH-A,500,0.95,1.2
+WH-B,300,0.90,1.5

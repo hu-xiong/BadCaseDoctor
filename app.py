@@ -2,6 +2,11 @@
 # 禁止再用 TextIOWrapper 包一层替换 sys.stdout：Flask debug 重载子进程里原 buffer 可能已关闭，
 # 会导致 ValueError: I/O operation on closed file，进而所有 print() 让接口 500。
 import sys
+# `python app.py` 时本模块名是 __main__，不是 app。路由/工具里懒加载的
+# `from app import db|has_project_permission|...` 必须落到同一份模块，否则会再造一套
+# Flask/SQLAlchemy，触发 “not registered with this SQLAlchemy instance” → 权限校验失败。
+if __name__ == "__main__":
+    sys.modules.setdefault("app", sys.modules[__name__])
 if sys.platform == "win32":
     for _stream in (sys.stdout, sys.stderr):
         try:
@@ -413,9 +418,16 @@ def api_ping():
 @app.route('/metrics', methods=['GET'])
 def metrics():
     """
-    暴露 Prometheus 指标端点
-    使用 curl http://localhost:5000/metrics 查看
+    暴露 Prometheus 指标端点。
+    若设置 METRICS_TOKEN，则要求 Authorization: Bearer <token> 或 ?token=。
     """
+    token = (os.getenv("METRICS_TOKEN") or "").strip()
+    if token:
+        auth = (request.headers.get("Authorization") or "").strip()
+        q = (request.args.get("token") or "").strip()
+        ok = auth == f"Bearer {token}" or q == token
+        if not ok:
+            return jsonify({"error": "unauthorized"}), 401
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 # 检查并创建存储桶
@@ -8995,10 +9007,9 @@ def sync_database_schema():
         reset_agent_tasks_stuck_running()
         
         # 演示账号仅显式开启时种入（SEED_DEMO_USERS=1），生产默认跳过且绝不重置密码
-        _seed_demo = (os.getenv("SEED_DEMO_USERS") or "").strip().lower() in (
-            "1", "true", "yes", "on"
-        )
-        if _seed_demo:
+        from app_services.demo_seed import ensure_demo_credits_and_project, seed_demo_enabled
+
+        if seed_demo_enabled():
             test_user = User.query.filter_by(email='test@example.com').first()
             if not test_user:
                 test_user = User(
@@ -9008,6 +9019,7 @@ def sync_database_schema():
                     is_verified=True
                 )
                 db.session.add(test_user)
+                db.session.flush()
                 print("已创建测试用户: test@example.com / 123456")
 
             specified_user = User.query.filter_by(email='2629258027@qq.com').first()
@@ -9019,9 +9031,15 @@ def sync_database_schema():
                     is_verified=True
                 )
                 db.session.add(specified_user)
+                db.session.flush()
                 print("已创建指定用户: 2629258027@qq.com / 123456")
             else:
                 print("演示用户已存在，跳过密码重置: 2629258027@qq.com")
+
+            for _du in (test_user, specified_user):
+                ensure_demo_credits_and_project(
+                    db, _du, UserCredits=UserCredits, Project=Project
+                )
         else:
             print("跳过演示账号种入（设 SEED_DEMO_USERS=1 开启）")
         
@@ -12023,13 +12041,18 @@ if __name__ == '__main__':
     # 本机 go-local-proxy：随 Flask 启停（环回 + 有二进制时默认托管；BADCASE_MANAGE_LOCAL_PROXY=0 关闭）
     _stop_local_proxy = lambda: None
     try:
-        from local_proxy_supervisor import start_managed_local_proxy, stop_managed_local_proxy as _stop_lp
+        from local_proxy_supervisor import (
+            start_managed_local_proxy,
+            stop_managed_local_proxy as _stop_lp,
+            start_local_proxy_monitor,
+        )
 
         _stop_local_proxy = _stop_lp
         _lp = start_managed_local_proxy(flask_host=_host)
+        start_local_proxy_monitor()
         if _lp.get("owned") and _lp.get("running_child"):
             print(
-                f"✅ 已托管本地代理 pid={_lp.get('pid')} listen={_lp.get('listen')}（退出后端时自动关闭）",
+                f"✅ 已托管本地代理 pid={_lp.get('pid')} listen={_lp.get('listen')}（退出后端时自动关闭；空闲见 IDLE_EXIT_SEC）",
                 flush=True,
             )
         elif _lp.get("skipped") == "already_up":

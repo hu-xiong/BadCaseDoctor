@@ -69,6 +69,19 @@ def local_proxy_supervisor_status():
     return jsonify({"ok": True, **st})
 
 
+@client_scripts_bp.route("/local-proxy/supervisor/ensure", methods=["POST", "GET"])
+def local_proxy_supervisor_ensure():
+    """按需拉起本机 go-local-proxy（Flask 同机托管）；返回探测结果。"""
+    try:
+        from local_proxy_supervisor import ensure_local_proxy_running, probe_local_proxy_ok
+
+        st = ensure_local_proxy_running()
+        ok = bool(probe_local_proxy_ok())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": ok, **(st or {})}), (200 if ok else 503)
+
+
 @client_scripts_bp.route("/local-proxy/save", methods=["POST"])
 @login_required
 def save_local_proxy_to_disk():

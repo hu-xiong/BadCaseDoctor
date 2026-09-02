@@ -1,19 +1,18 @@
 <template>
   <div class="team-management">
     <div class="header" :class="{ 'header-compact': hideTopHeading }">
-      <h2 v-if="!hideTopHeading">团队管理</h2>
+      <h2 v-if="!hideTopHeading">{{ t('teamPanel.title') }}</h2>
       <button class="create-team-btn" @click="showCreateTeamModal = true">
         <span class="plus-icon">+</span>
-        创建团队
+        {{ t('teamPanel.createTeam') }}
       </button>
     </div>
 
-    <!-- 团队列表 -->
     <div class="teams-container">
       <div v-if="teams.length === 0" class="no-teams">
         <div class="no-teams-icon">👥</div>
-        <div class="no-teams-text">暂无团队</div>
-        <div class="no-teams-desc">点击上方按钮创建您的第一个团队</div>
+        <div class="no-teams-text">{{ t('teamPanel.empty') }}</div>
+        <div class="no-teams-desc">{{ t('teamPanel.emptyHint') }}</div>
       </div>
       
       <div v-else class="teams-list">
@@ -21,25 +20,25 @@
           <div class="team-header">
             <div class="team-info">
               <h3 class="team-name">{{ team.name }}</h3>
-              <p class="team-description">{{ team.description || '暂无描述' }}</p>
+              <p class="team-description">{{ team.description || t('teamPanel.noDescription') }}</p>
             </div>
             <div class="team-actions">
               <button class="add-member-btn" @click="showAddMemberModalHandler(team)">
                 <span class="plus-icon">+</span>
-                添加成员
+                {{ t('teamPanel.addMember') }}
               </button>
             </div>
           </div>
           
           <div class="team-members">
-            <h4>团队成员 ({{ team.members.length }})</h4>
+            <h4>{{ t('teamPanel.members', { n: team.members.length }) }}</h4>
             <div class="members-list">
               <div v-for="member in team.members" :key="member.id" class="member-item">
                 <div class="member-avatar">👤</div>
                 <div class="member-info">
                   <div class="member-name">{{ member.user_name }}</div>
                   <div class="member-email">{{ member.user_email }}</div>
-                  <div class="member-role">{{ member.role === 'leader' ? '组长' : '成员' }}</div>
+                  <div class="member-role">{{ member.role === 'leader' ? t('teamPanel.roleLeader') : t('teamPanel.roleMember') }}</div>
                 </div>
               </div>
             </div>
@@ -48,68 +47,64 @@
       </div>
     </div>
 
-    <!-- 创建团队模态框 -->
     <div v-if="showCreateTeamModal" class="modal-overlay" @click="showCreateTeamModal = false">
       <div class="modal-content" @click.stop>
         <div class="modal-header">
-          <h3>创建团队</h3>
+          <h3>{{ t('teamPanel.createTeam') }}</h3>
           <button class="close-btn" @click="showCreateTeamModal = false">×</button>
         </div>
         
         <div class="modal-body">
           <div class="form-group">
-            <label>团队名称</label>
-            <input v-model="newTeam.name" type="text" placeholder="请输入团队名称" />
+            <label>{{ t('teamPanel.teamName') }}</label>
+            <input v-model="newTeam.name" type="text" :placeholder="t('teamPanel.teamNamePlaceholder')" />
           </div>
           
           <div class="form-group">
-            <label>团队描述</label>
-            <textarea v-model="newTeam.description" placeholder="请输入团队描述（可选）"></textarea>
+            <label>{{ t('teamPanel.teamDesc') }}</label>
+            <textarea v-model="newTeam.description" :placeholder="t('teamPanel.teamDescPlaceholder')"></textarea>
           </div>
         </div>
         
         <div class="modal-footer">
-          <button class="cancel-btn" @click="showCreateTeamModal = false">取消</button>
+          <button class="cancel-btn" @click="showCreateTeamModal = false">{{ t('common.cancel') }}</button>
           <button class="confirm-btn" @click="createTeam" :disabled="!newTeam.name.trim()">
-            创建团队
+            {{ t('teamPanel.createTeam') }}
           </button>
         </div>
       </div>
     </div>
 
-    <!-- 添加成员模态框 -->
     <div v-if="showAddMemberModal" class="modal-overlay" @click="showAddMemberModal = false">
       <div class="modal-content add-member-modal" @click.stop>
         <div class="modal-header">
-          <h3>添加团队成员</h3>
+          <h3>{{ t('teamPanel.addMemberTitle') }}</h3>
           <button class="close-btn" @click="showAddMemberModal = false">×</button>
         </div>
         
         <div class="modal-body">
           <div class="form-group">
-            <label class="form-label">选择用户 <span class="required">*</span></label>
+            <label class="form-label">{{ t('teamPanel.selectUser') }} <span class="required">*</span></label>
             <div class="user-selector">
               <div class="search-box">
                 <input 
                   v-model="memberSearchText" 
                   type="text" 
-                  placeholder="搜索用户名或邮箱..." 
+                  :placeholder="t('teamPanel.searchUserPlaceholder')" 
                   @input="filterAvailableUsers"
                 />
                 <span class="search-icon">🔍</span>
               </div>
               <div class="search-hint">
-                💡 支持用户名和邮箱搜索，输入任意字符即可实时过滤
+                {{ t('teamPanel.searchHint') }}
               </div>
               <div class="users-list">
-                <!-- 搜索提示 -->
                 <div v-if="memberSearchText && filteredUsers.length === 0" class="search-no-results">
                   <div class="no-results-icon">🔍</div>
-                  <div class="no-results-text">未找到匹配的用户</div>
-                  <div class="no-results-hint">请尝试其他关键词或检查拼写</div>
+                  <div class="no-results-text">{{ t('teamPanel.noUserMatch') }}</div>
+                  <div class="no-results-hint">{{ t('teamPanel.noUserMatchHint') }}</div>
                 </div>
                 
-                <!-- 用户列表 -->
                 <div 
                   v-for="user in filteredUsers" 
                   :key="user.id" 
@@ -125,66 +120,65 @@
                   <div class="user-role" v-if="user.role">{{ user.role }}</div>
                 </div>
                 
-                <!-- 空状态 -->
                 <div v-if="!memberSearchText && filteredUsers.length === 0" class="users-empty">
                   <div class="empty-icon">👥</div>
-                  <div class="empty-text">暂无可用用户</div>
+                  <div class="empty-text">{{ t('teamPanel.noAvailableUsers') }}</div>
                 </div>
               </div>
             </div>
           </div>
           
           <div class="form-group">
-            <label class="form-label">角色 <span class="required">*</span></label>
+            <label class="form-label">{{ t('teamPanel.role') }} <span class="required">*</span></label>
             <div class="role-selector">
               <label class="role-option">
                 <input type="radio" v-model="newMember.role" value="member" />
                 <span class="role-label">
                   <span class="role-icon">👤</span>
-                  <span class="role-text">成员</span>
+                  <span class="role-text">{{ t('teamPanel.roleMember') }}</span>
                 </span>
               </label>
               <label class="role-option">
                 <input type="radio" v-model="newMember.role" value="leader" />
                 <span class="role-label">
                   <span class="role-icon">👑</span>
-                  <span class="role-text">组长</span>
+                  <span class="role-text">{{ t('teamPanel.roleLeader') }}</span>
                 </span>
               </label>
             </div>
           </div>
           
           <div class="form-group">
-            <label class="form-label">权限设置</label>
+            <label class="form-label">{{ t('teamPanel.permissions') }}</label>
             <div class="permissions-grid">
               <label class="permission-item">
                 <input type="checkbox" v-model="newMember.permissions" value="view_project" />
-                <span class="permission-label">查看项目</span>
+                <span class="permission-label">{{ t('teamPanel.permViewProject') }}</span>
               </label>
               <label class="permission-item">
                 <input type="checkbox" v-model="newMember.permissions" value="edit_badcase" />
-                <span class="permission-label">编辑BadCase</span>
+                <span class="permission-label">{{ t('teamPanel.permEditBadcase') }}</span>
               </label>
               <label class="permission-item">
                 <input type="checkbox" v-model="newMember.permissions" value="manage_plans" />
-                <span class="permission-label">管理计划</span>
+                <span class="permission-label">{{ t('teamPanel.permManagePlans') }}</span>
               </label>
               <label class="permission-item">
                 <input type="checkbox" v-model="newMember.permissions" value="manage_team" />
-                <span class="permission-label">管理团队</span>
+                <span class="permission-label">{{ t('teamPanel.permManageTeam') }}</span>
               </label>
               <label class="permission-item">
                 <input type="checkbox" v-model="newMember.permissions" value="admin_project" />
-                <span class="permission-label">项目管理员</span>
+                <span class="permission-label">{{ t('teamPanel.permAdmin') }}</span>
               </label>
             </div>
           </div>
         </div>
         
         <div class="modal-footer">
-          <button class="cancel-btn" @click="showAddMemberModal = false">取消</button>
+          <button class="cancel-btn" @click="showAddMemberModal = false">{{ t('common.cancel') }}</button>
           <button class="confirm-btn" @click="addTeamMember" :disabled="!newMember.user_id || !newMember.role">
-            添加成员
+            {{ t('teamPanel.addMember') }}
           </button>
         </div>
       </div>
@@ -192,8 +186,10 @@
   </div>
 </template>
 
+
 <script>
 import { ref, reactive, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { getProjectTeams, createTeam, addTeamMember, getProjectMembers, getAvailableUsers } from '../api.js'
 
 export default {
@@ -210,6 +206,7 @@ export default {
   },
   
   setup(props) {
+    const { t } = useI18n()
     const teams = ref([])
     const availableUsers = ref([])
     const showCreateTeamModal = ref(false)
@@ -356,7 +353,7 @@ export default {
           newMember.role = 'member'
           newMember.permissions = ['view_project']
         } else {
-          alert(`添加成员失败: ${response.data.error || '未知错误'}`)
+          alert(t('teamPanel.addMemberFail', { msg: response.data.error || t('common.unknownError') }))
         }
       } catch (error) {
         console.error('添加团队成员失败:', error)
@@ -365,9 +362,9 @@ export default {
         console.error('错误头:', error.response?.headers)
         
         if (error.response?.data?.error) {
-          alert(`添加成员失败: ${error.response.data.error}`)
+          alert(t('teamPanel.addMemberFail', { msg: error.response.data.error }))
         } else {
-          alert(`添加成员失败: ${error.message || '请重试'}`)
+          alert(t('teamPanel.addMemberFail', { msg: error.message || t('common.retry') }))
         }
       }
     }
@@ -378,6 +375,7 @@ export default {
     })
 
     return {
+      t,
       teams,
       availableUsers,
       filteredUsers,

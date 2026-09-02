@@ -65,3 +65,7 @@ def test_config_es_defaults_are_local(monkeypatch):
     port = int(os.getenv("ES_PORT", "9200"))
     assert host == "127.0.0.1"
     assert port == 9200
+
+
+def test_payment_history_view_exists():
+    assert callable(getattr(pay, "payment_history", None))

@@ -6,7 +6,7 @@
 
 import json
 import asyncio
-from typing import Any, Dict, Optional, List, Iterator
+from typing import Any, Dict, Optional, List, Iterator, Union
 import requests
 import os
 from config import Config
@@ -229,3 +229,61 @@ class ZhipuLLM:
         for i in range(0, len(text), chunk):
             yield {"type": "content_delta", "delta": text[i : i + chunk]}
         yield {"type": "done"}
+
+    def chat_completion_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: Any = "auto",
+        parallel_tool_calls: bool = False,
+        max_tokens: Optional[int] = None,
+        images: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """OpenAI 兼容 function calling（智谱 PaaS v4）。供 LangGraph / ReAct 工具环使用。"""
+        from llm.chat_messages import normalize_chat_messages
+
+        messages = normalize_chat_messages(messages)
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools or [],
+            "tool_choice": tool_choice if tool_choice is not None else "auto",
+            "temperature": Config.ZHIPU_TEMPERATURE,
+            "max_tokens": int(max_tokens or Config.ZHIPU_MAX_TOKENS or 4096),
+        }
+        # 工具调用阶段关闭思考，避免空 content + 无 tool_calls
+        if self.model == "glm-5":
+            payload["thinking"] = {"type": "disabled"}
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        timeout = (
+            float(os.getenv("LLM_HTTP_TIMEOUT_CONNECT", "5")),
+            float(os.getenv("LLM_HTTP_TIMEOUT_READ", "180")),
+        )
+        maybe_log_llm_chat_kwargs("zhipu", payload, tag="chat_completion_with_tools")
+        if not (self.api_key or "").strip():
+            raise ValueError("未配置 ZHIPU_API_KEY")
+
+        response = get_session().post(self.base_url, headers=headers, json=payload, timeout=timeout)
+        if response.status_code != 200:
+            err = f"ZhipuLLM tools HTTP {response.status_code}: {response.text[:800]}"
+            print(f"[ZHIPU-LLM] {err}", flush=True)
+            raise RuntimeError(err)
+
+        res_json = response.json()
+        maybe_log_llm_response_body(
+            "zhipu", res_json, tag="chat_completion_with_tools", model=self.model
+        )
+        msg = ((res_json.get("choices") or [{}])[0] or {}).get("message") or {}
+        out: Dict[str, Any] = {
+            "role": "assistant",
+            "content": msg.get("content") or "",
+        }
+        tcs = msg.get("tool_calls") or []
+        if tcs:
+            out["tool_calls"] = tcs
+        return out

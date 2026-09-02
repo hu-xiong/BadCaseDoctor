@@ -310,6 +310,28 @@ export function updateChatMessage(messageId, data) {
   return api.put(`/api/chat-messages/${apiPathId(messageId)}`, data, { timeout: 120000 })
 }
 
+/** 保存可续作的 ReAct 中断检查点 */
+export function saveReactCheckpoint(data) {
+  return api.post('/api/agent/react/checkpoint', data, { timeout: 60000 })
+}
+
+/** 本轮正常结束，清除 interrupted */
+export function completeReactCheckpoint(data) {
+  return api.post('/api/agent/react/checkpoint/complete', data)
+}
+
+/** 当前会话可续作任务 */
+export function getResumableReactRun(chatSessionId) {
+  return api.get('/api/agent/react/resumable', {
+    params: { chat_session_id: chatSessionId }
+  })
+}
+
+/** 忽略可续作任务 */
+export function dismissReactCheckpoint(runId) {
+  return api.post('/api/agent/react/checkpoint/dismiss', { run_id: runId })
+}
+
 /**
  * 聊天附图异步落库：POST /upload（MinIO），返回可公网/内网访问的 url。
  * 勿手动设 Content-Type，以便浏览器带 multipart boundary。

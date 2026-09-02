@@ -38,7 +38,14 @@
             {{ loading ? t('auth.loggingIn') : t('auth.login') }}
           </button>
         </div>
-        
+
+        <div v-if="showDemoHint" class="demo-hint mt-3">
+          <div class="demo-hint-title">{{ t('auth.demoHintTitle') }}</div>
+          <button type="button" class="btn btn-sm btn-outline-secondary w-100" @click="fillDemoAccount">
+            {{ t('auth.demoHintUse') }}
+          </button>
+          <div class="demo-hint-detail text-muted">{{ t('auth.demoHintDetail') }}</div>
+        </div>
 
       </form>
       
@@ -205,6 +212,12 @@ export default {
     const codeSending = ref(false)
     const registerLoading = ref(false)
     const forgotPasswordLoading = ref(false)
+    const showDemoHint = String(import.meta.env.VITE_SHOW_DEMO_LOGIN || '').trim() === '1'
+
+    const fillDemoAccount = () => {
+      form.email = 'test@example.com'
+      form.password = '123456'
+    }
     
     const handleLogin = async () => {
       loading.value = true
@@ -323,6 +336,8 @@ export default {
       codeSending,
       registerLoading,
       forgotPasswordLoading,
+      showDemoHint,
+      fillDemoAccount,
       handleLogin,
       handleRegister,
       sendVerificationCode: handleSendVerificationCode,
@@ -333,6 +348,25 @@ export default {
 </script>
 
 <style scoped>
+.demo-hint {
+  padding: 12px;
+  border: 1px dashed #ced4da;
+  border-radius: 8px;
+  background: #f8f9fa;
+  text-align: left;
+}
+.demo-hint-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #495057;
+}
+.demo-hint-detail {
+  font-size: 12px;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
 .login-container {
   min-height: 100vh;
   display: flex;

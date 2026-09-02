@@ -6,10 +6,10 @@
           class="action-icon-btn"
           @click="onShowCreatePlanModal"
           :title="t('project.addPlan')"
-          aria-label="新建迭代"
+          :aria-label="t('project.addPlan')"
         >
           <span class="icon">➕</span>
-          <span class="btn-text">新建迭代</span>
+          <span class="btn-text">{{ t('project.addPlan') }}</span>
         </button>
       </div>
     </div>

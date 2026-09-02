@@ -134,7 +134,7 @@ def _build_registry() -> List[ModelSpec]:
             id="glm-4-flash",
             label="GLM-4-Flash",
             provider="zhipu",
-            enabled=_enabled("glm-4-flash", default=False),
+            enabled=_enabled("glm-4-flash", default=True),
             vision=False,
             pricing=_price_for("glm-4-flash"),
             priority=30,

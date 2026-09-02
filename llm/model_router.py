@@ -21,7 +21,11 @@ from .failure_attribution import (
 )
 from .model_registry import get_model, is_supported_model, supports_vision
 from . import model_scheduler
-from .task_complexity import TaskComplexity, infer_task_complexity
+from .task_complexity import (
+    ComplexityAssessment,
+    TaskComplexity,
+    assess_task_complexity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,10 @@ class RouteContext:
     user_input: str = ""
     has_pending_diff: bool = False
     user_id: Optional[str] = None
+    # Auto 智能信号（可选）
+    conversation_turns: int = 0
+    has_client_terminal_results: bool = False
+    is_resume: bool = False
 
 
 @dataclass
@@ -61,6 +69,8 @@ class RouteResult:
     escalated_from: Optional[str] = None
     task_complexity: Optional[str] = None
     route_resolve_ms: float = 0.0
+    complexity_score: Optional[int] = None
+    complexity_signals: Optional[str] = None
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -96,11 +106,16 @@ def _map_cost_policy(
     ctx: RouteContext,
     complexity: TaskComplexity,
     prefer_low_latency: bool,
+    assessment: Optional[ComplexityAssessment] = None,
 ) -> str:
     ch = (ctx.channel or "react").lower()
     intent = (ctx.image_intent or "").lower()
+    if assessment and assessment.prefer_quality:
+        return "quality_first"
     if complexity == "complex":
         return "quality_first"
+    if assessment and assessment.prefer_cheap:
+        return "cost_first"
     if complexity == "simple" or prefer_low_latency:
         return "cost_first"
     if ch == "summary":
@@ -109,6 +124,7 @@ def _map_cost_policy(
         return "cost_first"
     if intent in ("react", "prototype") and ctx.has_images:
         return "quality_first"
+    # 中档偏质量：写库意图已被 assessment 抬升；标准对话用 balanced
     return "balanced"
 
 
@@ -199,58 +215,81 @@ def _apply_downgrade(ctx: RouteContext, complexity: TaskComplexity) -> RouteResu
     )
 
 
+def _attach_assessment(result: RouteResult, assessment: ComplexityAssessment) -> RouteResult:
+    result.complexity_score = assessment.score
+    result.complexity_signals = ",".join(assessment.signals[:12])
+    result.task_complexity = assessment.complexity
+    return result
+
+
 def _resolve_auto(ctx: RouteContext, *, rejected_alias: bool) -> RouteResult:
-    complexity = infer_task_complexity(
+    assessment = assess_task_complexity(
         channel=ctx.channel or "react",
         user_input=ctx.user_input,
         has_images=ctx.has_images,
         image_intent=ctx.image_intent,
         has_pending_diff=ctx.has_pending_diff,
+        conversation_turns=int(ctx.conversation_turns or 0),
+        has_client_terminal_results=bool(ctx.has_client_terminal_results),
+        is_resume=bool(ctx.is_resume),
     )
-    prefer_ll = _infer_prefer_low_latency(ctx, complexity)
+    complexity = assessment.complexity
+    prefer_ll = _infer_prefer_low_latency(ctx, complexity) and not assessment.prefer_quality
 
     uid = str(ctx.user_id or "")
     sid = (ctx.session_id or "").strip()
     if uid and sid:
         esc = get_escalation_state(uid, ctx.project_id, sid)
         if esc and should_escalate(FailureAttribution(esc.attribution)):
-            return _apply_escalation(ctx, esc)
+            return _attach_assessment(_apply_escalation(ctx, esc), assessment)
 
     sticky = None
     if uid and sid and _env_bool("AUTO_DOWNGRADE_SIMPLE_ENABLED", True):
         sticky = get_downgrade_sticky(uid, ctx.project_id, sid)
 
-    if (
+    # 写库 / 终端续跑 / 中断恢复：禁止降到最便宜档
+    allow_downgrade = (
         _env_bool("AUTO_DOWNGRADE_SIMPLE_ENABLED", True)
+        and not assessment.block_downgrade
         and complexity == "simple"
-        and not (uid and sid and get_escalation_state(uid, ctx.project_id, sid))
-    ):
-        return _apply_downgrade(ctx, complexity)
+    )
 
-    if sticky and complexity in ("simple", "standard") and len((ctx.user_input or "")) <= int(
-        os.getenv("SIMPLE_TASK_MAX_CHARS", "400") or 400
+    if allow_downgrade and not (uid and sid and get_escalation_state(uid, ctx.project_id, sid)):
+        return _attach_assessment(_apply_downgrade(ctx, complexity), assessment)
+
+    if (
+        sticky
+        and not assessment.block_downgrade
+        and complexity == "simple"
+        and len((ctx.user_input or "")) <= int(os.getenv("SIMPLE_TASK_MAX_CHARS", "400") or 400)
     ):
         bid = sticky.model_id
         if is_supported_model(bid):
             vid = _vision_for_business(bid, ctx, cost_policy="cost_first", exclude=frozenset())
-            return RouteResult(
-                business_model_id=bid,
-                vision_model_id=vid,
-                route_reason="auto_downgrade_sticky",
-                used_auto=True,
-                task_complexity=complexity,
+            return _attach_assessment(
+                RouteResult(
+                    business_model_id=bid,
+                    vision_model_id=vid,
+                    route_reason="auto_downgrade_sticky",
+                    used_auto=True,
+                    task_complexity=complexity,
+                ),
+                assessment,
             )
 
-    cost_policy = _map_cost_policy(ctx, complexity, prefer_ll)
+    cost_policy = _map_cost_policy(ctx, complexity, prefer_ll, assessment)
     require_vision = None
     if ctx.channel == "vision_describe":
         vid = model_scheduler.pick_best_vision()
-        return RouteResult(
-            business_model_id=Config.DASHSCOPE_MODEL,
-            vision_model_id=vid,
-            route_reason="vision_describe_only",
-            used_auto=True,
-            task_complexity=complexity,
+        return _attach_assessment(
+            RouteResult(
+                business_model_id=Config.DASHSCOPE_MODEL,
+                vision_model_id=vid,
+                route_reason="vision_describe_only",
+                used_auto=True,
+                task_complexity=complexity,
+            ),
+            assessment,
         )
 
     if ctx.has_images and (ctx.image_intent or "").lower() in ("react", "prototype"):
@@ -267,17 +306,28 @@ def _resolve_auto(ctx: RouteContext, *, rejected_alias: bool) -> RouteResult:
     if not bid:
         bid = Config.DASHSCOPE_MODEL
 
-    reason = f"auto_{ctx.channel}_{cost_policy}"
+    reason = f"auto_{ctx.channel}_{cost_policy}_s{assessment.score}"
     if rejected_alias:
         reason = "reject_logical_alias_" + reason
 
     vid = _vision_for_business(bid, ctx, cost_policy=cost_policy, exclude=frozenset())
-    return RouteResult(
-        business_model_id=bid,
-        vision_model_id=vid,
-        route_reason=reason,
-        used_auto=True,
-        task_complexity=complexity,
+    if _env_bool("AUTO_ROUTE_DEBUG", False):
+        logger.info(
+            "[MODEL_ROUTE] auto score=%s signals=%s policy=%s model=%s",
+            assessment.score,
+            assessment.signals,
+            cost_policy,
+            bid,
+        )
+    return _attach_assessment(
+        RouteResult(
+            business_model_id=bid,
+            vision_model_id=vid,
+            route_reason=reason,
+            used_auto=True,
+            task_complexity=complexity,
+        ),
+        assessment,
     )
 
 
@@ -332,6 +382,9 @@ def resolve_model_name(
     has_pending_diff: bool = False,
     user_id: Optional[str] = None,
     pending_diff_context: Optional[list] = None,
+    conversation_turns: int = 0,
+    has_client_terminal_results: bool = False,
+    is_resume: bool = False,
 ) -> str:
     """供 agent/chat 使用的薄封装，返回 business model id。"""
     ctx = RouteContext(
@@ -344,6 +397,9 @@ def resolve_model_name(
         user_input=user_input,
         has_pending_diff=has_pending_diff or bool(pending_diff_context),
         user_id=user_id,
+        conversation_turns=conversation_turns,
+        has_client_terminal_results=has_client_terminal_results,
+        is_resume=is_resume,
     )
     return resolve_request_model(ctx).business_model_id
 
@@ -359,6 +415,9 @@ def resolve_route(
     user_input: str = "",
     has_pending_diff: bool = False,
     user_id: Optional[str] = None,
+    conversation_turns: int = 0,
+    has_client_terminal_results: bool = False,
+    is_resume: bool = False,
 ) -> RouteResult:
     """完整路由结果（含 vision_model_id）。"""
     ctx = RouteContext(
@@ -371,5 +430,8 @@ def resolve_route(
         user_input=user_input,
         has_pending_diff=has_pending_diff,
         user_id=user_id,
+        conversation_turns=conversation_turns,
+        has_client_terminal_results=has_client_terminal_results,
+        is_resume=is_resume,
     )
     return resolve_request_model(ctx)

@@ -1379,6 +1379,15 @@ def react_summarize_cdp_done(observation: Dict[str, Any], locale: Optional[str])
             msg += f" ({route})" if is_english_locale(locale) else f"，已进入{route}"
         return msg
 
+    vision = str(observation.get("vision_description") or "").strip()
+    if vision:
+        prefix = "Vision: " if is_english_locale(locale) else "视觉："
+        if is_english_locale(locale):
+            base = f"cdp {action or 'step'} finished: success={ok}" + (f", {route}" if route else "")
+        else:
+            base = f"cdp {action or '步骤'} 完成：success={ok}" + (f"，{route}" if route else "")
+        return f"{base} · {prefix}{vision[:180]}"
+
     if is_english_locale(locale):
         return f"cdp {action or 'step'} finished: success={ok}" + (f", {route}" if route else "")
     return f"cdp {action or '步骤'} 完成：success={ok}" + (f"，{route}" if route else "")
@@ -1443,6 +1452,17 @@ def enrich_nl_observation_for_incremental_summary_llm(
     clicks = observation.get("exploration_clicks")
     if clicks is not None:
         parts.append(f"[explore.clicks] {clicks}")
+
+    vision = str(observation.get("vision_description") or "").strip()
+    if vision:
+        parts.append(f"[screenshot.vision] {vision[:500]}")
+    agent_hint = str(observation.get("agent_hint") or "").strip()
+    if agent_hint:
+        parts.append(f"[agent_hint] {agent_hint[:300]}")
+    if observation.get("stale_ref_recovered") or observation.get("new_snapshot_id"):
+        parts.append(
+            "[stale_ref] use new_snapshot_id/focus_hints; re-snapshot then retry click/fill"
+        )
 
     url = str(observation.get("url") or page.get("url") or "").strip()
     route = _cdp_page_route_label(url, locale)

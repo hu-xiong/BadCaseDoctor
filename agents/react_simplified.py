@@ -7994,12 +7994,16 @@ class SimplifiedReActEngine:
         images: Optional[List[Dict[str, Any]]] = None,
         ui_context: Optional[Dict[str, Any]] = None,
         raw_user_input: Optional[str] = None,
+        client_terminal_results: Optional[List[Dict[str, Any]]] = None,
+        langgraph_resume: Optional[Dict[str, Any]] = None,
     ):
         """
         流式执行 ReAct（Skill 工具）。plan_id 为当前迭代计划 ID，传入则 grep 可只检索该计划下记录。
         内部仍用 ``event`` 字典；本方法在出口统一转为 SSE v1（``type`` + ``payload``），上层无需再映射。
         """
         _ = conversation_history  # 统一 XML 路径依赖上层注入的 user_input 提示；LangGraph 会完整入 messages
+        _ = client_terminal_results  # 已由 IntelligentDevOpsAgent 注入 user_input
+        _ = langgraph_resume  # 仅 LangGraph 引擎消费断点快照
         _last_wire_phase: Optional[str] = None
         _auto_capture_scheduled = False
         async for raw in self._run_unified_xml_stream(

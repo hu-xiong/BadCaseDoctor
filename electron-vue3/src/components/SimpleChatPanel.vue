@@ -11,6 +11,15 @@
         ×
       </button>
     </div>
+    <div v-if="resumableRun" class="react-resumable-banner" role="status">
+      <span class="react-resumable-text">{{ t('chat.resumableHint') }}</span>
+      <button type="button" class="btn btn-sm btn-primary" :disabled="isSending" @click="onResumeInterruptedRun">
+        {{ t('chat.resumableContinue') }}
+      </button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="isSending" @click="onDismissResumableRun">
+        {{ t('chat.resumableDismiss') }}
+      </button>
+    </div>
     <!-- 图片大图预览弹层 -->
     <Teleport to="body">
       <div v-if="imagePreviewSrc" class="image-preview-overlay" @click.self="closeImagePreview">
@@ -939,7 +948,11 @@ import {
   createBadcase,
   createTestCase,
   createCard,
-  createPlan
+  createPlan,
+  saveReactCheckpoint,
+  completeReactCheckpoint,
+  getResumableReactRun,
+  dismissReactCheckpoint
 } from '../api.js'
 import { apiLocaleParam } from '../i18n/index.js'
 import EvidenceCard from './EvidenceCard.vue'
@@ -982,6 +995,7 @@ import {
   patchTerminalExecCard,
   terminalExecStatusLabelKey
 } from '../composables/flushPendingTerminalExec.js'
+import { toClientTerminalResultsPayload } from '../utils/terminalSubAgent.js'
 import {
   getTerminalAutoRunMode,
   setTerminalAutoRunMode
@@ -1037,6 +1051,60 @@ const ensureBottomTerminalVisible = inject('ensureBottomTerminalVisible', null)
 const agentLocalProxyHint = ref('')
 const terminalAutoRunMode = ref(getTerminalAutoRunMode())
 const localRunExecTip = ref('')
+/** 可续作的中断任务（GET /react/resumable） */
+const resumableRun = ref(null)
+
+const resolveClientShell = () => {
+  try {
+    const ctl =
+      terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl
+        ? terminalCtl.value
+        : terminalCtl
+    if (ctl && typeof ctl.getClientShell === 'function') {
+      const sh = ctl.getClientShell()
+      if (sh && typeof sh === 'object') return sh
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  const isWin =
+    typeof navigator !== 'undefined' &&
+    (/Win/i.test(navigator.userAgent || '') || /Win/i.test(navigator.platform || ''))
+  return { cwd: '', platform: isWin ? 'windows' : 'posix', shell: isWin ? 'powershell' : 'bash' }
+}
+
+const refreshResumableRun = async () => {
+  if (!props.sessionId) {
+    resumableRun.value = null
+    return
+  }
+  try {
+    const res = await getResumableReactRun(props.sessionId)
+    const run = res?.data?.run || res?.data?.data || null
+    resumableRun.value = run && run.id ? run : null
+  } catch (_) {
+    resumableRun.value = null
+  }
+}
+
+const onResumeInterruptedRun = async () => {
+  const run = resumableRun.value
+  if (!run?.id || isSending.value) return
+  const hint = t('chat.resumableContinuePrompt')
+  await sendText(hint, [], { resumeRunId: run.id })
+  resumableRun.value = null
+}
+
+const onDismissResumableRun = async () => {
+  const run = resumableRun.value
+  if (!run?.id) return
+  try {
+    await dismissReactCheckpoint(run.id)
+  } catch (_) {
+    /* ignore */
+  }
+  resumableRun.value = null
+}
 let localRunExecTipTimer = null
 const localProxyOneClickBusy = ref(false)
 /** 防止代理上线续跑重入 */
@@ -1552,9 +1620,12 @@ function isPlaceholderSessionTitle(title) {
           )
       )
     }
-    // 手动执行后把结果回传助手，便于继续后续步骤
+    // 手动执行后把结构化结果回传主 Agent（终端子 Agent → resume）
     if (outcome?.text && !isSending.value) {
-      await sendText(`【本机终端执行结果】\n\n${outcome.text}`)
+      const payload = toClientTerminalResultsPayload([outcome])
+      await sendText(`【本机终端执行结果】\n\n${outcome.text}`, [], {
+        clientTerminalResults: payload
+      })
     }
   }
 
@@ -3884,7 +3955,7 @@ const saveMessageToDb = async (messageData) => {
   }
 }
 
-const sendText = async (rawText, imagesToSend = null) => {
+const sendText = async (rawText, imagesToSend = null, sendOpts = {}) => {
   const text = (rawText || '').trim()
   const images = imagesToSend ?? pendingImages.value
   const hasImages = images && images.length > 0
@@ -3962,7 +4033,11 @@ const sendText = async (rawText, imagesToSend = null) => {
 
     // Agent 模式一律走后端 /api/agent/react，由后端统一做意图识别与分流
     if (selectedAgent.value === 'agent') {
-      await handleReactAgentMode(messageContent, imagesPayload)
+      await handleReactAgentMode(messageContent, imagesPayload, {
+        clientTerminalResults: sendOpts?.clientTerminalResults,
+        resumeRunId: sendOpts?.resumeRunId,
+        terminalContinueDepth: sendOpts?.terminalContinueDepth
+      })
     } else {
       await handleChatMode(messageContent, imagesPayload)
     }
@@ -4050,12 +4125,20 @@ onMounted(() => {
   if (typeof window !== 'undefined') {
     window.addEventListener(EVT_LOCAL_PROXY_BECAME_OK, onLocalProxyBecameOkEvent)
   }
+  void refreshResumableRun()
 })
 onUnmounted(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener(EVT_LOCAL_PROXY_BECAME_OK, onLocalProxyBecameOkEvent)
   }
 })
+
+watch(
+  () => props.sessionId,
+  () => {
+    void refreshResumableRun()
+  }
+)
 
 const beginEditUserMessage = (msg) => {
   if (!msg) return
@@ -4146,6 +4229,10 @@ const handleStop = () => {
 const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) => {
   console.log('[MODEL-DEBUG] 当前选择的模型', selectedModel.value)
   const terminalContinueDepth = Math.max(0, Number(reactOpts?.terminalContinueDepth) || 0)
+  const clientTerminalResults = Array.isArray(reactOpts?.clientTerminalResults)
+    ? reactOpts.clientTerminalResults
+    : null
+  const resumeRunId = String(reactOpts?.resumeRunId || '').trim() || null
 
   const aiMessage = reactive(createReactAiMessageState(Date.now() + 1))
   
@@ -4159,6 +4246,7 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
   try {
     console.log(`[CHAT-REACT] 调用 ReAct Agent 接口 (流式): ${userMessage}`)
     console.log('[MODEL-DEBUG] 请求参数 model:', selectedModel.value)
+    const clientShell = resolveClientShell()
     const response = await fetch(`${BACKEND_BASE_URL}/api/agent/react`, {
       method: 'POST',
       headers: {
@@ -4174,6 +4262,11 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
         images: images || [],
         locale: localeForApi(),
         chat_session_id: props.sessionId || undefined,
+        client_shell: clientShell,
+        ...(clientTerminalResults && clientTerminalResults.length
+          ? { client_terminal_results: clientTerminalResults }
+          : {}),
+        ...(resumeRunId ? { resume_run_id: resumeRunId } : {}),
         ...(String(props.projectDisplayName || '').trim()
           ? { project_display_name: String(props.projectDisplayName).trim() }
           : {}),
@@ -4332,6 +4425,7 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
 
   // SSE 结束后：按 Auto-Run 策略在本机执行 terminal_exec 队列，并回写卡片
   let terminalFollowUp = ''
+  let terminalResultsPayload = []
   if (
     Array.isArray(aiMessage.pendingTerminalExecQueue) &&
     aiMessage.pendingTerminalExecQueue.length &&
@@ -4352,6 +4446,7 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
         onAfter: () => scrollToBottom()
       })
       terminalFollowUp = String(flushed?.followUpText || '').trim()
+      terminalResultsPayload = Array.isArray(flushed?.results) ? flushed.results : []
     } catch (e) {
       console.error('[CHAT-TERMINAL] flush pending exec failed:', e)
     }
@@ -4427,6 +4522,53 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
     final_response: aiMessage.finalResponse
   })
 
+  // 检查点：终端卡 / 代理挂起 / LangGraph 人机打断 → 记 interrupted；否则标记本轮完成
+  const reqIdForCk =
+    reactStreamRequestIdRef.value ||
+    aiMessage?.agentResult?.request_id ||
+    aiMessage?.requestId ||
+    ''
+  const stillQueuedTerminal = (aiMessage.clientTerminalExecCards || []).some(
+    (c) => c && c.status === 'queued'
+  )
+  const needHumanResume = !!(aiMessage.awaitingHumanResume || aiMessage.langgraphResume)
+  // 用户点停止后仍要保存人机/终端挂起检查点（后端 cancel 也会落库；前端有 snapshot 时一并写）
+  if (props.sessionId && reqIdForCk) {
+    try {
+      if (stillQueuedTerminal || aiMessage.awaitProxyResume || needHumanResume) {
+        let interruptReason = 'awaiting_local_proxy'
+        if (stillQueuedTerminal) interruptReason = 'awaiting_client_terminal'
+        else if (needHumanResume) {
+          interruptReason = stopSignal?.aborted ? 'cancelled' : 'awaiting_human'
+        }
+        await saveReactCheckpoint({
+          chat_session_id: props.sessionId,
+          project_id: currentProjectId.value || props.projectId,
+          react_request_id: reqIdForCk,
+          user_input: userMessage,
+          model: selectedModel.value,
+          checkpoint: {
+            interrupt_reason: interruptReason,
+            original_user_input: userMessage,
+            pending_terminal_cards: aiMessage.clientTerminalExecCards || [],
+            summary: aiMessage.finalResponse || '',
+            ...(aiMessage.langgraphResume && typeof aiMessage.langgraphResume === 'object'
+              ? { langgraph_resume: aiMessage.langgraphResume }
+              : {})
+          }
+        })
+        await refreshResumableRun()
+      } else if (!stopSignal?.aborted) {
+        await completeReactCheckpoint({ react_request_id: reqIdForCk })
+      } else {
+        // 停止时后端可能已写 cancelled 断点：刷新可续跑横幅
+        await refreshResumableRun()
+      }
+    } catch (e) {
+      console.warn('[CHAT-REACT] checkpoint sync failed', e)
+    }
+  }
+
   // 本机命令/浏览器结果作为下一条用户上下文继续 ReAct（与后端 pause 文案对齐）
   // 安装代理卡挂起时不自动续跑，等代理上线由 resumePendingAfterProxyOnline 触发
   if (
@@ -4449,7 +4591,8 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
     })
     scrollToBottom()
     await handleReactAgentMode(clientFollowUp, [], {
-      terminalContinueDepth: terminalContinueDepth + 1
+      terminalContinueDepth: terminalContinueDepth + 1,
+      clientTerminalResults: terminalResultsPayload
     })
   }
 }
@@ -5113,6 +5256,24 @@ watch(() => props.sessionId, (newSessionId) => {
   overflow: hidden;
   margin: 0;
   padding: 0;
+}
+
+.react-resumable-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #cde4ff;
+  background: rgba(33, 150, 243, 0.14);
+  border-bottom: 1px solid rgba(33, 150, 243, 0.28);
+}
+.react-resumable-text {
+  flex: 1;
+  min-width: 140px;
 }
 
 .agent-local-proxy-hint {

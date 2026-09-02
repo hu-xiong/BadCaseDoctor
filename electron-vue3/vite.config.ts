@@ -23,7 +23,8 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
-    host: 'localhost',
+    // 显式绑 IPv4：Windows 上 host:localhost 常只听 [::1]，CDP/Chrome 走 127.0.0.1 会连不上
+    host: '127.0.0.1',
     strictPort: true,
     open: false,
     proxy: {

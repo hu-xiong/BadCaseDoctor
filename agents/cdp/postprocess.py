@@ -8,6 +8,21 @@ from typing import Any, Dict, Optional
 from agents.cdp.evidence import get_cdp_evidence_recorder
 
 
+def _normalize_cdp_action(action: str, observation: Dict[str, Any], params: Dict[str, Any]) -> str:
+    act = (action or observation.get("action") or params.get("action") or "").strip().lower()
+    # session.create 返回 action=create，与工具入参 action=session 对齐
+    if act == "create" or (
+        act in ("", "create")
+        and str(params.get("sub_action") or "").strip().lower() in ("create", "")
+        and (params.get("url") or observation.get("session_id"))
+    ):
+        if str(params.get("action") or "").strip().lower() == "session" or observation.get(
+            "session_id"
+        ):
+            return "session"
+    return act
+
+
 async def enrich_cdp_observation(
     engine: Any,
     observation: Dict[str, Any],
@@ -25,9 +40,10 @@ async def enrich_cdp_observation(
     if not isinstance(observation, dict):
         return observation
 
-    act = (action or observation.get("action") or "").strip().lower()
     par = params if isinstance(params, dict) else {}
+    act = _normalize_cdp_action(action, observation, par)
 
+    # 1) 测试任务：失败不影响后续自动探测
     try:
         from agents.cdp.test_task import (
             ensure_cdp_test_task,
@@ -69,21 +85,40 @@ async def enrich_cdp_observation(
                 )
                 if isinstance(result_context, dict) and result_context.get("cdp_test_run"):
                     observation["cdp_test_run"] = result_context["cdp_test_run"]
+    except Exception as ex:
+        print(f"[CDP] test_task enrich skipped: {ex}", flush=True)
 
-            # testcase 模式：session/navigate/login 后自动跑用例 steps
-            from agents.cdp.auto_run_testcase import maybe_auto_run_testcases
+    # 2) 自动跑用例 / 探测：不依赖 run_id（任务表失败时仍要探测）
+    try:
+        from agents.cdp.auto_run_testcase import maybe_auto_run_testcases
 
-            observation = await maybe_auto_run_testcases(
-                engine,
-                observation,
-                action=act,
-                params=par,
-                project_id=project_id,
-                plan_id=plan_id,
-                result_context=result_context,
-            )
-    except Exception:
-        pass
+        observation = await maybe_auto_run_testcases(
+            engine,
+            observation,
+            action=act,
+            params=par,
+            project_id=project_id,
+            plan_id=plan_id,
+            result_context=result_context,
+        )
+    except Exception as ex:
+        print(f"[CDP] auto_run_testcase skipped: {ex}", flush=True)
+
+    try:
+        from agents.cdp.auto_run_explore import maybe_auto_run_explore
+
+        observation = await maybe_auto_run_explore(
+            engine,
+            observation,
+            action=act,
+            params=par,
+            project_id=project_id,
+            plan_id=plan_id,
+            user_query=user_query or "",
+            result_context=result_context,
+        )
+    except Exception as ex:
+        print(f"[CDP] auto_run_explore skipped: {ex}", flush=True)
 
     recorder = get_cdp_evidence_recorder()
     if act in ("explore",) and observation.get("cdp_test_evidence"):
@@ -96,25 +131,33 @@ async def enrich_cdp_observation(
             user_query=user_query,
         )
 
-    if act == "explore" and observation.get("exploration_issues"):
-        from agents.cdp.auto_create import postprocess_cdp_explore_interaction_creates
+    if (act == "explore" or observation.get("cdp_auto_explore")) and observation.get(
+        "exploration_issues"
+    ):
+        try:
+            from agents.cdp.auto_create import postprocess_cdp_explore_interaction_creates
 
-        observation = await postprocess_cdp_explore_interaction_creates(
-            engine,
-            observation,
-            project_id=project_id,
-            plan_id=plan_id or par.get("plan_id"),
-            result_context=result_context,
-        )
+            observation = await postprocess_cdp_explore_interaction_creates(
+                engine,
+                observation,
+                project_id=project_id,
+                plan_id=plan_id or par.get("plan_id"),
+                result_context=result_context,
+            )
+        except Exception as ex:
+            print(f"[CDP] explore create postprocess skipped: {ex}", flush=True)
 
     if observation.get("assertion_failed") or observation.get("has_obvious_issues"):
-        from agents.cdp.auto_create import postprocess_cdp_failure_creates
+        try:
+            from agents.cdp.auto_create import postprocess_cdp_failure_creates
 
-        observation = await postprocess_cdp_failure_creates(
-            engine,
-            observation,
-            project_id=project_id,
-            plan_id=plan_id or par.get("plan_id"),
-            result_context=result_context,
-        )
+            observation = await postprocess_cdp_failure_creates(
+                engine,
+                observation,
+                project_id=project_id,
+                plan_id=plan_id or par.get("plan_id"),
+                result_context=result_context,
+            )
+        except Exception as ex:
+            print(f"[CDP] failure create postprocess skipped: {ex}", flush=True)
     return observation

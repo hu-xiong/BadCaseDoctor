@@ -78,16 +78,19 @@
 
     <div v-else class="left-sidebar-placeholder">
       <div class="placeholder-title">{{ activeLeftPanel }}</div>
-      <div class="placeholder-desc">该面板稍后接入（search/archive/plugins）。</div>
+      <div class="placeholder-desc">{{ t('project.panelComingSoon') }}</div>
     </div>
   </div>
 </template>
 
 <script setup>
+import { useI18n } from 'vue-i18n'
 import PlansPanel from './PlansPanel.vue'
 import SearchPanel from './SearchPanel.vue'
 import ArchivePanel from './ArchivePanel.vue'
 import PluginsPanel from './PluginsPanel.vue'
+
+const { t } = useI18n()
 
 defineEmits(['closeSearch', 'selectSearchResult', 'pluginAction'])
 

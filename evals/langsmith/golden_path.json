@@ -1,0 +1,42 @@
+{
+  "dataset_name": "badcase-golden-path",
+  "description": "LangGraph 金路径：grep→modify 预览停图、门控、空检索熔断",
+  "examples": [
+    {
+      "id": "gp-modify-preview",
+      "inputs": {
+        "user_input": "把登录失败的 bug 优先级改为 p1"
+      },
+      "outputs": {
+        "expected_tools": ["grep", "modify"],
+        "require_preview_stop": true,
+        "forbid_confirm_true": true,
+        "min_tools": 2
+      }
+    },
+    {
+      "id": "gp-gate-coerce",
+      "inputs": {
+        "user_input": "修改网盘显示问题的状态为已关闭",
+        "force_first_tool": "modify"
+      },
+      "outputs": {
+        "expected_tools_prefix": ["grep"],
+        "require_preview_stop": true,
+        "forbid_confirm_true": true
+      }
+    },
+    {
+      "id": "gp-empty-grep-stop",
+      "inputs": {
+        "user_input": "修改一个绝对不存在的xyzzy999标题优先级为p0",
+        "grep_empty": true
+      },
+      "outputs": {
+        "expected_tools": ["grep"],
+        "require_empty_grep_stop": true,
+        "max_grep_calls": 1
+      }
+    }
+  ]
+}

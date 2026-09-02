@@ -227,7 +227,7 @@
           @project-selected="handleProjectSelected"
         />
         <div
-          v-if="!(showMainEditor && mainEditorComponent)"
+          v-if="showWorkbenchListRoot"
           ref="workbenchListRootRef"
           class="workbench-list-root"
         >
@@ -688,11 +688,12 @@
         <div class="plan-modal-body">
           <div class="plan-form-row">
             <div class="plan-form-item">
-              <label class="plan-form-label required">标题</label>
+              <label class="plan-form-label required">{{ t('project.planName') }}</label>
               <input 
                 type="text" 
                 v-model="newPlan.name" 
                 class="plan-form-input"
+                :placeholder="t('project.planNamePlaceholder')"
                 maxlength="50"
               />
             </div>
@@ -700,11 +701,11 @@
           
           <div class="plan-form-row plan-form-row-2col">
             <div class="plan-form-item">
-              <label class="plan-form-label required">开始时间</label>
+              <label class="plan-form-label required">{{ t('project.startDate') }}</label>
               <input type="date" v-model="newPlan.startDate" class="plan-form-input" placeholder=" " />
             </div>
             <div class="plan-form-item">
-              <label class="plan-form-label required">结束时间</label>
+              <label class="plan-form-label required">{{ t('project.endDate') }}</label>
               <input type="date" v-model="newPlan.endDate" class="plan-form-input" placeholder=" " />
             </div>
           </div>
@@ -735,7 +736,7 @@
         
         <div class="plan-modal-footer">
           <button class="plan-btn plan-btn-default" @click="createPlanAndContinue" :disabled="!isFormValid">
-            继续添加
+            {{ t('project.continueAddPlan') }}
           </button>
           <div class="plan-modal-footer-right">
             <button class="plan-btn plan-btn-cancel" @click="closeCreateModal">{{ t('prefs.cancel') }}</button>
@@ -1475,6 +1476,16 @@ export default {
     const isTerminalSettingsWorkbenchTab = computed(
       () => activeWorkbenchTabId.value === TERMINAL_SETTINGS_WORKBENCH_TAB_ID
     )
+    /** Settings/Help 等专用 Tab 打开时隐藏列表，避免与面板纵向叠在一起 */
+    const showWorkbenchListRoot = computed(() => {
+      if (showMainEditor.value && mainEditorComponent.value) return false
+      if (isSettingsWorkbenchTab.value) return false
+      if (isTerminalSettingsWorkbenchTab.value) return false
+      if (isHelpWorkbenchTab.value) return false
+      if (isNotificationsWorkbenchTab.value) return false
+      if (isProjectManagementWorkbenchTab.value) return false
+      return true
+    })
     const activeWorkbenchTab = computed(() => workbenchTabs.value.find(t => t.id === activeWorkbenchTabId.value))
     
     /** 供嵌入式终端展示/关联的“当前卡片上下文”（来自工作台 Tab meta） */
@@ -12348,6 +12359,7 @@ const totalCards = ref(0)
       openNotificationsWorkbenchTab,
       closeAppSettingsWorkbenchTab,
       isSettingsWorkbenchTab,
+      showWorkbenchListRoot,
       // 类型过滤器和处理方法
       currentTypeFilter,
       handleOpenTypeList,

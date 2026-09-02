@@ -18,6 +18,12 @@ from .evidence import (
 )
 from .screenshot import capture_and_upload_cdp_screenshot, format_steps_html_with_screenshot
 from .overlay import close_overlay, overlay_close_button_nodes, overlay_is_visible
+from .vision_recover import (
+    apply_vision_recover_action,
+    cdp_vision_recover_enabled,
+    cdp_vision_recover_max,
+    vision_recover_from_page,
+)
 
 if TYPE_CHECKING:
     from .session_manager import CdpSessionManager
@@ -28,11 +34,17 @@ _CLICKABLE_ROLES = frozenset({
     "treeitem", "option", "switch", "checkbox", "radio",
 })
 
+# 探测填写：只对「真正能键盘输入」的控件试填；日期 spinbutton / combobox 用 fill 必失败，不算缺陷
 _FILLABLE_ROLES = frozenset({
-    "textbox", "searchbox", "combobox", "spinbutton",
+    "textbox", "searchbox",
+})
+_PROBE_SKIP_FILL_ROLES = frozenset({
+    "combobox", "spinbutton", "listbox", "slider",
 })
 
 _CDP_PROBE_FILL_TEXT = "cdp_probe"
+
+_DATE_NAME_HINTS = ("年", "月", "日", "日期", "date", "time", "开始", "结束", "deadline")
 
 _SKIP_NAME_KEYWORDS = (
     "删除", "注销", "logout", "sign out", "退出", "登出", "destroy", "remove",
@@ -91,7 +103,7 @@ def filter_explorable_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def filter_fillable_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """可填写输入框（含弹窗内）。"""
+    """适合盲目试填的输入框（不含日期旋钮 / 下拉，避免假缺陷）。"""
     out: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     for n in nodes or []:
@@ -100,7 +112,13 @@ def filter_fillable_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if n.get("disabled"):
             continue
         role = str(n.get("role") or "").lower()
+        if role in _PROBE_SKIP_FILL_ROLES:
+            continue
         if role not in _FILLABLE_ROLES:
+            continue
+        name = str(n.get("name") or "")
+        # 日期相关文案的 textbox 也跳过（部分组件暴露为 textbox）
+        if any(h in name.lower() for h in _DATE_NAME_HINTS):
             continue
         ref = str(n.get("ref") or "").strip()
         if not ref or ref in seen:
@@ -360,6 +378,9 @@ async def run_exploration(
     fills = 0
     visited_refs: Set[str] = set()
     visited_fill_refs: Set[str] = set()
+    vision_budget = cdp_vision_recover_max() if cdp_vision_recover_enabled() else 0
+    vision_used = 0
+    vision_notes: List[str] = []
 
     async def _record(action: str, params: Dict[str, Any], obs: Dict[str, Any]) -> None:
         recorder.record(session_id, action, params, obs)
@@ -380,6 +401,7 @@ async def run_exploration(
 
     async def _explore_overlay_if_open(depth: int) -> None:
         """弹窗已打开时：在 overlay 内继续 DFS，再关闭弹窗。"""
+        nonlocal clicks
         if not await overlay_is_visible(page):
             return
         if depth < depth_limit:
@@ -428,12 +450,19 @@ async def run_exploration(
                 fill_res,
             )
             if not fill_res.get("success"):
+                msg = str(fill_res.get("message") or fill_res.get("error") or "填写失败")
+                # 控件消失 / 弹窗已关：探测时序问题，不记缺陷
+                if any(
+                    k in msg
+                    for k in ("找到 0 个", "stale", "not visible", "hidden", "detached", "Timeout")
+                ):
+                    continue
                 issues.append({
                     "type": "fill_failed",
                     "ref": ref,
                     "role": node.get("role"),
                     "name": node.get("name"),
-                    "message": str(fill_res.get("message") or fill_res.get("error") or "填写失败"),
+                    "message": msg,
                     "severity": "low",
                 })
 
@@ -486,16 +515,82 @@ async def run_exploration(
                 click_res["success"] = True
                 click_res["click_recovered"] = "overlay_opened"
 
-            if not click_res.get("success"):
-                issues.append(
-                    _issue_from_click_failure(
-                        ref=ref,
-                        node=node,
-                        click_res=click_res,
-                        before_url=before_url,
-                        before_title=before_title,
-                    )
+            if not click_res.get("success") and vision_used < vision_budget:
+                vision_used += 1
+                err = str(click_res.get("message") or click_res.get("error") or "")
+                decision = await vision_recover_from_page(
+                    page,
+                    action="click",
+                    role=str(node.get("role") or ""),
+                    name=str(node.get("name") or ""),
+                    error=err,
+                    url=before_url,
                 )
+                applied = await apply_vision_recover_action(
+                    page=page,
+                    mgr=mgr,
+                    session_id=session_id,
+                    owner_key=owner_key,
+                    actor=actor,
+                    node=node,
+                    snap_id=cur_snap.get("snapshot_id"),
+                    decision=decision,
+                )
+                note = str(applied.get("note") or decision.get("reason") or "").strip()
+                if note:
+                    vision_notes.append(f"@{ref} {decision.get('verdict')}: {note}")
+                retry_obs = applied.get("click_res")
+                if isinstance(retry_obs, dict) and retry_obs.get("success"):
+                    click_res = retry_obs
+                    click_res = dict(click_res)
+                    click_res["click_recovered"] = "vision_retry"
+                    await _record(
+                        "click",
+                        {
+                            "ref": ref,
+                            "role": node.get("role"),
+                            "name": node.get("name"),
+                            "session_id": session_id,
+                            "explore_depth": depth,
+                            "vision_recover": True,
+                        },
+                        click_res,
+                    )
+                elif applied.get("handled"):
+                    if applied.get("issue"):
+                        issue = dict(applied["issue"])
+                        try:
+                            shot = await capture_and_upload_cdp_screenshot(
+                                page,
+                                session_id=session_id,
+                                tag=f"vision_{ref}",
+                            )
+                            if shot:
+                                issue["screenshot_url"] = shot
+                        except Exception:
+                            pass
+                        issues.append(issue)
+                    continue
+
+            if not click_res.get("success"):
+                issue = _issue_from_click_failure(
+                    ref=ref,
+                    node=node,
+                    click_res=click_res,
+                    before_url=before_url,
+                    before_title=before_title,
+                )
+                try:
+                    shot = await capture_and_upload_cdp_screenshot(
+                        page,
+                        session_id=session_id,
+                        tag=str(ref or "click_fail"),
+                    )
+                    if shot:
+                        issue["screenshot_url"] = shot
+                except Exception:
+                    pass
+                issues.append(issue)
                 continue
 
             await asyncio.sleep(0.35)
@@ -548,6 +643,8 @@ async def run_exploration(
         "exploration_issues": issues,
         "exploration_severe_issues": severe_explore_issues(issues),
         "has_obvious_issues": bool(severe_explore_issues(issues)),
+        "vision_recover_used": vision_used,
+        "vision_recover_notes": vision_notes[:8],
         "cdp_step_count": len(records),
         "cdp_steps_preview": build_steps_to_reproduce(records)[:3000],
         "page": await session.page_info(),
@@ -559,4 +656,40 @@ async def run_exploration(
             out["success"] = False
         else:
             out["success"] = True
+    else:
+        # 无 issue 也要给可读结论，避免前端只显示一句 finished
+        try:
+            body_text = ""
+            try:
+                body_text = await page.inner_text("body", timeout=2000)
+            except Exception:
+                body_text = ""
+            empty_hints = ("暂无卡片", "暂无数据", "没有数据", "No Card", "No data", "empty")
+            empty_hit = any(h.lower() in (body_text or "").lower() for h in empty_hints)
+            if clicks == 0 and len(inventory) == 0:
+                out["summary"] = (
+                    "探测完成：当前页未找到可交互控件，无法继续点击探测。"
+                    + (" 页面文案提示内容为空。" if empty_hit else "")
+                )
+            elif empty_hit:
+                out["summary"] = (
+                    f"探测完成：点击 {clicks} 次、填写 {fills} 次；"
+                    f"页面存在空状态提示（如「暂无卡片/暂无数据」），未发现报错页。"
+                )
+            else:
+                out["summary"] = (
+                    f"探测完成：可交互元素 {len(inventory)} 个，点击 {clicks} 次、填写 {fills} 次，"
+                    f"未发现明显页面级错误。"
+                )
+        except Exception:
+            out["summary"] = (
+                f"探测完成：可交互元素 {len(inventory)} 个，点击 {clicks} 次，未发现明显错误。"
+            )
+    if vision_notes:
+        base = str(out.get("summary") or f"探测完成：点击 {clicks} 次、填写 {fills} 次。")
+        out["summary"] = (
+            base
+            + "\n视觉纠错：\n"
+            + "\n".join(f"- {n}" for n in vision_notes[:5])
+        )[:2000]
     return out

@@ -484,7 +484,18 @@ function buildQueueOutcome(command, partial) {
       ? -1
       : Number(partial.exitCode)
   const ok = !proxyDown && !cancelled && !hasError && ec === 0
-  return { text, ok, cancelled, proxyDown }
+  return {
+    text,
+    ok,
+    cancelled,
+    proxyDown,
+    command: String(command || ''),
+    cwd: String(partial.cwd || ''),
+    exitCode: ec,
+    stdout: String(partial.stdout || ''),
+    stderr: String(partial.stderr || ''),
+    error: partial.error != null ? String(partial.error) : ''
+  }
 }
 
 /**
@@ -514,6 +525,7 @@ export async function runTerminalQueueItem(agent, item, opts = {}) {
   try {
     const r = await tryExec(false)
     return buildQueueOutcome(displayCommand, {
+      cwd,
       exitCode: r.exitCode,
       stdout: r.stdout,
       stderr: r.stderr,
@@ -524,6 +536,7 @@ export async function runTerminalQueueItem(agent, item, opts = {}) {
     const aborted = e && (e.name === 'AbortError' || e.code === 20)
     if (aborted) {
       return buildQueueOutcome(displayCommand, {
+        cwd,
         exitCode: -1,
         error: '用户停止生成，命令已中止',
         cancelled: true
@@ -540,6 +553,7 @@ export async function runTerminalQueueItem(agent, item, opts = {}) {
             )
       if (!okDlg) {
         return buildQueueOutcome(displayCommand, {
+          cwd,
           exitCode: -1,
           error: '用户拒绝执行（confirm_required）'
         })
@@ -547,6 +561,7 @@ export async function runTerminalQueueItem(agent, item, opts = {}) {
       try {
         const r = await tryExec(true)
         return buildQueueOutcome(displayCommand, {
+          cwd,
           exitCode: r.exitCode,
           stdout: r.stdout,
           stderr: r.stderr,
@@ -556,20 +571,44 @@ export async function runTerminalQueueItem(agent, item, opts = {}) {
       } catch (e2) {
         if (e2 && (e2.name === 'AbortError' || e2.code === 20)) {
           return buildQueueOutcome(displayCommand, {
+            cwd,
             exitCode: -1,
             error: '用户停止生成，命令已中止',
             cancelled: true
           })
         }
         return buildQueueOutcome(displayCommand, {
+          cwd,
           exitCode: -1,
           error: String(e2?.message || e2)
         })
       }
     }
     return buildQueueOutcome(displayCommand, {
+      cwd,
       exitCode: -1,
       error: String(e?.message || e)
     })
   }
+}
+
+/**
+ * 子 Agent 结果 → 主 Agent 请求体字段 client_terminal_results
+ * @param {Array<{ command?: string, cwd?: string, exitCode?: number, stdout?: string, stderr?: string, ok?: boolean, cancelled?: boolean, proxyDown?: boolean, error?: string }>} outcomes
+ */
+export function toClientTerminalResultsPayload(outcomes) {
+  const list = Array.isArray(outcomes) ? outcomes : []
+  return list
+    .filter((o) => o && String(o.command || '').trim())
+    .map((o) => ({
+      command: String(o.command || ''),
+      cwd: String(o.cwd || ''),
+      exit_code: Number(o.exitCode ?? -1),
+      ok: !!o.ok,
+      cancelled: !!o.cancelled,
+      proxy_down: !!o.proxyDown,
+      stdout: String(o.stdout || ''),
+      stderr: String(o.stderr || ''),
+      error: String(o.error || '')
+    }))
 }

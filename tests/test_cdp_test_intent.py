@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """CDP 测试任务意图识别。"""
-from agents.cdp.test_intent import detect_cdp_test_intent, extract_testcase_ids_from_context
+from agents.cdp.test_intent import (
+    detect_browser_url_test_bootstrap,
+    detect_cdp_test_intent,
+    extract_testcase_ids_from_context,
+)
 
 
 def test_manual_test_intent():
@@ -52,3 +56,23 @@ def test_extract_testcase_ids():
         "testcase_ids": [101, 102],
     })
     assert ids == [101, 102]
+
+
+def test_browser_url_test_bootstrap():
+    out = detect_browser_url_test_bootstrap(
+        "测试下这个网站 http://localhost:5173/#/project-detail/3"
+    )
+    assert out is not None
+    assert out["url"] == "http://localhost:5173/#/project-detail/3"
+    assert out["action"] == "session"
+    assert detect_browser_url_test_bootstrap("今天天气怎么样") is None
+    assert detect_browser_url_test_bootstrap("http://localhost:5173/") is None
+
+
+def test_url_test_opens_explore_task_on_session():
+    out = detect_cdp_test_intent(
+        user_input="测试下这个网站 http://localhost:5173/#/project-detail/3",
+        tool_action="session",
+    )
+    assert out["should_open"] is True
+    assert out["mode"] == "explore"

@@ -1,0 +1,6 @@
+sku,unit_cost,holding_cost_per_day,stockout_penalty,supplier_moq,supplier_pack
+SKU-100,12.5,0.02,8.0,20,10
+SKU-200,22.0,0.04,15.0,10,5
+SKU-300,8.0,0.015,5.0,30,15
+SKU-400,45.0,0.08,30.0,5,5
+SKU-500,15.5,0.03,10.0,20,10

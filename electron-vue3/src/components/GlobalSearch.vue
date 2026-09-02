@@ -9,7 +9,7 @@
           v-model="searchQuery"
           type="text"
           class="search-input"
-          placeholder="搜索迭代计划、卡片、BadCase、Bug、测试用例..."
+          :placeholder="t('globalSearch.placeholder')"
           @keydown.escape="handleClose"
           @input="handleSearch"
         />
@@ -21,15 +21,15 @@
     <!-- 搜索结果 -->
     <div class="search-panel-body" ref="resultsContainerRef">
       <div v-if="loading" class="search-loading">
-        <span>搜索中...</span>
+        <span>{{ t('globalSearch.searching') }}</span>
       </div>
 
       <div v-else-if="!searchQuery" class="search-empty">
-        <span>输入关键词搜索迭代计划与工作内容</span>
+        <span>{{ t('globalSearch.emptyHint') }}</span>
       </div>
 
       <div v-else-if="searchResults.length === 0" class="search-no-results">
-        <span>未找到相关结果</span>
+        <span>{{ t('globalSearch.noResults') }}</span>
       </div>
 
       <div v-else class="results-container">
@@ -84,7 +84,10 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { globalSearch } from '../api'
+
+const { t } = useI18n()
 
 const props = defineProps({
   projectId: { type: [String, Number, null], default: null },
@@ -222,14 +225,9 @@ const getTypeIcon = (type) => {
 }
 
 const getTypeLabel = (type) => {
-  const labels = {
-    plan: '迭代计划',
-    card: '其他卡片',
-    bug: 'Bug',
-    badcase: 'BadCase',
-    testcase: '测试用例'
-  }
-  return labels[type] || type
+  const key = `globalSearch.types.${type}`
+  const label = t(key)
+  return label === key ? type : label
 }
 
 // Focus input on mount

@@ -48,6 +48,26 @@ export async function tryStartInstalledLocalProxy(opts = {}) {
   const retries = Math.max(2, Number(opts.retries) || 10)
   const delayMs = Math.max(300, Number(opts.delayMs) || 900)
 
+  // 优先让同机 Flask 托管拉起（自动探测 health），失败再走协议唤醒 / 终端命令
+  try {
+    const res = await fetch('/api/client-scripts/local-proxy/supervisor/ensure', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    })
+    if (res.ok) {
+      try {
+        await ping()
+      } catch {
+        /* ignore */
+      }
+      const wokeViaFlask = await tryWakeThenPing({ retries: 4, delayMs: 400, ping })
+      if (wokeViaFlask) return true
+    }
+  } catch {
+    /* Flask 未托管或不在本机时忽略 */
+  }
+
   const woke = await tryWakeThenPing({ retries: 2, delayMs: 500, ping })
   if (woke) return true
 

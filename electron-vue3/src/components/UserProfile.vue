@@ -1,51 +1,49 @@
 <template>
   <div v-if="embedded" class="profile-embedded" :class="{ 'profile-embedded--light': tone === 'light' }">
     <div class="modal-body embedded-body">
-        <!-- 用户基本信息 -->
         <div class="user-info-section">
           <div class="avatar-large">{{ userInitial }}</div>
           <div class="user-details">
-            <h3>{{ user?.name || '用户' }}</h3>
+            <h3>{{ user?.name || t('shell.userFallback') }}</h3>
             <p class="email">{{ user?.email || '' }}</p>
           </div>
         </div>
 
-        <!-- 订阅信息 -->
         <div class="subscription-section">
-          <h4>订阅信息</h4>
+          <h4>{{ t('userProfile.subscriptionInfo') }}</h4>
           
           <div v-if="loading" class="loading-state">
-            加载中...
+            {{ t('common.loading') }}
           </div>
           
           <div v-else-if="credits > 0" class="subscription-active">
             <div class="credits-display">
               <div class="credits-circle">
                 <span class="credits-number">{{ credits }}</span>
-                <span class="credits-label">剩余次数</span>
+                <span class="credits-label">{{ t('userProfile.creditsRemaining') }}</span>
               </div>
             </div>
             <div class="subscription-stats">
               <div class="stat-item">
                 <span class="stat-value">{{ totalPurchased }}</span>
-                <span class="stat-label">累计购买</span>
+                <span class="stat-label">{{ t('userProfile.totalPurchased') }}</span>
               </div>
               <div class="stat-item">
                 <span class="stat-value">{{ totalPurchased - credits }}</span>
-                <span class="stat-label">已使用</span>
+                <span class="stat-label">{{ t('userProfile.used') }}</span>
               </div>
             </div>
             <button class="buy-more-btn" @click="goToSubscription">
-              购买更多
+              {{ t('userProfile.buyMore') }}
             </button>
           </div>
           
           <div v-else class="no-subscription">
             <div class="empty-icon">💳</div>
-            <p>您还没有订阅</p>
-            <p class="hint">订阅后可使用 AI 智能诊断功能</p>
+            <p>{{ t('userProfile.noSubscription') }}</p>
+            <p class="hint">{{ t('userProfile.subscribeHint') }}</p>
             <button class="subscribe-btn" @click="goToSubscription">
-              立即订阅
+              {{ t('subscription.getStarted') }}
             </button>
           </div>
         </div>
@@ -54,56 +52,54 @@
   <div v-else class="profile-modal-overlay" @click.self="$emit('close')">
     <div class="profile-modal">
       <div class="modal-header">
-        <h2>个人资料</h2>
+        <h2>{{ t('userProfile.title') }}</h2>
         <button class="close-btn" @click="$emit('close')">×</button>
       </div>
       
       <div class="modal-body">
-        <!-- 用户基本信息 -->
         <div class="user-info-section">
           <div class="avatar-large">{{ userInitial }}</div>
           <div class="user-details">
-            <h3>{{ user?.name || '用户' }}</h3>
+            <h3>{{ user?.name || t('shell.userFallback') }}</h3>
             <p class="email">{{ user?.email || '' }}</p>
           </div>
         </div>
 
-        <!-- 订阅信息 -->
         <div class="subscription-section">
-          <h4>订阅信息</h4>
+          <h4>{{ t('userProfile.subscriptionInfo') }}</h4>
           
           <div v-if="loading" class="loading-state">
-            加载中...
+            {{ t('common.loading') }}
           </div>
           
           <div v-else-if="credits > 0" class="subscription-active">
             <div class="credits-display">
               <div class="credits-circle">
                 <span class="credits-number">{{ credits }}</span>
-                <span class="credits-label">剩余次数</span>
+                <span class="credits-label">{{ t('userProfile.creditsRemaining') }}</span>
               </div>
             </div>
             <div class="subscription-stats">
               <div class="stat-item">
                 <span class="stat-value">{{ totalPurchased }}</span>
-                <span class="stat-label">累计购买</span>
+                <span class="stat-label">{{ t('userProfile.totalPurchased') }}</span>
               </div>
               <div class="stat-item">
                 <span class="stat-value">{{ totalPurchased - credits }}</span>
-                <span class="stat-label">已使用</span>
+                <span class="stat-label">{{ t('userProfile.used') }}</span>
               </div>
             </div>
             <button class="buy-more-btn" @click="goToSubscription">
-              购买更多
+              {{ t('userProfile.buyMore') }}
             </button>
           </div>
           
           <div v-else class="no-subscription">
             <div class="empty-icon">💳</div>
-            <p>您还没有订阅</p>
-            <p class="hint">订阅后可使用 AI 智能诊断功能</p>
+            <p>{{ t('userProfile.noSubscription') }}</p>
+            <p class="hint">{{ t('userProfile.subscribeHint') }}</p>
             <button class="subscribe-btn" @click="goToSubscription">
-              立即订阅
+              {{ t('subscription.getStarted') }}
             </button>
           </div>
         </div>
@@ -115,6 +111,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { api } from '../api.js'
 
 const props = defineProps({
@@ -126,6 +123,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 const router = useRouter()
+const { t } = useI18n()
 
 const credits = ref(0)
 const totalPurchased = ref(0)
@@ -141,7 +139,7 @@ const fetchCredits = async () => {
     credits.value = res.data.credits || 0
     totalPurchased.value = res.data.total_purchased || 0
   } catch (error) {
-    console.error('获取订阅信息失败:', error)
+    console.error('[UserProfile] fetch credits failed:', error)
   } finally {
     loading.value = false
   }

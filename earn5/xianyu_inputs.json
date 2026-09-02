@@ -1,0 +1,132 @@
+[
+  {
+    "i": 0,
+    "tag": "INPUT",
+    "type": "file",
+    "name": "file",
+    "placeholder": null,
+    "className": "",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 1,
+    "tag": "DIV",
+    "type": null,
+    "name": null,
+    "placeholder": null,
+    "className": "editor--MtHPS94K ",
+    "value": "AI智能体定制开发 扣子Coze/Dify/私有Agent 客服知识库工作流\n\n",
+    "aria": null
+  },
+  {
+    "i": 2,
+    "tag": "INPUT",
+    "type": "search",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-select-selection-search-input",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 3,
+    "tag": "INPUT",
+    "type": "search",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-select-selection-search-input",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 4,
+    "tag": "INPUT",
+    "type": "search",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-select-selection-search-input",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 5,
+    "tag": "INPUT",
+    "type": "text",
+    "name": null,
+    "placeholder": "0.00",
+    "className": "ant-input css-d5i8y5",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 6,
+    "tag": "INPUT",
+    "type": "text",
+    "name": null,
+    "placeholder": "0.00",
+    "className": "ant-input css-d5i8y5",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 7,
+    "tag": "INPUT",
+    "type": "radio",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-radio-input",
+    "value": "0",
+    "aria": null
+  },
+  {
+    "i": 8,
+    "tag": "INPUT",
+    "type": "radio",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-radio-input",
+    "value": "1",
+    "aria": null
+  },
+  {
+    "i": 9,
+    "tag": "INPUT",
+    "type": "radio",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-radio-input",
+    "value": "2",
+    "aria": null
+  },
+  {
+    "i": 10,
+    "tag": "INPUT",
+    "type": "radio",
+    "name": null,
+    "placeholder": null,
+    "className": "ant-radio-input",
+    "value": "3",
+    "aria": null
+  },
+  {
+    "i": 11,
+    "tag": "INPUT",
+    "type": "text",
+    "name": null,
+    "placeholder": "0.00",
+    "className": "ant-input css-d5i8y5",
+    "value": "",
+    "aria": null
+  },
+  {
+    "i": 12,
+    "tag": "INPUT",
+    "type": "text",
+    "name": null,
+    "placeholder": "搜索地点",
+    "className": "search-input--SkYFms8d",
+    "value": "",
+    "aria": null
+  }
+]

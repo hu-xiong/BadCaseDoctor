@@ -1,0 +1,5 @@
+Copyright (c) 2026 OpenClaw Foundation
+MIT License — see https://github.com/openclaw/openclaw/blob/main/LICENSE
+
+BadCaseDoctor's agents/cdp browser action set is adapted from OpenClaw Browser
+(Playwright + CDP/accessibility refs). No OpenClaw Gateway code is embedded.

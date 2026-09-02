@@ -1,0 +1,39 @@
+{
+  "window_count": 1,
+  "text_count": 19,
+  "candidates": [
+    {
+      "text": "找人做智能体 - 小红书搜索 - Microsoft Edge",
+      "kind": "demand"
+    },
+    {
+      "text": "https://www.xiaohongshu.com/search_result/?keyword=找人做智能体&type=51",
+      "kind": "demand"
+    },
+    {
+      "text": "找人做智能体 - 小红书搜索 - 内存使用率 - 498 MB",
+      "kind": "demand"
+    }
+  ],
+  "all_sample": [
+    "找人做智能体 - 小红书搜索 - Microsoft Edge",
+    "查看站点信息",
+    "https://www.xiaohongshu.com/search_result/?keyword=找人做智能体&type=51",
+    "应用程序可用。安装 小红书",
+    "安装 小红书 应用",
+    "更多操作",
+    "将此页面添加到收藏夹(Ctrl+D)",
+    "用户1 个人资料，请登录",
+    "设置及其他 (Alt+F)",
+    "标签页栏",
+    "搜索标签页",
+    "Excel Data Cleaning & ML | Freelancer",
+    "关闭标签页",
+    "Pincode Stock Tracker Needed | Freelancer",
+    "Nifty Options Backtesting Strategy | Freelancer",
+    "BigQuery & Looker Studio Setup | Freelancer",
+    "找人做智能体 - 小红书搜索 - 内存使用率 - 498 MB",
+    "熵衍美学 - 小红书",
+    "新建标签页"
+  ]
+}

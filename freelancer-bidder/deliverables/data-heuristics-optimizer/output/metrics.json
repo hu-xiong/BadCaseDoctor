@@ -1,0 +1,15 @@
+{
+  "rows": 10,
+  "skus": 5,
+  "warehouses": 2,
+  "po_units": 370,
+  "transfer_units": 7.397959183673471,
+  "expected_stockout_units": 15.928571428571423,
+  "expected_total_cost": 11184.5,
+  "projected_service_level": 0.9815,
+  "actions": {
+    "PURCHASE_ORDER": 6,
+    "OK": 3,
+    "TRANSFER_IN": 1
+  }
+}

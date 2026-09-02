@@ -613,6 +613,55 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     aiMessage.agentResult.status = 'failed'
     return {}
   }
+  // LangGraph：观察节点（工具后 → 下一轮决策前）
+  if (stepEvent.event === 'observe') {
+    const sum = String(stepEvent.summary || '').trim()
+    if (sum) {
+      const prev = String(aiMessage.thinkReasoningDraft || aiMessage.reasoningContent || '')
+      const note = `\n[observe] ${sum}\n`
+      if (!prev.includes(note.trim())) {
+        aiMessage.thinkReasoningDraft = prev + note
+      }
+    }
+    return {}
+  }
+  // LangGraph：失败边 / 人机打断 / 断点快照
+  if (stepEvent.event === 'failure_edge') {
+    const act = String(stepEvent.action || '').trim()
+    const kind = String(stepEvent.kind || '').trim()
+    const line = [act, kind].filter(Boolean).join(':')
+    if (line) {
+      const prev = String(aiMessage.thinkReasoningDraft || aiMessage.reasoningContent || '')
+      const note = `\n[failure_edge] ${line}\n`
+      if (!prev.includes(note.trim())) {
+        aiMessage.thinkReasoningDraft = prev + note
+      }
+    }
+    return {}
+  }
+  if (stepEvent.event === 'langgraph_resume') {
+    const st = stepEvent.state
+    if (st && typeof st === 'object') {
+      aiMessage.langgraphResume = st
+      aiMessage.awaitingHumanResume = true
+    }
+    return {}
+  }
+  if (stepEvent.event === 'interrupt') {
+    aiMessage.awaitingHumanResume = true
+    const sum = String(stepEvent.summary || stepEvent.reason || '').trim()
+    if (sum && !String(aiMessage.finalResponse || '').trim()) {
+      aiMessage.finalResponse = sum
+    }
+    return {}
+  }
+  if (stepEvent.event === 'client_pause') {
+    // 终端/浏览器交还：保留 resume 标记，检查点由收尾逻辑写入
+    if (aiMessage.langgraphResume) {
+      aiMessage.awaitingHumanResume = true
+    }
+    return {}
+  }
   return {}
 }
 

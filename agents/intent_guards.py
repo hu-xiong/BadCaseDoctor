@@ -595,6 +595,12 @@ def react_tools_intent_likely_need_tools_heuristic(user_input: Optional[str]) ->
         "bad case",
         "database_query",
         "database query",
+        "http://",
+        "https://",
+        "打开浏览器",
+        "测试下",
+        "测一下",
+        "cdp",
     )
     for n in needles:
         if n.isascii():
