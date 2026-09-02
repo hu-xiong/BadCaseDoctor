@@ -384,6 +384,7 @@ class Config:
 
     # ==================== MinIO（通用文件上传：/upload、富文本附件、头像等）====================
     # 后续若换独立文件服务，可改环境变量或只替换上传逻辑，仍建议保留此处为单一配置源。
+    # 凭证只从环境变量读取，禁止把真实密钥写进仓库默认值
     MINIO_ENDPOINT = (os.getenv("MINIO_ENDPOINT") or "").strip().rstrip("/")
     MINIO_ACCESS_KEY = (os.getenv("MINIO_ACCESS_KEY") or "").strip()
     MINIO_SECRET_KEY = (os.getenv("MINIO_SECRET_KEY") or "").strip()

@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 *.log
 observability/
+evals/langsmith/results/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -15,8 +16,11 @@ observability/
 htmlcov/
 .idea/
 .vscode/
+# 密钥只放本地 .env，禁止入库（已跟踪的用 git rm --cached 取消）
 .env
+**/.env
 .env.*
+!**/.env.example
 !.env.example
 !electron-vue3/.env.production.example
 .DS_Store
@@ -28,6 +32,8 @@ electron-vue3/dist/
 electron-vue3/release/
 electron-vue3/node_modules/
 electron-vue3/.vite/
+agents/midscene_runner/midscene_run/
+agents/midscene_runner/node_modules/
 .cursor/
 .pnpm-store/
 electron-vue3/.pnpm-store/
@@ -52,3 +58,8 @@ observability/
 # mem0 本地向量库 / history
 data/mem0_qdrant/
 data/mem0_history.db
+# LangGraph checkpointer
+data/langgraph_checkpoints.sqlite
+data/langgraph_checkpoints.sqlite-*
+data/langgraph_checkpoints.sqlite
+data/langgraph_checkpoints.sqlite-*
