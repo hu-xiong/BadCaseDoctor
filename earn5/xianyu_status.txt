@@ -1,4 +1,0 @@
-price=10
-duration=待议
-has35=False
-has10price_line=True

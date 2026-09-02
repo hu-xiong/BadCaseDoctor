@@ -1,2 +1,0 @@
-url=https://www.goofish.com/item?id=1072186349974&categoryId=&spm=a21ybx.publish.0.0
-msgs=[]
