@@ -130,6 +130,8 @@ class CdpTool(BaseTool):
             return await self._run_step(**kwargs)
         if act in ("run_testcase", "testcase_run", "cdp_run_testcase"):
             return await self._run_testcase(**kwargs)
+        if act in ("storage_save", "save_storage_state"):
+            return await self._save_storage_state(**kwargs)
         return {"success": False, "error": f"未知 action: {act}"}
 
     async def _session(self, **kwargs) -> Dict[str, Any]:
@@ -680,6 +682,25 @@ class CdpTool(BaseTool):
                     break
 
         analysis = analyze_login_page(nodes, url)
+        # 登录页 URL 但页面已无账号/密码/验证码输入框（SPA 登录成功后 hash 不变的场景）：
+        # 视为已完成登录，跳过自动登录，避免误报「需要账密」把已登录页面挡在暂停态
+        if (
+            analysis.is_login_page
+            and not analysis.username_ref
+            and not analysis.password_ref
+            and not analysis.code_ref
+        ):
+            return {
+                "success": True,
+                "action": "login",
+                "tool": "cdp_login",
+                "session_id": sid,
+                "login_skipped": True,
+                "already_logged_in": True,
+                "message": "页面已无登录表单（疑似已完成登录），跳过自动登录",
+                "url": url,
+                "page": page_info,
+            }
         creds = resolve_login_credentials(
             url=url or return_url,
             project_id=int(project_id) if project_id else None,
@@ -952,6 +973,16 @@ class CdpTool(BaseTool):
             "return_url": return_url or None,
         }
 
+    async def _save_storage_state(self, **kwargs) -> Dict[str, Any]:
+        """导出当前会话的 cookies/storage 到本地，供后续 session create 自动复用登录态。"""
+        owner = self._owner_key(kwargs)
+        sid = kwargs.get("session_id") or self._mgr.latest_session_id(owner_key=owner)
+        if not sid:
+            return {"success": False, "error": "storage_save 需要 session_id（或先 session create）"}
+        out = await self._mgr.save_storage_state(sid, url=kwargs.get("url"))
+        out["action"] = "storage_save"
+        return out
+
     async def _assert(self, **kwargs) -> Dict[str, Any]:
         owner = self._owner_key(kwargs)
         sid = kwargs.get("session_id") or self._mgr.latest_session_id(owner_key=owner)
@@ -969,60 +1000,108 @@ class CdpTool(BaseTool):
 
     async def _explore(self, **kwargs) -> Dict[str, Any]:
         from agents.cdp.explore import run_exploration
-        from agents.cdp.midscene_bridge import explore_engine, run_midscene_exploration
+        from agents.cdp.midscene_bridge import (
+            CDP_TEXT_PROGRESS_PREFIX,
+            _push_cdp_progress,
+            explore_engine,
+            run_combined_exploration,
+            run_midscene_exploration,
+        )
         from agents.cdp.params import resolve_cdp_target_url
 
         owner = self._owner_key(kwargs)
+        # 引擎侧注入的实时进度队列（SSE 展示每步动作）；无队列时所有推送自动跳过
+        progress_queue = kwargs.get("progress_queue")
         sid = kwargs.get("session_id") or self._mgr.latest_session_id(owner_key=owner)
         if not sid:
             return {"success": False, "error": "explore 需要 session_id（请先 session create）"}
+        # 会话真实归属优先：session create 与 explore 的 kwargs 来源不同（user_id/project_id 组合可能不同），
+        # 重算的 owner 可能匹配不上实际会话，导致拿不到页面/无法复用浏览器
+        try:
+            _sess = self._mgr.get_session(sid, owner_key=None)
+            if _sess is not None and getattr(_sess, "owner_key", None):
+                owner = str(_sess.owner_key)
+        except Exception:
+            pass
         nav = await self._ensure_on_target_url(sid, kwargs, owner_key=owner)
         if isinstance(nav, dict) and not nav.get("success"):
             return nav
+
+        # 隐私政策/协议弹窗会遮挡页面导致探测空跑；先在被测会话页点掉「同意」类弹窗
+        consent_dismissed: list = []
+        try:
+            sess = self._mgr.get_session(sid, owner_key=owner)
+            if sess is not None and getattr(sess, "page", None) is not None:
+                from agents.cdp.overlay import dismiss_consent_dialogs
+
+                consent_dismissed = await dismiss_consent_dialogs(sess.page)
+                if consent_dismissed:
+                    print(f"[CDP] explore consent dismissed: {consent_dismissed}", flush=True)
+        except Exception as _consent_ex:
+            print(f"[CDP] explore consent dismiss skipped: {_consent_ex}", flush=True)
+
         phase = kwargs.get("phase") or kwargs.get("sub_phase") or "full"
         user_query = kwargs.get("natural_query") or kwargs.get("user_query")
         eng = explore_engine()
         force_legacy = str(phase).lower() in ("dfs", "inventory", "legacy")
-        if eng != "legacy" and not force_legacy:
-            url = resolve_cdp_target_url(
-                params=kwargs,
-                user_input=user_query,
-                result_context=kwargs.get("result_context"),
-            )
-            if not url:
-                try:
-                    sess = self._mgr.get_session(sid, owner_key=owner)
-                    page_info = await sess.page_info() if sess else {}
-                    url = str((page_info or {}).get("url") or "")
-                except Exception:
-                    url = ""
-            if url:
-                print(f"[CDP] explore engine={eng} via midscene url={url}", flush=True)
-                mid = await run_midscene_exploration(
-                    url=url,
-                    user_query=str(user_query or ""),
-                )
-                if mid.get("fallback_legacy") and eng in ("auto", "midscene"):
-                    # midscene 明确要求时可回退；auto 必回退；纯 midscene 也回退以免阻断
-                    print(
-                        f"[CDP] midscene fallback legacy: {mid.get('error')}",
-                        flush=True,
-                    )
-                elif not mid.get("fallback_legacy"):
-                    mid["session_id"] = sid
-                    return mid
-            else:
-                print("[CDP] midscene skip: no url, fallback legacy explore", flush=True)
 
-        return await run_exploration(
-            self._mgr,
-            sid,
-            phase=str(phase) if str(phase).lower() != "legacy" else "full",
-            max_depth=_int_or_none(kwargs.get("max_depth")),
-            max_clicks=_int_or_none(kwargs.get("max_clicks")),
-            owner_key=owner,
-            user_query=str(user_query) if user_query else None,
+        # legacy / force_legacy → 旧版 DFS 探索（兼容保留）
+        if eng == "legacy" or force_legacy:
+            return await run_exploration(
+                self._mgr,
+                sid,
+                phase=str(phase) if str(phase).lower() != "legacy" else "full",
+                max_depth=_int_or_none(kwargs.get("max_depth")),
+                max_clicks=_int_or_none(kwargs.get("max_clicks")),
+                owner_key=owner,
+                user_query=str(user_query) if user_query else None,
+            )
+
+        # 新版：解析目标 URL
+        url = resolve_cdp_target_url(
+            params=kwargs,
+            user_input=user_query,
+            result_context=kwargs.get("result_context"),
         )
+        if not url:
+            try:
+                sess = self._mgr.get_session(sid, owner_key=owner)
+                page_info = await sess.page_info() if sess else {}
+                url = str((page_info or {}).get("url") or "")
+            except Exception:
+                url = ""
+        if not url:
+            return {"success": False, "error": "explore 需要目标 URL"}
+
+        if eng == "combined":
+            # 复用已打开的浏览器，避免每次 Midscene 都启动新 Chromium
+            cdp_ws_url = await self._mgr.get_browser_ws_endpoint(owner_key=owner) if hasattr(self._mgr, 'get_browser_ws_endpoint') else None
+            if cdp_ws_url:
+                print(f"[CDP] reusing browser ws={cdp_ws_url[:60]}...", flush=True)
+                _push_cdp_progress(progress_queue, CDP_TEXT_PROGRESS_PREFIX, "已复用已打开的浏览器，开始界面探测…")
+            else:
+                _push_cdp_progress(progress_queue, CDP_TEXT_PROGRESS_PREFIX, "启动新浏览器，开始界面探测…")
+            print(f"[CDP] explore engine=combined (midscene + gremlins) url={url}", flush=True)
+            result = await run_combined_exploration(
+                url=url,
+                user_query=str(user_query or ""),
+                cdp_ws_url=cdp_ws_url,
+                progress_queue=progress_queue,
+            )
+        else:
+            cdp_ws_url = await self._mgr.get_browser_ws_endpoint(owner_key=owner) if hasattr(self._mgr, 'get_browser_ws_endpoint') else None
+            print(f"[CDP] explore engine={eng} url={url}", flush=True)
+            result = await run_midscene_exploration(
+                url=url,
+                user_query=str(user_query or ""),
+                cdp_ws_url=cdp_ws_url,
+                progress_queue=progress_queue,
+            )
+
+        result["session_id"] = sid
+        if consent_dismissed:
+            result["consent_dismissed"] = consent_dismissed
+        return result
 
     async def _ensure_on_target_url(
         self,

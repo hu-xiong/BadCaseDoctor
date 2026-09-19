@@ -170,6 +170,10 @@ async def try_structured_recover(
             client_shell=client_shell,
             pending_diff_context=pending_diff_context,
         )
+        # 与主链路一致：注入干净用户原话，避免 [会话上下文] 前缀进入关键词/embedding
+        _clean_rq = str(getattr(engine, "_raw_user_input", None) or "").strip()
+        if _clean_rq:
+            gparams.setdefault("raw_user_input", _clean_rq)
         sse.append(
             {
                 "event": "executing",
@@ -323,15 +327,35 @@ def heuristic_task_plan_steps(user_input: str, *, locale: str = "zh") -> List[Di
     def step(i: int, name: str, status: str = "pending") -> Dict[str, Any]:
         return {"id": i, "name": name, "description": name, "status": status}
 
+    # 顺序原则：明确的操作动词优先（修改/删除/创建）→ 终端 → 页面动作 → 查询；
+    # 名词性高频词（如"登录"，常见于 Bug 标题）不作信号，避免被误判为浏览器操作
+    if any(k in text for k in ("改", "修改", "更新", "标记", "关闭", "resolve", "modify", "status")):
+        names = (
+            ["Search / locate", "Modify (preview)", "Confirm with user"]
+            if en
+            else ["检索定位", "修改（预览）", "待确认"]
+        )
+    elif any(k in text for k in ("删除", "delete", "移除")):
+        names = (
+            ["Locate target", "Delete / preview", "Confirm"]
+            if en
+            else ["定位目标", "删除/预览", "确认"]
+        )
+    elif any(k in text for k in ("新建", "创建", "添加", "create")):
+        names = (
+            ["Clarify fields", "Create record", "Confirm preview"]
+            if en
+            else ["确认字段", "创建记录", "确认预览"]
+        )
     # 终端 / 浏览器
-    if any(k in text for k in ("终端", "命令", "powershell", "bash", "npm ", "pip ")) or "terminal" in low:
+    elif any(k in text for k in ("终端", "命令", "powershell", "bash", "npm ", "pip ")) or "terminal" in low:
         names = (
             ["Inspect request", "Run local command", "Summarize result"]
             if en
             else ["理解任务", "执行本机命令", "汇报结果"]
         )
     elif (
-        any(k in text for k in ("打开", "浏览器", "登录", "点击", "cdp", "网页", "测试", "探测", "访问"))
+        any(k in text for k in ("打开", "浏览器", "点击", "cdp", "网页", "访问", "探测", "测试下", "测试一下"))
         or "browser" in low
         or "http://" in low
         or "https://" in low
@@ -340,24 +364,6 @@ def heuristic_task_plan_steps(user_input: str, *, locale: str = "zh") -> List[Di
             ["Open / navigate", "Interact", "Verify outcome"]
             if en
             else ["打开/导航页面", "页面操作", "核对结果"]
-        )
-    elif any(k in text for k in ("新建", "创建", "添加", "create")):
-        names = (
-            ["Clarify fields", "Create record", "Confirm preview"]
-            if en
-            else ["确认字段", "创建记录", "确认预览"]
-        )
-    elif any(k in text for k in ("删除", "delete", "移除")):
-        names = (
-            ["Locate target", "Delete / preview", "Confirm"]
-            if en
-            else ["定位目标", "删除/预览", "确认"]
-        )
-    elif any(k in text for k in ("改", "修改", "更新", "标记", "resolve", "modify", "status")):
-        names = (
-            ["Search / locate", "Modify (preview)", "Confirm with user"]
-            if en
-            else ["检索定位", "修改（预览）", "待确认"]
         )
     elif any(k in text for k in ("查", "搜", "列出", "有哪些", "grep", "search", "list")):
         names = (

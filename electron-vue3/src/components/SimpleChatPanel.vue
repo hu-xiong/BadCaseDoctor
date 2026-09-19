@@ -96,12 +96,6 @@
                       class="model-icon"
                     />
                     <img
-                      v-else-if="isErnieModel"
-                      :src="ernieIcon"
-                      alt="Ernie"
-                      class="model-icon model-icon--ernie"
-                    />
-                    <img
                       v-else-if="isGlmModel"
                       :src="glmIcon"
                       alt="GLM"
@@ -111,8 +105,6 @@
                       <option value="auto">{{ t('chat.modelAutoOption') }}</option>
                       <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
                       <option value="qwen-max-thinking">Qwen-Max</option>
-                      <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
-                      <option value="ernie-x1-turbo-32k">Ernie-X1</option>
                       <option value="deepseek-v4-flash">DeepSeek-V4-Flash</option>
                       <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
                       <option value="glm-5">GLM-5</option>
@@ -262,6 +254,7 @@
             :modify-sandbox-pending="messageHasPendingSandboxConfirm(message)"
             :sandbox-after-modify-step-index="getAgentTaskRunViewForAi(message).embedIdx"
             @grep-bug-click="handleNavigation"
+            @open-grep-query-tab="handleOpenGrepQueryTab"
           >
             <template #modifySandbox>
               <div :id="'sandbox-mod-embed-' + message.id" class="agent-modify-sandbox-anchor" />
@@ -292,6 +285,14 @@
                   {{ st.action || st.summary || st.url || ('step ' + (si + 1)) }}
                 </li>
               </ul>
+              <button
+                v-if="tc.run_id"
+                type="button"
+                class="cdp-open-report-btn"
+                @click="handleOpenCdpReport(tc)"
+              >
+                {{ t('chat.cdpOpenReport') }}
+              </button>
             </div>
           </div>
 
@@ -765,6 +766,14 @@
                     <span class="bug-nav-title">{{ item.title || item.bug_title }}</span>
                     <span v-if="item.plan_name" class="bug-nav-plan">{{ item.plan_name }}</span>
                   </div>
+                  <button
+                    type="button"
+                    class="bug-nav-open-tab"
+                    :title="t('queryResult.openInNewTab')"
+                    @click="handleOpenGrepQueryTab({ items: message.navigation.items, queryPayload: message.navigation.query_payload || null })"
+                  >
+                    {{ t('queryResult.openInNewTab') }}
+                  </button>
                 </div>
               </details>
             </div>
@@ -866,12 +875,6 @@
               class="model-icon"
             />
             <img
-              v-else-if="isErnieModel"
-              :src="ernieIcon"
-              alt="Ernie"
-              class="model-icon model-icon--ernie"
-            />
-            <img
               v-else-if="isGlmModel"
               :src="glmIcon"
               alt="GLM"
@@ -881,8 +884,6 @@
               <option value="auto">{{ t('chat.modelAutoOption') }}</option>
               <option value="qwen3.5-plus">Qwen-3.5-Plus</option>
               <option value="qwen-max-thinking">Qwen-Max</option>
-              <option value="ernie-4.5-turbo-128k">Ernie-4.5-Turbo</option>
-              <option value="ernie-x1-turbo-32k">Ernie-X1</option>
               <option value="deepseek-v4-flash">DeepSeek-V4-Flash</option>
               <option value="deepseek-v4-pro">DeepSeek-V4-Pro</option>
               <option value="glm-5">GLM-5</option>
@@ -965,7 +966,6 @@ import deepThinkingIcon from '../assets/deep-thinking-icon.svg'
 import chevronRightIcon from '../assets/chevron-right-qoder.png'
 import chevronDownIcon from '../assets/chevron-down-qoder.png'
 import qwenIcon from '../assets/qwen-icon.png'
-import ernieIcon from '../assets/ernie-icon.png'
 import glmIcon from '../assets/glm-icon.png'
 import sendCursorIcon from '../assets/send-cursor.png'
 import imageUploadIcon from '../assets/image-upload-icon.png'
@@ -1734,9 +1734,11 @@ const handleDocumentPointerDown = (e) => {
 const selectedAgent = ref('agent')
 // 从 localStorage 读取上次选择的模型，如果没有则使用默认值
 const savedModel = localStorage.getItem('selectedChatModel')
-const selectedModel = ref(savedModel || 'auto')  // 默认 Auto；可选具体 qwen / ernie / deepseek / glm
+// 文心（ernie）已从下拉移除：旧持久化值统一回退 auto，避免下拉框空白且误发已下架模型
+const isLegacyErnieModel = !!savedModel && savedModel.startsWith('ernie')
+const selectedModel = ref(isLegacyErnieModel ? 'auto' : (savedModel || 'auto'))  // 默认 Auto；可选具体 qwen / deepseek / glm
+if (isLegacyErnieModel) localStorage.setItem('selectedChatModel', 'auto')
 const isQwenModel = computed(() => selectedModel.value && selectedModel.value.startsWith('qwen'))
-const isErnieModel = computed(() => selectedModel.value && selectedModel.value.startsWith('ernie'))
 const isGlmModel = computed(() => selectedModel.value && selectedModel.value.startsWith('glm'))
 const messagesContainer = ref(null)
 const textareaRef = ref(null)
@@ -2647,6 +2649,31 @@ const handleNavigation = (navigation) => {
   console.log('[NAV] 已发送导航事件，detail:', event.detail)
 }
 
+// 「检索集合」Tab：把本次 grep 的命中集合 + 查询条件交回 ProjectDetail 打开临时 Tab
+const handleOpenGrepQueryTab = (payload) => {
+  const items = payload && Array.isArray(payload.items) ? payload.items : []
+  if (!items.length) return
+  const detail = {
+    items,
+    queryPayload: (payload && payload.queryPayload) || null,
+    source: 'agent-grep'
+  }
+  window.dispatchEvent(new CustomEvent('open-query-result-tab', { detail }))
+  console.log('[NAV] 已发送打开检索集合 Tab 事件，count:', items.length)
+}
+
+// 对话内 cdp 测试卡「打开报告」：交回 ProjectDetail 开报告 Tab（实体在 cdp_test_runs）
+const handleOpenCdpReport = (tc) => {
+  const id = tc && tc.run_id ? String(tc.run_id) : ''
+  if (!id) return
+  window.dispatchEvent(
+    new CustomEvent('open-report-tab', {
+      detail: { kind: 'cdp_test', id, title: tc.title || '' }
+    })
+  )
+  console.log('[NAV] 已发送打开 cdp 报告 Tab 事件，run_id:', id)
+}
+
 // 确认修改（兼容旧入口；主路径已改为左侧列表采纳）
 const handleConfirmModify = async (modifyData) => {
   console.log('[MODIFY] 用户确认修改:', modifyData)
@@ -2668,6 +2695,7 @@ const handleConfirmModify = async (modifyData) => {
         modifications: modifyData.modifications || modifyData.preview || {},
         confirm: true,
         message_id: modifyData._messageId || currentMessage?.id,
+        session_id: props.sessionId,
         natural_query: typeof modifyData._naturalQuery === 'string' ? modifyData._naturalQuery : ''
       })
     })
@@ -3944,14 +3972,15 @@ const formatReactStreamError = (err) => {
   return msg
 }
 
-// 保存消息到数据库
+// 保存消息到数据库；返回后端响应（含 message_id），供调用方回填真实消息 id
 const saveMessageToDb = async (messageData) => {
-  if (!props.sessionId) return
+  if (!props.sessionId) return null
   
   try {
-    await addChatMessage(props.sessionId, messageData)
+    return await addChatMessage(props.sessionId, messageData)
   } catch (error) {
     console.error('保存消息失败:', error)
+    return null
   }
 }
 
@@ -4173,11 +4202,17 @@ const cancelEditUserMessage = () => {
 const handleInlineSend = async (e) => {
   e?.preventDefault()
   if (isComposing.value) return
+  // 运行中不发送：否则先清空输入框、随后 sendText 因 isSending 直接 return，编辑内容被静默丢弃
+  if (isSending.value) return
   const text = inlineInputMessage.value
   inlineInputMessage.value = ''
-  // 先发送消息，再退出编辑态：避免 key 变化与新消息添加同一 tick 导致 Vue patch 冲突
-  await sendText(text)
-  editingUserMessageId.value = null
+  // 先发送消息（sendText 内部同步 push 新消息），再退出编辑态：避免 key 变化与新消息添加同一 tick 导致 Vue patch 冲突
+  // 退出编辑态用宏任务即可，不能等整轮 ReAct 结束（原实现会让空编辑框一直挂到运行结束）
+  const sending = sendText(text)
+  setTimeout(() => {
+    editingUserMessageId.value = null
+  }, 0)
+  await sending
 }
 
 const addNewLineInline = (e) => {
@@ -4507,7 +4542,7 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
   }
 
   // 保存最终结果到数据库（toRaw + 安全 stringify，避免 reactive 循环引用导致整段失败）
-  await saveMessageToDb({
+  const _saveResp = await saveMessageToDb({
     is_user: false,
     content: aiMessage.finalResponse || aiMessage.understanding || '处理完成',
     understanding: aiMessage.understanding,
@@ -4521,6 +4556,21 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
     modify_groups: safeJsonForDb(aiMessage.modifyGroups ?? null, 'modify_groups'),
     final_response: aiMessage.finalResponse
   })
+  // 回填服务端真实消息 id：落库前本地 id 为 Date.now() 临时值，采纳沙箱时后端按 message_id
+  // 清理待确认预览；不回填会导致「消息 id 查无」而漏清，已采纳沙箱预览反复出现
+  const _savedMsgId = _saveResp?.data?.message_id ?? _saveResp?.message_id
+  if (_savedMsgId != null) {
+    const _oldLocalId = aiMessage.id
+    aiMessage.id = _savedMsgId
+    if (_oldLocalId != null && String(_oldLocalId) !== String(_savedMsgId)) {
+      window.dispatchEvent(
+        new CustomEvent('chat-message-id-synced', {
+          detail: { oldId: _oldLocalId, newId: _savedMsgId, sessionId: props.sessionId },
+          bubbles: true
+        })
+      )
+    }
+  }
 
   // 检查点：终端卡 / 代理挂起 / LangGraph 人机打断 → 记 interrupted；否则标记本轮完成
   const reqIdForCk =
@@ -6324,6 +6374,21 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 .cdp-test-task-steps .ok { color: #2e7d32; }
 .cdp-test-task-steps .fail { color: #c62828; }
+.cdp-open-report-btn {
+  margin-top: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  background: #fff;
+  color: #444;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.cdp-open-report-btn:hover {
+  background: #f2f5f9;
+  border-color: #b9c2cc;
+}
 .client-local-run-section {
   margin: 12px 0;
 }
@@ -6552,6 +6617,25 @@ watch(() => props.sessionId, (newSessionId) => {
   padding: 2px 8px;
   border-radius: 4px;
   margin-left: 8px;
+}
+
+.bug-nav-open-tab {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #4f46e5;
+  background: #eef2ff;
+  border: 1px dashed #c7d2fe;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.bug-nav-open-tab:hover {
+  background: #e0e7ff;
+  border-color: #a5b4fc;
 }
 
 /* 修改导航区域 */
@@ -7299,11 +7383,6 @@ watch(() => props.sessionId, (newSessionId) => {
   height: 18px;
   object-fit: contain;
   flex-shrink: 0;
-}
-
-.model-icon--ernie {
-  width: 16px;
-  height: 16px;
 }
 </style>
 

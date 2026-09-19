@@ -1,10 +1,27 @@
 # -*- coding: utf-8 -*-
-"""弹窗 / 模态层：探测后继续在 overlay 内测试并关闭。"""
+"""弹窗 / 模态层：探测后继续在 overlay 内测试并关闭；隐私政策类弹窗点「同意」。"""
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any, List, Optional
+
+# 隐私政策 / 用户协议 / Cookie 类弹窗的「同意」按钮文案（只点同意，不点「暂不使用」）
+_CONSENT_BUTTON_TEXTS = (
+    "同意并继续",
+    "同意并接受",
+    "我同意",
+    "同意",
+    "接受并继续",
+    "接受全部",
+    "全部接受",
+    "允许全部",
+    "接受",
+    "Agree",
+    "Accept All",
+    "Accept",
+    "I Agree",
+)
 
 _OVERLAY_SELECTORS = (
     ".modal-overlay:visible",
@@ -52,6 +69,53 @@ async def close_overlay(page: Any, *, timeout_ms: int = 2500) -> bool:
         return not await overlay_is_visible(page)
     except Exception:
         return False
+
+
+async def dismiss_consent_dialogs(page: Any, *, rounds: int = 2, wait_between_ms: int = 600) -> List[str]:
+    """检测并点击「隐私政策/协议/Cookie」类弹窗的同意按钮（如淘股吧「同意」）。
+
+    - 每轮最多点掉一个弹窗，支持层叠弹窗；
+    - 只匹配精确文案，避免误点页面上的普通按钮；
+    - 点击后按钮仍未消失（点击未生效）时不再重复点击同一按钮；
+    - 返回点击过的按钮文案（供日志与报告说明），任何异常均吞掉。
+    """
+    dismissed: List[str] = []
+    ineffective: set = set()
+    for rnd in range(max(1, rounds)):
+        clicked = False
+        for text in _CONSENT_BUTTON_TEXTS:
+            for role in ("button", "link"):
+                try:
+                    loc = page.get_by_role(role, name=text, exact=True)
+                    count = await loc.count()
+                except Exception:
+                    continue
+                for i in range(min(count, 2)):
+                    if (role, text, i) in ineffective:
+                        continue
+                    btn = loc.nth(i)
+                    try:
+                        if not await btn.is_visible(timeout=300):
+                            continue
+                        await btn.click(timeout=2000)
+                        await asyncio.sleep(0.35)
+                        dismissed.append(text)
+                        clicked = True
+                        try:
+                            await btn.wait_for(state="hidden", timeout=1500)
+                        except Exception:
+                            # 点击后按钮仍可见：视为无效点击，避免下一轮重复点
+                            ineffective.add((role, text, i))
+                        break
+                    except Exception:
+                        continue
+                if clicked:
+                    break
+            if clicked:
+                break
+        if not clicked and rnd + 1 < rounds:
+            await asyncio.sleep(wait_between_ms / 1000)
+    return dismissed
 
 
 def overlay_close_button_nodes(nodes: List[dict]) -> List[dict]:

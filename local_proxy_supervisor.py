@@ -212,6 +212,9 @@ def start_managed_local_proxy(flask_host: str = "") -> Dict[str, Any]:
 
     env = os.environ.copy()
     env.setdefault("LISTEN", local_proxy_listen_addr())
+    # 托管进程随 Flask 启停，不应注册「开机自启」（否则云端会写 systemd 单元、本机开发也会劫持登录启动）；
+    # 用户显式设 BADCASE_LOCAL_PROXY_NO_AUTOSTART=0 可覆盖。
+    env.setdefault("BADCASE_LOCAL_PROXY_NO_AUTOSTART", "1")
     # 空闲退出：默认 30 分钟无 WS/PTY/browser 活动则代理自杀；0=禁用
     env.setdefault(
         "IDLE_EXIT_SEC",

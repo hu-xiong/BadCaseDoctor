@@ -24,6 +24,15 @@ def _grep_rerank_enabled(cfg=None) -> bool:
     return bool(getattr(cfg, "GREP_VECTOR_ENABLED", False))
 
 
+# 系统注入的上下文行前缀（非用户原话；进 ES/embed 前逐行剥离）
+_CONTEXT_LINE_PREFIXES = (
+    "[界面上下文]",
+    "[会话上下文]",
+    "[Session context]",
+    "[上下文]",
+)
+
+
 def grep_user_query_text(
     *,
     raw_user_input: Optional[str] = None,
@@ -31,9 +40,9 @@ def grep_user_query_text(
     natural_query: Optional[str] = None,
     max_chars: int = 400,
 ) -> str:
-    """Grep ES/embed 仅用用户对话原话；界面上下文走 ui_context 字段，不进 embedding。"""
+    """Grep ES/embed 仅用用户对话原话；界面/会话上下文等元数据不进 embedding。"""
     raw = (raw_user_input or "").strip()
-    if raw and "[界面上下文]" not in raw:
+    if raw and not any(p in raw for p in _CONTEXT_LINE_PREFIXES):
         return raw[:max_chars]
     if raw:
         cleaned = _user_question_without_ui_context(raw, max_chars=max_chars)
@@ -56,16 +65,18 @@ def semantic_text_for_grep_embed(
 
 
 def _user_question_without_ui_context(user_input: Optional[str], *, max_chars: int = 400) -> str:
-    """从 user_input 去掉 [界面上下文] 元数据，只保留用户原话。"""
+    """从 user_input 去掉 [界面上下文]/[会话上下文] 等注入元数据，只保留用户原话。"""
     raw = (user_input or "").strip()
     if not raw:
         return ""
-    if "[界面上下文]" not in raw:
+    if not any(p in raw for p in _CONTEXT_LINE_PREFIXES):
         return raw[:max_chars]
     lines: List[str] = []
     for line in raw.splitlines():
         s = line.strip()
-        if not s or s.startswith("[界面上下文]"):
+        if not s:
+            continue
+        if any(s.startswith(p) for p in _CONTEXT_LINE_PREFIXES):
             continue
         if s.startswith("- target=") or s.startswith("- record_id=") or s.startswith("- plan_id="):
             continue

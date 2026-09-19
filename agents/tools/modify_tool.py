@@ -16,6 +16,7 @@ from agents.locale_prompts import (
     modify_error_immutable_fields,
     modify_error_row_not_found,
     modify_message_sandbox_done,
+    modify_message_no_change,
     modify_summary_preview,
     modify_message_apply_ok,
     modify_message_apply_fail,
@@ -2536,6 +2537,38 @@ class ModifyTool(BaseTool):
                         target, modified_data, preview_mods, project_id
                     )
                     _wall.mark("enrich")
+                    # 无变化短路：目标值即当前值时不生成沙箱预览/不持久化 pending，直接返结论
+                    # （避免 closed → closed 这类空 diff 仍要求用户采纳）
+                    if preview_mods and not self._preview_effective_change_fields(
+                        preview_mods, original_data
+                    ):
+                        _nc_summary = modify_modifications_kv_summary(preview_mods, loc)
+                        _nc_msg = modify_message_no_change(loc, _nc_summary)
+                        print(
+                            f"[MODIFY] 目标值即当前值，跳过沙箱预览 target={target} "
+                            f"id={target_id} fields={sorted(preview_mods.keys())}",
+                            flush=True,
+                        )
+                        _nc_title = (
+                            (original_data or {}).get("title")
+                            or (original_data or {}).get("name")
+                            or ""
+                        )
+                        return {
+                            'success': True,
+                            'no_change': True,
+                            'confirmation_required': False,
+                            'message': _nc_msg,
+                            'summary': _nc_msg,
+                            'target': target,
+                            'target_id': _json_safe_id(target_id),
+                            'record_title': _nc_title or None,
+                            'before': None,
+                            'after': None,
+                            'diff': [],
+                            'modifications': {},
+                            'sandbox_preview': {'skipped': True, 'reason': 'no_change'},
+                        }
                     diff_result = self._generate_line_diff(
                         original_data,
                         modified_data,
@@ -4048,6 +4081,46 @@ class ModifyTool(BaseTool):
                 return str(value)
         return str(value) if value is not None else ''
 
+    def _preview_values_equivalent(self, before_val: Any, after_val: Any) -> bool:
+        """预览场景判断旧值/新值是否等价（None、数字/ID 字符串、布尔、大小写归一）。
+        仅在两值可确定等价时返回 True；类型不可靠比较时返回 False（保守：视为有变化，仍走预览）。"""
+
+        def _norm(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, bool):
+                return "true" if v else "false"
+            if isinstance(v, (int, float)):
+                fv = float(v)
+                return str(int(fv)) if fv == int(fv) else repr(fv)
+            return str(v).strip()
+
+        b, a = _norm(before_val), _norm(after_val)
+        if b == a:
+            return True
+        try:
+            return abs(float(b) - float(a)) < 1e-9
+        except (TypeError, ValueError):
+            pass
+        return b.lower() == a.lower()
+
+    def _preview_effective_change_fields(
+        self,
+        preview_mods: Dict[str, Any],
+        original_data: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """返回「目标值与原值确有差异」的字段列表；全为空表示无实际变化（目标值即当前值）。
+        append_comment 等追加类字段始终视为有变化（追加语义下每次都是新内容）。"""
+        row = original_data if isinstance(original_data, dict) else {}
+        changed: List[str] = []
+        for f, v in (preview_mods or {}).items():
+            if f in self._APPEND_ONLY_FIELDS:
+                changed.append(f)
+                continue
+            if not self._preview_values_equivalent(row.get(f), v):
+                changed.append(f)
+        return changed
+
     def _generate_line_diff(
         self,
         before: Dict,
@@ -4624,6 +4697,7 @@ class ModifyTool(BaseTool):
                 flush=True,
             )
         all_results: List[Dict[str, Any]] = []
+        no_change_ids: List[int] = []
         mod_summary = modify_modifications_kv_summary(modifications, loc)
         enrich_ms_acc = 0.0
         line_diff_ms_acc = 0.0
@@ -4651,6 +4725,10 @@ class ModifyTool(BaseTool):
                 )
             modified_data = original_data.copy()
             modified_data.update(preview_mods)
+            if preview_mods and not self._preview_effective_change_fields(
+                preview_mods, original_data
+            ):
+                no_change_ids.append(tid_i)
             _te0 = time.perf_counter()
             self._enrich_modified_data_for_preview(target, modified_data, preview_mods, project_id)
             _enrich_one = (time.perf_counter() - _te0) * 1000.0
@@ -4771,6 +4849,24 @@ class ModifyTool(BaseTool):
                 flush=True,
             )
 
+        # 批量全部无变化：目标值均已是对应当前值，跳过沙箱试写与 pending 持久化，直接给结论
+        if no_change_ids and len(no_change_ids) == len(batch_target_ids):
+            _nc_msg = modify_message_no_change(loc, mod_summary)
+            print(
+                f"[MODIFY] 批量目标值均已是当前值，跳过沙箱预览 n={len(no_change_ids)} "
+                f"ids={no_change_ids[:20]}",
+                flush=True,
+            )
+            return {
+                "success": True,
+                "no_change": True,
+                "confirmation_required": False,
+                "message": _nc_msg,
+                "summary": _nc_msg,
+                "target": target,
+                "batch_count": len(batch_target_ids),
+                "sandbox_preview": {"skipped": True, "reason": "no_change"},
+            }
         _progress(modify_tool_progress("sandbox_sql", loc))
         _t_sbx0 = time.perf_counter()
         sandbox_result = await self._preview_in_sandbox_batch(

@@ -260,7 +260,7 @@ def resolve_user_default_project(user_id: int) -> tuple[int, bool]:
         except Exception:
             default_owned = None
     if default_owned:
-        ensure_project_admin_permission(int(default_owned.id), uid)
+        ensure_project_admin_permission(int(default_owned.id), uid, project_row=default_owned)
         return int(default_owned.id), False
 
     owned = (
@@ -269,7 +269,7 @@ def resolve_user_default_project(user_id: int) -> tuple[int, bool]:
         .first()
     )
     if owned:
-        ensure_project_admin_permission(int(owned.id), uid)
+        ensure_project_admin_permission(int(owned.id), uid, project_row=owned)
         return int(owned.id), False
 
     tpl_id = system_project_template_id()
@@ -280,9 +280,10 @@ def resolve_user_default_project(user_id: int) -> tuple[int, bool]:
     return int(new_pid), True
 
 
-def ensure_project_admin_permission(project_id: int, user_id: int) -> bool:
+def ensure_project_admin_permission(project_id: int, user_id: int, project_row=None) -> bool:
     """
     项目 owner 缺失或权限行异常时补齐 admin（幂等）。
+    project_row：已加载的 Project 实例（登录路径复用查询结果，省一次主键往返）。
     返回 True 表示当前用户为该项目的 owner。
     """
     from utils.flask_runtime import get_app_module, get_db
@@ -294,7 +295,9 @@ def ensure_project_admin_permission(project_id: int, user_id: int) -> bool:
 
     pid = int(project_id)
     uid = int(user_id)
-    proj = db.session.get(Project, pid)
+    proj = project_row
+    if proj is None or int(getattr(proj, "id", -1) or -1) != pid:
+        proj = db.session.get(Project, pid)
     if not proj or proj.user_id is None:
         return False
     if int(proj.user_id) != uid:

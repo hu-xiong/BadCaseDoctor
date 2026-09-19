@@ -127,6 +127,31 @@ _CHROMIUM_LAUNCH_ARGS = [
 ]
 
 
+def _find_free_port() -> int:
+    """分配一个本机空闲端口，供 Chromium remote-debugging 暴露 DevTools 端点。"""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _fetch_ws_endpoint(port: int) -> Optional[str]:
+    """读取本机 Chromium DevTools HTTP 端点的 webSocketDebuggerUrl（Playwright 自身不暴露 ws）。"""
+    import json as _json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{int(port)}/json/version", timeout=3
+        ) as resp:
+            data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+        ws = str((data or {}).get("webSocketDebuggerUrl") or "").strip()
+        return ws or None
+    except Exception:
+        return None
+
+
 def _launch_channel_candidates() -> List[Optional[str]]:
     """
     Playwright 自带 Chromium 可能因 PLAYWRIGHT_BROWSERS_PATH（如 Cursor sandbox 缓存）
@@ -151,12 +176,16 @@ def _is_missing_browser_executable_error(ex: BaseException) -> bool:
     )
 
 
-async def _launch_chromium(pw: Any, *, headless: bool) -> Any:
+async def _launch_chromium(pw: Any, *, headless: bool, debug_port: Optional[int] = None) -> Any:
     last_ex: Optional[BaseException] = None
     for channel in _launch_channel_candidates():
+        args = list(_CHROMIUM_LAUNCH_ARGS)
+        if debug_port:
+            # 暴露本机 DevTools 端点，让 Midscene/Gremlins 子进程 connectOverCDP 复用同一浏览器
+            args.append(f"--remote-debugging-port={int(debug_port)}")
         kwargs: Dict[str, Any] = {
             "headless": headless,
-            "args": list(_CHROMIUM_LAUNCH_ARGS),
+            "args": args,
         }
         if channel:
             kwargs["channel"] = channel
@@ -212,6 +241,7 @@ def _is_stale_browser_error(ex: BaseException) -> bool:
 class _BrowserPoolSlot:
     browser: Any
     headless: bool
+    debug_port: Optional[int] = None
     idle_task: Optional[asyncio.Task] = None
 
 
@@ -302,8 +332,11 @@ class CdpSessionManager:
             await self._close_browser_pool_unlocked(owner_key)
         pw = await self._ensure_pw()
         t0 = time.perf_counter()
-        browser = await _launch_chromium(pw, headless=want)
-        self._browser_pools[owner_key] = _BrowserPoolSlot(browser=browser, headless=want)
+        debug_port = _find_free_port()
+        browser = await _launch_chromium(pw, headless=want, debug_port=debug_port)
+        self._browser_pools[owner_key] = _BrowserPoolSlot(
+            browser=browser, headless=want, debug_port=debug_port
+        )
         if os.getenv("PERF_LOG") == "1":
             print(
                 f"[CDP] chromium.launch {(time.perf_counter() - t0) * 1000:.0f}ms "
@@ -311,6 +344,27 @@ class CdpSessionManager:
                 flush=True,
             )
         return browser
+
+    async def get_browser_ws_endpoint(self, *, owner_key: str = "anonymous") -> Optional[str]:
+        """返回共享浏览器池中指定用户的浏览器 CDP WebSocket URL。
+
+        供 Midscene/Gremlins 子进程复用同一浏览器，避免重复启动。
+        Playwright 的 Browser 对象不暴露 ws（pipe 控制），因此通过
+        Chromium ``--remote-debugging-port`` 的 /json/version 读取；失败时返回 None（调用方回退自起浏览器）。
+        """
+        slot = self._browser_pools.get(owner_key)
+        if slot is None or not slot.debug_port:
+            return None
+        try:
+            connected = bool(slot.browser.is_connected())
+        except Exception:
+            connected = False
+        if not connected:
+            return None
+        try:
+            return await asyncio.to_thread(_fetch_ws_endpoint, int(slot.debug_port))
+        except Exception:
+            return None
 
     async def _new_browser_context(
         self,
@@ -998,8 +1052,13 @@ class CdpSessionManager:
         sid, _ = max(candidates, key=lambda x: x[1].last_used_at)
         return sid
 
-    async def save_storage_state(self, session_id: str) -> Dict[str, Any]:
-        """登录成功后导出 cookies/storage，供后续 session create 复用。"""
+    async def save_storage_state(
+        self, session_id: str, *, url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """登录成功后导出 cookies/storage，供后续 session create 复用。
+
+        url：可选，按指定地址的域名保存（巡检结束页可能在子页/第三方页时，用目标站更稳）；默认取当前页面地址。
+        """
         import json
         from urllib.parse import urlparse
 
@@ -1008,8 +1067,8 @@ class CdpSessionManager:
         session = self._get(session_id)
         await session.touch()
         try:
-            url = session.page.url
-            domain = urlparse(url).netloc
+            target = str(url or "").strip() or session.page.url
+            domain = urlparse(target).netloc
             if not domain:
                 return {"success": False, "error": "无法解析页面域名"}
             state_path = get_state_path(domain)

@@ -27,6 +27,16 @@ def _run_waitress(host: str, port: int) -> int:
 
     threads = max(8, min(int(os.getenv("WSGI_THREADS", "200")), 512))
     print(f"[WSGI] 使用 waitress 运行在 http://{host}:{port} (threads={threads})")
+    # 后台预热 MySQL 连接池 / Redis：避免启动后首个请求（常见为登录）现付冷连接 ~1s+
+    # 另启动“核心连接”维持器（BADCASE_POOL_CORE>0 时）：周期借还保底热连接
+    try:
+        import app as app_module
+        from app_services.warmup import maintain_pool_async, prewarm_async
+
+        prewarm_async(flask_app, app_module)
+        maintain_pool_async(flask_app)
+    except Exception as e:
+        print(f"[WSGI] 后台预热启动跳过: {e}")
     serve(flask_app, host=host, port=port, threads=threads)
     return 0
 

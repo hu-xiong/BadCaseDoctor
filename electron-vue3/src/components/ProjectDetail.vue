@@ -57,6 +57,7 @@
         @open-search="handleOpenGlobalSearch"
         @open-settings="openAppSettings"
         @open-archive="handleOpenArchive"
+        @open-reports="handleOpenReports"
         @open-plugins="activeLeftPanel='plugins'"
       />
 
@@ -104,9 +105,12 @@
           :getCreateClusterSize="getCreateClusterSize"
           :confirmConsecutiveCreateGroup="confirmConsecutiveCreateGroup"
           :cancelConsecutiveCreateGroup="cancelConsecutiveCreateGroup"
+          :activeReportKey="activeReportKey"
           @closeSearch="activeLeftPanel='plans'"
           @selectSearchResult="handleSearchResultSelect"
           @pluginAction="handlePluginAction"
+          @openReport="openReportWorkbenchTab"
+          @openReports="handleOpenReports"
         />
       </div>
 
@@ -133,6 +137,11 @@
               :class="{ active: tab.id === activeWorkbenchTabId }"
               @click="onWorkbenchTabButtonClick(tab.id)"
             >
+              <span
+                class="workbench-tab-ico"
+                :class="[workbenchTabIconInfo(tab).iconClass, workbenchTabIconInfo(tab).colorClass]"
+                aria-hidden="true"
+              >{{ workbenchTabIconInfo(tab).text }}</span>
               <SelectableTitleTip class="workbench-tab-title" :text="tab.title">
                 {{ tab.title }}
               </SelectableTitleTip>
@@ -159,7 +168,12 @@
                 :title="tab.title"
                 @click="onWorkbenchMenuSelectTab(tab.id)"
               >
-                {{ tab.title }}
+                <span
+                  class="workbench-tab-ico"
+                  :class="[workbenchTabIconInfo(tab).iconClass, workbenchTabIconInfo(tab).colorClass]"
+                  aria-hidden="true"
+                >{{ workbenchTabIconInfo(tab).text }}</span>
+                <span class="workbench-dropdown-label">{{ tab.title }}</span>
               </button>
               <div class="workbench-dropdown-sep" />
               <button type="button" class="workbench-dropdown-item danger" @click="closeAllWorkbenchTabs">
@@ -225,6 +239,24 @@
           v-if="!(showMainEditor && mainEditorComponent) && isProjectManagementWorkbenchTab"
           :visible="isProjectManagementWorkbenchTab"
           @project-selected="handleProjectSelected"
+        />
+        <component
+          :is="QueryResultPanel"
+          v-if="!(showMainEditor && mainEditorComponent) && isQueryResultWorkbenchTab"
+          :project-id="projectId"
+          :tab="activeWorkbenchTab"
+          :visible="isQueryResultWorkbenchTab"
+          @update-meta="handleQueryResultTabUpdateMeta"
+          @close="closeQueryResultWorkbenchTab"
+        />
+        <component
+          :is="ReportViewerPanel"
+          v-if="!(showMainEditor && mainEditorComponent) && isReportWorkbenchTab"
+          :project-id="projectId"
+          :tab="activeWorkbenchTab"
+          :visible="isReportWorkbenchTab"
+          @update-meta="handleReportTabUpdateMeta"
+          @close="closeReportWorkbenchTab"
         />
         <div
           v-if="showWorkbenchListRoot"
@@ -788,11 +820,21 @@ import { getBadCaseStatusText, getTestCaseStatusText } from '../constants/status
 import { normalizePlanId } from '../utils/snowflakeId.js'
 import { setLastProjectId } from '../utils/lastProject.js'
 import { ensureUserDefaultProject } from '../utils/ensureUserDefaultProject.js'
+import '@vscode/codicons/dist/codicon.css'
 import EmbeddedTerminalWorkspace from './EmbeddedTerminalWorkspace.vue'
 import TerminalSettingsWorkbenchPanel from './TerminalSettingsWorkbenchPanel.vue'
 import SimpleChatPanel from './SimpleChatPanel.vue'
 import AppSettingsPanel from './AppSettingsPanel.vue'
 import ProjectHelpPanel from './ProjectHelpPanel.vue'
+import QueryResultPanel from './QueryResultPanel.vue'
+import ReportViewerPanel from './ReportViewerPanel.vue'
+import {
+  normalizeQueryPayload,
+  hashQueryPayload,
+  hasQueryPayloadCondition,
+  hashItemsSignature,
+  buildQueryResultTabTitle
+} from '../utils/queryResultTab.js'
 import WorkflowNotificationsPanel from './WorkflowNotificationsPanel.vue'
 import ProjectWorkspaceShell from './ProjectWorkspaceShell.vue'
 import NarrowNavBar from './NarrowNavBar.vue'
@@ -1400,6 +1442,10 @@ export default {
     const dehydrateActiveWorkbenchTabView = (tabId) => {
       const tab = workbenchTabs.value.find((t) => t.id === tabId)
       if (!tab || !projectId.value) return
+      // 「检索集合」临时 Tab：数据随 meta 走 sessionStorage，无通用列表视图可脱水
+      if (tab.kind === 'query-result') return
+      // 「报告」Tab：实体在服务端，按 meta.reportKind/id 恢复，无通用视图可脱水
+      if (tab.kind === 'report') return
       const uid = resolveBcdUserId()
       const extra = { viewCtx: workbenchViewCtx() }
       if (tab.kind === 'type-list') {
@@ -1467,6 +1513,66 @@ export default {
     const workbenchTabs = ref([])
     const workbenchTabsForMoreMenu = computed(() => workbenchTabs.value)
     const activeWorkbenchTabId = ref(null)
+
+    /**
+     * 工作台 Tab 类型图标：图标形状表达页面形态（迭代 / 列表 / 具体实体 / 工具页），
+     * 颜色表达实体类型（bug 红、badcase 紫、测试用例 绿），便于一眼区分 Tab；
+     * 迭代 Tab 复用左侧迭代树同款图标（getPlanIcon('badcase') → 📋）以保持一致。
+     * 返回结构：{ iconClass, text, colorClass }——codicon 用 iconClass，emoji 用 text。
+     */
+    const workbenchTabIconInfo = (tab) => {
+      const kind = tab?.kind
+      const meta = tab?.meta || {}
+      const listType = String(meta.type || '').toLowerCase()
+      const detailType = String(meta.editorPlanType || '').toLowerCase()
+      if (kind === 'plan-list') {
+        // 与左侧迭代树（PlansPanel：getPlanIcon('badcase')）同款 📋，保证两处图标一致
+        return { iconClass: '', text: getPlanIcon('badcase'), colorClass: '' }
+      }
+      if (kind === 'type-list') {
+        if (listType === 'badcase') {
+          return { iconClass: 'codicon codicon-list-unordered', text: '', colorClass: 'workbench-tab-ico--badcase' }
+        }
+        if (listType === 'testcase' || listType === 'test_case') {
+          return { iconClass: 'codicon codicon-list-unordered', text: '', colorClass: 'workbench-tab-ico--testcase' }
+        }
+        return { iconClass: 'codicon codicon-list-unordered', text: '', colorClass: 'workbench-tab-ico--bug' }
+      }
+      if (kind === 'detail') {
+        if (detailType === 'badcase') {
+          return { iconClass: 'codicon codicon-feedback', text: '', colorClass: 'workbench-tab-ico--badcase' }
+        }
+        if (detailType === 'test_case' || detailType === 'testcase') {
+          return { iconClass: 'codicon codicon-beaker', text: '', colorClass: 'workbench-tab-ico--testcase' }
+        }
+        return { iconClass: 'codicon codicon-bug', text: '', colorClass: 'workbench-tab-ico--bug' }
+      }
+      if (kind === 'create') {
+        return { iconClass: 'codicon codicon-add', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'query-result') {
+        return { iconClass: 'codicon codicon-table', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'report') {
+        return { iconClass: 'codicon codicon-graph', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'settings') {
+        return { iconClass: 'codicon codicon-settings-gear', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'help') {
+        return { iconClass: 'codicon codicon-question', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'terminal-settings') {
+        return { iconClass: 'codicon codicon-terminal', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'projectManagement') {
+        return { iconClass: 'codicon codicon-organization', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      if (kind === 'notifications') {
+        return { iconClass: 'codicon codicon-bell', text: '', colorClass: 'workbench-tab-ico--muted' }
+      }
+      return { iconClass: 'codicon codicon-file', text: '', colorClass: 'workbench-tab-ico--muted' }
+    }
     const isSettingsWorkbenchTab = computed(() => activeWorkbenchTabId.value === SETTINGS_WORKBENCH_TAB_ID)
     const isHelpWorkbenchTab = computed(() => activeWorkbenchTabId.value === HELP_WORKBENCH_TAB_ID)
     const isProjectManagementWorkbenchTab = computed(() => activeWorkbenchTabId.value === 'project-management')
@@ -1476,6 +1582,14 @@ export default {
     const isTerminalSettingsWorkbenchTab = computed(
       () => activeWorkbenchTabId.value === TERMINAL_SETTINGS_WORKBENCH_TAB_ID
     )
+    /** 「检索集合」临时 Tab：对话 grep 结果打开，会话级保留（sessionStorage），不参与通用视图脱水 */
+    const isQueryResultWorkbenchTab = computed(
+      () => activeWorkbenchTab.value?.kind === 'query-result'
+    )
+    /** 「报告」Tab：持久实体（cdp_test_runs / react_agent_runs），数据从后端按 meta 恢复 */
+    const isReportWorkbenchTab = computed(
+      () => activeWorkbenchTab.value?.kind === 'report'
+    )
     /** Settings/Help 等专用 Tab 打开时隐藏列表，避免与面板纵向叠在一起 */
     const showWorkbenchListRoot = computed(() => {
       if (showMainEditor.value && mainEditorComponent.value) return false
@@ -1484,6 +1598,8 @@ export default {
       if (isHelpWorkbenchTab.value) return false
       if (isNotificationsWorkbenchTab.value) return false
       if (isProjectManagementWorkbenchTab.value) return false
+      if (isQueryResultWorkbenchTab.value) return false
+      if (isReportWorkbenchTab.value) return false
       return true
     })
     const activeWorkbenchTab = computed(() => workbenchTabs.value.find(t => t.id === activeWorkbenchTabId.value))
@@ -1612,8 +1728,10 @@ export default {
     const availableBadcases = ref([])
     
     // 窄条导航栏相关状态
-    // 左侧可挂载面板：plans/search/archive/plugins + 插件
+    // 左侧可挂载面板：plans/search/archive/reports/plugins + 插件
     const activeLeftPanel = ref('plans')
+    /** 报告与任务：当前打开的报告实体 id（左侧树高亮跟随） */
+    const activeReportKey = ref('')
     // 搜索改为左侧面板，不再使用覆盖层
     
     // 窄条导航栏处理函数
@@ -1650,6 +1768,16 @@ export default {
       if (!expandedSections.archived) {
         expandedSections.archived = true
       }
+      // 确保侧边栏显示
+      if (leftSidebarHidden.value) {
+        leftSidebarHidden.value = false
+        planCollapsed.value = false
+      }
+    }
+
+    // 打开「报告与任务」视图（窄条 📊 / 迭代树底部轻入口共用）
+    const handleOpenReports = () => {
+      activeLeftPanel.value = 'reports'
       // 确保侧边栏显示
       if (leftSidebarHidden.value) {
         leftSidebarHidden.value = false
@@ -3836,6 +3964,117 @@ const totalCards = ref(0)
       flushWorkbenchTabIndex()
     }
 
+    /** 「检索集合」Tab：把对话 grep 的命中集合 + 查询条件开成临时 Tab（同条件复用 / 会话级保留） */
+    const openQueryResultWorkbenchTab = async (detail) => {
+      const rawItems = Array.isArray(detail?.items) ? detail.items : []
+      if (!rawItems.length) return
+      const payload = normalizeQueryPayload(detail?.queryPayload || null)
+      const tabId = hasQueryPayloadCondition(payload)
+        ? `query-result-${hashQueryPayload(payload)}`
+        : `query-result-snap-${hashItemsSignature(rawItems)}`
+      const existing = workbenchTabs.value.find((x) => x.id === tabId)
+      if (existing?.meta?.frozen) {
+        // 已冻结：固定成员与快照不动，仅切回该 Tab
+        await activateWorkbenchTab(tabId)
+        return
+      }
+      const items = rawItems.slice(0, 80)
+      upsertWorkbenchTab({
+        id: tabId,
+        kind: 'query-result',
+        title: truncateForTab(
+          buildQueryResultTabTitle(payload, t),
+          t('queryResult.title')
+        ),
+        meta: {
+          ephemeral: true,
+          queryPayload: payload,
+          items,
+          itemsTotal: rawItems.length,
+          frozen: false,
+          frozenIds: [],
+          generatedAt: Date.now(),
+          source: detail?.source || ''
+        }
+      })
+      await activateWorkbenchTab(tabId)
+    }
+
+    /** 面板内刷新 / 冻结 / 编辑条件重查：仅回写 meta 与标题并持久化 */
+    const handleQueryResultTabUpdateMeta = (patch) => {
+      const tab = activeWorkbenchTab.value
+      if (!tab || tab.kind !== 'query-result' || !patch || typeof patch !== 'object') return
+      const idx = workbenchTabs.value.findIndex((x) => x.id === tab.id)
+      if (idx < 0) return
+      const { title, ...metaPatch } = patch
+      workbenchTabs.value[idx] = {
+        ...workbenchTabs.value[idx],
+        ...(title ? { title: truncateForTab(title, t('queryResult.title')) } : {}),
+        meta: { ...workbenchTabs.value[idx].meta, ...metaPatch }
+      }
+      flushWorkbenchTabIndex()
+    }
+
+    const closeQueryResultWorkbenchTab = () => {
+      if (activeWorkbenchTabId.value) void closeWorkbenchTab(activeWorkbenchTabId.value)
+    }
+
+    /** SimpleChatPanel / AgentTaskRun 派发的「在新标签页打开」事件入口 */
+    const handleOpenQueryResultTabEvent = (event) => {
+      void openQueryResultWorkbenchTab(event?.detail || {})
+    }
+
+    /**
+     * 「报告」Tab：打开 CDP 测试报告 / Agent 运行记录。
+     * tab id 即实体 id，天然跨会话恢复；数据由 ReportViewerPanel 按 meta 从后端拉取。
+     * 入口：ReportsPanel 列表 / 对话内 cdp 测试卡「打开报告」；打开时左侧切到报告树高亮跟随。
+     */
+    const openReportWorkbenchTab = async (detail) => {
+      const kind = detail?.kind === 'agent_run' ? 'agent_run' : 'cdp_test'
+      const id = detail?.id != null ? String(detail.id) : ''
+      if (!id) return
+      const tabId = `report-${kind}-${id}`
+      const title = detail?.title || ''
+      upsertWorkbenchTab({
+        id: tabId,
+        kind: 'report',
+        title: truncateForTab(title, t('reportView.title')),
+        meta: { reportKind: kind, reportId: id, reportTitle: title }
+      })
+      // 跟随：左侧切到「报告与任务」并高亮该条目
+      activeReportKey.value = id
+      activeLeftPanel.value = 'reports'
+      if (leftSidebarHidden.value) {
+        leftSidebarHidden.value = false
+        planCollapsed.value = false
+      }
+      await activateWorkbenchTab(tabId)
+    }
+
+    /** 报告详情加载后回填标题（完整标题替换列表里的截断标题） */
+    const handleReportTabUpdateMeta = (patch) => {
+      const tab = activeWorkbenchTab.value
+      if (!tab || tab.kind !== 'report' || !patch || typeof patch !== 'object') return
+      const idx = workbenchTabs.value.findIndex((x) => x.id === tab.id)
+      if (idx < 0) return
+      const { title, ...metaPatch } = patch
+      workbenchTabs.value[idx] = {
+        ...workbenchTabs.value[idx],
+        ...(title ? { title: truncateForTab(title, t('reportView.title')) } : {}),
+        meta: { ...workbenchTabs.value[idx].meta, ...metaPatch }
+      }
+      flushWorkbenchTabIndex()
+    }
+
+    const closeReportWorkbenchTab = () => {
+      if (activeWorkbenchTabId.value) void closeWorkbenchTab(activeWorkbenchTabId.value)
+    }
+
+    /** SimpleChatPanel 对话内 cdp 测试卡「打开报告」事件入口 */
+    const handleOpenReportTabEvent = (event) => {
+      void openReportWorkbenchTab(event?.detail || {})
+    }
+
     /** 卡片列表加载后补全 type-list Tab 的 meta.cardTitle，避免面包屑只剩迭代名、被误认为卡片错误 */
     watch(
       () => [activeWorkbenchTabId.value, cards.value, filteredCards.value],
@@ -4563,6 +4802,14 @@ const totalCards = ref(0)
       }
       activeWorkbenchTabId.value = tabId
       flushWorkbenchTabIndex()
+      if (tab.kind === 'query-result') {
+        hideEmbeddedEditor()
+        return
+      }
+      if (tab.kind === 'report') {
+        hideEmbeddedEditor()
+        return
+      }
       if (tab.kind === 'settings') {
         hideEmbeddedEditor()
         const p = tab.meta?.initialPane
@@ -5861,6 +6108,7 @@ const totalCards = ref(0)
           modifications: modifications,
           confirm: true,
           message_id: modifyData._messageId,
+          session_id: currentSession.value,
           natural_query:
             typeof modifyData._naturalQuery === 'string' ? modifyData._naturalQuery : ''
         })
@@ -6108,6 +6356,7 @@ const totalCards = ref(0)
             confirm: true,
             target: targetType,
             message_id: messageId,
+            session_id: currentSession.value,
             items
           })
         })
@@ -8325,11 +8574,16 @@ const totalCards = ref(0)
                        
       // 监听 grep 导航事件
       window.addEventListener('grep-navigate', handleGrepNavigate)
+      // 对话 grep 结果「在新标签页打开」→ 检索集合 Tab
+      window.addEventListener('open-query-result-tab', handleOpenQueryResultTabEvent)
+      // 对话内 cdp 测试卡「打开报告」→ 报告 Tab
+      window.addEventListener('open-report-tab', handleOpenReportTabEvent)
       window.addEventListener('diff-review-sync', handleDiffReviewSync)
       window.addEventListener('diff-review-push', handleDiffReviewPush)
 
       // 监听 modify 显示事件
       window.addEventListener('show-modify-in-list', handleShowModifyInList)
+      window.addEventListener('chat-message-id-synced', handleChatMessageIdSynced)
       window.addEventListener('show-delete-in-list', handleShowDeleteInList)
       window.addEventListener('confirm-pending-delete', handleConfirmPendingDelete)
       window.addEventListener('cancel-pending-delete', handleCancelPendingDelete)
@@ -8478,9 +8732,12 @@ const totalCards = ref(0)
       aiMoreOutsideCleanup?.()
       console.log('=== ProjectDetail onUnmounted ===')
       window.removeEventListener('grep-navigate', handleGrepNavigate)
+      window.removeEventListener('open-query-result-tab', handleOpenQueryResultTabEvent)
+      window.removeEventListener('open-report-tab', handleOpenReportTabEvent)
       window.removeEventListener('diff-review-sync', handleDiffReviewSync)
       window.removeEventListener('diff-review-push', handleDiffReviewPush)
       window.removeEventListener('show-modify-in-list', handleShowModifyInList)
+      window.removeEventListener('chat-message-id-synced', handleChatMessageIdSynced)
       window.removeEventListener('show-delete-in-list', handleShowDeleteInList)
       window.removeEventListener('confirm-pending-delete', handleConfirmPendingDelete)
       window.removeEventListener('cancel-pending-delete', handleCancelPendingDelete)
@@ -10155,11 +10412,21 @@ const totalCards = ref(0)
         }
       }
 
-      // 本地实体列表中不存在此 ID → 不是已知实体，不打实体详情 API（避免 Card ID 当实体 ID 的 404）
+      // 本地实体列表中不存在此 ID 时：无 plan 上下文则不探测（避免 Card ID 当实体 ID 的 404）；
+      // 有 plan 上下文（跨迭代预览跳转 / 列表未加载）时放行一次详情探测补 card_id，
+      // 否则目标卡解析不出，跳转退化为迭代「卡片表」Tab、列表无目标行 → 跳转失效
       const inLocalEntityList = [badcases.value, bugs.value, testcases.value].some(
         list => Array.isArray(list) && list.some(x => sameEntityId(x?.id, recordKey))
       )
-      if (!inLocalEntityList) return null
+      if (!inLocalEntityList) {
+        const planCtxForProbe = parsePositivePlanId(planIdHint)
+        if (!planCtxForProbe) return null
+        logListNav('recordDetailProbeByPlanContext', {
+          navTarget: ntUse,
+          recordId: recordKey,
+          planId: planCtxForProbe
+        })
+      }
 
       try {
         if (ntUse === 'bug') {
@@ -10620,6 +10887,34 @@ const totalCards = ref(0)
       }
     }
 
+    /** 对话区消息落库后回填了真实 id：把 pendingModifications 中残留的本地临时 _messageId 同步为服务端 id。
+     *  避免采纳沙箱时后端按 Date.now() 临时 id 查不到消息、漏清预览导致 diff 反复出现。 */
+    const handleChatMessageIdSynced = (event) => {
+      const { oldId, newId } = event.detail || {}
+      if (oldId == null || newId == null || String(oldId) === String(newId)) return
+      const next = { ...pendingModifications.value }
+      let changed = false
+      for (const [key, value] of Object.entries(next)) {
+        if (value && String(value._messageId) === String(oldId)) {
+          next[key] = { ...value, _messageId: newId }
+          changed = true
+        }
+      }
+      if (changed) {
+        pendingModifications.value = next
+        console.log('[MODIFY] 已同步 pendingModifications 消息 id:', oldId, '->', newId)
+      }
+      try {
+        const pd = getPendingModifyDiffForDetail(projectId.value)
+        if (pd && String(pd.messageId) === String(oldId)) {
+          setPendingModifyDiffSession({ ...pd, messageId: newId })
+          console.log('[MODIFY] 已同步详情 diff 消息 id:', oldId, '->', newId)
+        }
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+
     const handleShowModifyInList = async (event) => {
           const dtop = event.detail || {}
           // 批量路径已同步过且重新派发过来的，跳过避免重复处理
@@ -10687,20 +10982,15 @@ const totalCards = ref(0)
                 else if (tgt === 'testcase') urlContentType.value = 'test_case'
                 else if (tgt === 'card') urlContentType.value = null
 
-                // 若实体不在本地缓存中（target_id 精度丢失/实体已删除），跳过导航与打开编辑器
+                // 若实体不在本地列表（target_id 精度丢失/实体已删除/不在当前视图），跳过导航与打开编辑器。
+                // 注意：不得在此物理删除 diff_review_state 记录——本地列表仅反映“当前视图”，
+                // 跨迭代/跨卡片的合法 pending 会被误判为孤立记录删掉（刷新/换浏览器后跳转看不到 diff）；
+                // 真实已删除实体的 pending 由后端级联清理（删除卡片/记录时同步删除）。
                 if (!entityExistsLocally(tgt, hId)) {
-                  console.warn('[MODIFY] 跳过本地不存在的实体（可能 target_id 精度丢失或已删除）:', {
+                  console.warn('[MODIFY] 跳过本地不存在的实体（可能 target_id 精度丢失、已删除或不在当前视图）:', {
                     target: tgt,
                     targetId: hId
                   })
-                  // 自动清理孤立记录，避免每 15s 轮询重复触发
-                  resolveDiffReviewState({
-                    target: tgt,
-                    targetId: hId,
-                    action: 'reject'
-                  }).catch((e) =>
-                    console.warn('[MODIFY] 清理孤立 diff review 失败:', e)
-                  )
                   return
                 }
 
@@ -12170,6 +12460,16 @@ const totalCards = ref(0)
       ProjectHelpPanel,
       WorkflowNotificationsPanel,
       ProjectManage,
+      QueryResultPanel,
+      handleQueryResultTabUpdateMeta,
+      closeQueryResultWorkbenchTab,
+      ReportViewerPanel,
+      isReportWorkbenchTab,
+      handleOpenReports,
+      activeReportKey,
+      openReportWorkbenchTab,
+      handleReportTabUpdateMeta,
+      closeReportWorkbenchTab,
       projectName,
       projectId,
       planSearchText,
@@ -12240,6 +12540,8 @@ const totalCards = ref(0)
       listPanelCacheKey,
       workbenchTabs,
       workbenchTabsForMoreMenu,
+      workbenchTabIconInfo,
+      isQueryResultWorkbenchTab,
       activeWorkbenchTabId,
       workbenchMenuRef,
       aiHistoryDropdownRef,
@@ -12861,7 +13163,9 @@ const totalCards = ref(0)
 }
 
 .workbench-dropdown-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
   padding: 8px 14px;
   border: none;
@@ -12872,6 +13176,12 @@ const totalCards = ref(0)
   text-align: left;
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workbench-dropdown-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -12927,6 +13237,34 @@ const totalCards = ref(0)
   border-bottom-color: #fff;
   color: #1a1a1a;
   font-weight: 500;
+}
+
+.workbench-tab-ico {
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+/* 非 codicon 形态（如迭代 Tab 复用的 📋 emoji）：视觉尺寸略大，微调一号保持协调 */
+.workbench-tab-ico:not(.codicon) {
+  font-size: 13px;
+}
+
+.workbench-tab-ico--bug {
+  color: #d13438;
+}
+
+.workbench-tab-ico--badcase {
+  color: #8b5cf6;
+}
+
+.workbench-tab-ico--testcase {
+  color: #16a34a;
+}
+
+.workbench-tab-ico--muted {
+  color: #6b7280;
 }
 
 .workbench-tab-title {

@@ -266,6 +266,38 @@
             >{{ execLogMergedText(s, i) }}</pre>
           </div>
 
+          <!-- Midscene 子步骤列表：按意图（每轮规划）分组折叠 -->
+          <div
+            v-if="s.midsceneSteps && s.midsceneSteps.length"
+            class="agent-step-section midscene-steps"
+          >
+            <div class="agent-step-label">执行步骤（{{ s.midsceneSteps.length }}）</div>
+            <details
+              v-for="(g, gi) in midsceneStepGroups(s.midsceneSteps)"
+              :key="gi"
+              class="midscene-group-details"
+              :open="isMidsceneGroupOpen(s, gi, midsceneStepGroups(s.midsceneSteps))"
+            >
+              <summary class="midscene-group-summary">
+                <span class="midscene-group-icon" aria-hidden="true">{{ g.icon }}</span>
+                <span class="midscene-group-title">{{ g.title || '执行计划' }}</span>
+                <span v-if="g.actions.length" class="midscene-group-count">{{ g.actions.length }}</span>
+              </summary>
+              <div class="midscene-steps-list">
+                <div
+                  v-for="(ms, mi) in g.actions"
+                  :key="mi"
+                  class="midscene-step-item"
+                  :class="'midscene-step--' + (ms.status || 'done')"
+                >
+                  <span class="midscene-step-icon" aria-hidden="true">{{ ms.icon }}</span>
+                  <span class="midscene-step-desc">{{ ms.description }}</span>
+                </div>
+                <div v-if="g.summary" class="midscene-group-result">{{ g.summary }}</div>
+              </div>
+            </details>
+          </div>
+
           <div
             v-if="s.grepNavigation && s.grepNavigation.type === 'multiple' && s.grepNavigation.items?.length"
             class="agent-step-section agent-step-grep-nav"
@@ -313,6 +345,14 @@
                     grepNavStepListExpanded(i) ? '▾' : '▸'
                   }}</span>
                 </button>
+                <button
+                  type="button"
+                  class="agent-grep-nav-open-tab"
+                  :title="t('queryResult.openInNewTab')"
+                  @click.stop="emitQueryResultTab(s)"
+                >
+                  {{ t('queryResult.openInNewTab') }}
+                </button>
               </div>
             </details>
           </div>
@@ -338,7 +378,7 @@
             class="agent-step-pre agent-step-pre--params agent-step-pre--stream agent-step-pre--decide agent-step-pre--plain"
           >{{ paramsSummaryShown(s, i) }}</pre>
           <div v-if="showObserveWaiting(s)" class="agent-step-planning-inline agent-step-planning-inline--plain">
-            {{ t('agentTask.planningNextMoves') }}
+            {{ observeWaitingText(s) }}
           </div>
         </div>
         </div>
@@ -417,7 +457,17 @@ const props = defineProps({
   sandboxAfterDeleteStepIndex: { type: Number, default: -1 }
 })
 
-const emit = defineEmits(['grep-bug-click'])
+const emit = defineEmits(['grep-bug-click', 'open-grep-query-tab'])
+
+/** 「在新标签页打开」：把本步 grep 命中的集合 + 查询条件交给父组件开「检索结果」Tab */
+const emitQueryResultTab = (s) => {
+  const items = s?.grepNavigation?.items
+  if (!Array.isArray(items) || !items.length) return
+  emit('open-grep-query-tab', {
+    items,
+    queryPayload: s?.grepNavigation?.query_payload || null
+  })
+}
 
 marked.setOptions({ gfm: true, breaks: true })
 
@@ -495,6 +545,11 @@ const grepNavItemTitle = (navItem) => (navItem && (navItem.title || navItem.bug_
 const grepEmptyStepSummary = (s) => {
   const rs = String(s?.resultSummary || '').trim()
   if (rs && !/grep_empty_hits/i.test(rs)) return rs
+  // 步骤被停止/跳过（未产出检索结果）≠「检索无命中」，避免把「结果未送达」误报为未检索到
+  if (s?.status === 'skipped') {
+    const d = String(s?.description || '').trim()
+    return d || t('chat.stepGrepStoppedNoResult')
+  }
   return t('chat.stepGrepEmptyHits')
 }
 
@@ -509,6 +564,69 @@ const grepNavStepListCollapsed = (s, stepIdx) =>
 const toggleGrepNavStepExpand = (stepIdx) => {
   grepNavStepExpandedMap[stepIdx] = !grepNavStepExpandedMap[stepIdx]
 }
+
+/** Midscene 实时步骤 → 按意图（plan_index）分组；同一快照数组引用只计算一次 */
+const _midsceneGroupCache = new WeakMap()
+const midsceneStepGroups = (steps) => {
+  if (!Array.isArray(steps) || !steps.length) return []
+  const cached = _midsceneGroupCache.get(steps)
+  if (cached) return cached
+  const groups = []
+  const keyToGroup = new Map()
+  for (const row of steps) {
+    if (!row || typeof row !== 'object') continue
+    const kind = row.kind || 'action'
+    const hasPi = row.plan_index != null
+    if (kind === 'plan') {
+      const key = hasPi ? 'p' + row.plan_index : 'p_anon' + groups.length
+      let g = keyToGroup.get(key)
+      if (!g) {
+        g = { key, icon: row.icon || '🎯', title: '', status: 'pending', actions: [], summary: '' }
+        keyToGroup.set(key, g)
+        groups.push(g)
+      }
+      if (row.icon) g.icon = row.icon
+      if (row.description) g.title = row.description
+      if (row.status) g.status = row.status
+      continue
+    }
+    if (kind === 'result') {
+      const last = groups[groups.length - 1]
+      if (last) last.summary = row.description || ''
+      else
+        groups.push({
+          key: 'r' + groups.length,
+          icon: row.icon || '🏁',
+          title: row.description || '',
+          status: 'done',
+          actions: [],
+          summary: ''
+        })
+      continue
+    }
+    const key = hasPi ? 'p' + row.plan_index : null
+    let g = key ? keyToGroup.get(key) : null
+    if (!g) {
+      g = {
+        key: key || 'p_tail' + groups.length,
+        icon: '🎯',
+        title: '执行步骤',
+        status: 'running',
+        actions: [],
+        summary: ''
+      }
+      if (key) keyToGroup.set(key, g)
+      groups.push(g)
+    }
+    g.actions.push(row)
+  }
+  _midsceneGroupCache.set(steps, groups)
+  return groups
+}
+
+/** 运行中：仅展开最新一组（跟随当前执行）；完成后全部折叠，由用户按需展开 */
+const isMidsceneGroupOpen = (s, gi, groups) =>
+  !!(s && s.status === 'running' && Array.isArray(groups) && gi === groups.length - 1)
 
 const planIcon = (s) => {
   if (s.status === 'completed') return '✅'
@@ -1125,6 +1243,29 @@ const showObserveWaiting = (s) => {
   if (s.status !== 'running') return false
   if (hasParamsSummary(s) || hasLlmDraft(s)) return false
   return execPhaseFinished(s)
+}
+
+/**
+ * 登录等待状态：取最新一条带标记的进度行（⏳ 等待中 / ⏸ 已暂停 / ✅ 登录完成）
+ * 后端清障推送带这些标记，用于把子标题从「Planning next moves」切换为登录等待提示
+ */
+const loginWaitState = (s) => {
+  const logs = s && Array.isArray(s.progressLog) ? s.progressLog : []
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const line = String(logs[i] || '')
+    if (line.includes('⏳')) return 'waiting'
+    if (line.includes('⏸')) return 'paused'
+    if (line.includes('✅') && line.includes('登录')) return ''
+  }
+  return ''
+}
+
+/** 执行已结束待观察时的占位文案：登录等待期间替换 Planning next moves，避免像卡死 */
+const observeWaitingText = (s) => {
+  const st = loginWaitState(s)
+  if (st === 'waiting') return t('agentTask.waitingManualLogin')
+  if (st === 'paused') return t('agentTask.manualLoginPaused')
+  return t('agentTask.planningNextMoves')
 }
 
 /** 决策与观察：须等工具执行阶段有产出后再展示（含提前到达的入参/观察流） */
@@ -2101,6 +2242,137 @@ const showLogBlock = (s, i = 0) => {
   letter-spacing: 0.04em;
 }
 
+/* Midscene 子步骤列表 */
+.midscene-steps-details {
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 6px;
+  padding: 4px 0;
+}
+.midscene-steps-summary {
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #94a3b8;
+  user-select: none;
+  outline: none;
+}
+.midscene-steps-summary::-webkit-details-marker {
+  display: none;
+}
+.midscene-steps-title {
+  font-weight: 500;
+}
+.midscene-steps-title::before {
+  content: "▾ ";
+}
+.midscene-steps-details[open] .midscene-steps-title::before {
+  content: "▾ ";
+}
+/* Midscene 意图分组折叠 */
+.midscene-group-details {
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 6px;
+  padding: 2px 0;
+}
+.midscene-group-details + .midscene-group-details {
+  margin-top: 4px;
+}
+.midscene-group-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #cbd5e1;
+  user-select: none;
+  outline: none;
+  list-style: none;
+}
+.midscene-group-summary::-webkit-details-marker {
+  display: none;
+}
+.midscene-group-summary::before {
+  content: "▸";
+  flex-shrink: 0;
+  color: #64748b;
+}
+.midscene-group-details[open] > .midscene-group-summary::before {
+  content: "▾";
+}
+.midscene-group-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+.midscene-group-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.midscene-group-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #64748b;
+  background: rgba(148, 163, 184, 0.12);
+  border-radius: 8px;
+  padding: 1px 6px;
+}
+.midscene-group-result {
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 3px 4px;
+  border-top: 1px dashed rgba(148, 163, 184, 0.15);
+  margin-top: 2px;
+}
+.midscene-steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 10px 6px;
+}
+.midscene-step-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: 3px;
+}
+.midscene-step-item:hover {
+  background: rgba(148, 163, 184, 0.06);
+}
+.midscene-step-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 11px;
+}
+.midscene-step--done .midscene-step-icon {
+  color: #4ade80;
+}
+.midscene-step--running .midscene-step-icon {
+  color: #fbbf24;
+}
+.midscene-step--error .midscene-step-icon {
+  color: #f87171;
+}
+.midscene-step--thinking .midscene-step-icon {
+  color: #a5b4fc;
+}
+.midscene-step-desc {
+  color: #e2e8f0;
+  flex: 1;
+}
+.midscene-step--done .midscene-step-desc {
+  color: #94a3b8;
+}
+
 .agent-step-pre {
   margin: 0;
   padding: 8px 10px;
@@ -2239,6 +2511,27 @@ const showLogBlock = (s, i = 0) => {
   background: rgba(59, 130, 246, 0.12);
   cursor: pointer;
   transition: background 0.15s ease;
+}
+.agent-grep-nav-open-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px dashed rgba(147, 197, 253, 0.45);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #93c5fd;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.agent-grep-nav-open-tab:hover {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(147, 197, 253, 0.75);
 }
 .agent-grep-nav-expand:hover {
   background: rgba(59, 130, 246, 0.22);

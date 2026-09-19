@@ -622,6 +622,11 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           runningStep.thoughtSummaryDraft = rs
         }
       }
+      // 检查 midscene_action_steps（Midscene 子步骤），挂到 step 上供 AgentTaskRun 渲染
+      const actionSteps = td0.midscene_action_steps || (outputData.midscene_action_steps)
+      if (Array.isArray(actionSteps) && actionSteps.length) {
+        runningStep.midsceneSteps = actionSteps
+      }
     }
   }
 
@@ -924,7 +929,7 @@ export function applyReactObservationLegacyStepEvent(aiMessage, stepEvent, ctx) 
           after: toolData.after ?? null
         }
         console.log('[MODIFY] 存储沙箱预览导航:', aiMessage.modifyNavigation)
-      } else if (toolData.diff && toolData.before && toolData.after) {
+      } else if (!toolData.no_change && toolData.diff && toolData.before && toolData.after) {
         const navCid2 =
           pickModifyNavCardId(toolData, toolData, toolData) ||
           pickModifyNavCardIdFromGrepNav(aiMessage, toolData)

@@ -18,8 +18,20 @@ STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file_
 os.makedirs(STATE_DIR, exist_ok=True)
 
 
+def normalize_domain(domain: str) -> str:
+    """域名归一化：小写并去掉 www. 前缀，保证保存与加载使用同一 key。
+
+    例如 www.tgb.cn 与 tgb.cn 复用同一份登录状态；带端口的域（如 localhost:5173）不受影响。
+    """
+    d = str(domain or "").strip().lower()
+    if d.startswith("www."):
+        d = d[4:]
+    return d
+
+
 def get_state_path(domain: str) -> str:
     """根据域名生成状态文件路径"""
+    domain = normalize_domain(domain)
     domain_hash = hashlib.md5(domain.encode()).hexdigest()[:8]
     return os.path.join(STATE_DIR, f'{domain_hash}_{domain.replace(":", "_").replace("/", "_")}.json')
 

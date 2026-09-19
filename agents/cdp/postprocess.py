@@ -36,6 +36,7 @@ async def enrich_cdp_observation(
     todo: str = "",
     chat_session_id: Optional[int] = None,
     react_request_id: Optional[str] = None,
+    progress_queue: Any = None,
 ) -> Dict[str, Any]:
     if not isinstance(observation, dict):
         return observation
@@ -116,6 +117,8 @@ async def enrich_cdp_observation(
             plan_id=plan_id,
             user_query=user_query or "",
             result_context=result_context,
+            progress_queue=progress_queue,
+            chat_session_id=chat_session_id,
         )
     except Exception as ex:
         print(f"[CDP] auto_run_explore skipped: {ex}", flush=True)

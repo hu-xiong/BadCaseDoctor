@@ -1507,6 +1507,23 @@ def react_agent():
                 except Exception as e:
                     logger.exception("[REACT-execution] 事件循环异常: %s", str(e))
                 finally:
+                    # 总任务完成：把本次检索登记的未计划脏数据异步发到 Redis 队列
+                    # （消费侧 agents/dirty_data_cleanup.run_cleanup_worker 物理清理）
+                    try:
+                        from agents.dirty_data_cleanup import flush_unplanned_to_queue
+
+                        _flushed_n = flush_unplanned_to_queue(
+                            project_id,
+                            session_id=react_request_id,
+                            operator_id=getattr(current_user, "id", None),
+                        )
+                        if _flushed_n:
+                            logger.info(
+                                "[DIRTY-CLEANUP] 总任务完成，已登记 %s 条未计划脏数据待异步清理",
+                                _flushed_n,
+                            )
+                    except Exception:
+                        logger.debug("[DIRTY-CLEANUP] flush skipped", exc_info=True)
                     try:
                         from agents.react_sse_buffer import mark_run_finished
 
@@ -1915,3 +1932,263 @@ def api_list_cdp_test_runs():
         return jsonify({'success': True, 'runs': [r.to_dict() for r in rows]})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/reports', methods=['GET'])
+@login_required
+def api_list_reports():
+    """报告与任务聚合视图：按 chat_session 分组返回 CDP 测试报告与 ReAct 运行记录（工作台左侧「报告与任务」）。"""
+    try:
+        try:
+            project_id = int(request.args.get('project_id'))
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '缺少 project_id'}), 400
+        from app import has_project_permission
+
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        sessions_limit = min(int(request.args.get('sessions', 50) or 50), 100)
+        runs_per_session = min(int(request.args.get('runs', 12) or 12), 50)
+
+        from models.orm import CdpTestRun, ReactAgentRun, ChatSession
+
+        cdp_rows = (
+            CdpTestRun.query.filter(CdpTestRun.project_id == project_id)
+            .order_by(CdpTestRun.created_at.desc())
+            .limit(300)
+            .all()
+        )
+        # interrupted 为断开残影（被后续请求接管后转 completed），不进报告树
+        react_rows = (
+            ReactAgentRun.query.filter(
+                ReactAgentRun.project_id == project_id,
+                ReactAgentRun.status != 'interrupted',
+            )
+            .order_by(ReactAgentRun.created_at.desc())
+            .limit(300)
+            .all()
+        )
+
+        def _iso(dt):
+            return dt.isoformat() if dt else None
+
+        # 统一 run 项；分组键优先 chat_session_id，无会话的 CDP run 按 react_request_id 单独成组
+        groups = {}
+        for r in cdp_rows:
+            if r.chat_session_id is not None:
+                key = 's:%d' % int(r.chat_session_id)
+            elif r.react_request_id:
+                key = 'r:%s' % str(r.react_request_id)
+            else:
+                key = 'r:%s' % r.id
+            g = groups.setdefault(key, {'session_id': r.chat_session_id, 'runs': [], 'total': 0})
+            g['runs'].append(
+                {
+                    'id': r.id,
+                    'kind': 'cdp_test',
+                    'title': r.title or '',
+                    'status': r.status or '',
+                    'mode': r.mode or '',
+                    'pass_count': int(r.pass_count or 0),
+                    'fail_count': int(r.fail_count or 0),
+                    'summary': (r.summary or '')[:500],
+                    'plan_id': r.plan_id,
+                    'created_at': _iso(r.created_at),
+                    'updated_at': _iso(r.updated_at),
+                    'finished_at': _iso(r.finished_at),
+                    'react_request_id': r.react_request_id,
+                }
+            )
+            g['total'] += 1
+        for r in react_rows:
+            if r.chat_session_id is not None:
+                key = 's:%d' % int(r.chat_session_id)
+            elif r.react_request_id:
+                key = 'r:%s' % str(r.react_request_id)
+            else:
+                key = 'r:%s' % r.id
+            g = groups.setdefault(key, {'session_id': r.chat_session_id, 'runs': [], 'total': 0})
+            brief = (r.user_input or '').strip().replace('\n', ' ')
+            g['runs'].append(
+                {
+                    'id': r.id,
+                    'kind': 'agent_run',
+                    'title': brief[:80] or 'Agent 运行',
+                    'status': r.status or '',
+                    'mode': '',
+                    'pass_count': None,
+                    'fail_count': None,
+                    'summary': brief[:500],
+                    'plan_id': None,
+                    'created_at': _iso(r.created_at),
+                    'updated_at': _iso(r.updated_at),
+                    'finished_at': None,
+                    'react_request_id': r.react_request_id,
+                }
+            )
+            g['total'] += 1
+
+        for g in groups.values():
+            g['runs'].sort(key=lambda x: x.get('created_at') or '', reverse=True)
+            g['run_count'] = g['total']
+            g['runs'] = g['runs'][:runs_per_session]
+        ordered = sorted(
+            groups.values(),
+            key=lambda x: (x['runs'][0].get('created_at') if x['runs'] else ''),
+            reverse=True,
+        )[:sessions_limit]
+
+        session_ids = [g['session_id'] for g in ordered if g.get('session_id') is not None]
+        title_map = {}
+        if session_ids:
+            for s in ChatSession.query.filter(ChatSession.id.in_(session_ids)).all():
+                title_map[int(s.id)] = s.title or ''
+
+        sessions_payload = []
+        for g in ordered:
+            sid = g.get('session_id')
+            runs = g['runs']
+            sessions_payload.append(
+                {
+                    'key': ('s:%d' % int(sid)) if sid is not None else ('r:%s' % runs[0]['id'] if runs else ''),
+                    'session_id': sid,
+                    'title': title_map.get(int(sid), '') if sid is not None else '',
+                    'run_count': g['run_count'],
+                    'latest_at': runs[0].get('created_at') if runs else None,
+                    'latest_status': runs[0].get('status') if runs else '',
+                    'runs': runs,
+                }
+            )
+        return jsonify(
+            {
+                'success': True,
+                'sessions': sessions_payload,
+                'total_runs': sum(g['run_count'] for g in ordered),
+            }
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/reports/<string:kind>/<string:report_id>', methods=['GET'])
+@login_required
+def api_get_report_detail(kind, report_id):
+    """单份报告详情：cdp_test 返回完整步骤/规格；agent_run 返回运行输入与状态（报告 Tab 查看器用）。"""
+    try:
+        kind = (kind or '').strip()
+        rid = (report_id or '').strip()[:64]
+        if kind not in ('cdp_test', 'agent_run') or not rid:
+            return jsonify({'success': False, 'error': '非法报告类型'}), 400
+        from models.orm import CdpTestRun, ReactAgentRun, ChatSession
+        from app import has_project_permission
+
+        def _iso(dt):
+            return dt.isoformat() if dt else None
+
+        def _session_title(sid):
+            if sid is None:
+                return ''
+            s = ChatSession.query.filter(ChatSession.id == int(sid)).first()
+            return (s.title or '') if s else ''
+
+        if kind == 'cdp_test':
+            row = CdpTestRun.query.filter(CdpTestRun.id == rid).first()
+            if not row:
+                return jsonify({'success': False, 'error': '报告不存在'}), 404
+            if not has_project_permission(current_user.id, row.project_id):
+                return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+            data = row.to_dict()
+            data['kind'] = 'cdp_test'
+            data['session_title'] = _session_title(row.chat_session_id)
+            return jsonify({'success': True, 'report': data})
+
+        row = ReactAgentRun.query.filter(ReactAgentRun.id == rid).first()
+        if not row:
+            return jsonify({'success': False, 'error': '报告不存在'}), 404
+        if row.project_id is not None and not has_project_permission(current_user.id, row.project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+        brief = (row.user_input or '').strip().replace('\n', ' ')
+        return jsonify(
+            {
+                'success': True,
+                'report': {
+                    'id': row.id,
+                    'kind': 'agent_run',
+                    'title': brief[:80],
+                    'status': row.status or '',
+                    'user_input': row.user_input or '',
+                    'model_name': row.model_name or '',
+                    'chat_session_id': row.chat_session_id,
+                    'react_request_id': row.react_request_id,
+                    'session_title': _session_title(row.chat_session_id),
+                    'created_at': _iso(row.created_at),
+                    'updated_at': _iso(row.updated_at),
+                },
+            }
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_bp.route('/projects/<int:project_id>/grep-replay', methods=['POST'])
+@login_required
+def api_grep_replay(project_id):
+    """检索集合重放：按 grep 查询条件重跑检索，仅返回导航 items。
+
+    供前端「检索结果」工作台 Tab 刷新/冻结校验使用；与 Agent 内 grep 工具
+    共用 GrepTool.execute（仅检索，不做 LLM 总结），保证集合与对话内定位结果一致。
+    """
+    try:
+        from app import has_project_permission
+
+        if not has_project_permission(current_user.id, project_id):
+            return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+
+        payload = request.get_json(silent=True) or {}
+        keywords = str(payload.get('keywords') or '').strip()[:200] or None
+        assignee = str(payload.get('assignee') or '').strip()[:64] or None
+        status = str(payload.get('status') or '').strip()[:64] or None
+        target = str(payload.get('target') or 'all').strip().lower()[:16] or 'all'
+        plan_id = str(payload.get('plan_id') or '').strip()[:32] or None
+        card_id = str(payload.get('card_id') or '').strip()[:32] or None
+
+        # 无条件且不限迭代 ≈ 全项目扫描，拒绝；限定 plan_id 时允许（如「某迭代全部 Bug」集合）
+        if not (keywords or assignee or status) and not plan_id:
+            return jsonify(
+                {'success': False, 'error': '缺少检索条件（keywords/assignee/status/plan_id 至少其一）'}
+            ), 400
+
+        from agents.tools.grep_tool import GrepTool
+
+        tool = GrepTool()
+        result = asyncio.run(
+            tool.execute(
+                keywords=keywords,
+                project_id=str(project_id),
+                plan_id=plan_id,
+                card_id=card_id,
+                target=target,
+                status=status,
+                assignee=assignee,
+            )
+        )
+        data = (result or {}).get('data') or {}
+        navigation = data.get('navigation')
+        nav_items = (
+            navigation.get('items') if isinstance(navigation, dict) else None
+        ) or []
+        return jsonify(
+            {
+                'success': True,
+                'navigation': {'type': 'multiple', 'items': nav_items},
+                'query_payload': (
+                    navigation.get('query_payload')
+                    if isinstance(navigation, dict)
+                    else None
+                ),
+                'count': len(nav_items),
+            }
+        )
+    except Exception as e:
+        print(f'[GREP-REPLAY] 失败: {e}')
+        return jsonify({'success': False, 'error': f'检索重放失败: {str(e)}'}), 500

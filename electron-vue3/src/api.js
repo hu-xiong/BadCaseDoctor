@@ -647,6 +647,36 @@ export function searchCards(params) {
   return api.get('/api/cards/search', { params: configParams })
 }
 
+// 检索集合重放：按 grep 查询条件重跑检索（工作台「检索结果」Tab 刷新/冻结校验用）
+// 后端 blueprint 前缀为 /api/agent（agent.py），故路径为 /api/agent/projects/<id>/grep-replay
+export function replayGrepQuery(projectId, payload) {
+  const p = payload && typeof payload === 'object' ? payload : {}
+  return api.post(`/api/agent/projects/${projectId}/grep-replay`, {
+    keywords: p.keywords || '',
+    assignee: p.assignee || '',
+    status: p.status || '',
+    target: p.target || 'all',
+    plan_id: p.plan_id != null && p.plan_id !== '' ? String(p.plan_id) : '',
+    card_id: p.card_id != null && p.card_id !== '' ? String(p.card_id) : ''
+  })
+}
+
+// 报告与任务：按会话分组的报告列表（工作台左侧「报告与任务」视图）
+// 后端 blueprint 前缀为 /api/agent（agent.py）
+export function listReports(projectId, opts = {}) {
+  const params = { project_id: projectId }
+  if (opts.sessions != null) params.sessions = opts.sessions
+  if (opts.runs != null) params.runs = opts.runs
+  return api.get('/api/agent/reports', { params })
+}
+
+// 报告详情：cdp_test 返回完整步骤/规格；agent_run 返回运行输入与状态（报告 Tab 查看器用）
+export function getReportDetail(kind, reportId) {
+  return api.get(
+    `/api/agent/reports/${encodeURIComponent(String(kind || ''))}/${apiPathId(reportId)}`
+  )
+}
+
 // 移动卡片到指定计划
 export function moveCard(cardId, planId) {
   return api.post(`/api/cards/${apiPathId(cardId)}/move`, {

@@ -13,6 +13,11 @@
     <!-- 分隔线 -->
     <div class="nav-divider"></div>
 
+    <!-- 报告与任务：左侧切报告/任务树（放归档上方；归档使用频率最低，保持垫底） -->
+    <div class="nav-item" :title="t('narrowNav.reports')" @click="handleOpenReports">
+      <span class="nav-icon">📊</span>
+    </div>
+
     <!-- 归档按钮 -->
     <div class="nav-item" :title="t('narrowNav.archive')" @click="handleOpenArchive">
       <span class="nav-icon">📦</span>
@@ -48,6 +53,7 @@ const emit = defineEmits([
   'open-search',
   'open-settings',
   'open-archive',
+  'open-reports',
   'open-plugins'
 ])
 
@@ -65,6 +71,10 @@ const handleOpenSettings = () => {
 
 const handleOpenArchive = () => {
   emit('open-archive')
+}
+
+const handleOpenReports = () => {
+  emit('open-reports')
 }
 
 const handleOpenPlugins = () => {

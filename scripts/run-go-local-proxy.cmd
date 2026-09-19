@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
-REM 启动本地 Go 代理
+REM 启动本地 Go 代理（仓库开发用）
+REM 开发二进制不注册开机自启，避免登录启动指向仓库内的临时构建
+set BADCASE_LOCAL_PROXY_NO_AUTOSTART=1
 cd /d "%~dp0.."
 if not exist "go-local-proxy\go-local-proxy.exe" (
   echo 未找到 go-local-proxy\go-local-proxy.exe

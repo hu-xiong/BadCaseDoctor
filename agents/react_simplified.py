@@ -1801,6 +1801,62 @@ def _modify_progress_to_stream_event(
     }
 
 
+def _unified_tool_name_is_cdp(tool_name: str) -> bool:
+    """与 ``_execute_tool_implementation`` 的浏览器工具归一化规则一致（browser_* 均归 cdp）。"""
+    tn = str(tool_name or "").strip().lower()
+    if tn == "cdp" or tn.startswith("cdp_") or tn == "browser_test":
+        return True
+    if tn in (
+        "browser_click",
+        "browser_input",
+        "browser_wait",
+        "browser_assert",
+        "form_fill",
+        "form_submit",
+        "complete_login",
+        "test_scenario",
+    ):
+        return True
+    return "browser" in tn
+
+
+def _cdp_progress_to_stream_event(
+    msg: Union[str, Any], step_index: int, reason: str
+) -> Dict[str, Any]:
+    """CDP 探测进度队列 → 引擎事件。
+
+    - ``__CDP_STEP__``：结构化步骤快照（意图分组 + 动作行），供前端实时逐步展示；
+    - ``__CDP_TEXT__``：阶段文本进度（连接浏览器/进入猴子测试等）。
+    """
+    from agents.cdp.midscene_bridge import (
+        CDP_STEP_PROGRESS_PREFIX,
+        CDP_TEXT_PROGRESS_PREFIX,
+    )
+
+    sm = str(msg)
+    if sm.startswith(CDP_STEP_PROGRESS_PREFIX):
+        try:
+            steps = json.loads(sm[len(CDP_STEP_PROGRESS_PREFIX) :])
+        except Exception:
+            steps = None
+        if isinstance(steps, list):
+            return {
+                "event": "cdp_explore_step",
+                "tool": "cdp",
+                "index": step_index,
+                "reason": reason,
+                "steps": steps,
+            }
+    text = sm[len(CDP_TEXT_PROGRESS_PREFIX) :] if sm.startswith(CDP_TEXT_PROGRESS_PREFIX) else sm
+    return {
+        "event": "cdp_explore_step",
+        "tool": "cdp",
+        "index": step_index,
+        "reason": reason,
+        "message": text,
+    }
+
+
 def _unified_thinking_is_tool_meta_only(s: str) -> bool:
     """模型把「没有合适工具、应自然语言回复」等决策说明写进 thinking，勿当作用户可见气泡。"""
     if not s or not isinstance(s, str):
@@ -5915,6 +5971,44 @@ class SimplifiedReActEngine:
                     except Exception as _cdp_resume_ex:
                         if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
                             print(f"[REACT-CDP-LOGIN] auto resume skipped: {_cdp_resume_ex}", flush=True)
+                # CDP 巡检撞登录墙暂停后续跑：用户回复「登录好了/继续」→ 跳过 LLM 直接导航并自动巡检
+                if not getattr(self, "_macro_pending_decision", None):
+                    try:
+                        from agents.cdp.auto_run_explore import resolve_explore_login_resume
+
+                        _ex_resume_ui = (
+                            getattr(self, "_react_stream_user_query", None) or user_input or ""
+                        )
+                        _ex_resume_params = resolve_explore_login_resume(
+                            _ex_resume_ui,
+                            result_context=result_ctx,
+                            chat_session_id=getattr(self, "_chat_session_id", None),
+                            project_id=project_id,
+                        )
+                        if _ex_resume_params:
+                            if project_id is not None:
+                                _ex_resume_params.setdefault("project_id", project_id)
+                            result_ctx["_cdp_force_auto_explore"] = True
+                            _ru = str(_ex_resume_params.get("url") or "").strip()
+                            if _ru:
+                                result_ctx["cdp_target_url"] = _ru
+                            self._macro_pending_decision = {
+                                "execute": True,
+                                "tool": "cdp",
+                                "params": _ex_resume_params,
+                                "reason": "登录完成，自动继续巡检",
+                            }
+                            if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                                print(
+                                    "[REACT-CDP-EXPLORE] auto resume explore after login",
+                                    flush=True,
+                                )
+                    except Exception as _ex_resume_ex:
+                        if os.getenv("REACT_MAIN_LOOP_LOG", "1") != "0":
+                            print(
+                                f"[REACT-CDP-EXPLORE] auto resume skipped: {_ex_resume_ex}",
+                                flush=True,
+                            )
                 _macro_exec_only_round = bool(
                     getattr(self, "_macro_pending_decision", None)
                 )
@@ -7344,13 +7438,14 @@ class SimplifiedReActEngine:
 
                 observation: Dict[str, Any]
                 tool_exc: Optional[BaseException] = None
-                _dag_modify = False
+                _dag_enabled = False
                 try:
                     from agents.agent_task_dag import use_react_agent_task_dag
 
-                    _dag_modify = tool_name == "modify" and use_react_agent_task_dag()
+                    _dag_enabled = use_react_agent_task_dag()
                 except Exception:
-                    _dag_modify = False
+                    _dag_enabled = False
+                _dag_modify = tool_name == "modify" and _dag_enabled
                 if tool_name == "modify" and not _dag_modify:
                     _tool_obj = self.tools.get(tool_name)
                     if _tool_obj is None:
@@ -7391,6 +7486,46 @@ class SimplifiedReActEngine:
                         if isinstance(observation, dict) and "success" not in observation:
                             observation = dict(observation)
                             observation.setdefault("success", True)
+                elif _unified_tool_name_is_cdp(tool_name) and not _dag_enabled:
+                    # CDP 探测含 AI 多步动作（常 1-3 分钟）：后台任务 + 进度队列轮询，
+                    # 执行期间逐步下发动作快照，避免“执行黑洞”
+                    try:
+                        _cdp_timeout = int(
+                            (os.getenv("CDP_AGENT_TOOL_TIMEOUT") or "900").strip()
+                        )
+                    except (TypeError, ValueError):
+                        _cdp_timeout = 900
+                    _cdp_progress_q: "queue.Queue[str]" = queue.Queue()
+                    tool_params["progress_queue"] = _cdp_progress_q
+                    wait_task = asyncio.create_task(
+                        asyncio.wait_for(
+                            self._execute_tool(decision_dict), timeout=_cdp_timeout
+                        )
+                    )
+                    try:
+                        async for _side in self._iter_cdp_side_events_while_task(
+                            wait_task,
+                            _cdp_progress_q,
+                            round_idx,
+                            _reason_nl,
+                        ):
+                            yield _side
+                        observation = wait_task.result()
+                    except asyncio.TimeoutError:
+                        observation = {
+                            "success": False,
+                            "error": f"CDP 探测超时（>{_cdp_timeout}s）",
+                        }
+                    except Exception as e:
+                        tool_exc = e
+                        print(f"[REACT-UNIFIED] cdp error: {e}")
+                        observation = {"success": False, "error": str(e)}
+                    finally:
+                        if isinstance(tool_params, dict):
+                            tool_params.pop("progress_queue", None)
+                    if isinstance(observation, dict) and "success" not in observation:
+                        observation = dict(observation)
+                        observation.setdefault("success", True)
                 else:
                     try:
                         observation = await self._execute_tool(decision_dict)
@@ -10818,6 +10953,33 @@ class SimplifiedReActEngine:
         for ev in self._drain_tool_task_sse_buffer_list():
             yield ev
     
+    async def _iter_cdp_side_events_while_task(
+        self,
+        wait_task: "asyncio.Task[Any]",
+        progress_q: "queue.Queue[str]",
+        round_idx: int,
+        progress_reason: str,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """CDP 探测执行期间：轮询进度队列（步骤快照 / 阶段文本）→ 引擎事件。"""
+        while not wait_task.done():
+            try:
+                while True:
+                    msg = progress_q.get_nowait()
+                    yield _cdp_progress_to_stream_event(msg, round_idx, progress_reason)
+            except queue.Empty:
+                pass
+            for ev in self._drain_tool_task_sse_buffer_list():
+                yield ev
+            await asyncio.sleep(0.05)
+        try:
+            while True:
+                msg = progress_q.get_nowait()
+                yield _cdp_progress_to_stream_event(msg, round_idx, progress_reason)
+        except queue.Empty:
+            pass
+        for ev in self._drain_tool_task_sse_buffer_list():
+            yield ev
+
     async def _execute_tool(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         """执行工具（可选经 agent_tasks 持久化，见 REACT_AGENT_TASK_DAG）。"""
         try:

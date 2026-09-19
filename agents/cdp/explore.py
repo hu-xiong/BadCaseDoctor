@@ -467,7 +467,7 @@ async def run_exploration(
                 })
 
     async def dfs(depth: int, start_url: str) -> None:
-        nonlocal clicks
+        nonlocal clicks, vision_used
         if depth > depth_limit or clicks >= click_limit:
             return
 

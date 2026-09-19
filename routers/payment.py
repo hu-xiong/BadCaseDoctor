@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 from flask_login import current_user, login_required
@@ -420,6 +420,26 @@ def get_credits():
     )
 
 
+def _history_item(r) -> dict:
+    """序列化一条额度流水（充值/消耗/待支付），供 payment_history 与 credit_stats 复用。"""
+    if r.status == "consumed" or (r.credits or 0) < 0:
+        kind = "consume"
+    elif r.status == "completed":
+        kind = "purchase"
+    else:
+        kind = "pending"
+    return {
+        "id": r.id,
+        "type": kind,
+        "plan_id": r.plan_id,
+        "credits": r.credits,
+        "amount": r.amount,
+        "status": r.status,
+        "session_id": r.stripe_session_id,
+        "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+    }
+
+
 @payment_bp.route("/api/payment/history", methods=["GET"])
 @login_required
 def payment_history():
@@ -437,36 +457,74 @@ def payment_history():
         .limit(limit)
         .all()
     )
-    items = []
-    for r in rows:
-        items.append(
-            {
-                "id": r.id,
-                "plan_id": r.plan_id,
-                "credits": r.credits,
-                "amount": r.amount,
-                "status": r.status,
-                "session_id": r.stripe_session_id,
-                "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
-            }
-        )
+    items = [_history_item(r) for r in rows]
     return jsonify({"items": items, "count": len(items)})
+
+
+@payment_bp.route("/api/payment/credit-stats", methods=["GET"])
+@login_required
+def credit_stats():
+    """积分（额度）统计：余额/累计购买/累计消耗/赠送 + 近 7 日消耗 + 最近流水。"""
+    from app import PaymentHistory, UserCredits
+
+    uid = int(current_user.id)
+    credit = UserCredits.query.filter_by(user_id=uid).first()
+    credits = int(credit.credits) if credit else 0
+    total_purchased = int(credit.total_purchased) if credit else 0
+
+    # 消耗流水（credits 记为负数）；一次取回，用于累计与近 7 日按天聚合
+    consumed_rows = (
+        PaymentHistory.query.with_entities(PaymentHistory.created_at, PaymentHistory.credits)
+        .filter(PaymentHistory.user_id == uid, PaymentHistory.status == "consumed")
+        .all()
+    )
+    total_consumed = sum(max(0, -int(r.credits or 0)) for r in consumed_rows)
+
+    now = datetime.utcnow()
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start = today0 - timedelta(days=6)
+    day_counts: dict[str, int] = {}
+    for r in consumed_rows:
+        if not r.created_at or r.created_at < window_start:
+            continue
+        key = r.created_at.date().isoformat()
+        day_counts[key] = day_counts.get(key, 0) + max(0, -int(r.credits or 0))
+    last7d = [
+        {"date": d, "consumed": day_counts.get(d, 0)}
+        for d in ((today0 - timedelta(days=i)).date().isoformat() for i in range(6, -1, -1))
+    ]
+    today_consumed = day_counts.get(today0.date().isoformat(), 0)
+
+    recent_rows = (
+        PaymentHistory.query.filter_by(user_id=uid)
+        .order_by(PaymentHistory.created_at.desc(), PaymentHistory.id.desc())
+        .limit(20)
+        .all()
+    )
+    return jsonify(
+        {
+            "credits": credits,
+            "total_purchased": total_purchased,
+            "total_consumed": total_consumed,
+            # 赠送 = 余额 + 已消耗 - 已购买（含首次使用自动发放的免费额度）
+            "total_granted": max(0, credits + total_consumed - total_purchased),
+            "today_consumed": today_consumed,
+            "last7d": last7d,
+            "recent": [_history_item(r) for r in recent_rows],
+        }
+    )
 
 
 @payment_bp.route("/api/payment/use-credit", methods=["POST"])
 @login_required
 def use_credit():
-    """消耗一次使用额度"""
-    from app import UserCredits, db
-
-    credit = UserCredits.query.filter_by(user_id=current_user.id).first()
-    if not credit or credit.credits <= 0:
-        return jsonify({"error": "额度不足，请购买订阅"}), 403
-
-    credit.credits -= 1
-    credit.updated_at = datetime.utcnow()
-    db.session.commit()
-    return jsonify({"success": True, "remaining_credits": credit.credits})
+    """消耗一次使用额度（与 Agent 闸门共用扣减路径，保证流水与统计一致）"""
+    ok, remaining, err = consume_user_credit(current_user.id)
+    if not ok:
+        if err == "insufficient":
+            return jsonify({"error": "额度不足，请购买订阅"}), 403
+        return jsonify({"error": err or "credit_error"}), 500
+    return jsonify({"success": True, "remaining_credits": remaining})
 
 
 def _record_pending_payment(

@@ -43,6 +43,30 @@ def _grep_nav_json_id(value: Any) -> Optional[str]:
         return None
 
 
+def _grep_query_payload(
+    *,
+    keywords: Any = None,
+    assignee: Any = None,
+    status: Any = None,
+    target: Any = None,
+    plan_id: Any = None,
+    card_id: Any = None,
+) -> Dict[str, Any]:
+    """检索集合 Tab 重放用：记录本次 grep 的结构化查询条件。"""
+
+    def _s(v: Any) -> str:
+        return str(v).strip() if v not in (None, '') else ''
+
+    return {
+        'keywords': _s(keywords),
+        'assignee': _s(assignee),
+        'status': _s(status),
+        'target': (_s(target) or 'all').lower(),
+        'plan_id': _s(plan_id),
+        'card_id': _s(card_id),
+    }
+
+
 # grep keywords 默认检索的字符串/文本列（不含 id/plan_id/project_id 等关联键，id 单独精确匹配）
 _GREP_SEARCH_FIELDS: Dict[str, Tuple[str, ...]] = {
     "bug": (
@@ -394,7 +418,18 @@ class GrepTool(BaseTool):
                             plan_entity_list=plan_location,
                         )
                         navigation = (
-                            {"type": "multiple", "items": navigation_list}
+                            {
+                                "type": "multiple",
+                                "items": navigation_list,
+                                "query_payload": _grep_query_payload(
+                                    keywords=keywords,
+                                    assignee=assignee,
+                                    status=status,
+                                    target=raw_target,
+                                    plan_id=plan_id,
+                                    card_id=card_id,
+                                ),
+                            }
                             if navigation_list
                             else None
                         )
@@ -752,6 +787,44 @@ class GrepTool(BaseTool):
                         _grep_seg["attach_card_ids"] = round(
                             (time.perf_counter() - _t_attach0) * 1000.0, 1
                         )
+
+                        # 未计划脏数据（plan_id 为空）：从分析/导航/模型上下文中剔除，
+                        # 并登记到清理池；总任务完成后经 Redis 队列异步物理清除。
+                        _n_unplanned_dropped = 0
+                        if self._grep_filter_unplanned_enabled():
+                            _n_pre = (
+                                len(bug_list or []),
+                                len(badcase_list or []),
+                                len(testcase_list or []),
+                                len(card_list or []),
+                            )
+                            bug_list = self._drop_unplanned_dirty_entities(
+                                project_id, "bug", bug_list
+                            )
+                            badcase_list = self._drop_unplanned_dirty_entities(
+                                project_id, "badcase", badcase_list
+                            )
+                            testcase_list = self._drop_unplanned_dirty_entities(
+                                project_id, "testcase", testcase_list
+                            )
+                            card_list = self._drop_unplanned_dirty_entities(
+                                project_id, "card", card_list
+                            )
+                            _n_post = (
+                                len(bug_list or []),
+                                len(badcase_list or []),
+                                len(testcase_list or []),
+                                len(card_list or []),
+                            )
+                            _n_unplanned_dropped = sum(p - q for p, q in zip(_n_pre, _n_post))
+                            if _n_unplanned_dropped > 0:
+                                print(
+                                    f"[GREP] 过滤未计划脏数据 {_n_unplanned_dropped} 条 "
+                                    f"(bug {_n_pre[0]}->{_n_post[0]}, badcase {_n_pre[1]}->{_n_post[1]}, "
+                                    f"testcase {_n_pre[2]}->{_n_post[2]}, card {_n_pre[3]}->{_n_post[3]})，"
+                                    f"已登记总任务完成后异步清理",
+                                    flush=True,
+                                )
                     
                         # 【阶段2】分析关联
                         _progress(grep_tool_progress("phase2_assoc", loc))
@@ -784,6 +857,15 @@ class GrepTool(BaseTool):
                             )
                             _grep_mark("phase2_assoc")
                         _progress(grep_tool_progress("phase2_done", loc))
+                        if _n_unplanned_dropped > 0 and isinstance(analysis_result, dict):
+                            _nc_hint = (
+                                f" ({_n_unplanned_dropped} unplanned junk record(s) filtered out; will be cleaned asynchronously)"
+                                if is_english_locale(loc)
+                                else f"（已过滤 {_n_unplanned_dropped} 条未计划脏数据，任务结束后异步清理）"
+                            )
+                            analysis_result["summary"] = (
+                                str(analysis_result.get("summary") or "") + _nc_hint
+                            )
                     
                         # 【阶段3】对比报告：locate 默认跳过（曾全表扫 BadCase，拖慢 ~数百 ms）
                         if self._grep_locate_comparison_enabled():
@@ -810,7 +892,19 @@ class GrepTool(BaseTool):
                             _progress(grep_tool_progress("nav_build", loc))
                             # 始终使用 type=multiple + items，与前端 SimpleChatPanel / AgentTaskRun 一致；
                             # 单条时若只返回 expand_and_locate，界面不渲染「点击跳转」列表。
-                            navigation = {'type': 'multiple', 'items': navigation_list}
+                            # query_payload：供前端「检索结果」工作台 Tab 按原条件重放刷新。
+                            navigation = {
+                                'type': 'multiple',
+                                'items': navigation_list,
+                                'query_payload': _grep_query_payload(
+                                    keywords=keywords,
+                                    assignee=assignee,
+                                    status=status,
+                                    target=raw_target,
+                                    plan_id=plan_id,
+                                    card_id=card_id,
+                                ),
+                            }
                             print(
                                 f"[GREP] ✅ 定位完成: Bug={len(bug_list)} BadCase={len(badcase_list)} "
                                 f"TestCase={len(testcase_list)} Card={len(card_list)}，导航条目={len(navigation_list)}"
@@ -1534,6 +1628,48 @@ class GrepTool(BaseTool):
         if len(items) <= max_n:
             return items
         return items[:max_n]
+
+    @staticmethod
+    def _grep_filter_unplanned_enabled() -> bool:
+        """未计划（plan_id 为空）脏数据过滤开关，默认开；GREP_FILTER_UNPLANNED=0 关闭。"""
+        return (os.getenv("GREP_FILTER_UNPLANNED", "1") or "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _drop_unplanned_dirty_entities(
+        self,
+        project_id: Any,
+        entity_type: str,
+        items: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        """剔除未计划（plan_id 为空/0/''）条目并登记异步清理；保留有计划归属的条目。"""
+        if not items:
+            return []
+        from agents.dirty_data_cleanup import record_unplanned_dirty
+
+        kept: List[Dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                kept.append(it)
+                continue
+            raw_pid = it.get("plan_id")
+            norm: Optional[int] = None
+            if raw_pid is not None and raw_pid != "":
+                try:
+                    n = int(raw_pid)
+                    norm = n if n > 0 else None
+                except (TypeError, ValueError):
+                    norm = None
+            if norm is None:
+                record_unplanned_dirty(
+                    project_id, entity_type, it.get("id"), str(it.get("title") or "")
+                )
+                continue
+            kept.append(it)
+        return kept
 
     def _build_grep_navigation_items(
         self,

@@ -5340,10 +5340,13 @@ def api_login():
                 try:
                     from utils.project_clone import resolve_user_default_project, ensure_default_plan_for_project
 
-                    project_id, _ = resolve_user_default_project(int(user.id))
+                    project_id, created = resolve_user_default_project(int(user.id))
                     ensure_default_plan_for_project(int(project_id), int(user.id))
                     db.session.commit()
-                    _redis_cache_invalidate_projects(user.id)
+                    # 登录本身不改项目数据：常态路径跳过缓存失效（保住登录后 /api/projects 缓存命中，
+                    # 省一次 Redis 往返）；仅新克隆项目时需清项目列表
+                    if created:
+                        _redis_cache_invalidate_projects(user.id)
                 except Exception as e:
                     db.session.rollback()
                     print(f"[LOGIN] 默认项目解析失败: {e}")
@@ -12119,6 +12122,15 @@ if __name__ == '__main__':
                 _conn_limit = max(_threads, min(_conn_limit, 4096))
                 from waitress import create_server
 
+                # 后台预热 MySQL/Redis：首请求（常见为登录）不再现付冷连接 ~1s+
+                # 另启动“核心连接”维持器（BADCASE_POOL_CORE>0 时）：周期借还保底热连接
+                try:
+                    from app_services.warmup import maintain_pool_async, prewarm_async
+
+                    prewarm_async(app, sys.modules[__name__])
+                    maintain_pool_async(app)
+                except Exception as _pw_ex:
+                    print(f"⚠️ 后台预热跳过: {_pw_ex}", flush=True)
                 _wsgi_server = create_server(
                     app,
                     host=_host,

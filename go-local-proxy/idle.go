@@ -18,17 +18,23 @@ var (
 	idleExitOnce    sync.Once
 )
 
+// idleExitDefaultSec：未显式设置环境变量时的默认空闲退出秒数；0=常驻。
+// main 在「已注册开机自启」时置 0（见 autostart.go），环境变量仍可覆盖。
+var idleExitDefaultSec = 1800
+
+func setIdleExitDefault(sec int) { idleExitDefaultSec = sec }
+
 func idleExitSec() int {
 	raw := strings.TrimSpace(os.Getenv("IDLE_EXIT_SEC"))
 	if raw == "" {
 		raw = strings.TrimSpace(os.Getenv("BADCASE_LOCAL_PROXY_IDLE_EXIT_SEC"))
 	}
 	if raw == "" {
-		return 1800 // 默认 30 分钟
+		return idleExitDefaultSec
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		return 1800
+		return idleExitDefaultSec
 	}
 	return n
 }

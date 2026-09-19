@@ -76,7 +76,7 @@ export function sseChunkNeedsImmediatePaint(chunk) {
   if (t === 'heartbeat') return false
   if (t === 'stream') {
     const lane = String(chunk.payload?.lane || '')
-    return lane === 'batch_preview' || lane === 'tool_error'
+    return lane === 'batch_preview' || lane === 'tool_error' || lane === 'cdp_step'
   }
   return true
 }

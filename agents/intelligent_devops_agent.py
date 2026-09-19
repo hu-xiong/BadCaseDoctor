@@ -212,20 +212,33 @@ class IntelligentDevOpsAgent:
             _backend = "langgraph"
         else:
             _backend = "react"
-        self.engine_backend = _backend
         if _backend == "langgraph":
-            from .langgraph_engine import LangGraphReactEngine
+            try:
+                from .langgraph_engine import LangGraphReactEngine
 
-            self.react_engine = LangGraphReactEngine(
-                llm=llm,
-                tool_registry=self.tool_registry,
-            )
-            print("[AGENT] 使用 LangGraph 引擎 (AGENT_ENGINE=langgraph)", flush=True)
+                self.react_engine = LangGraphReactEngine(
+                    llm=llm,
+                    tool_registry=self.tool_registry,
+                )
+                print("[AGENT] 使用 LangGraph 引擎 (AGENT_ENGINE=langgraph)", flush=True)
+            except ImportError as e:
+                # langgraph 依赖缺失时不再把 ImportError 抛给用户：自动回退旧引擎（等价 AGENT_ENGINE=react）
+                _backend = "react"
+                print(
+                    f"[AGENT] ⚠️ LangGraph 引擎不可用（{e}），已自动回退旧引擎 SimplifiedReActEngine；"
+                    f"恢复默认引擎请执行: pip install langgraph",
+                    flush=True,
+                )
+                self.react_engine = SimplifiedReActEngine(
+                    llm=llm,
+                    tool_registry=self.tool_registry,
+                )
         else:
             self.react_engine = SimplifiedReActEngine(
                 llm=llm,
                 tool_registry=self.tool_registry,
             )
+        self.engine_backend = _backend
         self.react_engine.db = db_session
         if perf:
             print(

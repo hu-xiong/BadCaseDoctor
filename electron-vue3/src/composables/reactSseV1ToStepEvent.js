@@ -138,6 +138,19 @@ export function reactSseV1ChunkToLegacyStepEvent(chunk) {
     }
   }
 
+  if (chunk.type === 'stream' && chunk.payload?.lane === 'cdp_step') {
+    const pl = chunk.payload || {}
+    return {
+      event: 'cdp_explore_step',
+      tool: pl.tool,
+      index: pl.index,
+      reason: pl.reason,
+      steps: pl.steps,
+      message: pl.message,
+      react_phase: pl.react_phase
+    }
+  }
+
   if (chunk.type === 'stream' && chunk.payload?.lane === 'engine') {
     return chunk.payload.data
   }

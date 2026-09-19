@@ -35,6 +35,7 @@
       :getCreateClusterSize="getCreateClusterSize"
       :confirmConsecutiveCreateGroup="confirmConsecutiveCreateGroup"
       :cancelConsecutiveCreateGroup="cancelConsecutiveCreateGroup"
+      @openReports="$emit('openReports')"
     />
 
     <SearchPanel
@@ -67,6 +68,13 @@
       :onPinPlan="pinPlan"
     />
 
+    <ReportsPanel
+      v-else-if="activeLeftPanel === 'reports'"
+      :projectId="projectId"
+      :activeKey="activeReportKey"
+      @open-report="$emit('openReport', $event)"
+    />
+
     <PluginsPanel
       v-else-if="activeLeftPanel === 'plugins'"
       :key="'plugins-panel-v2'"
@@ -88,16 +96,18 @@ import { useI18n } from 'vue-i18n'
 import PlansPanel from './PlansPanel.vue'
 import SearchPanel from './SearchPanel.vue'
 import ArchivePanel from './ArchivePanel.vue'
+import ReportsPanel from './ReportsPanel.vue'
 import PluginsPanel from './PluginsPanel.vue'
 
 const { t } = useI18n()
 
-defineEmits(['closeSearch', 'selectSearchResult', 'pluginAction'])
+defineEmits(['closeSearch', 'selectSearchResult', 'pluginAction', 'openReport', 'openReports'])
 
 defineProps({
   activeLeftPanel: { type: String, default: 'plans' },
   projectId: { type: [String, Number, null], default: null },
   selectedPlan: { type: [String, Number, null], default: null },
+  activeReportKey: { type: String, default: '' },
   currentUser: { type: Object, default: null },
   planCollapsed: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },

@@ -364,12 +364,35 @@ def preview_side_events_from_observation(
 
 
 def progress_line_to_sse(line: str) -> Optional[Dict[str, Any]]:
-    """modify progress_queue 文本行 → 引擎事件（兼容 BATCH_PREVIEW_ROW 前缀）。"""
+    """modify / cdp progress_queue 文本行 → 引擎事件（兼容 BATCH_PREVIEW_ROW / __CDP_* 前缀）。"""
     if not line or not isinstance(line, str):
         return None
     raw = line.strip()
     if not raw:
         return None
+    try:
+        from agents.cdp.midscene_bridge import (
+            CDP_STEP_PROGRESS_PREFIX,
+            CDP_TEXT_PROGRESS_PREFIX,
+        )
+
+        if raw.startswith(CDP_STEP_PROGRESS_PREFIX):
+            import json
+
+            try:
+                steps = json.loads(raw[len(CDP_STEP_PROGRESS_PREFIX) :])
+            except Exception:
+                steps = None
+            if isinstance(steps, list):
+                return {"event": "cdp_explore_step", "tool": "cdp", "steps": steps}
+            return None
+        if raw.startswith(CDP_TEXT_PROGRESS_PREFIX):
+            text = raw[len(CDP_TEXT_PROGRESS_PREFIX) :].strip()
+            if text:
+                return {"event": "cdp_explore_step", "tool": "cdp", "message": text}
+            return None
+    except Exception:
+        pass
     prefix = os.getenv("MODIFY_BATCH_PREVIEW_SSE_PREFIX", "BATCH_PREVIEW_ROW:")
     if raw.startswith(prefix):
         import json

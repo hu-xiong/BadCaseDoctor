@@ -420,7 +420,7 @@ class LangGraphReactEngine:
         if tool is None:
             return {"success": False, "error": f"工具不存在: {tool_name}"}
         p = dict(params or {})
-        if progress_q is not None and name == "modify":
+        if progress_q is not None and name in ("modify", "cdp"):
             p["progress_queue"] = progress_q
         try:
             if name == "skill_executor":
@@ -452,7 +452,9 @@ class LangGraphReactEngine:
                 and round_i == 0
                 and not state.get("task_plan_emitted")
             ):
-                _ui = str(state.get("user_input") or "")
+                # 启发式规划仅用干净用户原话：state.user_input 可能带 [会话上下文] URL 前缀，
+                # 会让 "http://" 命中浏览器分支，把任意任务误规划成「打开导航页面」
+                _ui = str(getattr(engine, "_raw_user_input", None) or state.get("user_input") or "")
                 _steps = heuristic_task_plan_steps(_ui, locale=str(state.get("locale") or "zh"))
                 sse.append(plan_init_sse(_steps))
                 plan_extra = {"task_plan_emitted": True, "task_plan_steps": _steps}
@@ -539,6 +541,77 @@ class LangGraphReactEngine:
                     )
             except Exception as _auto_login_ex:
                 print(f"[LANGGRAPH] auto resume cdp skipped: {_auto_login_ex}", flush=True)
+
+            # CDP 巡检撞登录墙暂停后续跑：用户回复「登录好了/继续」→ 跳过 LLM，直接导航回目标页并自动巡检
+            try:
+                from agents.cdp.auto_run_explore import resolve_explore_login_resume
+
+                _rc_ex_resume = (
+                    state.get("result_context")
+                    if isinstance(state.get("result_context"), dict)
+                    else {}
+                )
+                _ex_resume = resolve_explore_login_resume(
+                    str(state.get("user_input") or ""),
+                    result_context=_rc_ex_resume,
+                    chat_session_id=getattr(engine, "_chat_session_id", None),
+                    project_id=state.get("project_id"),
+                )
+                if _ex_resume:
+                    if state.get("project_id") is not None:
+                        _ex_resume.setdefault("project_id", state.get("project_id"))
+                    _rc_ex_resume["_cdp_force_auto_explore"] = True
+                    _ru = str(_ex_resume.get("url") or "").strip()
+                    if _ru:
+                        _rc_ex_resume["cdp_target_url"] = _ru
+                    _args = json.dumps(_ex_resume, ensure_ascii=False)
+                    _tc_id = f"call_cdp_explore_resume_{int(time.time() * 1000) % 1000000}"
+                    _hint = (
+                        "Login detected — resuming the exploratory test…"
+                        if is_english_locale(state.get("locale"))
+                        else "检测到你已完成登录，自动继续巡检…"
+                    )
+                    sse.append(
+                        {
+                            "event": "agent_thought",
+                            "delta": _hint,
+                            "index": round_i,
+                        }
+                    )
+                    sse.append({"event": "agent_thought_done", "index": round_i})
+                    sse.append(
+                        {
+                            "event": "executing",
+                            "tool": "cdp",
+                            "params": {"action": "navigate"},
+                            "reason": "langgraph:auto_resume_explore_login",
+                            "index": round_i,
+                        }
+                    )
+                    print("[LANGGRAPH] auto resume cdp action=navigate (explore)", flush=True)
+                    return _agent_out(
+                        {
+                            "messages": [
+                                {
+                                    "role": "assistant",
+                                    "content": _hint,
+                                    "tool_calls": [
+                                        {
+                                            "id": _tc_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": "cdp",
+                                                "arguments": _args,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                            "sse_buffer": sse,
+                        }
+                    )
+            except Exception as _ex_resume_err:
+                print(f"[LANGGRAPH] auto resume explore skipped: {_ex_resume_err}", flush=True)
 
             # 「测试/打开 + URL」首轮直接开浏览器，避免模型空回复 → 前端「处理完成」
             if round_i == 0:
@@ -802,6 +875,41 @@ class LangGraphReactEngine:
                 last_grep_empty=last_grep_empty,
             )
             sse: List[Dict[str, Any]] = []
+            # CDP 实时旁路：节点执行期间的事件经 custom stream 立即下发（不等 tools_node 返回）
+            _live_writer: Optional[Any] = None
+            try:
+                from langgraph.config import get_stream_writer
+
+                _live_writer = get_stream_writer()
+            except Exception:
+                _live_writer = None
+
+            def _emit_live(ev: Dict[str, Any]) -> bool:
+                """立即下发实时事件；writer 不可用时返回 False 由调用方兜底 append。"""
+                if _live_writer is None:
+                    return False
+                try:
+                    _live_writer(ev)
+                    return True
+                except Exception:
+                    return False
+
+            _progress_q: queue.Queue = queue.Queue()
+
+            def _drain_progress_to_sse() -> None:
+                """消费进度队列：CDP 步骤实时旁路，其余（如 modify 预览行）批量入 sse。"""
+                try:
+                    while True:
+                        _line = _progress_q.get_nowait()
+                        _ev = progress_line_to_sse(str(_line))
+                        if not _ev:
+                            continue
+                        if _ev.get("event") == "cdp_explore_step" and _emit_live(_ev):
+                            continue
+                        sse.append(_ev)
+                except queue.Empty:
+                    pass
+
             if block_msg:
                 sse.append({"event": "agent_thought", "delta": block_msg + "\n\n", "index": int(state.get("round_idx") or 0)})
                 obs = {
@@ -934,34 +1042,25 @@ class LangGraphReactEngine:
                 pending_diff_context=pending if isinstance(pending, list) else None,
                 chat_session_id=getattr(engine, "_chat_session_id", None),
             )
+            # grep 注入干净用户原话：state.user_input 可能带 [会话上下文] 前缀（与旧 ReAct 链路对齐）
+            if name == "grep":
+                _clean_rq = str(getattr(engine, "_raw_user_input", None) or "").strip()
+                if _clean_rq:
+                    params.setdefault("raw_user_input", _clean_rq)
             executed_name = name
             executed_params = dict(params)
 
-            # 3) 执行（modify 带 progress_queue 透出沙箱预览行）
-            progress_q: queue.Queue = queue.Queue()
+            # 3) 执行（modify/cdp 带 progress_queue 透出预览行 / Midscene 实时步骤）
+            progress_q: queue.Queue = _progress_q
             exec_task = asyncio.create_task(
                 engine._execute_prepared_tool(name, params, progress_q=progress_q)
             )
             while not exec_task.done():
-                try:
-                    while True:
-                        line = progress_q.get_nowait()
-                        ev = progress_line_to_sse(str(line))
-                        if ev:
-                            sse.append(ev)
-                except queue.Empty:
-                    pass
+                _drain_progress_to_sse()
                 await asyncio.sleep(0.05)
             obs = await exec_task
             # drain leftover
-            try:
-                while True:
-                    line = progress_q.get_nowait()
-                    ev = progress_line_to_sse(str(line))
-                    if ev:
-                        sse.append(ev)
-            except queue.Empty:
-                pass
+            _drain_progress_to_sse()
 
             if not isinstance(obs, dict):
                 obs = {"success": False, "raw": obs}
@@ -1005,19 +1104,28 @@ class LangGraphReactEngine:
                         or obs.get("action")
                         or ""
                     )
-                    obs = await enrich_cdp_observation(
-                        engine,
-                        obs,
-                        action=str(_cdp_act),
-                        params=executed_params,
-                        project_id=project_id,
-                        plan_id=plan_id or executed_params.get("plan_id"),
-                        user_query=user_input or "",
-                        result_context=result_context,
-                        todo="",
-                        chat_session_id=getattr(engine, "_chat_session_id", None),
-                        react_request_id=getattr(engine, "_agent_session_id", None),
+                    # CDP 探测（可能含 Midscene 多步动作，常 1-3 分钟）：后台执行 + 实时步骤透出
+                    _enrich_task = asyncio.create_task(
+                        enrich_cdp_observation(
+                            engine,
+                            obs,
+                            action=str(_cdp_act),
+                            params=executed_params,
+                            project_id=project_id,
+                            plan_id=plan_id or executed_params.get("plan_id"),
+                            user_query=user_input or "",
+                            result_context=result_context,
+                            todo="",
+                            chat_session_id=getattr(engine, "_chat_session_id", None),
+                            react_request_id=getattr(engine, "_agent_session_id", None),
+                            progress_queue=progress_q,
+                        )
                     )
+                    while not _enrich_task.done():
+                        _drain_progress_to_sse()
+                        await asyncio.sleep(0.05)
+                    obs = await _enrich_task
+                    _drain_progress_to_sse()
                     for _tt_ev in pop_test_task_sse_buffer(result_context):
                         if isinstance(_tt_ev, dict):
                             sse.append(_tt_ev)
@@ -1897,7 +2005,7 @@ class LangGraphReactEngine:
                     "last_observe": "",
                 }
 
-            _astream_kw: Dict[str, Any] = {"stream_mode": "updates"}
+            _astream_kw: Dict[str, Any] = {"stream_mode": ["updates", "custom"]}
             if get_checkpointer() is not None:
                 _astream_kw["config"] = _lg_config
                 print(f"[LANGGRAPH] astream thread_id={self._thread_id}", flush=True)
@@ -1913,9 +2021,42 @@ class LangGraphReactEngine:
             _acc_plan = init.get("task_plan_steps")
             _astream_updates = 0
 
-            async for update in graph.astream(init, **_astream_kw):
-                _astream_updates += 1
+            async for _chunk in graph.astream(init, **_astream_kw):
+                # stream_mode=["updates","custom"]：chunk 为 (mode, payload)；兼容单模式裸 dict
+                _chunk_mode: Optional[str] = None
+                update = _chunk
+                if isinstance(_chunk, tuple) and len(_chunk) == 2 and isinstance(_chunk[0], str):
+                    _chunk_mode, update = _chunk
                 if self._cancel_requested():
+                    # 取消前先吸收并下发当前节点已完成的产出（如 grep 已成功的 observation + 导航条），
+                    # 否则已完成结果被整体丢弃，客户端会把「结果未送达」误显示为「未检索到匹配记录」
+                    if isinstance(update, dict):
+                        for _delta_c in update.values():
+                            if not isinstance(_delta_c, dict):
+                                continue
+                            _rc_c = _delta_c.get("result_context")
+                            if isinstance(_rc_c, dict):
+                                self._unified_result_ctx = dict(_rc_c)
+                                _acc_rc = dict(_rc_c)
+                            _dm_c = _delta_c.get("messages")
+                            if isinstance(_dm_c, list) and _dm_c:
+                                _acc_msgs.extend([m for m in _dm_c if isinstance(m, dict)])
+                            if "grep_tool_calls" in _delta_c:
+                                _acc_grep_calls = int(_delta_c.get("grep_tool_calls") or 0)
+                            if "grep_attempts" in _delta_c:
+                                _acc_grep_attempts = int(_delta_c.get("grep_attempts") or 0)
+                            if "last_grep_empty" in _delta_c:
+                                _acc_last_empty = bool(_delta_c.get("last_grep_empty"))
+                            if "failure_retries" in _delta_c:
+                                _acc_fail_retries = int(_delta_c.get("failure_retries") or 0)
+                            if "round_idx" in _delta_c:
+                                _acc_round = int(_delta_c.get("round_idx") or 0)
+                            if "task_plan_steps" in _delta_c:
+                                _acc_plan = _delta_c.get("task_plan_steps")
+                            for _ev_c in _delta_c.get("sse_buffer") or []:
+                                if isinstance(_ev_c, dict):
+                                    async for pkt in _yield_raw(_ev_c):
+                                        yield pkt
                     _cancel_snap = self._last_resume_snapshot
                     if not isinstance(_cancel_snap, dict) or not _cancel_snap.get("messages"):
                         _fake_state = {
@@ -1961,6 +2102,13 @@ class LangGraphReactEngine:
                     async for pkt in _yield_raw({"event": "done"}):
                         yield pkt
                     return
+                if _chunk_mode == "custom":
+                    # 节点执行期间实时旁路事件（如 cdp_explore_step）：立即转发，不计入节点更新数
+                    if isinstance(update, dict) and update.get("event"):
+                        async for pkt in _yield_raw(update):
+                            yield pkt
+                    continue
+                _astream_updates += 1
                 if not isinstance(update, dict):
                     continue
                 for _node, delta in update.items():

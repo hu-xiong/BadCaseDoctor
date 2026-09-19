@@ -24,22 +24,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"golang.org/x/sys/windows"
 )
 
-var (
-	modKernel32       = windows.NewLazySystemDLL("kernel32.dll")
-	procAllocConsole  = modKernel32.NewProc("AllocConsole")
-)
-
-func init() {
-	// Windows GUI apps (like those started by Electron) don't have a console by default.
-	// Allocate one so WriteConsoleInput can work for win32-input-mode support.
-	if runtime.GOOS == "windows" {
-		procAllocConsole.Call()
-	}
-}
+// Windows 专属的控制台分配逻辑在 console_windows.go（build tag 隔离，保证 darwin/linux 可编译）。
 
 // 自定义 URL 协议（见 scripts/protocol/）：badcase-local-proxy://wakeup?... 由系统传给本进程。
 // 若本机已有实例在监听，则直接退出 0，避免重复启动。
@@ -199,13 +186,75 @@ func main() {
 	addr := getenv("LISTEN", "127.0.0.1:8794")
 	pathWS := getenv("WS_PATH", "/ws")
 
-	if len(os.Args) > 1 && hasWakeupSchemeArg(os.Args[1:]) {
+	args := []string{}
+	if len(os.Args) > 1 {
+		args = os.Args[1:]
+	}
+	asMode, autostartRun, noAutostart := parseAutostartArgs(args)
+	if autostartRun {
+		// 由注册表 Run / LaunchAgent / systemd 在登录时拉起：隐藏控制台（Windows）
+		hideConsoleForAutostart()
+	}
+
+	// --autostart-status / --uninstall-autostart：只做注册查询/移除，不启动服务（见 autostart.go）
+	if asMode == autostartModeStatus {
+		info, err := autostartDescribe()
+		printAutostartJSON("status", info, err)
+		return
+	}
+	if asMode == autostartModeUninstall {
+		info, err := autostartRemove()
+		printAutostartJSON("uninstall", info, err)
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
+	// 开机自启注册（幂等）：
+	//   --install-autostart：显式注册（首次安装的一键流程调用）
+	//   常规启动：默认「确保已注册」——首次运行即写入，之后仅校验并修正路径（文件挪动后自愈）
+	//   --no-autostart / BADCASE_LOCAL_PROXY_NO_AUTOSTART=1：跳过（Flask 托管、仓库开发脚本等）
+	autostartRegistered := false
+	exePath, exeErr := os.Executable()
+	doEnsure := asMode == autostartModeInstall || (!noAutostart && !autostartOptOutByEnv())
+	switch {
+	case !doEnsure:
+		log.Printf("[go-local-proxy] autostart 注册已跳过（--no-autostart / %s）", autostartEnvOptOut)
+	case exeErr != nil:
+		log.Printf("[go-local-proxy] autostart 注册跳过：无法解析本进程路径: %v", exeErr)
+	case autostartPathLooksTransient(exePath):
+		log.Printf("[go-local-proxy] autostart 注册跳过：临时目录二进制（%s）", exePath)
+	default:
+		if info, err := autostartEnsure(exePath); err != nil {
+			log.Printf("[go-local-proxy] autostart 注册失败: %v", err)
+		} else {
+			autostartRegistered = info.Registered
+			if info.Changed {
+				log.Printf("[go-local-proxy] 已注册开机自启（首次安装/路径更新）mechanism=%s target=%s", info.Mechanism, info.Target)
+			} else if asMode == autostartModeInstall {
+				log.Printf("[go-local-proxy] 开机自启已存在 mechanism=%s target=%s", info.Mechanism, info.Target)
+			}
+		}
+	}
+
+	// 由唤醒协议/自启机制/一键安装拉起且本机已有可用实例：不重复占用端口（退出 0）
+	if hasWakeupSchemeArg(args) || asMode == autostartModeInstall || autostartRun {
 		u := healthURLFromListenAddr(addr)
 		if probeHealthOK(u) {
-			log.Printf("[go-local-proxy] wakeup: already up (%s)", u)
-			os.Exit(0)
+			log.Printf("[go-local-proxy] already up (%s) — exit 0", u)
+			return
 		}
-		log.Printf("[go-local-proxy] wakeup: starting (health %s not ok)", u)
+		if hasWakeupSchemeArg(args) {
+			log.Printf("[go-local-proxy] wakeup: starting (health %s not ok)", u)
+		}
+	}
+
+	// 已注册开机自启时默认关闭空闲退出（常驻，登录后不再出现「未运行→点击启动」）；
+	// 显式设置 IDLE_EXIT_SEC / BADCASE_LOCAL_PROXY_IDLE_EXIT_SEC 仍优先生效。
+	if autostartRegistered && os.Getenv("IDLE_EXIT_SEC") == "" && os.Getenv("BADCASE_LOCAL_PROXY_IDLE_EXIT_SEC") == "" {
+		setIdleExitDefault(0)
+		log.Printf("[go-local-proxy] 开机自启已注册：空闲退出默认关闭（常驻）；设 IDLE_EXIT_SEC 可恢复")
 	}
 
 	mux := http.NewServeMux()
@@ -236,6 +285,13 @@ func main() {
 		_ = srv.Shutdown(ctx)
 	})
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// 端口被占（先探测后绑定的竞态窗口：拉起时 health 未通、随后被另一实例抢到端口）：
+		// 再探一次 health，已有实例在线即视为本次启动成功（幂等去重），
+		// 避免 exit 1 触发 macOS launchd KeepAlive 反复重拉。
+		if isAddrInUse(err) && probeHealthOK(healthURLFromListenAddr(addr)) {
+			log.Printf("[go-local-proxy] port busy but health ok (%s) — exit 0", healthURLFromListenAddr(addr))
+			return
+		}
 		log.Fatal(err)
 	}
 }

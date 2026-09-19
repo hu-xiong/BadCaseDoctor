@@ -162,6 +162,9 @@ def react_sse_meta(step_data: Dict[str, Any]) -> Dict[str, Any]:
         return {"react_phase": REACT_PHASE_ACT}
     if ev == "batch_preview_row":
         return {"react_phase": REACT_PHASE_ACT}
+    if ev == "cdp_explore_step":
+        # CDP 探测实时步骤：属执行态（act），前端据此立即刷新步骤行
+        return {"react_phase": REACT_PHASE_ACT}
     if ev == "observation":
         return {"react_phase": REACT_PHASE_ACT}
     if ev in ("exploring", "retry"):
@@ -666,6 +669,25 @@ def _pack_cdp_test_task(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{"type": ClientWireType.STREAM.value, "payload": deep_sse_json_safe(pl)}]
 
 
+def _pack_cdp_explore_step(step_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """CDP 探测实时步骤：独立 lane=cdp_step，避免整包透传产生的大 payload。
+
+    - ``steps``：意图分组 + 动作行的结构化快照（覆盖式更新）；
+    - ``message``：阶段文本进度（连接浏览器 / 进入猴子测试等）。
+    """
+    pl: Dict[str, Any] = {
+        "lane": "cdp_step",
+        "tool": step_data.get("tool") or "cdp",
+        "index": step_data.get("index"),
+        "reason": step_data.get("reason"),
+        "steps": step_data.get("steps"),
+        "message": step_data.get("message"),
+        "react_phase": step_data.get("react_phase") or REACT_PHASE_ACT,
+    }
+    pl = {k: v for k, v in pl.items() if v is not None}
+    return [{"type": ClientWireType.STREAM.value, "payload": deep_sse_json_safe(pl)}]
+
+
 # 引擎 event 字符串 → 打包函数（新增映射时只改这一处表即可）
 _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, Any]]]] = {
     "plan": _pack_plan,
@@ -695,6 +717,7 @@ _ENGINE_EVENT_TO_PACKETS: Dict[str, Callable[[Dict[str, Any]], List[Dict[str, An
     "cdp_test_task_step": _pack_cdp_test_task,
     "cdp_test_task_done": _pack_cdp_test_task,
     "batch_preview_row": _pack_batch_preview_row,
+    "cdp_explore_step": _pack_cdp_explore_step,
     "tool_error": _pack_tool_error_event,
     "client_local_run": _pack_client_local_run,
     "client_terminal_exec": _pack_client_terminal_exec,

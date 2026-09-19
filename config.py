@@ -273,8 +273,9 @@ class Config:
     )
     # 有关键词时是否仍加载整棵计划材料树（极慢）；默认关，检索走 ES
     GREP_PLAN_RECORDS_ON_KEYWORD = os.getenv("GREP_PLAN_RECORDS_ON_KEYWORD", "false").lower() == "true"
-    # ES 向量召回后、rerank 前：按 cosine 相似度过滤（仅 KNN/混合向量路径；BM25 分数量纲不同见 GREP_VECTOR_MIN_SCORE）
-    GREP_PRE_RERANK_MIN_SCORE = float(os.getenv("GREP_PRE_RERANK_MIN_SCORE", "0.90"))
+    # ES 向量召回后、rerank 前：按 cosine 相似度粗筛（仅 KNN/混合向量路径；BM25 分数量纲不同见 GREP_VECTOR_MIN_SCORE）
+    # 0.90 对当前 doubao-embedding-vision 分数分布过高（实测相关命中仅 0.7~0.8），会导致纯 KNN 路径全被过滤 → 0 命中
+    GREP_PRE_RERANK_MIN_SCORE = float(os.getenv("GREP_PRE_RERANK_MIN_SCORE", "0.55"))
     GREP_VECTOR_MIN_SCORE = float(os.getenv("GREP_VECTOR_MIN_SCORE", "0.0"))
     GREP_HYBRID_RRF_K = int(os.getenv("GREP_HYBRID_RRF_K", "60"))
     GREP_INDEX_ASYNC = os.getenv("GREP_INDEX_ASYNC", "true").lower() == "true"

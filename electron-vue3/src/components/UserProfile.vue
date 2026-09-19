@@ -16,21 +16,41 @@
             {{ t('common.loading') }}
           </div>
           
-          <div v-else-if="credits > 0" class="subscription-active">
+          <div v-else-if="hasActivity" class="subscription-active">
             <div class="credits-display">
               <div class="credits-circle">
-                <span class="credits-number">{{ credits }}</span>
+                <span class="credits-number">{{ stats.credits }}</span>
                 <span class="credits-label">{{ t('userProfile.creditsRemaining') }}</span>
               </div>
             </div>
             <div class="subscription-stats">
               <div class="stat-item">
-                <span class="stat-value">{{ totalPurchased }}</span>
+                <span class="stat-value">{{ stats.total_purchased }}</span>
                 <span class="stat-label">{{ t('userProfile.totalPurchased') }}</span>
               </div>
               <div class="stat-item">
-                <span class="stat-value">{{ totalPurchased - credits }}</span>
-                <span class="stat-label">{{ t('userProfile.used') }}</span>
+                <span class="stat-value">{{ stats.total_consumed }}</span>
+                <span class="stat-label">{{ t('userProfile.totalConsumed') }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-value">{{ stats.today_consumed }}</span>
+                <span class="stat-label">{{ t('userProfile.todayConsumed') }}</span>
+              </div>
+              <div v-if="stats.total_granted > 0" class="stat-item">
+                <span class="stat-value">{{ stats.total_granted }}</span>
+                <span class="stat-label">{{ t('userProfile.grantedCredits') }}</span>
+              </div>
+            </div>
+            <div v-if="recentRecords.length" class="usage-records">
+              <div class="records-title">{{ t('userProfile.usageRecords') }}</div>
+              <div class="records-list">
+                <div v-for="rec in recentRecords" :key="rec.id" class="record-item">
+                  <span class="record-badge" :class="`record-badge--${rec.type}`">{{ recordTypeLabel(rec.type) }}</span>
+                  <span class="record-time">{{ formatTime(rec.created_at) }}</span>
+                  <span class="record-credits" :class="{ 'record-credits--plus': rec.credits > 0, 'record-credits--pending': rec.type === 'pending' }">
+                    {{ rec.credits > 0 ? '+' + rec.credits : rec.credits }}
+                  </span>
+                </div>
               </div>
             </div>
             <button class="buy-more-btn" @click="goToSubscription">
@@ -72,21 +92,41 @@
             {{ t('common.loading') }}
           </div>
           
-          <div v-else-if="credits > 0" class="subscription-active">
+          <div v-else-if="hasActivity" class="subscription-active">
             <div class="credits-display">
               <div class="credits-circle">
-                <span class="credits-number">{{ credits }}</span>
+                <span class="credits-number">{{ stats.credits }}</span>
                 <span class="credits-label">{{ t('userProfile.creditsRemaining') }}</span>
               </div>
             </div>
             <div class="subscription-stats">
               <div class="stat-item">
-                <span class="stat-value">{{ totalPurchased }}</span>
+                <span class="stat-value">{{ stats.total_purchased }}</span>
                 <span class="stat-label">{{ t('userProfile.totalPurchased') }}</span>
               </div>
               <div class="stat-item">
-                <span class="stat-value">{{ totalPurchased - credits }}</span>
-                <span class="stat-label">{{ t('userProfile.used') }}</span>
+                <span class="stat-value">{{ stats.total_consumed }}</span>
+                <span class="stat-label">{{ t('userProfile.totalConsumed') }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-value">{{ stats.today_consumed }}</span>
+                <span class="stat-label">{{ t('userProfile.todayConsumed') }}</span>
+              </div>
+              <div v-if="stats.total_granted > 0" class="stat-item">
+                <span class="stat-value">{{ stats.total_granted }}</span>
+                <span class="stat-label">{{ t('userProfile.grantedCredits') }}</span>
+              </div>
+            </div>
+            <div v-if="recentRecords.length" class="usage-records">
+              <div class="records-title">{{ t('userProfile.usageRecords') }}</div>
+              <div class="records-list">
+                <div v-for="rec in recentRecords" :key="rec.id" class="record-item">
+                  <span class="record-badge" :class="`record-badge--${rec.type}`">{{ recordTypeLabel(rec.type) }}</span>
+                  <span class="record-time">{{ formatTime(rec.created_at) }}</span>
+                  <span class="record-credits" :class="{ 'record-credits--plus': rec.credits > 0, 'record-credits--pending': rec.type === 'pending' }">
+                    {{ rec.credits > 0 ? '+' + rec.credits : rec.credits }}
+                  </span>
+                </div>
               </div>
             </div>
             <button class="buy-more-btn" @click="goToSubscription">
@@ -125,21 +165,63 @@ const emit = defineEmits(['close'])
 const router = useRouter()
 const { t } = useI18n()
 
-const credits = ref(0)
-const totalPurchased = ref(0)
+const stats = ref({
+  credits: 0,
+  total_purchased: 0,
+  total_consumed: 0,
+  total_granted: 0,
+  today_consumed: 0,
+})
+const recentRecords = ref([])
 const loading = ref(true)
+
+// 有过任何额度活动（购买/赠送/消耗/余额）即展示统计，余额耗尽也能看到使用记录
+const hasActivity = computed(() =>
+  stats.value.credits > 0 ||
+  stats.value.total_purchased > 0 ||
+  stats.value.total_consumed > 0 ||
+  stats.value.total_granted > 0
+)
 
 const userInitial = computed(() => {
   return props.user?.name?.charAt(0)?.toUpperCase() || 'U'
 })
 
+const recordTypeLabel = (type) =>
+  ({
+    purchase: t('userProfile.recordPurchase'),
+    consume: t('userProfile.recordConsume'),
+    pending: t('userProfile.recordPending'),
+  })[type] || type
+
+const formatTime = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+}
+
 const fetchCredits = async () => {
   try {
-    const res = await api.get('/api/payment/credits')
-    credits.value = res.data.credits || 0
-    totalPurchased.value = res.data.total_purchased || 0
+    const res = await api.get('/api/payment/credit-stats')
+    const data = res.data || {}
+    stats.value = {
+      credits: data.credits || 0,
+      total_purchased: data.total_purchased || 0,
+      total_consumed: data.total_consumed || 0,
+      total_granted: data.total_granted || 0,
+      today_consumed: data.today_consumed || 0,
+    }
+    recentRecords.value = Array.isArray(data.recent) ? data.recent : []
   } catch (error) {
-    console.error('[UserProfile] fetch credits failed:', error)
+    console.error('[UserProfile] fetch credit stats failed:', error)
+    // 旧后端兜底：至少展示余额与累计购买
+    try {
+      const res = await api.get('/api/payment/credits')
+      stats.value.credits = res.data?.credits || 0
+      stats.value.total_purchased = res.data?.total_purchased || 0
+    } catch (fallbackError) {
+      console.error('[UserProfile] fetch credits fallback failed:', fallbackError)
+    }
   } finally {
     loading.value = false
   }
@@ -195,6 +277,22 @@ onMounted(() => {
 }
 
 .profile-embedded--light .stat-label {
+  color: #868e96;
+}
+
+.profile-embedded--light .records-title {
+  color: #868e96;
+}
+
+.profile-embedded--light .records-list {
+  border-color: #e9ecef;
+}
+
+.profile-embedded--light .record-item {
+  border-bottom-color: #f1f3f5;
+}
+
+.profile-embedded--light .record-time {
   color: #868e96;
 }
 
@@ -343,7 +441,8 @@ onMounted(() => {
 .subscription-stats {
   display: flex;
   justify-content: center;
-  gap: 40px;
+  flex-wrap: wrap;
+  gap: 28px;
   margin-bottom: 20px;
 }
 
@@ -361,6 +460,79 @@ onMounted(() => {
 .stat-label {
   font-size: 12px;
   color: #888;
+}
+
+.usage-records {
+  text-align: left;
+  margin-bottom: 20px;
+}
+
+.records-title {
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+}
+
+.records-list {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 10px;
+}
+
+.record-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.record-item:last-child {
+  border-bottom: none;
+}
+
+.record-badge {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.record-badge--purchase {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+}
+
+.record-badge--consume {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.record-badge--pending {
+  background: rgba(250, 204, 21, 0.15);
+  color: #facc15;
+}
+
+.record-time {
+  flex: 1;
+  color: #888;
+}
+
+.record-credits {
+  font-weight: 600;
+  color: #60a5fa;
+}
+
+.record-credits--plus {
+  color: #4ade80;
+}
+
+.record-credits--pending {
+  color: #facc15;
 }
 
 .buy-more-btn {

@@ -812,6 +812,16 @@ def modify_message_sandbox_done(locale: Optional[str]) -> str:
     )
 
 
+def modify_message_no_change(locale: Optional[str], mod_summary: str = "") -> str:
+    """目标值即当前值（无实际变化）：不生成沙箱预览，直接给结论。"""
+    detail = (mod_summary or "").strip()
+    if is_english_locale(locale):
+        base = "No changes needed: the requested value(s) already match the current record"
+        return f"{base} ({detail})." if detail else f"{base}."
+    base = "无需修改：目标值已是当前值"
+    return f"{base}（{detail}）。" if detail else f"{base}。"
+
+
 def modify_summary_preview(
     target: str,
     target_id: int,

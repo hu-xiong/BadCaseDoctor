@@ -1,4 +1,6 @@
 # 可选：将 badcase-local-proxy 加入用户登录启动（快捷方式方式，非协议注册）
+# 注：新版代理自带一等公民机制——运行 `badcase-local-proxy.exe --install-autostart`（或首次运行自动）
+#     会写入注册表 Run 键并常驻；本脚本仅作「启动文件夹快捷方式」的替代手段保留。
 # 用法（需自行改 $ExePath）：
 #   powershell -ExecutionPolicy Bypass -File .\scripts\protocol\windows-autostart-shortcut.ps1
 param(

@@ -19,4 +19,6 @@ Write-Host "启动本地 Go 代理: $exe" -ForegroundColor Cyan
 Write-Host "  HTTP /health: http://127.0.0.1:8794/health" -ForegroundColor Gray
 Write-Host "  WebSocket run: ws://127.0.0.1:8794/ws  |  pty: ws://127.0.0.1:8794/pty" -ForegroundColor Gray
 Write-Host "  修改源码后请先 go build 再运行，否则仍是旧 exe。" -ForegroundColor DarkGray
+# 开发脚本不注册开机自启，避免登录启动指向仓库内的临时构建（与 run-go-local-proxy.cmd 一致）
+$env:BADCASE_LOCAL_PROXY_NO_AUTOSTART = "1"
 & $exe

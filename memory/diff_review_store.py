@@ -166,28 +166,40 @@ def persist_modify_sandbox_diff_review(
         return False
 
     try:
+        from flask import has_app_context
         from app import (
             _broadcast_diff_review,
             _diff_review_row_to_item,
             _safe_mysql_int_fk_id,
             _upsert_diff_review_state,
+            app as flask_app,
             db,
         )
 
-        row, _suppressed = _upsert_diff_review_state(
-            project_id=pid,
-            target=target,
-            target_id=tid,
-            plan_id=plan_id,
-            diff=diff or [],
-            modifications=mods_payload,
-            source_message_id=_safe_mysql_int_fk_id(source_message_id),
-            source_session_id=_safe_mysql_int_fk_id(source_session_id),
-            operator_id=operator_id,
-        )
-        db.session.commit()
-        item = _diff_review_row_to_item(row)
-        _broadcast_diff_review(pid, "upsert", item)
+        def _run_upsert() -> None:
+            row, _suppressed = _upsert_diff_review_state(
+                project_id=pid,
+                target=target,
+                target_id=tid,
+                plan_id=plan_id,
+                diff=diff or [],
+                modifications=mods_payload,
+                source_message_id=_safe_mysql_int_fk_id(source_message_id),
+                source_session_id=_safe_mysql_int_fk_id(source_session_id),
+                operator_id=operator_id,
+            )
+            db.session.commit()
+            item = _diff_review_row_to_item(row)
+            _broadcast_diff_review(pid, "upsert", item)
+
+        # modify 工具在 react_tool 工作线程执行（无 Flask app_context）；
+        # 缺上下文时 DiffReviewState.query 抛异常会导致 pending 静默不落库，
+        # 刷新页面 / 换浏览器后（历史消息）点击跳转将看不到待确认 diff
+        if has_app_context():
+            _run_upsert()
+        else:
+            with flask_app.app_context():
+                _run_upsert()
         if os.getenv("PERF_LOG", "").strip() == "1":
             print(
                 f"[DIFF-UPSERT][auto] project={pid} target={target!r} id={tid} "

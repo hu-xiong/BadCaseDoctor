@@ -16,6 +16,9 @@ export function resolveInstalledLocalProxyPath() {
 }
 
 /**
+ * 背景启动本机代理，并附带 --install-autostart：首次安装时一次性注册
+ * 「开机自启」（Windows 注册表 Run 键 / macOS LaunchAgent / Linux systemd 用户服务），
+ * 之后用户无需再手动点击启动或安装。该参数幂等，旧版二进制会忽略未知参数。
  * @param {string} exePath
  * @returns {string}
  */
@@ -24,11 +27,13 @@ export function buildLocalProxyStartCommand(exePath) {
   if (!p) return ''
   const os = detectClientOS()
   if (os === 'win') {
-    // PowerShell：后台启动，避免阻塞嵌入终端会话
-    return `Start-Process -FilePath ${JSON.stringify(p)}`
+    // PowerShell：后台启动 + 隐藏窗口，避免阻塞嵌入终端会话；--install-autostart 注册 Run 键
+    return `Start-Process -FilePath ${JSON.stringify(p)} -ArgumentList '--install-autostart' -WindowStyle Hidden`
   }
   const q = JSON.stringify(p)
-  return `chmod +x ${q} 2>/dev/null; nohup ${q} >/tmp/badcase-local-proxy.log 2>&1 &`
+  // macOS：浏览器下载会带 com.apple.quarantine（自启/首次执行可能被 Gatekeeper 拦截），先尝试清除
+  const dequarantine = os === 'darwin' ? `xattr -d com.apple.quarantine ${q} 2>/dev/null; ` : ''
+  return `${dequarantine}chmod +x ${q} 2>/dev/null; nohup ${q} --install-autostart >/tmp/badcase-local-proxy.log 2>&1 &`
 }
 
 /**

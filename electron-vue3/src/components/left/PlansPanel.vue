@@ -254,6 +254,13 @@
         </div>
       </div>
     </div>
+
+    <!-- 报告与任务：迭代树底部轻入口（低频兜底；主入口为左侧窄条 📊，见 NarrowNavBar） -->
+    <div class="reports-entry" @click="$emit('openReports')">
+      <span class="reports-entry-icon">📊</span>
+      <span class="reports-entry-text">{{ t('reportsPanel.entry') }}</span>
+      <span class="reports-entry-arrow">→</span>
+    </div>
   </div>
 </template>
 
@@ -261,6 +268,8 @@
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
+
+defineEmits(['openReports'])
 
 defineProps({
   planCollapsed: { type: Boolean, default: false },
@@ -346,6 +355,38 @@ defineProps({
 
 .plan-tree {
   margin-top: 16px;
+}
+
+.reports-entry {
+  position: sticky;
+  bottom: 0;
+  margin-top: 18px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid #e8eaed;
+  background: #f8f9fa;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #666;
+  transition: background-color 0.15s, color 0.15s;
+  user-select: none;
+}
+
+.reports-entry:hover {
+  background: #eef2f7;
+  color: #1a73e8;
+}
+
+.reports-entry-icon {
+  font-size: 13px;
+}
+
+.reports-entry-arrow {
+  margin-left: auto;
+  color: #999;
 }
 
 .plan-list {

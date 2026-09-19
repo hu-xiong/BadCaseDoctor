@@ -600,6 +600,25 @@ def _patch_steps_blob_for_title(steps, target_norm, entity_id_int, new_title):
     return changed
 
 
+def _patch_er_nested_value(v, fn, *fn_args):
+    """execution_results 行内 text 常为嵌套 JSON 字符串（如 '{"confirmation_required": true, ...}'）：
+    直接递归只覆盖 dict/list，字符串整块会被漏掉；此处先尝试解析字符串再递归，命中修改后写回 JSON 字符串。"""
+    if isinstance(v, str):
+        s = v.strip()
+        if not s or s[0] not in '{[':
+            return False, v
+        try:
+            parsed = json.loads(s)
+        except (ValueError, TypeError):
+            return False, v
+        if isinstance(parsed, (dict, list)) and fn(parsed, *fn_args):
+            return True, json.dumps(parsed, ensure_ascii=False)
+        return False, v
+    if isinstance(v, (dict, list)) and fn(v, *fn_args):
+        return True, v
+    return False, v
+
+
 def _patch_execution_results_modify_adopted(obj, target_norm, entity_id_int):
     """采纳后：将 execution_results 内对应 modify 块的 confirmation_required 置为 False，避免前端从 ER 恢复成「仍待确认」沙箱。"""
     changed = False
@@ -618,12 +637,16 @@ def _patch_execution_results_modify_adopted(obj, target_norm, entity_id_int):
                             changed = True
             except (TypeError, ValueError):
                 pass
-        for v in obj.values():
-            if _patch_execution_results_modify_adopted(v, target_norm, entity_id_int):
+        for k, v in list(obj.items()):
+            hit, nv = _patch_er_nested_value(v, _patch_execution_results_modify_adopted, target_norm, entity_id_int)
+            if hit:
+                obj[k] = nv
                 changed = True
     elif isinstance(obj, list):
-        for x in obj:
-            if _patch_execution_results_modify_adopted(x, target_norm, entity_id_int):
+        for i, x in enumerate(list(obj)):
+            hit, nv = _patch_er_nested_value(x, _patch_execution_results_modify_adopted, target_norm, entity_id_int)
+            if hit:
+                obj[i] = nv
                 changed = True
     return changed
 
@@ -647,12 +670,16 @@ def _patch_execution_results_modify_titles(obj, target_norm, entity_id_int, new_
                                 changed = True
             except (TypeError, ValueError):
                 pass
-        for v in obj.values():
-            if _patch_execution_results_modify_titles(v, target_norm, entity_id_int, new_title):
+        for k, v in list(obj.items()):
+            hit, nv = _patch_er_nested_value(v, _patch_execution_results_modify_titles, target_norm, entity_id_int, new_title)
+            if hit:
+                obj[k] = nv
                 changed = True
     elif isinstance(obj, list):
-        for x in obj:
-            if _patch_execution_results_modify_titles(x, target_norm, entity_id_int, new_title):
+        for i, x in enumerate(list(obj)):
+            hit, nv = _patch_er_nested_value(x, _patch_execution_results_modify_titles, target_norm, entity_id_int, new_title)
+            if hit:
+                obj[i] = nv
                 changed = True
     return changed
 
@@ -700,17 +727,46 @@ def _patch_chat_message_record_titles(msg, target, target_id, new_title):
             print(f"[MODIFY-BG] patch execution_results 失败: {e}")
 
 
-def _finalize_chat_message_after_modify_adopt(message_id, target=None, target_id=None, modifications=None):
-    """采纳落库成功后：若有标题变更则同步修正本条消息上的定位/执行结果文案，再清空沙箱预览字段。"""
+def _locate_chat_message_by_target(session_id, target, target_id):
+    """按 (session + target_id) 在会话消息里兜底定位沙箱预览消息。
+    前端常把流式阶段的本地临时 id（Date.now()）当 message_id 传来，落库消息 id 与其不符，
+    仅按 id 查会漏清；此处按消息内容中的 target_id 找最近一条助手消息作为兜底。"""
+    if target_id is None:
+        return None
+    try:
+        tid = int(str(target_id).strip())
+    except (TypeError, ValueError):
+        return None
+    pat = f"%{tid}%"
+    q = ChatMessage.query.filter(
+        ChatMessage.is_user.is_(False),
+        db.or_(
+            ChatMessage.execution_results.like(pat),
+            ChatMessage.modify_navigation.like(pat),
+        ),
+    )
+    sid = _safe_mysql_int_fk_id(session_id)
+    if sid is not None:
+        q = q.filter(ChatMessage.session_id == sid)
+    return q.order_by(ChatMessage.id.desc()).first()
+
+
+def _finalize_chat_message_after_modify_adopt(message_id, target=None, target_id=None, modifications=None, session_id=None):
+    """采纳落库成功后：若有标题变更则同步修正本条消息上的定位/执行结果文案，再清空沙箱预览字段。
+    按 message_id 查不到时用 (session_id, target_id) 兜底，避免临时 id 导致漏清、已采纳沙箱反复出现。"""
     mid = _normalize_chat_message_id(message_id)
-    if mid is None:
-        return
     try:
         db.session.expire_all()
-        msg = db.session.get(ChatMessage, mid)
-        if not msg:
-            print(f"[MODIFY-BG] ChatMessage id={mid} 不存在，跳过 finalize")
-            return
+        msg = db.session.get(ChatMessage, mid) if mid is not None else None
+        if msg is None:
+            msg = _locate_chat_message_by_target(session_id, target, target_id)
+            if msg is None:
+                print(f"[MODIFY-BG] ChatMessage id={mid} 不存在，跳过 finalize")
+                return
+            print(
+                f"[MODIFY-BG] finalize 兜底命中消息 {msg.id}"
+                f"（message_id={message_id!r} session={session_id!r} target_id={target_id!r}）"
+            )
         new_title = None
         if isinstance(modifications, dict):
             tv = modifications.get('title')
@@ -774,6 +830,7 @@ def _run_modify_in_background(
     db_uri,
     natural_query=None,
     operator_user_id=None,
+    session_id=None,
 ):
     """后台线程执行采纳落库，使用独立 app_context 和 db.session，避免阻塞主请求"""
     import asyncio
@@ -792,20 +849,22 @@ def _run_modify_in_background(
                 message_id=message_id,
                 operator_user_id=operator_user_id,
             ))
-            if result.get('success') and message_id:
+            if result.get('success'):
                 _finalize_chat_message_after_modify_adopt(
                     message_id,
                     target=target,
                     target_id=int(target_id),
                     modifications=dict(modifications or {}),
+                    session_id=session_id,
                 )
         except Exception as e:
             print(f"[MODIFY-BG] 后台采纳失败: {e}")
 
 
-def _run_modify_batch_in_background(project_id, target, items, message_id, db_uri):
+def _run_modify_batch_in_background(project_id, target, items, message_id, db_uri, session_id=None):
     """同一线程内顺序采纳多条，仅结束时清理消息预览一次；用于前端单次 HTTP 批量采纳。"""
     import asyncio
+    import json
 
     with app.app_context():
         from agents.tools.modify_tool import ModifyTool
@@ -833,33 +892,54 @@ def _run_modify_batch_in_background(project_id, target, items, message_id, db_ur
                     succeeded_items.append(it)
         except Exception as e:
             print(f"[MODIFY-BG-BATCH] 批量采纳失败: {e}")
-        if any_success and message_id:
+        if any_success:
             mid = _normalize_chat_message_id(message_id)
-            if mid is None:
-                return
             try:
                 db.session.expire_all()
-                msg = db.session.get(ChatMessage, mid)
+                msg = db.session.get(ChatMessage, mid) if mid is not None else None
+                if msg is None and succeeded_items:
+                    msg = _locate_chat_message_by_target(session_id, target, succeeded_items[0]["target_id"])
+                    if msg is not None:
+                        print(
+                            f"[MODIFY-BG-BATCH] finalize 兜底命中消息 {msg.id}"
+                            f"（message_id={message_id!r} session={session_id!r}）"
+                        )
                 if not msg:
                     print(f"[MODIFY-BG-BATCH] ChatMessage id={mid} 不存在，跳过 finalize")
                     return
+                tgt_b = _normalize_diff_target(target)
                 for it in succeeded_items:
                     mods = dict(it.get("modifications") or {})
+                    try:
+                        it_tid = int(it["target_id"])
+                    except (TypeError, ValueError):
+                        continue
                     tv = mods.get("title")
                     if isinstance(tv, str) and tv.strip():
                         try:
                             _patch_chat_message_record_titles(
-                                msg, target, int(it["target_id"]), tv.strip()
+                                msg, target, it_tid, tv.strip()
                             )
                         except Exception as e:
                             print(f"[MODIFY-BG-BATCH] 标题同步失败 tid={it.get('target_id')}: {e}")
+                    if msg.execution_results:
+                        try:
+                            er = (
+                                json.loads(msg.execution_results)
+                                if isinstance(msg.execution_results, str)
+                                else msg.execution_results
+                            )
+                            if _patch_execution_results_modify_adopted(er, tgt_b, it_tid):
+                                msg.execution_results = json.dumps(er, ensure_ascii=False)
+                        except Exception as e:
+                            print(f"[MODIFY-BG-BATCH] patch execution_results 失败 tid={it_tid}: {e}")
                 msg.modify_groups = None
                 msg.modify_navigation = None
                 msg.delete_navigation = None
                 db.session.commit()
-                print(f"[MODIFY-BG-BATCH] 已 finalize 消息 {mid}（批量标题同步 + 清空 modify_*）")
+                print(f"[MODIFY-BG-BATCH] 已 finalize 消息 {msg.id}（批量标题同步 + 清空 modify_*）")
             except Exception as e:
-                print(f"[MODIFY-BG-BATCH] finalize 失败 id={mid}: {e}")
+                print(f"[MODIFY-BG-BATCH] finalize 失败 mid={mid}: {e}")
                 db.session.rollback()
 
 
@@ -946,6 +1026,10 @@ def api_project_modify(project_id):
         modifications = data.get('modifications', {})
         confirm = data.get('confirm', True)
         message_id = _normalize_chat_message_id(data.get('message_id'))
+        # 会话 id：message_id 为前端临时 id 时，finalize 需靠 session_id + target_id 兜底定位消息
+        session_id = _safe_mysql_int_fk_id(data.get('session_id'))
+        # 会话 id：message_id 为前端临时 id 时，finalize 需靠 session_id + target_id 兜底定位消息
+        session_id = _safe_mysql_int_fk_id(data.get('session_id'))
         db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI')
         natural_query_top = data.get("natural_query")
         if isinstance(natural_query_top, str):
@@ -1005,7 +1089,7 @@ def api_project_modify(project_id):
             )
             thread = threading.Thread(
                 target=_run_modify_batch_in_background,
-                args=(project_id, target, normalized, message_id, db_uri),
+                args=(project_id, target, normalized, message_id, db_uri, session_id),
                 daemon=True,
             )
             thread.start()
@@ -1054,13 +1138,13 @@ def api_project_modify(project_id):
 
                 result = asyncio.run(run_comment_adopt())
                 if result.get("success"):
-                    if message_id:
-                        _finalize_chat_message_after_modify_adopt(
-                            message_id,
-                            target=target,
-                            target_id=int(target_id),
-                            modifications=mods_dict,
-                        )
+                    _finalize_chat_message_after_modify_adopt(
+                        message_id,
+                        target=target,
+                        target_id=int(target_id),
+                        modifications=mods_dict,
+                        session_id=session_id,
+                    )
                     adopted_entity = result.get("after")
                     if not isinstance(adopted_entity, dict):
                         adopted_entity = None
@@ -1097,6 +1181,7 @@ def api_project_modify(project_id):
                         db_uri,
                         natural_query_top,
                         current_user.id,
+                        session_id,
                     ),
                     daemon=True,
                 )
@@ -1135,13 +1220,13 @@ def api_project_modify(project_id):
 
             result = asyncio.run(run_sync_adopt())
             if result.get("success"):
-                if message_id:
-                    _finalize_chat_message_after_modify_adopt(
-                        message_id,
-                        target=target,
-                        target_id=int(target_id),
-                        modifications=mods_dict,
-                    )
+                _finalize_chat_message_after_modify_adopt(
+                    message_id,
+                    target=target,
+                    target_id=int(target_id),
+                    modifications=mods_dict,
+                    session_id=session_id,
+                )
                 adopted_entity = result.get("after")
                 if not isinstance(adopted_entity, dict):
                     adopted_entity = None

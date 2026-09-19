@@ -394,6 +394,34 @@ export function applyReactEngineLaneLegacyStepEvent(aiMessage, stepEvent, ctx) {
     }
     return {}
   }
+  if (stepEvent.event === 'cdp_explore_step') {
+    aiMessage._placeholderSteps = false
+    ensureReactStepsForStreamIndex(aiMessage, stepEvent.index, buildReactStepsFromTodoStrings)
+    const _cdpi = resolveStreamStepIndexFromEvent(stepEvent, aiMessage.steps, resolveStreamStepIndex)
+    const runningStep =
+      _cdpi != null ? aiMessage.steps[_cdpi] : aiMessage.steps.find((s) => s.status === 'running')
+    if (runningStep) {
+      if (runningStep.phaseWait) runningStep.phaseWait = null
+      if (Array.isArray(stepEvent.steps)) {
+        // 快照语义：服务端 tracker 已做增量合并，这里整体替换保证行状态一致
+        runningStep.midsceneSteps = stepEvent.steps
+        runningStep.cdpLive = true
+      }
+      if (stepEvent.message) {
+        const line = String(stepEvent.message).trim()
+        if (line) {
+          if (!runningStep.progressLog) runningStep.progressLog = []
+          if (runningStep.progressLog[runningStep.progressLog.length - 1] !== line) {
+            runningStep.progressLog.push(line)
+            if (runningStep.progressLog.length > 60) runningStep.progressLog.shift()
+            runningStep.progressLog = [...runningStep.progressLog]
+          }
+          appendStepDetailLine(runningStep, line)
+        }
+      }
+    }
+    return {}
+  }
   if (stepEvent.event === 'batch_preview_row') {
     aiMessage._placeholderSteps = false
     ensureReactStepsForStreamIndex(aiMessage, stepEvent.index, buildReactStepsFromTodoStrings)
@@ -858,14 +886,33 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
   // getUnifiedSummaryBody 仍优先草稿；summaryText 已写入 agentResult 供落库与刷新后展示。
   aiMessage.thoughtCollapsed = true
 
+  // done 收口：failed/error 步骤保持原状。
+  // 巡检撞登录墙暂停（等待用户登录、回复「继续」续跑）时，未执行到的计划步骤
+  // 不能被刷成「已完成」——否则规划备忘整排绿勾与「已暂停」结论互相矛盾（只收回 running）；
+  // 正常完成时沿用原收口语义：未完成的步骤一并标完成（探测类任务会一次性吸收后续模板步骤）。
+  const _awaitLoginPaused =
+    (Array.isArray(aiMessage.allObservations) &&
+      aiMessage.allObservations.some(
+        (o) => o && typeof o === 'object' && o.await_manual_login === true
+      )) ||
+    (Array.isArray(aiMessage.steps) &&
+      aiMessage.steps.some(
+        (s) =>
+          Array.isArray(s?.progressLog) &&
+          s.progressLog.some((l) => String(l).trim().startsWith('⏸'))
+      ))
   aiMessage.steps.forEach((step) => {
     if (step?.phaseWait) step.phaseWait = null
-    if (step.status === 'failed' || step.status === 'error') return
-    if (step.status !== 'completed') {
-      freezeThoughtSnapshotForStep(step)
-      step.status = 'completed'
-      step.description = '已完成'
+    if (step?.status === 'failed' || step?.status === 'error') return
+    if (_awaitLoginPaused) {
+      // 暂停：只收回「正在执行」的步骤，从未开始的 pending 保持未完成
+      if (step?.status !== 'running') return
+    } else if (step?.status === 'completed') {
+      return
     }
+    freezeThoughtSnapshotForStep(step)
+    step.status = 'completed'
+    step.description = '已完成'
   })
   if (aiMessage.understanding === '...') {
     aiMessage.understanding = ''
@@ -955,7 +1002,33 @@ function applyReactDoneLegacyStepEvent(aiMessage, stepEvent, flushReasoningTypew
     }
   }
 
-  if ((stepEvent.steps_count === 0 || !stepEvent.steps_count) && displayFindings.length > 0) {
+  if (_awaitLoginPaused) {
+    // 巡检撞登录墙暂停：结论必须直接说「需要登录」，不能被 findings[0]（报告正文首行）覆盖
+    let pauseLine = ''
+    if (Array.isArray(aiMessage.allObservations)) {
+      for (const o of aiMessage.allObservations) {
+        if (o && typeof o === 'object' && o.await_manual_login === true) {
+          const m = String(o.error || o.message || '').trim()
+          if (m) {
+            pauseLine = m
+            break
+          }
+        }
+      }
+    }
+    if (!pauseLine) {
+      for (const f of displayFindings) {
+        const s = String(f).trim()
+        if (s.startsWith('⏸')) {
+          pauseLine = s
+          break
+        }
+      }
+    }
+    if (pauseLine && !pauseLine.startsWith('⏸')) pauseLine = '⏸ ' + pauseLine
+    aiMessage.finalResponse =
+      pauseLine || '⏸ 巡检被登录拦截并已暂停：请完成登录后回复「登录好了」，我会接着完成巡检。'
+  } else if ((stepEvent.steps_count === 0 || !stepEvent.steps_count) && displayFindings.length > 0) {
     aiMessage.finalResponse = '⚠️ ' + displayFindings[0]
   } else {
     // 有统一总结块时正文走 runningSummaryDraft / summaryText / findings，勿再塞「执行统计」到 finalResponse
