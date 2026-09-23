@@ -1919,9 +1919,12 @@ def api_list_cdp_test_runs():
         react_request_id = (request.args.get('react_request_id') or request.args.get('session_id') or '').strip()
         chat_session_id = request.args.get('chat_session_id')
         limit = min(int(request.args.get('limit', 20)), 100)
+        # 注意：models.orm 的模型绑定在未 init_app 的 db_extensions.db 上，
+        # 类级 Model.query 会抛 'not registered'，统一走 app 已注册实例的 Session 级查询
+        from app import db
         from models.orm import CdpTestRun
 
-        q = CdpTestRun.query
+        q = db.session.query(CdpTestRun)
         if react_request_id:
             q = q.filter(CdpTestRun.react_request_id == react_request_id[:64])
         elif chat_session_id:
@@ -1950,17 +1953,18 @@ def api_list_reports():
         sessions_limit = min(int(request.args.get('sessions', 50) or 50), 100)
         runs_per_session = min(int(request.args.get('runs', 12) or 12), 50)
 
+        from app import db
         from models.orm import CdpTestRun, ReactAgentRun, ChatSession
 
         cdp_rows = (
-            CdpTestRun.query.filter(CdpTestRun.project_id == project_id)
+            db.session.query(CdpTestRun).filter(CdpTestRun.project_id == project_id)
             .order_by(CdpTestRun.created_at.desc())
             .limit(300)
             .all()
         )
         # interrupted 为断开残影（被后续请求接管后转 completed），不进报告树
         react_rows = (
-            ReactAgentRun.query.filter(
+            db.session.query(ReactAgentRun).filter(
                 ReactAgentRun.project_id == project_id,
                 ReactAgentRun.status != 'interrupted',
             )
@@ -2041,7 +2045,7 @@ def api_list_reports():
         session_ids = [g['session_id'] for g in ordered if g.get('session_id') is not None]
         title_map = {}
         if session_ids:
-            for s in ChatSession.query.filter(ChatSession.id.in_(session_ids)).all():
+            for s in db.session.query(ChatSession).filter(ChatSession.id.in_(session_ids)).all():
                 title_map[int(s.id)] = s.title or ''
 
         sessions_payload = []
@@ -2079,8 +2083,8 @@ def api_get_report_detail(kind, report_id):
         rid = (report_id or '').strip()[:64]
         if kind not in ('cdp_test', 'agent_run') or not rid:
             return jsonify({'success': False, 'error': '非法报告类型'}), 400
+        from app import db, has_project_permission
         from models.orm import CdpTestRun, ReactAgentRun, ChatSession
-        from app import has_project_permission
 
         def _iso(dt):
             return dt.isoformat() if dt else None
@@ -2088,11 +2092,11 @@ def api_get_report_detail(kind, report_id):
         def _session_title(sid):
             if sid is None:
                 return ''
-            s = ChatSession.query.filter(ChatSession.id == int(sid)).first()
+            s = db.session.query(ChatSession).filter(ChatSession.id == int(sid)).first()
             return (s.title or '') if s else ''
 
         if kind == 'cdp_test':
-            row = CdpTestRun.query.filter(CdpTestRun.id == rid).first()
+            row = db.session.query(CdpTestRun).filter(CdpTestRun.id == rid).first()
             if not row:
                 return jsonify({'success': False, 'error': '报告不存在'}), 404
             if not has_project_permission(current_user.id, row.project_id):
@@ -2102,7 +2106,7 @@ def api_get_report_detail(kind, report_id):
             data['session_title'] = _session_title(row.chat_session_id)
             return jsonify({'success': True, 'report': data})
 
-        row = ReactAgentRun.query.filter(ReactAgentRun.id == rid).first()
+        row = db.session.query(ReactAgentRun).filter(ReactAgentRun.id == rid).first()
         if not row:
             return jsonify({'success': False, 'error': '报告不存在'}), 404
         if row.project_id is not None and not has_project_permission(current_user.id, row.project_id):

@@ -9705,6 +9705,17 @@ class SimplifiedReActEngine:
             )
             params["target"] = "bug"
             return
+        # 反向保护：模型已给 bug 时，若真实用户话术明确「Bug」，不因 todo/界面上下文里的 Card/BadCase 字样
+        # 把 target 覆盖为 card/badcase（否则导航只剩卡片层命中，与总结展示的源表结果不对应）
+        if (
+            t == "bug"
+            and exp in ("card", "badcase")
+            and user_text_implies_bug_entity_type(user_input or "")
+        ):
+            print(
+                f"[REACT-execution] grep.params.target 用户话术明确 Bug，保留: 'bug'（忽略 exp={exp!r} 推断）"
+            )
+            return
         if t in ('all', exp):
             return
         if exp == 'testcase' and t not in ('testcase', 'all'):

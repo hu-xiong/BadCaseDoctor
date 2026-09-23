@@ -1011,7 +1011,9 @@ def grep_generate_locate_summary(
             )
 
     if bug_count > 0:
-        if related_bug_count > 0:
+        if is_query_all:
+            parts.append(f"🐛 Found {bug_count} Bug(s)" if en else f"🐛 找到 {bug_count} 条Bug")
+        elif related_bug_count > 0:
             if bug_location and len(bug_location) > 0:
                 plan_name = bug_location[0].get("plan_name", "")
                 if plan_name:

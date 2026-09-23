@@ -58,6 +58,9 @@ const urlSchemeMarker = "badcase-local-proxy://"
 //   {"op":"error","id":"1","message":"..."}
 //
 // HTTP 浏览器：/browser/start|/stop|/status ，CDP 反代 /browser/cdp/* → 本机 Chrome DevTools
+//
+// 出站隧道（tunnel.go）：--tunnel-url/--tunnel-token（或 env / 持久化配置）→ 云端桥服务，
+// 供云端 Agent/midscene 经 CDP 网关操作本机 Chrome（内网场景；见 docs/技术设计_本机浏览器CDP通道.md）。
 
 type msgIn struct {
 	Op         string            `json:"op"`
@@ -211,6 +214,13 @@ func main() {
 		return
 	}
 
+	// 隧道配置（--tunnel-url/--tunnel-token / env）：落盘供自启无参实例与运行中实例重读
+	if tcfg, ok := parseTunnelArgs(args); ok {
+		if err := persistTunnelConfig(tcfg); err != nil {
+			log.Printf("[tunnel] 配置持久化失败: %v", err)
+		}
+	}
+
 	// 开机自启注册（幂等）：
 	//   --install-autostart：显式注册（首次安装的一键流程调用）
 	//   常规启动：默认「确保已注册」——首次运行即写入，之后仅校验并修正路径（文件挪动后自愈）
@@ -256,6 +266,9 @@ func main() {
 		setIdleExitDefault(0)
 		log.Printf("[go-local-proxy] 开机自启已注册：空闲退出默认关闭（常驻）；设 IDLE_EXIT_SEC 可恢复")
 	}
+
+	// 出站隧道（本机 → 云端）：读持久化配置启动；token 更新后自动重建连接
+	startTunnelWatcher()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/pty", handlePtyTerminal)

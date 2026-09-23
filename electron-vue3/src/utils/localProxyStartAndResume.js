@@ -16,24 +16,61 @@ export function resolveInstalledLocalProxyPath() {
 }
 
 /**
+ * 拉取本机代理隧道参数（云端 CDP 通道；需登录）。未配置/失败返回 null，代理按本地模式启动。
+ * @returns {Promise<{url:string,token:string}|null>}
+ */
+export async function fetchTunnelParams() {
+  try {
+    const r = await fetch('/api/client-scripts/local-proxy/tunnel-token', {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    })
+    if (!r.ok) return null
+    const j = await r.json().catch(() => ({}))
+    const url = String((j && j.url) || '').trim()
+    const token = String((j && j.token) || '').trim()
+    if (!url || !token) return null
+    return { url, token }
+  } catch {
+    return null
+  }
+}
+
+/** PowerShell 单引号参数字面量 */
+function psQuote(v) {
+  return `'${String(v).replace(/'/g, "''")}'`
+}
+
+/** POSIX shell 单引号参数字面量 */
+function shQuote(v) {
+  return `'${String(v).replace(/'/g, "'\\''")}'`
+}
+
+/**
  * 背景启动本机代理，并附带 --install-autostart：首次安装时一次性注册
  * 「开机自启」（Windows 注册表 Run 键 / macOS LaunchAgent / Linux systemd 用户服务），
  * 之后用户无需再手动点击启动或安装。该参数幂等，旧版二进制会忽略未知参数。
  * @param {string} exePath
+ * @param {{url:string,token:string}|null} [tunnel] 隧道参数（见 fetchTunnelParams）；旧版二进制忽略未知参数
  * @returns {string}
  */
-export function buildLocalProxyStartCommand(exePath) {
+export function buildLocalProxyStartCommand(exePath, tunnel) {
   const p = String(exePath || '').trim()
   if (!p) return ''
   const os = detectClientOS()
+  const tunnelPairs =
+    tunnel && tunnel.url && tunnel.token ? [['--tunnel-url', tunnel.url], ['--tunnel-token', tunnel.token]] : []
   if (os === 'win') {
     // PowerShell：后台启动 + 隐藏窗口，避免阻塞嵌入终端会话；--install-autostart 注册 Run 键
-    return `Start-Process -FilePath ${JSON.stringify(p)} -ArgumentList '--install-autostart' -WindowStyle Hidden`
+    const argList = [psQuote('--install-autostart'), ...tunnelPairs.map(([k, v]) => `${psQuote(k)},${psQuote(v)}`)].join(',')
+    return `Start-Process -FilePath ${JSON.stringify(p)} -ArgumentList ${argList} -WindowStyle Hidden`
   }
   const q = JSON.stringify(p)
   // macOS：浏览器下载会带 com.apple.quarantine（自启/首次执行可能被 Gatekeeper 拦截），先尝试清除
   const dequarantine = os === 'darwin' ? `xattr -d com.apple.quarantine ${q} 2>/dev/null; ` : ''
-  return `${dequarantine}chmod +x ${q} 2>/dev/null; nohup ${q} --install-autostart >/tmp/badcase-local-proxy.log 2>&1 &`
+  const tunnelArgs = tunnelPairs.map(([k, v]) => ` ${shQuote(k)} ${shQuote(v)}`).join('')
+  return `${dequarantine}chmod +x ${q} 2>/dev/null; nohup ${q} --install-autostart${tunnelArgs} >/tmp/badcase-local-proxy.log 2>&1 &`
 }
 
 /**
@@ -77,7 +114,8 @@ export async function tryStartInstalledLocalProxy(opts = {}) {
   if (woke) return true
 
   const exePath = String(opts.exePath || resolveInstalledLocalProxyPath() || '').trim()
-  const startCmd = buildLocalProxyStartCommand(exePath)
+  const tunnel = await fetchTunnelParams()
+  const startCmd = buildLocalProxyStartCommand(exePath, tunnel)
   if (startCmd && typeof opts.injectCommand === 'function') {
     try {
       if (typeof opts.ensureTerminalVisible === 'function') {

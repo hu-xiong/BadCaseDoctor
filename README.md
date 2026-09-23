@@ -51,6 +51,8 @@ flowchart LR
   UI <-->|本机 loopback WS/HTTP| Go
   Go --> Chrome
   Go --> Shell
+  Go <-->|wss 反连隧道（本机主动出站）| Cloud
+  LG -->|CDP 网关 ws（经隧道操作本机 Chrome）| Go
   LG -->|client_browser / terminal 指令| UI
   Biz -->|采纳后的 Bug/Case/Diff| IDE
 ```
@@ -59,6 +61,7 @@ flowchart LR
 
 - **云端**：会话、权限、额度、LLM、草稿与 Diff 生命周期  
 - **本机 Go**：不把内网浏览器和本地 shell 暴露到公网，只在 `127.0.0.1` 上为前端/Agent 提供能力  
+- **跨网 CDP 通道**：本机代理主动反连云端隧道，Agent/Midscene 经环回网关 ws 直连本机 Chrome——内网页面无需云端可达、无需入站端口
 - **Cursor 等**：消费已采纳的问题描述与复现信息，完成修复
 
 ## Go 本机代理（核心能力）
@@ -122,6 +125,7 @@ Go 轻量守护进程做「最后一公里」：前端/Electron 把 Agent 下发
 | --------------------- | ------------------------------------------------------------------------------ |
 | **拉起本机 Chrome + CDP** | `browser_start`：有头调试、remote-debugging；Agent 才能对真实 UI 做 snapshot / click / fill |
 | **CDP HTTP 反代**       | `/browser/cdp/`* → 本机 DevTools，供 Playwright `connect_over_cdp` 等同机连接           |
+| **跨网 CDP 通道**         | 反连隧道（wss）+ 云端 CDP 网关：Agent / Midscene 直连你本机 Chrome——内网页面云端可达，且不向内网暴露任何入站端口 |
 | **Shell 执行与流式回传**     | WebSocket：`run` / `chunk` / `done`；支持超时、取消、cwd/env                             |
 | **交互式 PTY**           | 类终端会话（Windows ConPTY 等），方便长任务与交互命令                                             |
 | **权限与确认**             | 高风险命令可要求前端二次确认（`confirm_required`）                                             |
@@ -156,6 +160,7 @@ Go 轻量守护进程做「最后一公里」：前端/Electron 把 Agent 下发
 
 相关设计文档（仓库内）：
 
+- `docs/技术设计_本机浏览器CDP通道.md`（反连隧道 + CDP 网关，跨网操作本机浏览器）
 - `docs/需求文档_CDP浏览器工具与元素精准操控.md`  
 - `docs/需求文档_diff_review闭环处理.md`  
 - `agents/cdp/OPENCLAW_BROWSER_PORT.md`
@@ -178,6 +183,7 @@ Go 轻量守护进程做「最后一公里」：前端/Electron 把 Agent 下发
 - `cp .env.example .env` 后自行填写；模板可提交，`.env` 已在 `.gitignore`。  
 - 若密钥曾进入公开仓库历史，请立即轮换，并考虑清理 Git 历史。  
 - Go 代理默认只绑本机；不要把 CDP/代理端口映射到公网。
+- 跨网 CDP 通道：本机仅主动反连出站（wss），隧道只转发本代理自拉 Chrome 的 CDP，不提供任意 host/port 转发；网关仅环回监听。
 
 ## 快速开始
 
@@ -202,6 +208,17 @@ go build -ldflags="-s -w" -o ../client_binaries/badcase-local-proxy.exe .
 ```
 
 跨平台构建说明见 `go-local-proxy/main.go` 文件头注释。Electron/Web 也可下载 `client_binaries/` 中预置二进制。
+
+启用**跨网 CDP 通道**（内网页面云端可达，可选）——云端先起桥服务，代理带隧道参数：
+
+```bash
+python local_browser_bridge.py   # 云端（与 Flask 同机，需 BADCASE_TUNNEL_SECRET，两边共享）
+# 本机代理（token 由云端 /api/client-scripts/local-proxy/tunnel-token 签发，Electron/Web 启动时自动注入）
+./badcase-local-proxy --tunnel-url wss://<云端域名>/api/local-proxy/tunnel --tunnel-token <token>
+```
+
+Agent 侧连接模式由 `CDP_CONNECTION_MODE=auto|local|launch` 控制（默认 auto：隧道在线走本机，
+内网地址离线时显式失败不降级）；协议与降级矩阵详见 `docs/技术设计_本机浏览器CDP通道.md`。
 
 ### 3. 桌面端（可选）
 

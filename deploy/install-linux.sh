@@ -36,8 +36,11 @@ python3 -m venv "$APP_DIR/venv"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 
 install -m 644 "$APP_DIR/deploy/badcase-doctor.service" /etc/systemd/system/badcase-doctor.service
+# 本机浏览器 CDP 桥服务（反连隧道 Hub + CDP 网关；无 BADCASE_TUNNEL_SECRET 时启动后不接收隧道，可先只 enable 不 start）
+install -m 644 "$APP_DIR/deploy/badcase-local-bridge.service" /etc/systemd/system/badcase-local-bridge.service
 systemctl daemon-reload
 systemctl enable badcase-doctor.service
+systemctl enable badcase-local-bridge.service
 
-echo "安装完成。编辑 $APP_DIR/.env 后执行: systemctl start badcase-doctor"
+echo "安装完成。编辑 $APP_DIR/.env（含 BADCASE_TUNNEL_SECRET）后执行: systemctl start badcase-doctor badcase-local-bridge"
 echo "健康检查: curl -fsS http://127.0.0.1:5000/health"

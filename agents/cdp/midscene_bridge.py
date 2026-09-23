@@ -589,6 +589,30 @@ def _resolve_node_bin() -> Optional[str]:
     return shutil.which("node") or shutil.which("node.exe")
 
 
+def _local_mode_requires_cdp_ws(
+    cdp_ws_url: Optional[str], *, engine: str
+) -> Optional[Dict[str, Any]]:
+    """local（强制本机）模式下必须携带网关 cdp_ws_url：禁止 runner 自起云端浏览器
+    造成内网站点假完成（设计 §8.5）；launch/auto 模式不受限制。"""
+    try:
+        from agents.cdp.settings import cdp_connection_mode
+
+        if cdp_connection_mode() != "local":
+            return None
+    except Exception:
+        return None
+    if (cdp_ws_url or "").strip():
+        return None
+    return {
+        "success": False,
+        "engine": engine,
+        "error": (
+            "CDP_CONNECTION_MODE=local 但未提供 cdp_ws_url："
+            "禁止 midscene/gremlins 自行启动云端浏览器（防内网站点假完成）"
+        ),
+    }
+
+
 async def run_midscene_smoke(
     *,
     url: str,
@@ -603,6 +627,9 @@ async def run_midscene_smoke(
     progress_queue：可选的引擎侧进度队列（``queue.Queue``），每发生一步就推送
     结构化快照（``__CDP_STEP__``）与阶段文本（``__CDP_TEXT__``），供 SSE 实时展示。
     """
+    guard = _local_mode_requires_cdp_ws(cdp_ws_url, engine="midscene")
+    if guard is not None:
+        return guard
     if not midscene_runner_ready():
         return {
             "success": False,
@@ -865,6 +892,9 @@ async def run_gremlins_monkey(
 
     progress_queue：可选进度队列，流式推送 ``[gremlins]`` 阶段日志（``__CDP_TEXT__``）。
     """
+    guard = _local_mode_requires_cdp_ws(cdp_ws_url, engine="gremlins")
+    if guard is not None:
+        return guard
     if not gremlins_runner_ready():
         return {
             "success": False,

@@ -334,6 +334,8 @@
   },
   "chat": {
     "empty": "开始新的对话...",
+    "insufficientCredits": "额度不足，已暂停 Agent 使用，请购买订阅后继续",
+    "insufficientCreditsDialog": "额度不足，请购买订阅后继续使用。是否前往订阅页面？",
     "me": "我",
     "ai": "AI",
     "placeholder": "输入消息... (Enter发送，Shift+Enter换行)",

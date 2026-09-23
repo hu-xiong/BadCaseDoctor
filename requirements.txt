@@ -40,6 +40,9 @@ langchain-experimental
 langchain-openai
 sqlalchemy
 
+# 本机浏览器 CDP 桥服务（local_browser_bridge.py：隧道 Hub + CDP 网关；纯 Python 无编译依赖）
+aiohttp>=3.9
+
 # 沙箱执行依赖（可选）
 # pip install llm-sandbox  # Docker 沙箱执行（推荐）
 

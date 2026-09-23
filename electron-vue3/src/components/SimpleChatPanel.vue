@@ -3972,6 +3972,15 @@ const formatReactStreamError = (err) => {
   return msg
 }
 
+/** 额度到 0：给出清晰提示，并可选跳转订阅页（Agent 到 0 后不可用） */
+const notifyInsufficientCredits = () => {
+  const text = t('chat.insufficientCredits')
+  try {
+    const goSubscribe = window.confirm(`${text}\n\n${t('chat.insufficientCreditsDialog')}`)
+    if (goSubscribe) window.location.hash = '#/subscription'
+  } catch (_) { /* confirm 不可用时静默降级，聊天区内仍有提示 */ }
+}
+
 // 保存消息到数据库；返回后端响应（含 message_id），供调用方回填真实消息 id
 const saveMessageToDb = async (messageData) => {
   if (!props.sessionId) return null
@@ -4323,18 +4332,25 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
     
     if (!response.ok) {
       let detail = `HTTP ${response.status}`
+      let errCode = ''
       try {
         const errBody = await response.json()
         if (errBody?.message) detail = String(errBody.message)
         else if (errBody?.error) detail = String(errBody.error)
+        if (errBody?.error) errCode = String(errBody.error)
       } catch (_) { /* ignore */ }
       if (response.status === 401) detail = '未登录，请重新登录'
-      else if (response.status === 402) detail = detail || '额度不足，请购买订阅'
       else if (response.status === 403) detail = detail || '无该项目权限'
       else if (response.status === 429) {
         detail = detail || '请求过于频繁，请稍后再试'
         const ra = parseInt(response.headers.get('Retry-After') || '', 10)
         if (Number.isFinite(ra) && ra > 0) detail += `（约 ${ra} 秒后重试）`
+      } else if (response.status === 402 && (errCode === 'insufficient_credits' || !errCode)) {
+        // 额度到 0：弹窗引导订阅，聊天区给出专用提示（与后端 Agent 闸门 insufficient_credits 对齐）
+        notifyInsufficientCredits()
+        const creditErr = new Error(t('chat.insufficientCredits'))
+        creditErr.insufficientCredits = true
+        throw creditErr
       }
       throw new Error(detail)
     }
@@ -4418,9 +4434,14 @@ const handleReactAgentMode = async (userMessage, images = [], reactOpts = {}) =>
         finalizeRunningMessage(aiMessage, 'stopped')
       } else {
         finalizeRunningMessage(aiMessage, 'failed')
-        const short = formatReactStreamError(error)
-        // 纯连接断开：预览沙箱不依赖 SSE，不必在底部再刷一大段说明
-        aiMessage.finalResponse = short === '连接已断开' ? '' : `错误: ${short}`
+        if (error?.insufficientCredits) {
+          // 额度不足：聊天区给专用提示（弹窗已引导订阅）
+          aiMessage.finalResponse = String(error.message || t('chat.insufficientCredits'))
+        } else {
+          const short = formatReactStreamError(error)
+          // 纯连接断开：预览沙箱不依赖 SSE，不必在底部再刷一大段说明
+          aiMessage.finalResponse = short === '连接已断开' ? '' : `错误: ${short}`
+        }
       }
     }
   }
@@ -4687,11 +4708,24 @@ const handleAgentMode = async (userMessage) => {
     
     if (!response.ok) {
       let detail = `HTTP ${response.status}`
+      let errCode = ''
+      try {
+        const errBody = await response.json()
+        if (errBody?.message) detail = String(errBody.message)
+        if (errBody?.error) errCode = String(errBody.error)
+      } catch (_) { /* ignore */ }
       if (response.status === 429) {
         const ra = parseInt(response.headers.get('Retry-After') || '', 10)
         detail = '请求过于频繁，请稍后再试'
         if (Number.isFinite(ra) && ra > 0) detail += `（约 ${ra} 秒后重试）`
       } else if (response.status === 401) detail = '未登录，请重新登录'
+      else if (response.status === 402 && (errCode === 'insufficient_credits' || !errCode)) {
+        // 额度到 0：弹窗引导订阅，聊天区给出专用提示
+        notifyInsufficientCredits()
+        const creditErr = new Error(t('chat.insufficientCredits'))
+        creditErr.insufficientCredits = true
+        throw creditErr
+      }
       throw new Error(detail)
     }
     
@@ -4734,7 +4768,9 @@ const handleAgentMode = async (userMessage) => {
     }
   } catch (error) {
     console.error('[CHAT-EXECUTE] Agent 执行失败:', error)
-    aiMessage.finalResponse = `错误: ${error.message || '未知错误'}`
+    aiMessage.finalResponse = error?.insufficientCredits
+      ? String(error.message || t('chat.insufficientCredits'))
+      : `错误: ${error.message || '未知错误'}`
   }
   
   // 保存 AI 消息到数据库
@@ -6343,6 +6379,27 @@ watch(() => props.sessionId, (newSessionId) => {
 .reasoning-markdown code { background: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
 .reasoning-markdown pre { background: #f1f5f9; padding: 10px; border-radius: 6px; overflow-x: auto; margin: 0.5em 0; font-size: 0.85em; white-space: pre-wrap; }
 .reasoning-markdown pre code { background: none; padding: 0; }
+/* GFM 表格（总结/思考区，模型输出标准 Markdown 表格时渲染） */
+.reasoning-markdown :deep(table) {
+  margin: 0.5em 0;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.reasoning-markdown :deep(th),
+.reasoning-markdown :deep(td) {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+.reasoning-markdown :deep(th) {
+  font-weight: 600;
+  background: rgba(148, 163, 184, 0.14);
+}
+.reasoning-markdown :deep(table code) {
+  white-space: nowrap;
+}
 
 .findings-section {
   margin: 16px 0;

@@ -11,16 +11,25 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .owner import resolve_cdp_owner_key
+from .channel import ensure_local_channel, issue_route, owner_user_id, tunnel_status_async
 
-from .errors import CdpError, NAVIGATION_FAILED, PLAYWRIGHT_UNAVAILABLE, SESSION_NOT_FOUND
+from .errors import (
+    CdpError,
+    LOCAL_CHANNEL_UNAVAILABLE,
+    NAVIGATION_FAILED,
+    PLAYWRIGHT_UNAVAILABLE,
+    SESSION_NOT_FOUND,
+)
 from .settings import (
     assert_url_allowed,
     cdp_browser_idle_sec,
+    cdp_connection_mode,
     cdp_default_timeout_ms,
     cdp_headless,
     cdp_max_sessions,
     cdp_session_ttl_sec,
     cdp_snapshot_max_nodes,
+    is_private_url,
 )
 from .snapshot import AxSnapshotBuilder, PageSnapshot
 from .element_actor import ElementActor
@@ -62,6 +71,9 @@ class BrowserSession:
     awaiting_verification_project_id: Optional[int] = None
     owns_browser: bool = False
     owner_key: str = "anonymous"
+    local_mode: bool = False  # True=本机浏览器（隧道网关连接）：close 不关 context/browser
+    owns_page: bool = False  # local 模式下本会话新建的 tab（close 时释放；复用的 tab 保留）
+    llm_capture: Any = None  # LLM 报文采集器（见 llm_capture.py）
 
     async def touch(self) -> None:
         self.last_used_at = time.time()
@@ -98,6 +110,11 @@ class BrowserSession:
         self._cdp = None
         self.last_snapshot = None
         await self.page.bring_to_front()
+        if self.llm_capture is not None:
+            try:
+                self.llm_capture.attach(self.page)
+            except Exception:
+                pass
         await self.touch()
 
     async def close(self) -> None:
@@ -106,6 +123,15 @@ class BrowserSession:
                 await self._cdp.detach()
         except Exception:
             pass
+        if self.local_mode:
+            # 本机共享浏览器（D6/D7）：仅释放本会话——不关 context（登录态留存本机 profile）、
+            # 不关浏览器（生命周期归本机 go 代理）；仅当 tab 由本会话新建时才关闭
+            if self.owns_page and self.page is not None:
+                try:
+                    await self.page.close()
+                except Exception:
+                    pass
+            return
         try:
             await self.context.close()
         except Exception:
@@ -245,6 +271,15 @@ class _BrowserPoolSlot:
     idle_task: Optional[asyncio.Task] = None
 
 
+@dataclass
+class LocalBrowserSlot:
+    """本机浏览器连接槽（经隧道网关 connect_over_cdp），按 owner_key 缓存。"""
+
+    browser: Any
+    ws_url: str
+    connected_at: float = field(default_factory=time.time)
+
+
 class CdpSessionManager:
     _instance: Optional["CdpSessionManager"] = None
 
@@ -254,6 +289,7 @@ class CdpSessionManager:
         self._pw_cm = None
         self._pw_loop: Optional[asyncio.AbstractEventLoop] = None
         self._browser_pools: Dict[str, _BrowserPoolSlot] = {}
+        self._local_slots: Dict[str, LocalBrowserSlot] = {}
         self._lock = asyncio.Lock()
         self._sweeper_started = False
 
@@ -298,6 +334,7 @@ class CdpSessionManager:
         """Playwright / Browser 与当前事件循环不匹配或连接失效时整池重建。"""
         for key in list(self._browser_pools.keys()):
             await self._close_browser_pool_unlocked(key)
+        self._local_slots.clear()  # CDP 连接随 Playwright 实例失效，下次 ensure 时重建
         self._sessions.clear()
         if self._pw_cm is not None:
             try:
@@ -315,6 +352,9 @@ class CdpSessionManager:
         owner_key: str = "anonymous",
     ) -> None:
         """预启动指定用户的共享 Chromium（供服务启动预热，默认 anonymous）。"""
+        if cdp_connection_mode() == "local":
+            # local 强制本机通道：浏览器生命周期归本机代理（D7），不做云端预热
+            return
         async with self._lock:
             await self._ensure_browser(owner_key=owner_key, headless=headless)
 
@@ -345,13 +385,173 @@ class CdpSessionManager:
             )
         return browser
 
-    async def get_browser_ws_endpoint(self, *, owner_key: str = "anonymous") -> Optional[str]:
-        """返回共享浏览器池中指定用户的浏览器 CDP WebSocket URL。
+    async def _resolve_connection_mode(self, *, owner_key: str, url: Optional[str]) -> str:
+        """决策本次会话连接模式（``local``/``launch``）；本机不可用且禁止降级时抛 CdpError。
 
-        供 Midscene/Gremlins 子进程复用同一浏览器，避免重复启动。
-        Playwright 的 Browser 对象不暴露 ws（pipe 控制），因此通过
-        Chromium ``--remote-debugging-port`` 的 /json/version 读取；失败时返回 None（调用方回退自起浏览器）。
+        - CDP_CONNECTION_MODE=launch：始终云端 launch（回归安全）。
+        - =local：强制本机；通道可用性由 _ensure_local_browser 的 ensure（带等待）把关。
+        - =auto：隧道在线 → local；离线时私网 URL 显式失败（D8，不降级）、公网/未定回退 launch。
         """
+        mode = cdp_connection_mode()
+        if mode == "launch":
+            return "launch"
+        user_id = owner_user_id(owner_key)
+        if user_id is None:
+            if mode == "local":
+                raise CdpError(
+                    LOCAL_CHANNEL_UNAVAILABLE,
+                    f"本机通道需要登录用户归属（owner={owner_key}），无法定位本机代理隧道",
+                )
+            return "launch"
+        if mode == "local":
+            return "local"
+        status = await tunnel_status_async(user_id)
+        if status.online:
+            return "local"
+        if url and is_private_url(url):
+            raise CdpError(
+                LOCAL_CHANNEL_UNAVAILABLE,
+                "目标为内网地址且本机代理通道离线：请先启动本机代理"
+                "（可经 browser_local 卡片唤起），云端浏览器无法访问内网",
+            )
+        return "launch"
+
+    async def _ensure_local_browser(
+        self, owner_key: str, *, force_reconnect: bool = False
+    ) -> LocalBrowserSlot:
+        """建立/复用本机浏览器 CDP 连接（经隧道网关）；失败重试一次后显式报错。
+
+        force_reconnect：隧道抖动后旧 ws 已失效时强制重建（不信任 is_connected 缓存）。
+        """
+        slot = self._local_slots.get(owner_key)
+        if slot is not None and not force_reconnect:
+            try:
+                if bool(slot.browser.is_connected()):
+                    return slot
+            except Exception:
+                pass
+            self._local_slots.pop(owner_key, None)
+        elif slot is not None:
+            try:
+                await slot.browser.close()
+            except Exception:
+                pass
+            self._local_slots.pop(owner_key, None)
+        last_ex: Optional[BaseException] = None
+        for attempt in range(2):
+            ws_url = await ensure_local_channel(owner_key)
+            if not ws_url:
+                raise CdpError(
+                    LOCAL_CHANNEL_UNAVAILABLE,
+                    "本机代理通道不可用：请启动本机代理后重试"
+                    "（客户端唤起流程可自动拉起，见 browser_local 卡片）",
+                )
+            try:
+                pw = await self._ensure_pw()
+                t0 = time.perf_counter()
+                browser = await pw.chromium.connect_over_cdp(ws_url)
+                new_slot = LocalBrowserSlot(browser=browser, ws_url=ws_url)
+                self._local_slots[owner_key] = new_slot
+                print(
+                    f"[CDP] mode=local owner={owner_key} 已连接本机浏览器 "
+                    f"{(time.perf_counter() - t0) * 1000:.0f}ms",
+                    flush=True,
+                )
+                return new_slot
+            except Exception as ex:
+                last_ex = ex
+                if attempt == 0:
+                    print(
+                        f"[CDP] mode=local 连接本机浏览器失败，重试一次: {type(ex).__name__}: {ex}",
+                        flush=True,
+                    )
+                    continue
+        raise CdpError(LOCAL_CHANNEL_UNAVAILABLE, f"连接本机浏览器失败: {last_ex}")
+
+    @staticmethod
+    def _local_context(browser: Any):
+        """D6：复用本机浏览器的默认 context（contexts[0]，保留登录态），不 new_context。"""
+        try:
+            contexts = list(browser.contexts)
+        except Exception:
+            contexts = []
+        return contexts[0] if contexts else None
+
+    @staticmethod
+    async def _choose_local_page(context: Any, url: Optional[str]):
+        """选择会话页：host 匹配的已有 tab 优先（延续登录态），否则新建；返回 (page, owns_page)。"""
+        from urllib.parse import urlparse
+
+        def _host(raw: str) -> str:
+            try:
+                return (urlparse(str(raw or "").strip()).hostname or "").lower()
+            except Exception:
+                return ""
+
+        target_host = _host(url or "")
+        if target_host:
+            try:
+                pages = list(context.pages)
+            except Exception:
+                pages = []
+            for p in pages:
+                try:
+                    if _host(p.url) == target_host:
+                        return p, False
+                except Exception:
+                    continue
+        return await context.new_page(), True
+
+    async def _recover_local_session(
+        self, session: "BrowserSession", *, url: Optional[str] = None
+    ) -> None:
+        """local 会话因隧道抖动断线后就地重建连接/页面（session_id 不变，D6 语义保持）。
+
+        url：重建后偏好复用的目标地址（host 匹配的已有 tab 优先）。
+        """
+        print(
+            f"[CDP] mode=local 会话断线，重建本机连接 sid={session.session_id}",
+            flush=True,
+        )
+        slot = await self._ensure_local_browser(session.owner_key, force_reconnect=True)
+        context = self._local_context(slot.browser)
+        if context is None:
+            context = await slot.browser.new_context()
+        if session.owns_page and session.page is not None:
+            try:
+                await session.page.close()
+            except Exception:
+                pass
+        page, owns_page = await self._choose_local_page(context, url)
+        session.browser = slot.browser
+        session.context = context
+        session.page = page
+        session.owns_page = owns_page
+        session._cdp = None
+        session.last_snapshot = None
+
+    async def get_browser_ws_endpoint(self, *, owner_key: str = "anonymous") -> Optional[str]:
+        """返回可被 Midscene/Gremlins 子进程复用的浏览器 CDP WebSocket URL。
+
+        - local 模式：每次重新申领 route key（网关 ws，指向本机浏览器，登录态/内网可达）；
+        - launch 模式：读共享浏览器池 ``--remote-debugging-port`` 的 /json/version
+          （Playwright Browser 不暴露 ws）；失败返回 None（调用方回退自起浏览器）。
+        """
+        local_slot = self._local_slots.get(owner_key)
+        if local_slot is not None:
+            try:
+                connected = bool(local_slot.browser.is_connected())
+            except Exception:
+                connected = False
+            if connected:
+                user_id = owner_user_id(owner_key)
+                if user_id is not None:
+                    lease = await asyncio.to_thread(issue_route, user_id)
+                    if lease is not None:
+                        print(f"[CDP] mode=local ws={lease.ws_url[:60]}...", flush=True)
+                        return lease.ws_url
+                return None
+            self._local_slots.pop(owner_key, None)
         slot = self._browser_pools.get(owner_key)
         if slot is None or not slot.debug_port:
             return None
@@ -472,16 +672,44 @@ class CdpSessionManager:
             self._cancel_browser_idle_close(owner)
             evicted = self._evict_sessions_for_owner_locked(owner)
             sid = f"sess_{uuid.uuid4().hex[:10]}"
-            ctx_args: Dict[str, Any] = {}
-            if storage_state_path:
-                ctx_args["storage_state"] = storage_state_path
             try:
-                browser, context = await self._new_browser_context(
-                    owner_key=owner,
-                    headless=headless,
-                    ctx_args=ctx_args,
-                )
-                page = await context.new_page()
+                conn_mode = await self._resolve_connection_mode(owner_key=owner, url=url)
+            except CdpError as e:
+                return e.to_dict() | {
+                    "tool": "cdp",
+                    "action": "create",
+                    "owner_key": owner,
+                }
+            try:
+                if conn_mode == "local":
+                    if storage_state_path:
+                        print(
+                            "[CDP] mode=local 忽略 storage_state（登录态留存本机浏览器 profile）",
+                            flush=True,
+                        )
+                    slot = await self._ensure_local_browser(owner)
+                    context = self._local_context(slot.browser)
+                    if context is None:
+                        context = await slot.browser.new_context()
+                    page, owns_page = await self._choose_local_page(context, url)
+                    browser = slot.browser
+                else:
+                    ctx_args: Dict[str, Any] = {}
+                    if storage_state_path:
+                        ctx_args["storage_state"] = storage_state_path
+                    browser, context = await self._new_browser_context(
+                        owner_key=owner,
+                        headless=headless,
+                        ctx_args=ctx_args,
+                    )
+                    page = await context.new_page()
+                    owns_page = False
+            except CdpError as e:
+                return e.to_dict() | {
+                    "tool": "cdp",
+                    "action": "create",
+                    "owner_key": owner,
+                }
             except Exception as ex:
                 return {
                     "success": False,
@@ -500,12 +728,18 @@ class CdpSessionManager:
                 page=page,
                 owns_browser=False,
                 owner_key=owner,
+                local_mode=(conn_mode == "local"),
+                owns_page=owns_page,
             )
             self._sessions[sid] = session
         for old in evicted:
             await old.close()
         try:
             await self.ensure_console_hook(sid, owner_key=owner)
+        except Exception:
+            pass
+        try:
+            await self.ensure_llm_capture(sid, owner_key=owner)
         except Exception:
             pass
         if url:
@@ -518,7 +752,8 @@ class CdpSessionManager:
             "action": "create",
             "session_id": sid,
             "page": await session.page_info(),
-            "storage_state_loaded": bool(storage_state_path),
+            "storage_state_loaded": bool(storage_state_path) and conn_mode != "local",
+            "connection_mode": conn_mode,
             "duration_ms": int((time.perf_counter() - t0) * 1000),
             "owner_key": owner,
         }
@@ -558,6 +793,22 @@ class CdpSessionManager:
                 "page": await session.page_info(),
             }
         except Exception as ex:
+            if session.local_mode and _is_stale_browser_error(ex):
+                # 隧道抖动/浏览器断开：就地重建一次后重试（设计第 10 节：断线自动恢复）
+                try:
+                    await self._recover_local_session(session, url=url)
+                    await session.page.goto(url, wait_until=wait_until, timeout=timeout)
+                    session.last_snapshot = None
+                    return {
+                        "success": True,
+                        "tool": "cdp_navigate",
+                        "session_id": session_id,
+                        "duration_ms": int((time.perf_counter() - t0) * 1000),
+                        "page": await session.page_info(),
+                        "recovered": True,
+                    }
+                except Exception as ex2:
+                    ex = ex2
             return CdpError(NAVIGATION_FAILED, str(ex)).to_dict() | {
                 "tool": "cdp_navigate",
                 "session_id": session_id,
@@ -569,6 +820,7 @@ class CdpSessionManager:
         *,
         scope: str = "interactive",
         owner_key: Optional[str] = None,
+        _retry: bool = True,
     ) -> Dict[str, Any]:
         session = self._get(session_id, owner_key=owner_key)
         await session.touch()
@@ -593,6 +845,27 @@ class CdpSessionManager:
             out["duration_ms"] = int((time.perf_counter() - t0) * 1000)
             return out
         except Exception as ex:
+            if _retry and session.local_mode and _is_stale_browser_error(ex):
+                # 隧道抖动/浏览器断开：重建并回到原地址后重试一次（防探测假完成）
+                try:
+                    recover_url = str(
+                        getattr(session.last_snapshot, "url", "") or ""
+                    ).strip() or None
+                    await self._recover_local_session(session, url=recover_url)
+                    if recover_url:
+                        try:
+                            await session.page.goto(
+                                recover_url,
+                                wait_until="domcontentloaded",
+                                timeout=cdp_default_timeout_ms(),
+                            )
+                        except Exception:
+                            pass
+                    return await self.snapshot(
+                        session_id, scope=scope, owner_key=owner_key, _retry=False
+                    )
+                except Exception:
+                    pass
             # 回退 Playwright accessibility.snapshot
             try:
                 tree = await session.page.accessibility.snapshot(interesting_only=(scope == "interactive"))
@@ -664,6 +937,11 @@ class CdpSessionManager:
         session.page = page
         session._cdp = None
         session.last_snapshot = None
+        if session.llm_capture is not None:
+            try:
+                session.llm_capture.attach(page)
+            except Exception:
+                pass
         if url:
             try:
                 assert_url_allowed(url)
@@ -931,6 +1209,29 @@ class CdpSessionManager:
         except Exception:
             pass
 
+    async def ensure_llm_capture(
+        self,
+        session_id: str,
+        *,
+        project_id: Optional[int] = None,
+        declared: Optional[Dict[str, Any]] = None,
+        owner_key: Optional[str] = None,
+    ) -> Any:
+        """挂 LLM 报文采集：采集被测系统的对话原始报文（模型/参数/输出/工具调用/时延）。
+
+        declared 为项目里填写的模型与参数（申报值），用于「申报 vs 实际」对比检测模型降级。
+        """
+        session = self._get(session_id, owner_key=owner_key)
+        from .llm_capture import ensure_capture
+
+        session.llm_capture = ensure_capture(
+            session.page,
+            session_id,
+            project_id=project_id,
+            declared=declared,
+        )
+        return session.llm_capture
+
     async def close(self, session_id: str, *, owner_key: Optional[str] = None) -> Dict[str, Any]:
         owner: Optional[str] = None
         async with self._lock:
@@ -947,6 +1248,12 @@ class CdpSessionManager:
         if not session:
             return {"success": False, "error_code": SESSION_NOT_FOUND, "message": session_id}
         await session.close()
+        try:
+            from .llm_capture import drop_capture
+
+            drop_capture(session_id)
+        except Exception:
+            pass
         if owner:
             async with self._lock:
                 self._schedule_browser_idle_close(owner)
@@ -1066,6 +1373,13 @@ class CdpSessionManager:
 
         session = self._get(session_id)
         await session.touch()
+        if getattr(session, "local_mode", False):
+            # local 模式登录态天然留存本机浏览器 profile：不导出（§8.4）
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "local 模式登录态留存本机浏览器，无需导出 storage_state",
+            }
         try:
             target = str(url or "").strip() or session.page.url
             domain = urlparse(target).netloc

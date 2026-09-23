@@ -146,6 +146,8 @@ _SYSTEM_PROMPT_ZH = """你是 BadCaseDoctor 项目助手，通过工具管理 Bu
    click/fill 失败时阅读 observation 的 vision_description 与 agent_hint；
    stale ref 用 new_snapshot_id/focus_hints 换新 @eN 重试一次；
    状态不明时调用 screenshot（会返回视觉描述文本）再决策；登录页用 login，验证码等用户。
+8. 罗列多条记录或对照数据时，用标准 Markdown 表格（表头行 + |---| 分隔行 + 每行 | 单元格 |）；
+   禁止用空格对齐排版表格，前端仅能渲染标准 Markdown 表格。
 """
 
 _SYSTEM_PROMPT_EN = """You are the BadCaseDoctor assistant. Manage bugs, badcases, test cases, plans, and cards via tools.
@@ -160,6 +162,7 @@ Rules:
    On click/fill failure, read vision_description and agent_hint;
    on stale ref, retry once with new_snapshot_id/focus_hints;
    when unsure, call screenshot (returns vision text) then decide; use login for auth pages.
+8. To list multiple records or compare data, use a standard Markdown table (header row + |---| delimiter row + data rows); never space-aligned pseudo tables — the UI renders only standard Markdown tables.
 """
 
 

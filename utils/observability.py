@@ -12,6 +12,8 @@ Agent + Prometheus 本地观测：指标落盘 + 结构化 trace（JSONL）。
 - BADCASE_METRICS_TEXT_DIR / BADCASE_METRICS_TEXT_INTERVAL
 - BADCASE_AGENT_TRACE_DIR：JSONL 目录，默认 observability/agent_trace
 - BADCASE_AGENT_TRACE_ENABLED：默认 1
+- BADCASE_LLM_EXCHANGE_DIR：被测系统对话报文 JSONL 目录，默认 observability/llm_exchange
+- BADCASE_LLM_CAPTURE_ENABLED：默认 1；CDP 层 LLM 报文采集总开关
 """
 from __future__ import annotations
 
@@ -184,6 +186,38 @@ def append_agent_trace(
         run_path = base / f"run_{react_request_id}.jsonl"
         with _trace_lock:
             with run_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
+
+def llm_exchange_dir() -> Path:
+    env = (os.getenv("BADCASE_LLM_EXCHANGE_DIR") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return _repo_root() / "observability" / "llm_exchange"
+
+
+def append_llm_exchange(record: Dict[str, Any]) -> None:
+    """被测系统对话报文（llm_capture 采集）落盘：按天 + 按会话各存一份。"""
+    if not (os.getenv("BADCASE_LLM_CAPTURE_ENABLED", "1") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+    base = llm_exchange_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False, default=str)
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    paths = [base / f"llm_exchange_{day}.jsonl"]
+    sid = str(record.get("session_id") or "").strip()
+    if sid:
+        safe = "".join(ch for ch in sid if ch.isalnum() or ch in "-_")[:64]
+        if safe:
+            paths.append(base / f"session_{safe}.jsonl")
+    with _trace_lock:
+        for p in paths:
+            with p.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
 

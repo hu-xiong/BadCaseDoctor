@@ -334,6 +334,8 @@
   },
   "chat": {
     "empty": "Start a new conversation...",
+    "insufficientCredits": "Insufficient credits — the Agent is paused. Please subscribe to continue.",
+    "insufficientCreditsDialog": "Insufficient credits. Subscribe to continue. Go to the subscription page?",
     "me": "You",
     "ai": "AI",
     "placeholder": "Message… (Enter to send, Shift+Enter for newline)",

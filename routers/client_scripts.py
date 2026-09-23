@@ -7,7 +7,7 @@ import re
 import shutil
 
 from flask import Blueprint, Response, jsonify, request, send_from_directory
-from flask_login import login_required
+from flask_login import current_user, login_required
 
 from badcase_client_binaries import LOCAL_PROXY_ARTIFACTS, client_binaries_dir, local_proxy_artifacts_for_api
 
@@ -80,6 +80,53 @@ def local_proxy_supervisor_ensure():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": ok, **(st or {})}), (200 if ok else 503)
+
+
+def _tunnel_public_url() -> str:
+    """本机代理反连入口：优先 env 覆盖，否则按当前请求推导 wss 同域地址。"""
+    explicit = (os.getenv("BADCASE_TUNNEL_URL") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        host = (request.host or "").strip()
+    except Exception:
+        host = ""
+    if not host:
+        return ""
+    proto = (
+        (request.headers.get("X-Forwarded-Proto") or request.scheme or "https")
+        .split(",")[0]
+        .strip()
+        .lower()
+    )
+    scheme = "wss" if proto == "https" else "ws"
+    return f"{scheme}://{host}/api/local-proxy/tunnel"
+
+
+@client_scripts_bp.route("/local-proxy/tunnel-token", methods=["GET"])
+@login_required
+def local_proxy_tunnel_token():
+    """登录用户获取隧道接入参数（供前端注入 --tunnel-url/--tunnel-token）。
+
+    见 docs/技术设计_本机浏览器CDP通道.md §6.2；密钥未配置时 503 并由前端跳过注入。
+    """
+    from app_services.tunnel_token import issue_tunnel_token
+
+    try:
+        row = issue_tunnel_token(int(current_user.id))
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": "tunnel_disabled", "message": str(e)}), 503
+    url = _tunnel_public_url()
+    if not url:
+        return jsonify({"ok": False, "error": "tunnel_url_unresolved"}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "url": url,
+            "token": row["token"],
+            "expires_at": row["expires_at"],
+        }
+    )
 
 
 @client_scripts_bp.route("/local-proxy/save", methods=["POST"])

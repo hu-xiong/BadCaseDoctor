@@ -1825,6 +1825,21 @@ class GrepTool(BaseTool):
         if gt in ('testcase', 'all'):
             for tc in testcase_list or []:
                 append_tc(tc)
+        # 源表目标（bug/badcase/testcase）：卡片层需强关联才进导航——命中的源表实体容器卡（card_id 命中）
+        # 或标题覆盖显式关键词；避免 ES 语义弱命中的无关卡片污染「点击跳转」列表
+        if gt in ('bug', 'badcase', 'testcase'):
+            related_card_ids: set = set()
+            for row in list(bug_list or []) + list(badcase_list or []) + list(testcase_list or []):
+                cid_s = _grep_nav_json_id(row.get('card_id') or row.get('cardId'))
+                if cid_s:
+                    related_card_ids.add(cid_s)
+            kept_cards: List[Dict[str, Any]] = []
+            for c in card_list:
+                raw_cid = c.get('card_id') if c.get('card_id') is not None else c.get('id')
+                cid_s = _grep_nav_json_id(raw_cid)
+                if (cid_s and cid_s in related_card_ids) or bool(c.get('keyword_match')):
+                    kept_cards.append(c)
+            card_list = kept_cards
         # 任意 target：卡片层关键词命中也进入导航（与源表命中合并去重）
         for c in card_list:
             append_card(c)

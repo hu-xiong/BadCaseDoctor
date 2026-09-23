@@ -1,0 +1,32 @@
+[Unit]
+Description=BadCaseDoctor 本机浏览器 CDP 桥服务（反连隧道 Hub + CDP 网关）
+Documentation=docs/技术设计_本机浏览器CDP通道.md
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=badcase
+Group=badcase
+WorkingDirectory=/opt/badcase-doctor
+EnvironmentFile=-/opt/badcase-doctor/.env
+# 隧道监听 9889（经 nginx /api/local-proxy/tunnel 暴露）；网关 + internal 仅环回 9888
+Environment=BADCASE_BRIDGE_BIND=127.0.0.1
+Environment=BADCASE_BRIDGE_TUNNEL_PORT=9889
+Environment=BADCASE_CDP_GATEWAY_PORT=9888
+Environment=BADCASE_CDP_ROUTE_TTL_SEC=600
+# 必填（.env 中配置，与 Flask 共享同一密钥）：隧道 token HMAC 密钥
+# Environment=BADCASE_TUNNEL_SECRET=
+# 可选：internal API 的 X-Bridge-Key 头校验（Flask/Agent 调用桥服务时携带）
+# Environment=BADCASE_BRIDGE_INTERNAL_KEY=
+ExecStart=/opt/badcase-doctor/venv/bin/python local_browser_bridge.py
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+# 安全加固（按需放开）
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
