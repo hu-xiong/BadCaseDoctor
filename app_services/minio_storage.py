@@ -1,4 +1,9 @@
-"""MinIO / 图片上传与缓存。"""
+"""MinIO / 图片上传与缓存。
+
+可被 app.py exec 进自身命名空间（此时注册 /api/ping、/metrics 路由），
+也可被独立 import（agents/cdp、run_ledger 等）：import 时不触碰 app/db，
+缺失的全局（app/db/jsonify 等）只在路由体内引用，独立导入路径不会执行到。
+"""
 from __future__ import annotations
 
 import io
@@ -13,6 +18,39 @@ from PIL import Image
 from werkzeug.utils import secure_filename
 
 from config import Config
+
+try:
+    import redis
+except Exception:  # redis 不可用时仅影响缓存，不影响 MinIO 主流程
+    redis = None
+
+try:
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+except Exception:
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+    generate_latest = None
+
+MINIO_CONFIG = {
+    'endpoint': Config.MINIO_ENDPOINT,
+    'access_key': Config.MINIO_ACCESS_KEY,
+    'secret_key': Config.MINIO_SECRET_KEY,
+    'bucket_name': Config.MINIO_BUCKET_NAME,
+    'saas_file_path': Config.MINIO_SAAS_FILE_PATH,
+    'max_file_size': Config.MINIO_MAX_FILE_SIZE,
+    'max_sum_file_size': Config.MINIO_MAX_SUM_FILE_SIZE,
+}
+
+REDIS_CONFIG = {
+    'host': Config.REDIS_HOST or '127.0.0.1',
+    'port': int(Config.REDIS_PORT or 6379),
+    'password': Config.REDIS_PASSWORD or None,
+    'db': int(getattr(Config, 'REDIS_DATABASE', 0) or 0),
+    'decode_responses': False,  # 不自动解码，因为我们要存储二进制数据
+}
+
+_minio_client = None
+_redis_client = None
+_bucket_checked = False
 
 def get_minio_client():
     global _minio_client
@@ -55,43 +93,46 @@ def get_redis_client():
     return _redis_client
 
 # ==================== Prometheus 指标端点 ====================
+# 仅在 exec 进 app.py 命名空间（globals 里已有 app/jsonify/db）时注册路由；
+# 独立 import 时跳过，避免 NameError。
 
-@app.route('/api/ping', methods=['GET'])
-def api_ping():
-    """无鉴权探活 + 预热 DB/Redis，供前端进项目页时先打一遍，避免首条业务接口冷连远端库 4s+"""
-    t0 = time.perf_counter()
-    db_ok = False
-    try:
-        db.session.execute(db.text('SELECT 1'))
-        db_ok = True
-    except Exception as ex:
-        print(f"[ping] db failed: {ex}", flush=True)
-    finally:
-        db.session.remove()
-    db_ms = (time.perf_counter() - t0) * 1000
-    redis_ok = False
-    t1 = time.perf_counter()
-    try:
-        rc = get_redis_client()
-        if rc is not None:
-            rc.ping()
-            redis_ok = True
-    except Exception:
-        pass
-    redis_ms = (time.perf_counter() - t1) * 1000
-    total_ms = (time.perf_counter() - t0) * 1000
-    if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
-        print(f"[PERF] GET /api/ping total={total_ms:.1f}ms db={db_ms:.1f}ms redis={redis_ms:.1f}ms", flush=True)
-    return jsonify({'ok': db_ok, 'db_ms': round(db_ms, 1), 'redis_ok': redis_ok, 'redis_ms': round(redis_ms, 1)})
+if globals().get("app") is not None:
+    @app.route('/api/ping', methods=['GET'])
+    def api_ping():
+        """无鉴权探活 + 预热 DB/Redis，供前端进项目页时先打一遍，避免首条业务接口冷连远端库 4s+"""
+        t0 = time.perf_counter()
+        db_ok = False
+        try:
+            db.session.execute(db.text('SELECT 1'))
+            db_ok = True
+        except Exception as ex:
+            print(f"[ping] db failed: {ex}", flush=True)
+        finally:
+            db.session.remove()
+        db_ms = (time.perf_counter() - t0) * 1000
+        redis_ok = False
+        t1 = time.perf_counter()
+        try:
+            rc = get_redis_client()
+            if rc is not None:
+                rc.ping()
+                redis_ok = True
+        except Exception:
+            pass
+        redis_ms = (time.perf_counter() - t1) * 1000
+        total_ms = (time.perf_counter() - t0) * 1000
+        if (os.getenv("PERF_LOG", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[PERF] GET /api/ping total={total_ms:.1f}ms db={db_ms:.1f}ms redis={redis_ms:.1f}ms", flush=True)
+        return jsonify({'ok': db_ok, 'db_ms': round(db_ms, 1), 'redis_ok': redis_ok, 'redis_ms': round(redis_ms, 1)})
 
 
-@app.route('/metrics', methods=['GET'])
-def metrics():
-    """
-    暴露 Prometheus 指标端点
-    使用 curl http://localhost:5000/metrics 查看
-    """
-    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+    @app.route('/metrics', methods=['GET'])
+    def metrics():
+        """
+        暴露 Prometheus 指标端点
+        使用 curl http://localhost:5000/metrics 查看
+        """
+        return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 # 检查并创建存储桶
 def ensure_bucket_exists():
@@ -401,3 +442,4 @@ def get_image_cache_key(filename):
 
 
 def get_upload_image_cache_key(file_path: str) -> str:
+    return f"upload_img:{(file_path or '').strip().lstrip('/')}"

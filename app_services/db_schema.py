@@ -679,6 +679,23 @@ def sync_database_schema():
                     'finished_at DATETIME',
                 ]
             },
+            'tool_runs': {
+                'columns': [
+                    'run_id VARCHAR(36) PRIMARY KEY',
+                    'user_id INT NOT NULL',
+                    'project_id INT',
+                    'chat_session_id INT',
+                    'tool_kind VARCHAR(32) NOT NULL',
+                    'goal TEXT',
+                    'status VARCHAR(20) NOT NULL DEFAULT "running"',
+                    'counts_json TEXT',
+                    'summary TEXT',
+                    'minio_prefix VARCHAR(512)',
+                    'prev_run_id VARCHAR(36)',
+                    'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+                    'finished_at DATETIME',
+                ]
+            },
             'terminal_audit': {
                 'columns': [
                     'id INTEGER PRIMARY KEY AUTO_INCREMENT',

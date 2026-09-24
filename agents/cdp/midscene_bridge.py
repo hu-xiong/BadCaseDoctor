@@ -476,6 +476,15 @@ def map_midscene_result_to_explore_observation(raw: Dict[str, Any], *, url: str 
         "error": out_error or None,
         "message": (out_error or summary)[:500],
     }
+    # 台账字段透传：上层（LangGraph 失败边/replan）据此引用本次 run 或按未测入口续跑
+    if raw.get("run_id"):
+        out["run_id"] = raw.get("run_id")
+    if raw.get("run_dir"):
+        out["run_dir"] = raw.get("run_dir")
+    if isinstance(raw.get("entries"), list):
+        out["entries"] = raw.get("entries")
+    if isinstance(raw.get("untested_entries"), list):
+        out["untested_entries"] = raw.get("untested_entries")
     if issues and (blocking or out["has_obvious_issues"]):
         actual = "\n".join(str(i.get("message") or "") for i in issues)[:2000]
         out["cdp_test_evidence"] = {
@@ -613,6 +622,144 @@ def _local_mode_requires_cdp_ws(
     }
 
 
+# ---------------------------------------------------------------- run_ledger 台账
+
+def _ledger_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        v = int(value)
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _ledger_begin(
+    *,
+    goal: str,
+    user_id: Optional[int],
+    project_id: Optional[int],
+    chat_session_id: Optional[int],
+    resume_run_id: Optional[str],
+    prev_run_id: Optional[str],
+    url: str,
+) -> Optional[Dict[str, Any]]:
+    """开账：新 run 或续跑既有 run（本地缺则从 MinIO 拉回）。返回 None 表示不开账。"""
+    if user_id is None:
+        return None
+    try:
+        from app_services import run_ledger
+    except Exception as e:
+        logger.info("[midscene] run_ledger 不可用，跳过台账: %s", e)
+        return None
+    try:
+        if resume_run_id:
+            rd = run_ledger.ensure_local(
+                resume_run_id,
+                user_id=user_id,
+                project_id=project_id,
+                chat_session_id=chat_session_id,
+            )
+            if not rd:
+                logger.info("[midscene] 续跑 run %s 本地/MinIO 均无台账，按新 run 处理", resume_run_id[:8])
+            else:
+                return {
+                    "run_id": resume_run_id,
+                    "rd": rd,
+                    "resume": True,
+                    "user_id": user_id,
+                    "project_id": project_id,
+                    "chat_session_id": chat_session_id,
+                    "module": run_ledger,
+                }
+        run_id = run_ledger.start(
+            "midscene_explore",
+            goal,
+            user_id=user_id,
+            project_id=project_id,
+            chat_session_id=chat_session_id,
+            prev_run_id=prev_run_id,
+            extra_meta={"url": url},
+        )
+        return {
+            "run_id": run_id,
+            "rd": run_ledger.run_dir(user_id, project_id, chat_session_id, run_id),
+            "resume": False,
+            "user_id": user_id,
+            "project_id": project_id,
+            "chat_session_id": chat_session_id,
+            "module": run_ledger,
+        }
+    except Exception as e:
+        logger.info("[midscene] 台账开账失败，按无台账继续: %s", e)
+        return None
+
+
+def _ledger_status(raw: Dict[str, Any], *, killed: bool = False) -> str:
+    """台账状态语义=本次 run 的健康度（不是被测产品的好坏）。
+
+    被杀死/读写失败/进程无输出 → interrupted（checkpoint 里有未测入口，可续跑）；
+    fallback_legacy（模型/环境未配置）→ failed（续跑也无意义）；
+    其余带未测入口的失败 → interrupted；其余 → failed。
+    """
+    if raw.get("success"):
+        return "success"
+    if raw.get("fallback_legacy"):
+        return "failed"
+    if killed:
+        return "interrupted"
+    untested = raw.get("untested_entries")
+    if isinstance(untested, list) and untested:
+        return "interrupted"
+    return "failed"
+
+
+def _ledger_finish(ledger: Optional[Dict[str, Any]], status: str, raw: Optional[Dict[str, Any]] = None) -> None:
+    """best-effort 收尾：counts 从 entries 终态统计，summary 取巡检摘要或错误原因。"""
+    if not ledger:
+        return
+    try:
+        counts: Dict[str, int] = {}
+        summary = ""
+        if isinstance(raw, dict):
+            entries = raw.get("entries")
+            if isinstance(entries, list):
+                for e in entries:
+                    if isinstance(e, dict):
+                        st = str(e.get("status") or "pending")
+                        counts[st] = counts.get(st, 0) + 1
+            else:
+                passed = raw.get("passed")
+                failed = raw.get("failed")
+                if isinstance(passed, list):
+                    counts["pass"] = len(passed)
+                if isinstance(failed, list):
+                    counts["fail"] = len(failed)
+            untested = raw.get("untested_entries")
+            if isinstance(untested, list) and untested:
+                counts["pending"] = len(untested)
+            summary = str(raw.get("summary") or raw.get("error") or "")[:500]
+        ledger["module"].finish(
+            ledger["run_id"],
+            status,
+            counts=counts or None,
+            summary=summary or None,
+            user_id=ledger.get("user_id"),
+            project_id=ledger.get("project_id"),
+            chat_session_id=ledger.get("chat_session_id"),
+        )
+    except Exception as e:
+        logger.info("[midscene] 台账收尾失败（不影响巡检结果）: %s", e)
+
+
+def _with_ledger(ledger: Optional[Dict[str, Any]], raw: Dict[str, Any]) -> Dict[str, Any]:
+    """把 run_id/run_dir 注回返回值，供 observation 透传与上层续跑引用。"""
+    if ledger and isinstance(raw, dict):
+        raw.setdefault("run_id", ledger["run_id"])
+        raw.setdefault("run_dir", ledger["rd"])
+    return raw
+
+
 async def run_midscene_smoke(
     *,
     url: str,
@@ -621,11 +768,24 @@ async def run_midscene_smoke(
     timeout_sec: Optional[int] = None,
     cdp_ws_url: Optional[str] = None,
     progress_queue: Optional[Any] = None,
+    user_id: Optional[Any] = None,
+    project_id: Optional[Any] = None,
+    chat_session_id: Optional[Any] = None,
+    entries: Optional[Any] = None,
+    resume_run_id: Optional[str] = None,
+    entry: Optional[str] = None,
+    prev_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """子进程执行 Midscene smoke，返回原始 JSON。
 
     progress_queue：可选的引擎侧进度队列（``queue.Queue``），每发生一步就推送
     结构化快照（``__CDP_STEP__``）与阶段文本（``__CDP_TEXT__``），供 SSE 实时展示。
+
+    台账（可选，传 user_id 才开账）：run_ledger 建四层隔离 run 目录并把
+    run_dir/entries/resume 透传给 smoke.mjs；entries 指定待测入口清单（定向
+    探测/续跑），resume_run_id 续跑既有 run（本地缺则从 MinIO 拉回）；
+    无论成功/失败/超时/取消都会 best-effort 收尾（counts + MinIO 同步 + DB 索引），
+    返回值带 run_id/run_dir 供上层续跑引用。
     """
     guard = _local_mode_requires_cdp_ws(cdp_ws_url, engine="midscene")
     if guard is not None:
@@ -684,6 +844,24 @@ async def run_midscene_smoke(
         "headless": bool(headless),
         "cdp_ws_url": (cdp_ws_url or "").strip() or None,
     }
+    _uid = _ledger_int(user_id)
+    ledger = _ledger_begin(
+        goal=payload["goal"],
+        user_id=_uid,
+        project_id=_ledger_int(project_id),
+        chat_session_id=_ledger_int(chat_session_id),
+        resume_run_id=(resume_run_id or "").strip() or None,
+        prev_run_id=(prev_run_id or "").strip() or None,
+        url=url,
+    )
+    if ledger:
+        payload["run_dir"] = ledger["rd"]
+        if ledger.get("resume"):
+            payload["resume"] = True
+        if isinstance(entries, list) and entries:
+            payload["entries"] = entries
+        if entry and str(entry).strip():
+            payload["entry"] = str(entry).strip()
 
     with tempfile.TemporaryDirectory(prefix="bcd_midscene_") as td:
         input_path = Path(td) / "input.json"
@@ -780,13 +958,14 @@ async def run_midscene_smoke(
                 timeout=timeout_sec,
             )
         except asyncio.CancelledError:
-            # 上游取消（引擎超时/用户停止）：杀掉子进程后继续向上抛，避免泄漏
+            # 上游取消（引擎超时/用户停止）：杀掉子进程，台账记 cancelled 后继续向上抛
             stderr_task.cancel()
             stdout_task.cancel()
             try:
                 proc.kill()
             except Exception:
                 pass
+            _ledger_finish(ledger, "cancelled")
             raise
         except asyncio.TimeoutError:
             stderr_task.cancel()
@@ -795,13 +974,14 @@ async def run_midscene_smoke(
                 proc.kill()
             except Exception:
                 pass
-            return {
+            _ledger_finish(ledger, "interrupted")
+            return _with_ledger(ledger, {
                 "success": False,
                 "engine": "midscene",
                 "error": f"Midscene 超时（>{timeout_sec}s）",
                 "fallback_legacy": False,
                 "execution_steps": execution_steps,
-            }
+            })
         except Exception as ex:
             # 读流异常（如 StreamReader 限制）：杀掉子进程，返回结构化错误而非向上冒泡
             stderr_task.cancel()
@@ -810,13 +990,14 @@ async def run_midscene_smoke(
                 proc.kill()
             except Exception:
                 pass
-            return {
+            _ledger_finish(ledger, "interrupted")
+            return _with_ledger(ledger, {
                 "success": False,
                 "engine": "midscene",
                 "error": f"Midscene 读取失败: {type(ex).__name__}: {ex}"[:500],
                 "fallback_legacy": False,
                 "execution_steps": execution_steps,
-            }
+            })
 
         err_text = "\n".join(stderr_lines)
         out_text = stdout_task.result().strip()
@@ -824,12 +1005,14 @@ async def run_midscene_smoke(
             logger.info("[midscene] stderr (tail): %s", err_text[-2000:])
 
         if not out_text:
-            return {
+            raw_empty: Dict[str, Any] = {
                 "success": False,
                 "engine": "midscene",
                 "error": f"Midscene 无输出，exit={proc.returncode}; stderr={err_text[-800:]}",
                 "fallback_legacy": "Cannot find module" in err_text or "ERR_MODULE" in err_text,
             }
+            _ledger_finish(ledger, _ledger_status(raw_empty), raw_empty)
+            return _with_ledger(ledger, raw_empty)
 
         # stdout 应为纯 JSON；若混入日志，取最后一个 {…}
         try:
@@ -841,19 +1024,23 @@ async def run_midscene_smoke(
                 try:
                     raw = json.loads(out_text[start : end + 1])
                 except json.JSONDecodeError:
-                    return {
+                    raw_bad: Dict[str, Any] = {
                         "success": False,
                         "engine": "midscene",
                         "error": f"无法解析 Midscene JSON: {out_text[:500]}",
                         "fallback_legacy": False,
                     }
+                    _ledger_finish(ledger, _ledger_status(raw_bad, killed=True), raw_bad)
+                    return _with_ledger(ledger, raw_bad)
             else:
-                return {
+                raw_bad2: Dict[str, Any] = {
                     "success": False,
                     "engine": "midscene",
                     "error": f"无法解析 Midscene JSON: {out_text[:500]}",
                     "fallback_legacy": False,
                 }
+                _ledger_finish(ledger, _ledger_status(raw_bad2, killed=True), raw_bad2)
+                return _with_ledger(ledger, raw_bad2)
         if isinstance(raw, dict):
             # 注入流式收集的步骤信息（与子进程最终 JSON 的 execution_steps 合并去重）
             raw_steps = raw.get("execution_steps")
@@ -871,13 +1058,16 @@ async def run_midscene_smoke(
             live_steps = tracker.snapshot()
             if live_steps:
                 raw["midscene_action_steps"] = live_steps
-            return raw
-        return {
+            _ledger_finish(ledger, _ledger_status(raw), raw)
+            return _with_ledger(ledger, raw)
+        raw_not_obj: Dict[str, Any] = {
             "success": False,
             "engine": "midscene",
             "error": "midscene result not object",
             "fallback_legacy": False,
         }
+        _ledger_finish(ledger, "failed", raw_not_obj)
+        return _with_ledger(ledger, raw_not_obj)
 
 
 async def run_gremlins_monkey(
@@ -1072,6 +1262,13 @@ async def run_midscene_exploration(
     headless: Optional[bool] = None,
     cdp_ws_url: Optional[str] = None,
     progress_queue: Optional[Any] = None,
+    user_id: Optional[Any] = None,
+    project_id: Optional[Any] = None,
+    chat_session_id: Optional[Any] = None,
+    entries: Optional[Any] = None,
+    resume_run_id: Optional[str] = None,
+    entry: Optional[str] = None,
+    prev_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     _push_cdp_progress(progress_queue, CDP_TEXT_PROGRESS_PREFIX, "开始 Midscene 智能巡检…")
     raw = await run_midscene_smoke(
@@ -1080,6 +1277,13 @@ async def run_midscene_exploration(
         headless=headless,
         cdp_ws_url=cdp_ws_url,
         progress_queue=progress_queue,
+        user_id=user_id,
+        project_id=project_id,
+        chat_session_id=chat_session_id,
+        entries=entries,
+        resume_run_id=resume_run_id,
+        entry=entry,
+        prev_run_id=prev_run_id,
     )
     return map_midscene_result_to_explore_observation(raw, url=url)
 
@@ -1092,6 +1296,13 @@ async def run_combined_exploration(
     cdp_ws_url: Optional[str] = None,
     gremlins_duration_sec: int = 60,
     progress_queue: Optional[Any] = None,
+    user_id: Optional[Any] = None,
+    project_id: Optional[Any] = None,
+    chat_session_id: Optional[Any] = None,
+    entries: Optional[Any] = None,
+    resume_run_id: Optional[str] = None,
+    entry: Optional[str] = None,
+    prev_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """组合探测：先 Midscene 智能巡检，再 Gremlins 猴子测试，合并结果。"""
     start_ts = time.time()
@@ -1124,10 +1335,21 @@ async def run_combined_exploration(
         headless=headless,
         cdp_ws_url=cdp_ws_url,
         progress_queue=progress_queue,
+        user_id=user_id,
+        project_id=project_id,
+        chat_session_id=chat_session_id,
+        entries=entries,
+        resume_run_id=resume_run_id,
+        entry=entry,
+        prev_run_id=prev_run_id,
     )
     mid_obs = map_midscene_result_to_explore_observation(mid_raw, url=url)
     mid_obs["_phase"] = "midscene"
     result["sub_results"].append(mid_obs)
+    # 台账字段（run_id/run_dir/entries/untested_entries）随 Midscene 相位透传，供上层续跑引用
+    for _k in ("run_id", "run_dir", "entries", "untested_entries"):
+        if mid_obs.get(_k):
+            result[_k] = mid_obs[_k]
 
     # 目标页不可访问/被弹窗或登录阻塞：整个巡检不成立，不再让 Gremlins 空跑错误页
     mid_failed = (not bool(mid_raw.get("fallback_legacy"))) and (mid_obs.get("success") is False)

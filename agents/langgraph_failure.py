@@ -150,6 +150,51 @@ def classify_tool_failure(
             summary="retry_grep_first",
         )
 
+    # --- Midscene / CDP explore 专属分支（须在通用 ok 判定之前） ---
+    if name == "cdp" and str(obs.get("engine") or "").lower() in ("midscene", "combined"):
+        if obs.get("fallback_legacy"):
+            return FailureDecision(
+                action=FailureAction.REPLAN,
+                kind="midscene_fallback_legacy",
+                hint=(
+                    "[Replan] Midscene config unavailable; exploration fell back to legacy DFS. "
+                    "Either continue with explore engine=legacy explicitly, or fix the Midscene model config and retry."
+                    if en
+                    else "【纠错-REPLAN】Midscene 探测配置不可用，已降级 legacy DFS。可显式用 explore engine=legacy 继续，或检查 Midscene 模型配置后重试。"
+                ),
+                summary="midscene_fallback_legacy",
+            )
+        untested = [str(e) for e in (obs.get("untested_entries") or []) if str(e).strip()]
+        run_id = str(obs.get("run_id") or "").strip()
+        if untested:
+            shown = "、".join(untested[:8])
+            if len(untested) > 8:
+                shown += f" 等{len(untested)}个"
+            if retries >= max_r:
+                return FailureDecision(
+                    action=FailureAction.INTERRUPT,
+                    kind="midscene_interrupted_exhausted",
+                    hint=(
+                        f"UI exploration was interrupted with untested entries: {shown}. "
+                        f"Resume later via cdp explore with resume={run_id or '<run_id>'} (or resume=true for the latest interrupted run)."
+                        if en
+                        else f"界面探测中断，未测入口：{shown}。后续可用 cdp explore 带 resume={run_id or '<run_id>'} 续跑（或 resume=true 自动定位最近中断任务）。"
+                    ),
+                    summary="interrupt_midscene_exhausted",
+                )
+            return FailureDecision(
+                action=FailureAction.REPLAN,
+                kind="midscene_interrupted",
+                hint=(
+                    f"[Replan] UI exploration partially completed and checkpointed. Untested entries: {shown}. "
+                    f"Resume by calling cdp explore with resume={run_id or '<run_id>'} (or resume=true to auto-pick the latest interrupted run in this session). "
+                    "Only cover the untested entries; do not re-run everything from scratch."
+                    if en
+                    else f"【纠错-REPLAN】界面探测已部分完成并落盘，未测入口：{shown}。请调用 cdp explore 并带 resume={run_id or '<run_id>'}（或 resume=true 自动定位本会话最近中断任务）续跑，只补测未测入口，不要从零重跑全部。"
+                ),
+                summary="replan_midscene_resume",
+            )
+
     ok = bool(obs.get("success", True))
     if ok and not obs.get("blocked"):
         return FailureDecision(action=FailureAction.CONTINUE, kind="ok")

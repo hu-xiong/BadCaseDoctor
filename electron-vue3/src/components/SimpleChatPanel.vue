@@ -270,29 +270,41 @@
               :key="'cdpt-' + message.id + '-' + tcIdx"
               class="cdp-test-task-card findings-card"
             >
-              <div class="client-local-run-head">
+              <div
+                class="client-local-run-head client-card-head"
+                @click="toggleAgentCard(message.id, 'cdp', tcIdx)"
+              >
                 <span class="card-icon">🧪</span>
                 <span class="card-title">{{ tc.title || t('chat.cdpTestTaskTitle') }}</span>
+                <span v-if="cdpLatestStepText(tc)" class="card-meta">{{ cdpLatestStepText(tc) }}</span>
                 <span class="cdp-test-task-status">{{ tc.status || 'running' }}</span>
+                <img
+                  class="sandbox-toggle"
+                  :class="{ expanded: isAgentCardExpanded(message.id, 'cdp', tcIdx) }"
+                  :src="isAgentCardExpanded(message.id, 'cdp', tcIdx) ? chevronDownIcon : chevronRightIcon"
+                  alt="toggle"
+                />
               </div>
-              <p class="text-muted small">
-                {{ t('chat.cdpTestTaskCounts', { pass: tc.pass_count || 0, fail: tc.fail_count || 0 }) }}
-              </p>
-              <p v-if="tc.summary" class="small">{{ tc.summary }}</p>
-              <ul v-if="tc.steps && tc.steps.length" class="cdp-test-task-steps small">
-                <li v-for="(st, si) in tc.steps.slice(-8)" :key="si">
-                  <span :class="st.success ? 'ok' : 'fail'">{{ st.success ? '✓' : '✗' }}</span>
-                  {{ st.action || st.summary || st.url || ('step ' + (si + 1)) }}
-                </li>
-              </ul>
-              <button
-                v-if="tc.run_id"
-                type="button"
-                class="cdp-open-report-btn"
-                @click="handleOpenCdpReport(tc)"
-              >
-                {{ t('chat.cdpOpenReport') }}
-              </button>
+              <div v-show="isAgentCardExpanded(message.id, 'cdp', tcIdx)" class="client-card-detail">
+                <p class="text-muted small">
+                  {{ t('chat.cdpTestTaskCounts', { pass: tc.pass_count || 0, fail: tc.fail_count || 0 }) }}
+                </p>
+                <p v-if="tc.summary" class="small">{{ tc.summary }}</p>
+                <ul v-if="tc.steps && tc.steps.length" class="cdp-test-task-steps small">
+                  <li v-for="(st, si) in tc.steps.slice(-8)" :key="si">
+                    <span :class="st.success ? 'ok' : 'fail'">{{ st.success ? '✓' : '✗' }}</span>
+                    {{ st.action || st.summary || st.url || ('step ' + (si + 1)) }}
+                  </li>
+                </ul>
+                <button
+                  v-if="tc.run_id"
+                  type="button"
+                  class="cdp-open-report-btn"
+                  @click="handleOpenCdpReport(tc)"
+                >
+                  {{ t('chat.cdpOpenReport') }}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -437,38 +449,52 @@
               :key="'bcl-' + message.id + '-' + bcIdx"
               class="client-local-run-card findings-card"
             >
-              <div class="client-local-run-head">
+              <div
+                class="client-local-run-head client-card-head"
+                @click="toggleAgentCard(message.id, 'bcl', bcIdx, browserLocalNeedsAttention(bc.status))"
+              >
                 <span class="card-icon">🌐</span>
                 <span class="card-title">{{ browserLocalCardTitle(bc) }}</span>
+                <span v-if="bc.url" class="card-meta">{{ bc.url }}</span>
                 <span class="badge ms-1" :class="browserLocalStatusBadgeClass(bc.status)">
                   {{ browserLocalStatusText(bc.status) }}
                 </span>
+                <img
+                  class="sandbox-toggle"
+                  :class="{ expanded: isAgentCardExpanded(message.id, 'bcl', bcIdx, browserLocalNeedsAttention(bc.status)) }"
+                  :src="isAgentCardExpanded(message.id, 'bcl', bcIdx, browserLocalNeedsAttention(bc.status)) ? chevronDownIcon : chevronRightIcon"
+                  alt="toggle"
+                />
               </div>
-              <p v-if="bc.url" class="client-local-run-body text-muted small">{{ bc.url }}</p>
-              <p v-if="bc.error" class="client-local-run-body text-danger small">{{ bc.error }}</p>
-              <template v-if="bc.status === 'waiting_proxy' || bc.status === 'error'">
-                <div class="client-local-run-primary-actions">
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-primary"
-                    :disabled="localProxyOneClickBusy"
-                    @click="onOneClickInstallAndStart(message)"
-                  >
-                    {{ localProxyOneClickBusy ? t('chat.localRunOneClickBusy') : t('chat.localRunOneClickInstall') }}
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-outline-secondary"
-                    :disabled="localProxyOneClickBusy"
-                    @click="onLocalRunIAmRunning(message)"
-                  >
-                    {{ t('chat.localRunIAmRunning') }}
-                  </button>
-                </div>
-                <p v-if="message.awaitProxyResume && !proxyOkNow()" class="client-local-run-tip small text-muted">
-                  {{ t('chat.localRunProxyWaiting') }}
-                </p>
-              </template>
+              <div
+                v-show="isAgentCardExpanded(message.id, 'bcl', bcIdx, browserLocalNeedsAttention(bc.status))"
+                class="client-card-detail"
+              >
+                <p v-if="bc.error" class="client-local-run-body text-danger small">{{ bc.error }}</p>
+                <template v-if="bc.status === 'waiting_proxy' || bc.status === 'error'">
+                  <div class="client-local-run-primary-actions">
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-primary"
+                      :disabled="localProxyOneClickBusy"
+                      @click="onOneClickInstallAndStart(message)"
+                    >
+                      {{ localProxyOneClickBusy ? t('chat.localRunOneClickBusy') : t('chat.localRunOneClickInstall') }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-outline-secondary"
+                      :disabled="localProxyOneClickBusy"
+                      @click="onLocalRunIAmRunning(message)"
+                    >
+                      {{ t('chat.localRunIAmRunning') }}
+                    </button>
+                  </div>
+                  <p v-if="message.awaitProxyResume && !proxyOkNow()" class="client-local-run-tip small text-muted">
+                    {{ t('chat.localRunProxyWaiting') }}
+                  </p>
+                </template>
+              </div>
             </div>
           </div>
 
@@ -481,9 +507,13 @@
               :key="'tce-' + message.id + '-' + tcIdx"
               class="client-terminal-exec-card findings-card"
             >
-              <div class="client-terminal-exec-head">
+              <div
+                class="client-terminal-exec-head client-card-head"
+                @click="toggleAgentCard(message.id, 'tce', tcIdx, terminalExecNeedsAttention(tc.status))"
+              >
                 <img :src="terminalExecCardIcon" alt="" class="client-terminal-exec-icon" />
                 <span class="card-title">{{ t('chat.terminalExecTitle') }}</span>
+                <span v-if="tc.command" class="card-meta card-meta--mono">{{ tc.command }}</span>
                 <span
                   class="badge"
                   :class="{
@@ -497,54 +527,65 @@
                 <span v-if="tc.timeout" class="badge bg-light text-dark border">{{
                   t('chat.terminalExecTimeoutBadge', { sec: tc.timeout })
                 }}</span>
+                <img
+                  class="sandbox-toggle"
+                  :class="{ expanded: isAgentCardExpanded(message.id, 'tce', tcIdx, terminalExecNeedsAttention(tc.status)) }"
+                  :src="isAgentCardExpanded(message.id, 'tce', tcIdx, terminalExecNeedsAttention(tc.status)) ? chevronDownIcon : chevronRightIcon"
+                  alt="toggle"
+                />
               </div>
-              <p v-if="tc.cwd" class="client-terminal-exec-cwd small text-muted">
-                {{ t('chat.terminalExecCwd') }}: {{ tc.cwd }}
-              </p>
-              <pre class="client-terminal-exec-pre">{{ tc.command }}</pre>
-              <div class="client-terminal-exec-actions">
-                <button
-                  v-if="tc.status === 'queued' || tc.status === 'proxy_down' || tc.status === 'error'"
-                  type="button"
-                  class="btn btn-sm btn-primary"
-                  :disabled="tc.status === 'running' || isSending"
-                  @click="onRunTerminalExecCard(message, tcIdx)"
-                >{{ t('chat.terminalExecRun') }}</button>
-                <button
-                  v-if="tc.status === 'queued'"
-                  type="button"
-                  class="btn btn-sm btn-outline-secondary"
-                  @click="onSkipTerminalExecCard(message, tcIdx)"
-                >{{ t('chat.terminalExecSkip') }}</button>
-                <button
-                  type="button"
-                  class="btn btn-sm btn-outline-secondary"
-                  @click="onOpenTerminalExecInPane(tc)"
-                >{{ t('chat.terminalExecOpenInPane') }}</button>
-                <button
-                  type="button"
-                  class="btn btn-sm btn-outline-secondary"
-                  @click="copyLocalRunLine(tc.command)"
-                >{{ t('chat.terminalExecCopyCommand') }}</button>
-                <div class="client-terminal-exec-autorun">
-                  <label class="small text-muted">{{ t('chat.terminalExecAutoRun') }}</label>
-                  <select
-                    class="form-select form-select-sm"
-                    :value="terminalAutoRunMode"
-                    :aria-label="t('chat.terminalExecMenuAria')"
-                    @change="onTerminalAutoRunModeChange($event)"
-                  >
-                    <option value="ask">{{ t('chat.terminalExecAskEveryTime') }}</option>
-                    <option value="allowlist">{{ t('chat.terminalExecUseAllowlist') }}</option>
-                    <option value="everything">{{ t('chat.terminalExecRunEverything') }}</option>
-                  </select>
+              <div
+                v-show="isAgentCardExpanded(message.id, 'tce', tcIdx, terminalExecNeedsAttention(tc.status))"
+                class="client-card-detail"
+              >
+                <p v-if="tc.cwd" class="client-terminal-exec-cwd small text-muted">
+                  {{ t('chat.terminalExecCwd') }}: {{ tc.cwd }}
+                </p>
+                <pre class="client-terminal-exec-pre">{{ tc.command }}</pre>
+                <div class="client-terminal-exec-actions">
+                  <button
+                    v-if="tc.status === 'queued' || tc.status === 'proxy_down' || tc.status === 'error'"
+                    type="button"
+                    class="btn btn-sm btn-primary"
+                    :disabled="tc.status === 'running' || isSending"
+                    @click="onRunTerminalExecCard(message, tcIdx)"
+                  >{{ t('chat.terminalExecRun') }}</button>
+                  <button
+                    v-if="tc.status === 'queued'"
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    @click="onSkipTerminalExecCard(message, tcIdx)"
+                  >{{ t('chat.terminalExecSkip') }}</button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    @click="onOpenTerminalExecInPane(tc)"
+                  >{{ t('chat.terminalExecOpenInPane') }}</button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    @click="copyLocalRunLine(tc.command)"
+                  >{{ t('chat.terminalExecCopyCommand') }}</button>
+                  <div class="client-terminal-exec-autorun">
+                    <label class="small text-muted">{{ t('chat.terminalExecAutoRun') }}</label>
+                    <select
+                      class="form-select form-select-sm"
+                      :value="terminalAutoRunMode"
+                      :aria-label="t('chat.terminalExecMenuAria')"
+                      @change="onTerminalAutoRunModeChange($event)"
+                    >
+                      <option value="ask">{{ t('chat.terminalExecAskEveryTime') }}</option>
+                      <option value="allowlist">{{ t('chat.terminalExecUseAllowlist') }}</option>
+                      <option value="everything">{{ t('chat.terminalExecRunEverything') }}</option>
+                    </select>
+                  </div>
                 </div>
+                <pre
+                  v-if="tc.resultText"
+                  class="client-terminal-exec-result"
+                >{{ tc.resultText }}</pre>
+                <p v-if="tcIdx === 0" class="client-terminal-exec-hint small text-muted">{{ t('chat.terminalExecHint') }}</p>
               </div>
-              <pre
-                v-if="tc.resultText"
-                class="client-terminal-exec-result"
-              >{{ tc.resultText }}</pre>
-              <p v-if="tcIdx === 0" class="client-terminal-exec-hint small text-muted">{{ t('chat.terminalExecHint') }}</p>
             </div>
           </div>
           
@@ -1828,6 +1869,31 @@ const isSandboxExpanded = (messageId, groupIdx) => sandboxExpanded.value[getSand
 const toggleSandboxExpand = (messageId, groupIdx) => {
   const key = getSandboxKey(messageId, groupIdx)
   sandboxExpanded.value = { ...sandboxExpanded.value, [key]: sandboxExpanded.value[key] === false }
+}
+
+// 运行态卡片（浏览器 / 终端 / CDP 探测）默认折叠：头部只留一行摘要，点击展开详情
+const agentCardExpanded = ref({})
+const getAgentCardKey = (messageId, kind, idx) => `${messageId}-${kind}-${idx}`
+const isAgentCardExpanded = (messageId, kind, idx, defaultOpen = false) => {
+  const hit = agentCardExpanded.value[getAgentCardKey(messageId, kind, idx)]
+  return hit === undefined ? defaultOpen : hit
+}
+const toggleAgentCard = (messageId, kind, idx, defaultOpen = false) => {
+  const key = getAgentCardKey(messageId, kind, idx)
+  agentCardExpanded.value = {
+    ...agentCardExpanded.value,
+    [key]: !isAgentCardExpanded(messageId, kind, idx, defaultOpen)
+  }
+}
+// 需要用户处理的状态：默认展开，避免操作入口被折叠藏起来
+const browserLocalNeedsAttention = (status) => status === 'waiting_proxy' || status === 'error'
+const terminalExecNeedsAttention = (status) =>
+  status === 'queued' || status === 'proxy_down' || status === 'error'
+const cdpLatestStepText = (tc) => {
+  const steps = Array.isArray(tc && tc.steps) ? tc.steps : []
+  const st = steps[steps.length - 1]
+  if (!st) return ''
+  return String(st.action || st.summary || st.url || '').trim()
 }
 
 /** 最后一个标题含 modify 的工具步骤下标（与 AgentTaskRun.execToolKind 一致） */
@@ -6609,18 +6675,40 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 
 .findings-card {
-  border: 1px solid #e5e7eb;
+  border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 8px;
-  background: #fff;
+  background: rgba(148, 163, 184, 0.06);
   overflow: hidden;
 }
+
+.findings-card .text-muted {
+  color: #9aa4b2;
+}
+
+/* Bootstrap 未引入：卡片内状态徽标按暗色主题自绘 */
+.findings-card .badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.findings-card .bg-primary { background: rgba(59, 130, 246, 0.22); color: #93c5fd; }
+.findings-card .bg-success { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+.findings-card .bg-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+.findings-card .bg-danger { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.findings-card .bg-secondary { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; }
+.findings-card .bg-light { background: rgba(148, 163, 184, 0.16); color: #e2e8f0; }
 
 .cdp-test-task-section {
   margin: 12px 0;
 }
 .cdp-test-task-card {
-  padding: 12px 14px;
-  margin-bottom: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
 }
 .cdp-test-task-status {
   margin-left: auto;
@@ -6632,29 +6720,29 @@ watch(() => props.sessionId, (newSessionId) => {
   margin: 6px 0 0;
   padding-left: 1.1em;
 }
-.cdp-test-task-steps .ok { color: #2e7d32; }
-.cdp-test-task-steps .fail { color: #c62828; }
+.cdp-test-task-steps .ok { color: #4ade80; }
+.cdp-test-task-steps .fail { color: #f87171; }
 .cdp-open-report-btn {
   margin-top: 8px;
   padding: 4px 10px;
   font-size: 12px;
-  border: 1px solid #d0d7de;
+  border: 1px solid rgba(148, 163, 184, 0.35);
   border-radius: 4px;
-  background: #fff;
-  color: #444;
+  background: rgba(148, 163, 184, 0.12);
+  color: #e2e8f0;
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s;
 }
 .cdp-open-report-btn:hover {
-  background: #f2f5f9;
-  border-color: #b9c2cc;
+  background: rgba(148, 163, 184, 0.22);
+  border-color: rgba(148, 163, 184, 0.5);
 }
 .client-local-run-section {
   margin: 12px 0;
 }
 .client-local-run-card {
-  padding: 12px 14px;
-  margin-bottom: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
 }
 .client-local-run-head {
   display: flex;
@@ -6663,14 +6751,14 @@ watch(() => props.sessionId, (newSessionId) => {
   margin-bottom: 8px;
 }
 .client-local-run-body {
-  margin: 0 0 10px;
+  margin: 0 0 6px;
   line-height: 1.5;
 }
 .client-local-run-primary-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin: 0 0 12px;
+  gap: 6px;
+  margin: 0 0 6px;
 }
 .client-local-run-actions {
   display: flex;
@@ -6680,8 +6768,9 @@ watch(() => props.sessionId, (newSessionId) => {
 }
 .client-local-run-pre {
   font-size: 12px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: rgba(2, 6, 23, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #e2e8f0;
   border-radius: 6px;
   padding: 8px 10px;
   margin: 6px 0 0;
@@ -6700,7 +6789,7 @@ watch(() => props.sessionId, (newSessionId) => {
 .client-local-run-platform {
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
 }
 
 .client-local-run-platform-title {
@@ -6715,8 +6804,8 @@ watch(() => props.sessionId, (newSessionId) => {
   margin: 12px 0;
 }
 .client-terminal-exec-card {
-  padding: 12px 14px;
-  margin-bottom: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
 }
 .client-terminal-exec-head {
   display: flex;
@@ -6771,6 +6860,66 @@ watch(() => props.sessionId, (newSessionId) => {
   margin: 4px 0 0;
   line-height: 1.45;
 }
+
+/* 运行态卡片折叠：头部固定一行摘要（图标+标题+摘要+状态+箭头），详情点击展开 */
+.client-card-head {
+  margin-bottom: 0;
+  cursor: pointer;
+  user-select: none;
+}
+.card-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #9aa4b2;
+}
+.card-meta--mono {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+.client-card-detail {
+  padding-top: 10px;
+}
+.client-card-detail .client-local-run-body:last-child,
+.client-card-detail .client-local-run-tip:last-child,
+.client-card-detail .client-terminal-exec-hint:last-child {
+  margin-bottom: 0;
+}
+
+/* 卡片内小字号/按钮/状态色：Bootstrap 未引入，.small / .btn-sm / .text-* 需自绘 */
+.findings-card .small {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.findings-card .btn-sm {
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 6px;
+}
+.findings-card .btn-outline-secondary {
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.35);
+}
+.findings-card .btn-outline-secondary:hover {
+  color: #fff;
+  background: rgba(148, 163, 184, 0.22);
+  border-color: rgba(148, 163, 184, 0.5);
+}
+.findings-card .form-select-sm {
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+.findings-card .text-danger { color: #f87171; }
+.findings-card .text-success { color: #4ade80; }
+.findings-card .text-warning { color: #fbbf24; }
 
 .findings-header {
   display: flex;
@@ -6974,7 +7123,7 @@ watch(() => props.sessionId, (newSessionId) => {
   color: #888;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px dashed #eee;
+  border-top: 1px dashed rgba(148, 163, 184, 0.25);
 }
 
 /* 首轮 Todo 流式正文（LLM content_delta） */

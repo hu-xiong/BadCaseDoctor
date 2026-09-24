@@ -395,6 +395,11 @@ class Config:
     MINIO_MAX_FILE_SIZE = int(os.getenv("MINIO_MAX_FILE_SIZE", str(524288000)))  # 默认 500MB，与历史 app 一致
     MINIO_MAX_SUM_FILE_SIZE = int(os.getenv("MINIO_MAX_SUM_FILE_SIZE", str(MINIO_MAX_FILE_SIZE)))
 
+    # ==================== 工具长任务台账 run_ledger（Midscene 探测 / WebFetch 调研等）====================
+    # 本地热写根目录（默认相对项目根 tmp/runs）；MinIO 冷存前缀挂在 MINIO_SAAS_FILE_PATH 之下的子前缀
+    RUN_LEDGER_LOCAL_ROOT = (os.getenv("RUN_LEDGER_LOCAL_ROOT") or "tmp/runs").strip().strip("/") or "tmp/runs"
+    RUN_LEDGER_MINIO_SUBPREFIX = (os.getenv("RUN_LEDGER_MINIO_SUBPREFIX") or "runs").strip().strip("/") or "runs"
+
     # ==================== 提示词页表 / KV Cache 调度（P0）====================
     PROMPT_PAGE_TABLE_ENABLED = (
         os.getenv("PROMPT_PAGE_TABLE_ENABLED", "1") or "1"

@@ -1095,6 +1095,15 @@ class CdpTool(BaseTool):
         if not url:
             return {"success": False, "error": "explore 需要目标 URL"}
 
+        # 台账参数（user/project/session 隔离 + entries/resume 续跑）：无 user_id 时为空 dict，完全兼容旧行为
+        try:
+            from agents.cdp.midscene_ledger import ledger_kwargs_from_tool
+
+            _ledger_kw = ledger_kwargs_from_tool(kwargs)
+        except Exception as _ledger_ex:
+            print(f"[CDP] explore ledger kwargs skipped: {_ledger_ex}", flush=True)
+            _ledger_kw = {}
+
         if eng == "combined":
             # 复用已打开的浏览器，避免每次 Midscene 都启动新 Chromium
             cdp_ws_url = await self._mgr.get_browser_ws_endpoint(owner_key=owner) if hasattr(self._mgr, 'get_browser_ws_endpoint') else None
@@ -1109,6 +1118,7 @@ class CdpTool(BaseTool):
                 user_query=str(user_query or ""),
                 cdp_ws_url=cdp_ws_url,
                 progress_queue=progress_queue,
+                **_ledger_kw,
             )
         else:
             cdp_ws_url = await self._mgr.get_browser_ws_endpoint(owner_key=owner) if hasattr(self._mgr, 'get_browser_ws_endpoint') else None
@@ -1118,6 +1128,7 @@ class CdpTool(BaseTool):
                 user_query=str(user_query or ""),
                 cdp_ws_url=cdp_ws_url,
                 progress_queue=progress_queue,
+                **_ledger_kw,
             )
 
         result["session_id"] = sid

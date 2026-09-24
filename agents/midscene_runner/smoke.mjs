@@ -2,7 +2,11 @@
  * BadCase Doctor — Midscene UI smoke runner.
  *
  * Input (env MIDSCENE_SMOKE_INPUT = path to JSON):
- *   { url, goal?, headless?, timeout_ms? }
+ *   { url, goal?, headless?, timeout_ms?, entries?: [{name, hint?}] | string[],
+ *     entry?: string, resume?: boolean, run_dir?: string }
+ * run_dir: 台账目录（checkpoint.json / steps.jsonl / artifacts 写入此处，缺省不落盘）
+ * resume:  读 checkpoint.json，跳过已终态（pass/fail/blocked）的 entry，只测剩余
+ * entry:   单入口模式，只验证这一个入口（explore 重规划时的最小续跑单元）
  *
  * stdout: single JSON object (machine-readable)
  * stderr: human logs
@@ -205,6 +209,100 @@ function emit(result) {
   fs.writeSync(1, JSON.stringify(result) + "\n");
 }
 
+// ---- 台账（run_ledger）落盘：checkpoint 原子写（.tmp+rename），steps 追加写 ----
+// Python 侧 run_ledger.start 已建好 run_dir 与骨架文件；这里负责运行期写入与续跑语义。
+const ENTRY_TERMINAL = new Set(["pass", "fail", "blocked"]);
+
+function normalizeEntries(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((x) =>
+      typeof x === "string"
+        ? { name: x, hint: "" }
+        : { name: String(x?.name || ""), hint: x?.hint ? String(x.hint) : "" },
+    )
+    .filter((e) => e.name);
+}
+
+function ledgerInit(input) {
+  const runDir = String(input.run_dir || "").trim();
+  if (!runDir) return null;
+  const ledger = {
+    runDir,
+    checkpointPath: path.join(runDir, "checkpoint.json"),
+    stepsPath: path.join(runDir, "steps.jsonl"),
+  };
+  fs.mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
+  let existing = null;
+  try {
+    existing = JSON.parse(fs.readFileSync(ledger.checkpointPath, "utf8"));
+  } catch { /* 首次运行 */ }
+  ledger.existing = existing && Array.isArray(existing.entries) ? existing : { entries: [] };
+  return ledger;
+}
+
+function ledgerSaveCheckpoint(ledger, checkpoint) {
+  if (!ledger) return;
+  checkpoint.updated_at = new Date().toISOString();
+  const tmp = ledger.checkpointPath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(checkpoint, null, 2), "utf8");
+  fs.renameSync(tmp, ledger.checkpointPath);
+}
+
+function ledgerAppendStep(ledger, step) {
+  if (!ledger) return;
+  try {
+    fs.appendFileSync(ledger.stepsPath, JSON.stringify(step) + "\n", "utf8");
+  } catch { /* 台账失败不阻断巡检 */ }
+}
+
+function buildGoalFromEntries(pendingEntries) {
+  return [
+    "你是一名认真的手工测试同学。本次只验证以下入口（逐项真实操作并记住结果，未列出的入口不要测）：",
+    ...pendingEntries.map((e, i) => `${i + 1}) ${e.name}${e.hint ? "：" + e.hint : ""}`),
+    "要求：如实记录每项通过/失败，不得虚构；遇到登录页不要输入任何账号密码、不要注册，如实报告被登录阻塞；不要点删除/注销/退出登录/清空数据等危险操作；日期/下拉用正常点选；完成后停留在结果页，便于汇总。",
+  ].join("\n");
+}
+
+function matchEntryText(name, items) {
+  const n = String(name || "");
+  if (!n) return null;
+  for (const item of items) {
+    const s = typeof item === "string" ? item : String(item?.step || item?.name || "");
+    if (s && (s.includes(n) || n.includes(s))) return item;
+  }
+  return null;
+}
+
+function updateEntriesFromReport(pendingEntries, existingEntries, report) {
+  const passed = Array.isArray(report?.passed) ? report.passed : [];
+  const failed = Array.isArray(report?.failed) ? report.failed : [];
+  const summaryText = String(report?.summary || "");
+  const loginBlocked =
+    /(登录|登陆|登入)[^。；\n]{0,40}(阻塞|受阻|无法|不能)|(阻塞|受阻|无法|不能)[^。；\n]{0,40}(登录|登陆|登入)/.test(
+      summaryText,
+    );
+  const prevByName = new Map((existingEntries || []).filter((e) => e?.name).map((e) => [e.name, e]));
+  return pendingEntries.map((e) => {
+    let status = "pending";
+    let reason = "";
+    const f = matchEntryText(e.name, failed);
+    if (f) {
+      status = "fail";
+      reason = (typeof f === "object" && String(f?.reason || "")) || String(f);
+    } else if (matchEntryText(e.name, passed)) {
+      status = "pass";
+    } else if (loginBlocked && /登录|登陆|登入/.test(e.name)) {
+      status = "blocked";
+      reason = "被登录阻塞";
+    }
+    const prev = prevByName.get(e.name) || {};
+    const out = { ...prev, ...e, status };
+    if (reason) out.reason = reason;
+    out.finished_at = status === "pending" ? prev.finished_at || null : new Date().toISOString();
+    return out;
+  });
+}
+
 async function main() {
   const started = Date.now();
   let input;
@@ -231,13 +329,62 @@ async function main() {
     process.exit(2);
   }
 
-  const goal = String(input.goal || DEFAULT_GOAL);
   const headless = input.headless !== false;
   const cdpWs = String(input.cdp_ws_url || process.env.MIDSCENE_CDP_WS_URL || "").trim();
+
+  // ---- 台账模式：entries 驱动 / resume 续跑 / entry 单入口 ----
+  const ledger = ledgerInit(input);
+  const entryMode = String(input.entry || "").trim();
+  let provided = normalizeEntries(input.entries);
+  if (!provided.length && input.resume) {
+    provided = normalizeEntries(ledger?.existing?.entries || []);
+  }
+  let pendingEntries = provided.filter(
+    (e) =>
+      !ENTRY_TERMINAL.has(
+        String((ledger?.existing?.entries || []).find((x) => x?.name === e.name)?.status || ""),
+      ),
+  );
+  let goal;
+  if (entryMode) {
+    goal = [
+      `你是一名认真的手工测试同学。只针对「${entryMode}」这一个入口做验证：找到并打开它，真实操作其主功能，如实记录结果。`,
+      "不要测其它入口；遇到登录页不要输入任何账号密码、不要注册，如实报告被登录阻塞；不要点删除/注销/退出登录/清空数据等危险操作；完成后停留在结果页。",
+    ].join("\n");
+    pendingEntries = [{ name: entryMode, hint: "entry 模式单入口验证" }];
+  } else if (provided.length) {
+    if (!pendingEntries.length) {
+      emit({
+        success: true,
+        engine: "midscene",
+        url,
+        nothing_to_do: true,
+        entries: ledger?.existing?.entries || [],
+        note: "所有 entry 均已终态，无需重跑",
+        duration_ms: Date.now() - started,
+      });
+      return;
+    }
+    goal = buildGoalFromEntries(pendingEntries);
+  } else {
+    goal = String(input.goal || DEFAULT_GOAL);
+  }
 
   let browser;
   let page;
   let agent;
+
+  // 运行前先落 pending 骨架：目标不可达 / 进程被 SIGKILL 也留有续跑依据
+  if (ledger && pendingEntries.length) {
+    const terminal = (ledger.existing.entries || []).filter(
+      (e) => e && e.name && !pendingEntries.some((p) => p.name === e.name),
+    );
+    ledgerSaveCheckpoint(ledger, {
+      ...ledger.existing,
+      entries: [...terminal, ...pendingEntries.map((e) => ({ ...e, status: "pending" }))],
+    });
+  }
+
   try {
     if (cdpWs) {
       browser = await chromium.connectOverCDP(cdpWs);
@@ -326,6 +473,7 @@ async function main() {
         data,
       };
       executionSteps.push(step);
+      ledgerAppendStep(ledger, step);
       // [step] 前缀供 Python 流式读取识别
       console.error('[step]' + JSON.stringify(step));
     });
@@ -407,6 +555,20 @@ async function main() {
     const hasSignal = tested.length > 0 || passed.length > 0 || failed.length > 0;
     const reportMissing = !(report && typeof report === "object") || !hasSignal;
 
+    const finalEntries = pendingEntries.length
+      ? updateEntriesFromReport(pendingEntries, ledger?.existing?.entries, report)
+      : [];
+    if (ledger) {
+      const terminal = (ledger.existing.entries || []).filter(
+        (e) => e && e.name && !finalEntries.some((f) => f.name === e.name),
+      );
+      ledgerSaveCheckpoint(ledger, {
+        ...ledger.existing,
+        entries: [...terminal, ...finalEntries],
+        last_summary: String(report?.summary || "").slice(0, 500),
+      });
+    }
+
     emit({
       success: !reportMissing && !blocking,
       report_missing: reportMissing,
@@ -426,11 +588,39 @@ async function main() {
       },
       execution_steps: executionSteps,
       report_file: reportFile,
+      run_dir: ledger ? ledger.runDir : undefined,
+      entries: finalEntries.length ? finalEntries : undefined,
+      untested_entries: finalEntries.length
+        ? finalEntries.filter((e) => e.status === "pending").map((e) => e.name)
+        : undefined,
       duration_ms: Date.now() - started,
     });
   } catch (e) {
     console.error(`[midscene] error: ${e?.stack || e}`);
     const msg = String(e?.message || e);
+    // 中断也要留证据：能 aiQuery 就拿部分报告写 checkpoint，下次 resume 接着测剩余入口
+    let partialReport = null;
+    if (ledger && agent) {
+      try {
+        partialReport = await agent.aiQuery(
+          `{tested_flows: string[], passed: string[], failed: { step: string, reason: string }[], summary: string}, 根据已经成功执行的操作，给出截至目前的中文部分报告；没测到的不要编。`,
+        );
+      } catch { /* aiQuery 也失败则只留步骤日志 */ }
+    }
+    const partialEntries = pendingEntries.length
+      ? updateEntriesFromReport(pendingEntries, ledger?.existing?.entries, partialReport)
+      : [];
+    if (ledger) {
+      const terminal = (ledger.existing.entries || []).filter(
+        (e2) => e2 && e2.name && !partialEntries.some((f) => f.name === e2.name),
+      );
+      ledgerSaveCheckpoint(ledger, {
+        ...ledger.existing,
+        entries: [...terminal, ...partialEntries],
+        interrupted_reason: msg.slice(0, 500),
+      });
+    }
+    const untestedAfterError = partialEntries.filter((x) => x.status === "pending").map((x) => x.name);
     const missingModel =
       /MIDSCENE_MODEL|API_KEY|api key|model/i.test(msg) ||
       /401|403|Unauthorized/i.test(msg);
@@ -439,6 +629,9 @@ async function main() {
       engine: "midscene",
       error: msg.slice(0, 2000),
       fallback_legacy: missingModel || /Cannot find module|ERR_MODULE_NOT_FOUND/i.test(msg),
+      run_dir: ledger ? ledger.runDir : undefined,
+      partial_report: partialReport || undefined,
+      untested_entries: untestedAfterError.length ? untestedAfterError : undefined,
       duration_ms: Date.now() - started,
     });
     process.exitCode = 1;

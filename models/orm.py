@@ -1448,6 +1448,42 @@ class CdpTestRun(db.Model):
         }
 
 
+class ToolRun(db.Model):
+    """工具长任务通用台账索引：文件本体在 tmp/runs + MinIO，本表只做鉴权查询与会话任务链索引。"""
+    __tablename__ = 'tool_runs'
+
+    run_id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    project_id = db.Column(db.Integer, nullable=True, index=True)
+    chat_session_id = db.Column(db.Integer, nullable=True, index=True)
+    tool_kind = db.Column(db.String(32), nullable=False)
+    goal = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='running', index=True)
+    counts_json = db.Column(db.JSON, nullable=True)
+    summary = db.Column(db.Text, nullable=True)
+    minio_prefix = db.Column(db.String(512), nullable=True)
+    prev_run_id = db.Column(db.String(36), nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "user_id": self.user_id,
+            "project_id": self.project_id,
+            "chat_session_id": self.chat_session_id,
+            "tool_kind": self.tool_kind,
+            "goal": self.goal,
+            "status": self.status,
+            "counts_json": self.counts_json,
+            "summary": self.summary,
+            "minio_prefix": self.minio_prefix,
+            "prev_run_id": self.prev_run_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+        }
+
+
 class TerminalAudit(db.Model):
     """嵌入式终端审计：会话开始、AI 建议等（不含逐键记录）。"""
     __tablename__ = 'terminal_audit'
