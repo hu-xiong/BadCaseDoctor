@@ -6,7 +6,6 @@ from agents.modify_field_schema import (
     normalize_field_key_for_target,
     remap_entity_modification_keys,
 )
-from agents.react_macro import build_macro_step_params_prompt
 
 
 def test_badcase_full_cross_entity_remap():
@@ -109,16 +108,3 @@ def test_modify_field_semantics_mentions_base_problem_not_title():
     assert "base_problem" in text
     assert "相似问题" in text
     assert "不是 title" in text or "**不是** title" in text
-
-
-def test_macro_modify_prompt_includes_field_semantics():
-    prompt = build_macro_step_params_prompt(
-        tool="modify",
-        step_spec={"plan_line": "modify badcase"},
-        user_input="相似问题改为进京证5环6环区别",
-        ui_context={"target": "badcase", "record_id": "1"},
-        execution_context={"last_params": {"target": "badcase"}},
-        frozen_macro={"target_hint": "badcase", "intent_hints": {}},
-    )
-    assert "base_problem" in prompt
-    assert "问登录问题答的不好" not in prompt

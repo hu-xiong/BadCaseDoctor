@@ -1,8 +1,10 @@
 # 首条「Agent Thought」出现之前：后端做了什么
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 **版本**：2026-04-02  
 **目的**：说明在 **步骤区 `agent_thought`** 出现前，服务端已完成的 **HTTP / gather / 上下文**；并记录 **架构优化方向**：用主循环里 **首轮 decide 的 `agent_thought`** 承接原「首轮 THINK」里的推断与规划，**省掉单独一轮 THINK 的串行耗时**。  
-**主代码**：`agents/intelligent_devops_agent.py`（入口）、`agents/react_simplified.py`（`_run_stream_raw`）、`agents/react_function_call.py`（decide FC 流）。提示词中的规划约束见 `agents/prompts.py`（`think_prompt` / `[GATE]` 规则）。
+**主代码**：`agents/intelligent_devops_agent.py`（入口）、`agents/langgraph_engine.py`（主循环）、`agents/react_function_call.py`（decide FC 流）。提示词中的规划约束见 `agents/prompts.py`（`think_prompt` / `[GATE]` 规则）。
 
 ---
 
@@ -58,7 +60,7 @@
 
 1. **SSE 连接建立**，`IntelligentDevOpsAgent.handle_user_request_stream` 先 `**yield {'type': 'hello', 'payload': {}}`**，表示协议握手就绪。
 2. **并行**启动 `**_classify_intent(user_input)`**（意图分类），**不阻塞**后续 ReAct 流；主流程立刻进入 `react_engine.run_stream`。
-3. `**run_stream`** 对 `_run_stream_raw` 吐出的字典做 **v1 打包**（`engine_dict_to_wire_packets`），并在 `**react_phase` 变化** 时插入 `**type: phase`**（若开启 `sse_v1_emit_phase_packets`）。
+3. `**run_stream`** 对主循环吐出的字典做 **v1 打包**（`engine_dict_to_wire_packets`），并在 `**react_phase` 变化** 时插入 `**type: phase`**（若开启 `sse_v1_emit_phase_packets`）。
 
 此阶段 **尚无** `event: agent_thought`。
 

@@ -1,6 +1,5 @@
-"""delete_plan 技能匹配与 macro target_hint 推断。"""
+"""delete_plan 技能匹配。"""
 from agents.intent_guards import user_text_implies_plan_entity_type
-from agents.react_macro import _infer_macro_target_hint
 from agents.skill_loader import SkillLoader
 
 
@@ -28,11 +27,6 @@ def test_delete_badcase_downranked_when_plan_explicit():
         if s > 0:
             scores[skill.name] = s
     assert scores.get("delete_plan", 0) > scores.get("delete_badcase", 0)
-
-
-def test_macro_target_hint_infers_plan():
-    hint = _infer_macro_target_hint("帮忙删除这个迭代计划2", {})
-    assert hint == "plan"
 
 
 def test_delete_plan_may_skip_grep():

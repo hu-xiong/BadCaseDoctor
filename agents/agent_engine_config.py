@@ -1,28 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Agent 执行引擎选择（旧 ReAct / LangGraph）。"""
+"""Agent 执行引擎（LangGraph）参数配置。"""
 from __future__ import annotations
 
 import os
 from typing import Optional, FrozenSet
-
-
-def agent_engine_backend() -> str:
-    """
-    返回 ``langgraph``（默认）或 ``react``（旧 SimplifiedReActEngine）。
-
-    环境变量：
-    - ``AGENT_ENGINE=langgraph|react``（推荐）
-    - 兼容别名 ``REACT_ENGINE``
-    未设置时默认 ``langgraph``；需回退旧引擎时设 ``AGENT_ENGINE=react``。
-    """
-    raw = (
-        os.getenv("AGENT_ENGINE")
-        or os.getenv("REACT_ENGINE")
-        or "langgraph"
-    ).strip().lower()
-    if raw in ("react", "legacy", "old", "simplified"):
-        return "react"
-    return "langgraph"
 
 
 def langgraph_max_rounds() -> int:

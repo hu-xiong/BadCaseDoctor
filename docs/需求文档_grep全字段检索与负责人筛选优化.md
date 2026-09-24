@@ -1,5 +1,7 @@
 # 需求文档：Grep 检索升级（统一向量索引 + 全字段检索）
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > 版本：v2 设计稿（2026-05）  
 > 范围：grep 工具、ES 向量索引、Bug/BadCase 首批入库、编排层 target 分类治理  
 > **性能优化定位**：**工具层 / 检索子系统**（embed、ES、rerank、plan_tree 并行），不替代 [推理/执行分离总纲](./需求文档_下一轮性能优化_推理执行分离总结与响应形态.md) 的 P0。  

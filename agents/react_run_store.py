@@ -39,7 +39,7 @@ def _brief_tool_result(result: Any) -> Any:
 def snapshot_agent_task_dag(react_request_id: str) -> Optional[Dict[str, Any]]:
     """
     从 agent_tasks 表重建 DAG 快照（节点 + dependencies + 拓扑分层）。
-    仅当 REACT_AGENT_TASK_DAG=1 且本轮有落库任务时非空。
+    仅当本轮有落库任务行时非空（写入路径已随自研 ReAct 引擎删除，现存量为历史数据）。
     """
     from app import AgentTask
 

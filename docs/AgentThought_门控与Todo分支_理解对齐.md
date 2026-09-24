@@ -1,5 +1,7 @@
 # Agent Thought 门控与 Todo 分支 — 理解对齐
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > 第四节为**已定案**（按产品确认）；前三节为设计背景。
 
 ---

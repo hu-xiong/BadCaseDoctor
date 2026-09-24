@@ -433,7 +433,7 @@ class CreateTool(BaseTool):
                 'error': '缺少必要参数：fields或project_id'
             }
 
-        # create 会被 react_simplified 放入线程池执行，线程里没有 Flask app context。
+        # create 会在工作线程中执行，线程里没有 Flask app context。
         # 为了保证复制/补全字段阶段能正常查询 TestCase 等表，这里给整个 execute 包一层 app_context。
         from app import app as flask_app
         with flask_app.app_context():
@@ -1055,7 +1055,7 @@ class CreateTool(BaseTool):
 
         if use_copy:
             try:
-                # react_simplified 会把 create 放到线程池执行，线程里需要显式推入 Flask app context
+                # create 在工作线程中执行，需要显式推入 Flask app context
                 with flask_app.app_context():
                     src = None
                     # 1) 优先按主键 id 查询

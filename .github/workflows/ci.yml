@@ -32,7 +32,7 @@ jobs:
           python -m py_compile routers/payment.py app_services/health_probes.py utils/cors_config.py server_wsgi.py agents/langgraph_engine.py agents/langgraph_bridge.py agents/langgraph_failure.py agents/langgraph_resume.py agents/langgraph_recover.py agents/langgraph_observe.py agents/langgraph_checkpointer.py agents/langsmith_tracing.py evals/langsmith/evaluators.py evals/langsmith/harness.py evals/langsmith/run_eval.py
           python -c "from routers import payment as p; assert p.payment_provider()=='mock'"
           python -c "from utils.cors_config import cors_origins_list; assert 'http://localhost:5173' in cors_origins_list()"
-          python -c "from agents.agent_engine_config import agent_engine_backend; assert agent_engine_backend()=='langgraph'"
+          python -c "from agents.langgraph_engine import LangGraphReactEngine; assert LangGraphReactEngine is not None"
           python -c "from agents.langgraph_checkpointer import get_checkpointer, reset_checkpointer_for_tests; import os; os.environ['LANGGRAPH_CHECKPOINTER']='memory'; reset_checkpointer_for_tests(); assert get_checkpointer() is not None"
 
       - name: LangGraph engine smoke

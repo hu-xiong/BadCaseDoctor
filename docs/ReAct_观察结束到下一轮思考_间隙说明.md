@@ -1,5 +1,7 @@
 # ReAct：「观察/决策与观察」结束 → 下一轮「思考」之间的步骤说明
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > **归属**：性能优化体系中的**间隙拆解**文档。总纲与排期见  
 > [`需求文档_下一轮性能优化_推理执行分离总结与响应形态.md`](./需求文档_下一轮性能优化_推理执行分离总结与响应形态.md)（**推理/执行分离为 P0**）。
 

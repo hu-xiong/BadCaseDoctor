@@ -1,11 +1,11 @@
 """_merge_grep_observation_into_context：批量 modify 仅以 grep navigation 中的 ID 为候选。"""
 from unittest.mock import MagicMock
 
-from agents.react_simplified import SimplifiedReActEngine
+from agents.react_legacy_helpers import LegacyReActHelpers
 
 
 def test_merge_grep_restricts_bug_list_to_navigation_ids():
-    eng = SimplifiedReActEngine(MagicMock(), MagicMock())
+    eng = LegacyReActHelpers(MagicMock(), MagicMock())
     observation = {
         "success": True,
         "data": {
@@ -36,7 +36,7 @@ def test_merge_grep_restricts_bug_list_to_navigation_ids():
 
 def test_merge_grep_with_navigation_but_missing_ids_yields_empty_lists():
     """navigation 存在但解析不到 record_id 时，不得回退到全量 bug_location。"""
-    eng = SimplifiedReActEngine(MagicMock(), MagicMock())
+    eng = LegacyReActHelpers(MagicMock(), MagicMock())
     observation = {
         "success": True,
         "data": {
@@ -53,17 +53,3 @@ def test_merge_grep_with_navigation_but_missing_ids_yields_empty_lists():
     eng._merge_grep_observation_into_context(observation, {}, ctx)
     assert ctx.get("bug_list") == []
     assert (ctx.get("grep_result") or {}).get("first_bug_id") is None
-
-
-def test_constrain_modify_batch_intersects_navigation_ids():
-    eng = SimplifiedReActEngine(MagicMock(), MagicMock())
-    ctx = {
-        "grep_result": {
-            "navigation_ids": {"bug": [9, 8], "badcase": [], "testcase": []}
-        }
-    }
-    target_list = [{"id": 10, "title": "x"}, {"id": 9}, {"id": 8}]
-    out = eng._constrain_modify_target_list_by_grep_navigation(
-        target_list, "bug", ctx, trace_phase="test"
-    )
-    assert [x["id"] for x in out] == [9, 8]

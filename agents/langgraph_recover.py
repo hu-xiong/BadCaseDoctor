@@ -114,7 +114,7 @@ async def try_structured_recover(
 
     from agents.intent_guards import react_context_has_grep_for_mutate
     from agents.langgraph_bridge import enrich_tool_params_for_execute, merge_grep_into_context
-    from agents.react_simplified import _grep_observation_empty_lists
+    from agents.react_legacy_helpers import _grep_observation_empty_lists
 
     sse: List[Dict[str, Any]] = []
     rc = dict(result_context or {})

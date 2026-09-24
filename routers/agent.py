@@ -843,7 +843,7 @@ def react_agent_stream_cancel():
         rid = (data.get('request_id') or data.get('react_request_id') or '').strip()
         if not rid:
             return jsonify({'code': 400, 'message': 'missing request_id'}), 400
-        from agents.react_simplified import request_react_stream_cancel
+        from agents.react_legacy_helpers import request_react_stream_cancel
 
         ok = bool(request_react_stream_cancel(rid))
         return jsonify({'code': 200, 'ok': ok})
@@ -1045,16 +1045,8 @@ def react_agent():
             )
         from app import db
         t_agent0 = time.perf_counter()
-        _engine_override = (
-            (data.get("agent_engine") or data.get("engine") or "").strip() or None
-        )
-        agent = IntelligentDevOpsAgent(
-            llm=llm, db_session=db.session, engine_backend=_engine_override
-        )
-        logger.info(
-            "[REACT] agent_engine=%s",
-            getattr(agent, "engine_backend", "react"),
-        )
+        agent = IntelligentDevOpsAgent(llm=llm, db_session=db.session)
+        logger.info("[REACT] agent_engine=langgraph")
         if perf:
             logger.info(
                 "[PERF][react_api][%s] agent_init_ms=%.1f fresh_agent=%s",

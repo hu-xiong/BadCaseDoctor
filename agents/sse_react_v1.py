@@ -6,7 +6,7 @@ ReAct SSE 协议 v1：引擎事件 → 对外 JSON。
 - **引擎 event**：``step_data["event"]``，种类多（plan_init、executing、reasoning…），仅 Python 侧使用。
 - **对外 type**：浏览器 JSON 顶层 ``type``，与文档 §6.1.9 对齐的少数几种（见 ``ClientWireType``）。
 
-**谁负责转换**：``SimplifiedReActEngine.run_stream`` 在出口调用 ``engine_dict_to_wire_packets``；Agent 只透传，不在循环里再做映射。
+**谁负责转换**：``LangGraphReactEngine`` 在出口调用 ``engine_dict_to_wire_packets``；Agent 只透传，不在循环里再做映射。
 实现方式：**枚举定「对外 kind」+ 字典把引擎 event 指到打包函数**；未登记的 event → ``stream`` + ``lane=engine`` 原样 ``data`` 兜底。
 
 ┌─────────────────┬──────────────────────┬────────────────────────────┐
@@ -453,7 +453,7 @@ def _pack_stream_agent_thought(step_data: Dict[str, Any]) -> List[Dict[str, Any]
     引擎 event=agent_thought：对外仍走 lane=think，但 payload.as=agent_thought，
     以便前端复用既有 think lane reducer（reactSseV1ChunkToLegacyStepEvent）。
     """
-    # react_simplified.py 使用 {"event":"agent_thought","delta":...}
+    # 引擎侧 agent_thought 事件形如 {"event":"agent_thought","delta":...}
     d = step_data.get("delta")
     if d is None:
         d = step_data.get("content")

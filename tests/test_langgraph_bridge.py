@@ -2,19 +2,8 @@
 """LangGraph 桥接与引擎配置单测（不连真实 LLM/DB）。"""
 from __future__ import annotations
 
-from agents.agent_engine_config import agent_engine_backend, langgraph_max_rounds, langgraph_tool_allowlist
+from agents.agent_engine_config import langgraph_max_rounds, langgraph_tool_allowlist
 from agents.langgraph_bridge import prepare_mutate_or_coerce_grep
-
-
-def test_agent_engine_default_langgraph(monkeypatch):
-    monkeypatch.delenv("AGENT_ENGINE", raising=False)
-    monkeypatch.delenv("REACT_ENGINE", raising=False)
-    assert agent_engine_backend() == "langgraph"
-
-
-def test_agent_engine_react_override(monkeypatch):
-    monkeypatch.setenv("AGENT_ENGINE", "react")
-    assert agent_engine_backend() == "react"
 
 
 def test_langgraph_max_rounds_clamped(monkeypatch):

@@ -2,7 +2,7 @@
 """
 LangGraph 与旧 ReAct 领域逻辑桥接：
 grep→modify 门控、实体 ID 补全、pending diff、grep 结果合并、modify 沙箱预览参数。
-复用 SimplifiedReActEngine 已验证方法，避免再写一套。
+复用 agents.react_legacy_helpers.LegacyReActHelpers 已验证方法，避免再写一套。
 """
 from __future__ import annotations
 
@@ -26,29 +26,10 @@ from utils.entity_id import (
 
 
 def _lazy_helpers(llm, tool_registry):
-    """
-    借 SimplifiedReActEngine 的领域方法，避免完整 __init__（Windows 控制台 emoji、双份 Skill 加载）。
-    """
-    from agents.react_simplified import SimplifiedReActEngine
+    """构造 LegacyReActHelpers（原自研 ReAct 引擎抽取的领域方法集）。"""
+    from agents.react_legacy_helpers import LegacyReActHelpers
 
-    eng = SimplifiedReActEngine.__new__(SimplifiedReActEngine)
-    eng.llm = llm
-    eng.tools = tool_registry
-    eng.project_id = None
-    eng.plan_id = None
-    eng.db = None
-    eng.user_id = ""
-    eng._user_id = ""
-    eng._ui_locale = "zh"
-    eng._ui_context = None
-    eng._client_shell = None
-    eng._pending_diff_context = {}
-    eng._grep_result_cache = {}
-    eng._agent_session_id = None
-    eng._chat_session_id = None
-    eng._react_stream_user_query = None
-    eng._react_stream_user_input = None
-    return eng
+    return LegacyReActHelpers(llm=llm, tool_registry=tool_registry)
 
 
 def prepare_mutate_or_coerce_grep(
@@ -300,6 +281,7 @@ def enrich_tool_params_for_execute(
         params["project_id"] = project_id
         params["user_id"] = user_id
         params["userId"] = user_id
+        params["chat_session_id"] = chat_session_id
         params["result_context"] = result_context
         try:
             from agents.cdp.login_flow import inject_cdp_login_resume_params

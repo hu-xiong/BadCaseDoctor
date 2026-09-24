@@ -1,5 +1,7 @@
 # 页表 + 伙伴系统：Token 管理与 KV Cache 调度
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > **主线目标**：把 Agent 提示词当作「可分页的虚拟地址空间」管理——**4KB 一页**，用**伙伴系统**管理**本地页帧**（hash 索引、LRU）；对可复用前缀依赖推理侧 **KV Cache 自动命中**，对可变尾部做**压缩与按需加载**，在 **$19 限次** 商业模型下把单次 grep→modify 的 **token 成本压到竞品的 1%～5% 量级**，并支撑 **P50 ≤ 3s** 的推理延迟。
 >
 > 本文档是 **推理侧基础设施** 设计，与 `需求文档_下一轮性能优化_推理执行分离总结与响应形态.md`（宏路径、少轮 LLM）互补：前者减少 **调用次数**（如 skip observe），本文减少 **每次调用的有效 token 与 KV 冷启动成本**（宏路径 compact VPN 见 §1.3）。与已实现的 **streaming FC 边输出边执行** 正交（§1.4）：页表主攻 prefill/TTFT，FC 主攻 decode/early execute。

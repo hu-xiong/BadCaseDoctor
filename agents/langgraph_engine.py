@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-LangGraph 执行引擎：图循环 + 旧引擎领域能力桥接
+LangGraph 执行引擎：图循环 + 领域能力桥接
 （grep→modify 门控、实体 ID 补全、modify 沙箱预览、skill/cdp 等全工具）。
 
-默认启用：AGENT_ENGINE=langgraph（见 agent_engine_config）。
-回退旧引擎：AGENT_ENGINE=react。
+本项目唯一的 Agent 执行引擎（自研 ReAct 引擎已删除）。
 """
 from __future__ import annotations
 
@@ -68,7 +67,7 @@ from agents.locale_prompts import (
     react_modify_blocked_after_empty_grep,
     react_unified_grep_no_repeat_message,
 )
-from agents.react_simplified import (
+from agents.react_legacy_helpers import (
     _grep_observation_empty_lists,
     _react_should_block_repeat_grep,
 )
@@ -104,6 +103,13 @@ def _take_right(left: Any, right: Any) -> Any:
     return right if right is not None else left
 
 
+def _merge_dicts(left: Any, right: Any) -> Any:
+    l = dict(left) if isinstance(left, dict) else {}
+    if isinstance(right, dict):
+        l.update(right)
+    return l
+
+
 class LangGraphAgentState(TypedDict, total=False):
     messages: Annotated[List[Dict[str, Any]], _append_list]
     sse_buffer: Annotated[List[Dict[str, Any]], _append_list]
@@ -132,6 +138,10 @@ class LangGraphAgentState(TypedDict, total=False):
     task_plan_emitted: Annotated[bool, _take_right]
     task_plan_steps: Annotated[Any, _take_right]
     last_observe: Annotated[str, _take_right]
+    # 滚动摘要视图（langgraph_summary）：原始 messages 保持追加，视图按 summary_through 判新鲜
+    summarized_messages: Annotated[List[Dict[str, Any]], _take_right]
+    summary_context: Annotated[Dict[str, Any], _merge_dicts]
+    summary_through: Annotated[str, _take_right]
 
 
 _SYSTEM_PROMPT_ZH = """你是 BadCaseDoctor 项目助手，通过工具管理 Bug / BadCase / 测试用例 / 计划 / 卡片。
@@ -244,13 +254,12 @@ def _message_content(resp: Any) -> str:
 
 
 class LangGraphReactEngine:
-    """与 SimplifiedReActEngine 对齐的流式接口 + LangGraph 循环。"""
+    """流式接口 + LangGraph 循环。"""
 
     def __init__(self, llm, tool_registry, skill_dir: str = ".qoder/skills"):
         if not _LANGGRAPH_OK:
             raise ImportError(
-                "未安装 langgraph，请执行: pip install langgraph\n"
-                "或设置 AGENT_ENGINE=react 使用旧引擎"
+                "未安装 langgraph，请执行: pip install langgraph"
             )
         self.llm = llm
         self.tools = tool_registry
@@ -300,7 +309,7 @@ class LangGraphReactEngine:
 
     def _cancel_requested(self) -> bool:
         try:
-            from agents.react_simplified import _REACT_STREAM_CANCEL_EVENTS
+            from agents.react_legacy_helpers import _REACT_STREAM_CANCEL_EVENTS
 
             aid = self._agent_session_id
             if not aid:
@@ -312,7 +321,7 @@ class LangGraphReactEngine:
 
     def _register_cancel(self) -> None:
         try:
-            from agents.react_simplified import _REACT_STREAM_CANCEL_EVENTS
+            from agents.react_legacy_helpers import _REACT_STREAM_CANCEL_EVENTS
 
             aid = (self._agent_session_id or "").strip()
             if aid:
@@ -322,7 +331,7 @@ class LangGraphReactEngine:
 
     def _unregister_cancel(self) -> None:
         try:
-            from agents.react_simplified import _REACT_STREAM_CANCEL_EVENTS
+            from agents.react_legacy_helpers import _REACT_STREAM_CANCEL_EVENTS
 
             aid = (self._agent_session_id or "").strip()
             if aid:
@@ -445,7 +454,12 @@ class LangGraphReactEngine:
         async def agent_node(state: LangGraphAgentState) -> Dict[str, Any]:
             if state.get("done"):
                 return {"sse_buffer": []}
-            messages = list(state.get("messages") or [])
+            try:
+                from agents.langgraph_summary import summary_view_or_raw
+
+                messages = summary_view_or_raw(state)
+            except Exception:
+                messages = list(state.get("messages") or [])
             tools = engine._openai_tools()
             round_i = int(state.get("round_idx") or 0)
             sse: List[Dict[str, Any]] = []
@@ -1320,7 +1334,7 @@ class LangGraphReactEngine:
                 {
                     "event": "observation",
                     "tool": name,
-                    # 与 SimplifiedReActEngine 对齐：SSE v1 打包读 data=
+                    # SSE v1 打包读 data=
                     "data": obs,
                     "observation": obs,
                     "success": ok,
@@ -1699,11 +1713,23 @@ class LangGraphReactEngine:
         g.add_node("tools", tools_node)
         g.add_node("observe", observe_node)
         g.add_edge(START, "agent")
+        # 滚动摘要：tools/observe 之后先过 summarize 再回 agent；异常静默回退原始 messages
+        _summary_on = False
+        try:
+            from agents.langgraph_summary import summarize_node, summary_enabled
+
+            _summary_on = bool(summary_enabled())
+        except Exception:
+            _summary_on = False
+        _next = "summarize" if _summary_on else "agent"
+        if _summary_on:
+            g.add_node("summarize", summarize_node)
+            g.add_edge("summarize", "agent")
         g.add_conditional_edges("agent", _route_after_agent, {"tools": "tools", "end": END})
         g.add_conditional_edges(
-            "tools", _route_after_tools, {"observe": "observe", "agent": "agent", "end": END}
+            "tools", _route_after_tools, {"observe": "observe", "agent": _next, "end": END}
         )
-        g.add_conditional_edges("observe", _route_after_observe, {"agent": "agent", "end": END})
+        g.add_conditional_edges("observe", _route_after_observe, {"agent": _next, "end": END})
         cp = get_checkpointer()
         if cp is not None:
             return g.compile(checkpointer=cp)

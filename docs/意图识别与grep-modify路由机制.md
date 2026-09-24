@@ -1,5 +1,7 @@
 # 意图识别与 Grep / Modify 路由机制
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > **性能优化关联**：宏路径 `frozen_macro` 的**规则触发**应与本文字段/实体路由一致；总纲见 [推理/执行分离](./需求文档_下一轮性能优化_推理执行分离总结与响应形态.md) §3.3。
 
 本文描述当前代码里**「用户想改什么实体」**如何被识别，以及 **grep**、**modify** 在 ReAct 主循环中如何配合；并给出一套可演进的**分层决策机制**，用于处理 Bug / Card / BadCase / TestCase 等口径并存时的模糊输入。
@@ -42,16 +44,16 @@
 
 **特点**：规则可解释、无模型成本；对「口语省略主语」仍可能返回 `None` 或 `all`，交给下层。
 
-### 2.2 第二层：ReAct 主循环对 **modify 参数的 enrich**（`agents/react_simplified.py`）
+### 2.2 第二层：ReAct 主循环对 **modify 参数的 enrich**（`agents/langgraph_bridge.py` + `agents/react_legacy_helpers.py`）
 
-`execute` 前会走 `_enrich_modify_decision_for_main_loop`，核心逻辑包括：
+`execute` 前会走 `langgraph_bridge.enrich_tool_params_for_execute`（内部调 `LegacyReActHelpers._enrich_modify_params_target_ids`），核心逻辑包括：
 
 1. **显式类型优先**：若 `_infer_modify_target_explicit` 命中，则 `target` 以用户话术为准。  
 2. **仅一种列表有数据时的粗分类**：例如只有 `testcase_list` → `testcase`；只有 `bug_list` → `bug` 等。  
 3. **仅命中卡片列表（`card_list`）时**：  
    - 若 `user_text_implies_card_entity_type` 为真 → **固定 `target=card`**，并从卡片行写入 `card_id`（避免「想改看板标题却被抬到 bug」）。  
    - 否则若存在 `grep_modify_raw_bug_list` 等原始列表 → 历史上为防 **status 误走 card**，会把 `target` **抬到** `bug` / `badcase` / `testcase`。  
-   - 再否则用 `_modify_target_from_card_grep_row` 根据行的 `source_type` / `source_id` / `type` 反推源表 `target` + `target_id`，并可附带 `card_id`。  
+   - 再否则按卡片行的 `source_type` / `source_id` / `type` 反推源表 `target` + `target_id`，并可附带 `card_id`（原 `_modify_target_from_card_grep_row` 已随旧引擎删除；现役目标推断见 `_coerce_grep_target_for_user_intent` / `_infer_modify_target`）。  
 4. **`_last_grep_target == 'card'` 时的分支**：与上类似，并增加 `_card_intent` 对「卡片层意图」的同样门禁。  
 5. **补全 `target_id` / `card_id` / `target_ids`**：与 `grep_result`、`merged list`、导航约束等配合（详见对齐文档）。  
 6. **探索与提取 modifications**：在缺 `modifications` 时可能 `explore_record` + LLM/正则提取字段。  
@@ -154,8 +156,8 @@
 |------|------------|
 | **字段层解析（无 LLM）** | `agents/intent/resolution.py`：`FIELD_TO_TABLE`、`ModifyResolutionContext`、`resolve_modify_target_and_id`、`infer_source_tuple_from_card_dict`；包入口 `agents/intent/__init__.py` |
 | 显式意图 | `agents/intent_guards.py`：`user_text_implies_*`、`infer_modify_target_from_user` |
-| Modify enrich | `agents/react_simplified.py`：`_enrich_modify_decision_for_main_loop`（末尾 `resolve_modify_target_and_id`）、`_modify_target_from_card_grep_row`（委托 `infer_source_tuple_from_card_dict`）、`_modify_params_ready` |
-| Grep 放宽 | `agents/react_simplified.py`：`_widen_grep_target_to_include_cards_unless_explicit` |
+| Modify enrich | `agents/langgraph_bridge.py`：`enrich_tool_params_for_execute`；`agents/react_legacy_helpers.py`：`_enrich_modify_params_target_ids`（末尾 `resolve_modify_target_and_id`）、`_pick_best_modify_id_by_user_title` |
+| Grep 放宽 | `agents/react_legacy_helpers.py`：`_widen_grep_target_to_include_cards_unless_explicit`（由 `enrich_tool_params_for_execute` 调用） |
 | Modify 执行与校正 | `agents/tools/modify_tool.py`：`execute`、`_modify_source_row_exists`、`resolve_modify_target_and_id`（撞号与 remap 后）、`_resolve_linked_source_row_for_card_modify`、`_get_original_data` |
 | 候选与导航对齐 | 见 [`需求文档_grep与modify候选集对齐_现状与优化方向.md`](./需求文档_grep与modify候选集对齐_现状与优化方向.md) |
 

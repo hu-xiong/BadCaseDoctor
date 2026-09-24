@@ -1,5 +1,5 @@
 """grep 无命中 / 已有命中后不再重复检索。"""
-from agents.react_simplified import (
+from agents.react_legacy_helpers import (
     _grep_observation_empty_lists,
     _react_should_block_repeat_grep,
 )

@@ -9,13 +9,11 @@ import os
 import threading
 from typing import Any, Dict, Optional
 
-from .react_simplified import SimplifiedReActEngine
 from .tool_registry import ToolRegistry
 from .tools.search_tool import SearchTool
 from .tools.login_state_tool import LoginStateTool
 from .tools.log_analyzer_tool import LogAnalyzerTool
 from .tools.accuracy_tester_tool import AccuracyTesterTool
-from .agent_engine_config import agent_engine_backend
 
 class ConversationMemory:
     """对话记忆管理"""
@@ -178,14 +176,13 @@ class IntelligentDevOpsAgent:
     4. 多工具协调 -> 复杂问题诊断
     """
     
-    def __init__(self, llm, db_session=None, engine_backend: str | None = None):
+    def __init__(self, llm, db_session=None):
         """
         初始化 Agent
         
         Args:
             llm: 语言模型（千帆）
             db_session: 数据库会话
-            engine_backend: 可选，覆盖 AGENT_ENGINE（``react`` / ``langgraph``）
         """
         perf = (os.getenv("PERF_LOG") == "1")
         t0 = time.perf_counter()
@@ -207,43 +204,18 @@ class IntelligentDevOpsAgent:
 
         # 初始化执行引擎（必须在 _register_tools 之前；skill 工具依赖 engine）
         t_engine0 = time.perf_counter()
-        _backend = (engine_backend or "").strip().lower() or agent_engine_backend()
-        if _backend in ("langgraph", "lg", "graph"):
-            _backend = "langgraph"
-        else:
-            _backend = "react"
-        if _backend == "langgraph":
-            try:
-                from .langgraph_engine import LangGraphReactEngine
+        from .langgraph_engine import LangGraphReactEngine
 
-                self.react_engine = LangGraphReactEngine(
-                    llm=llm,
-                    tool_registry=self.tool_registry,
-                )
-                print("[AGENT] 使用 LangGraph 引擎 (AGENT_ENGINE=langgraph)", flush=True)
-            except ImportError as e:
-                # langgraph 依赖缺失时不再把 ImportError 抛给用户：自动回退旧引擎（等价 AGENT_ENGINE=react）
-                _backend = "react"
-                print(
-                    f"[AGENT] ⚠️ LangGraph 引擎不可用（{e}），已自动回退旧引擎 SimplifiedReActEngine；"
-                    f"恢复默认引擎请执行: pip install langgraph",
-                    flush=True,
-                )
-                self.react_engine = SimplifiedReActEngine(
-                    llm=llm,
-                    tool_registry=self.tool_registry,
-                )
-        else:
-            self.react_engine = SimplifiedReActEngine(
-                llm=llm,
-                tool_registry=self.tool_registry,
-            )
-        self.engine_backend = _backend
+        self.react_engine = LangGraphReactEngine(
+            llm=llm,
+            tool_registry=self.tool_registry,
+        )
+        print("[AGENT] 使用 LangGraph 引擎", flush=True)
         self.react_engine.db = db_session
         if perf:
             print(
                 f"[PERF][agent] react_engine_init_ms={(time.perf_counter()-t_engine0)*1000:.1f} "
-                f"backend={_backend}"
+                f"backend=langgraph"
             )
 
         # 注册工具（在 react_engine 之后，因为 skill_tool 需要 react_engine）
@@ -425,8 +397,7 @@ class IntelligentDevOpsAgent:
             yield pkt
 
         # 获取最终结果并格式化
-        # 这里从 react_engine 的状态中获取最终结果可能更好，但目前 SimplifiedReActEngine 是无状态的
-        # 我们让 run_stream 最后 yield 一个 summary
+        # 引擎在 run_stream 最后 yield 一个 summary
         
     async def handle_user_request(
         self, user_input: str, project_id: int = None, locale: str = None

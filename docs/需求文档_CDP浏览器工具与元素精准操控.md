@@ -1,5 +1,7 @@
 # 需求文档：CDP 浏览器工具与元素精准操控
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > **定位**：用 **Chrome DevTools Protocol（CDP）** 实现 LLM 可编排的浏览器工具链，以 **DOM / 无障碍树 / 稳定元素引用** 为主路径，**默认不走**「截图 → 多模态识图 → 再猜坐标/选择器」的高延迟链路。  
 > **关联文档**：[Agent 执行流程](./需求文档_agent执行流程现状与优化需求_20260324.md)、[图片识别与实体 CRUD](./需求文档_图片识别与实体增删改查.md)（vision 与 CDP 职责分离）、[沙箱方案](./沙箱方案与流程.md)、[需求三 OpenClaw 沙箱](./需求文档_20260227.md) §需求三。
 

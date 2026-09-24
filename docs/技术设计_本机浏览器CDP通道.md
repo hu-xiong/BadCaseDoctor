@@ -1,5 +1,7 @@
 # 技术设计：本机浏览器 CDP 通道（go-local-proxy 反连隧道 + 云端 CDP 网关）
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > 状态：设计稿 v1；P1–P3（隧道 / 网关 / local 模式）已实现，P4 未开工
 > 另：CDP 层采集与 BadCase 证据关联已落地，见 §17
 > 关联现状代码：`agents/cdp/`、`agents/midscene_runner/`、`go-local-proxy/`、`local_browser_bridge.py`、`local_proxy_supervisor.py`、`electron-vue3/src/utils/localBrowserProxyClient.js`
@@ -373,7 +375,7 @@ badcase-local-proxy --tunnel-url wss://api.example.com/api/local-proxy/tunnel --
 3. **未观察到 request 开始**（例如采集器接入时请求已在途）→ 归属为空，不猜测、不回填；这类记录不会被任何项目/运行的证据查询命中（防串号）。
 4. `requestfinished` / `requestfailed` 清理快照，避免 WeakKeyDictionary 之外的悬挂；`detach()` 摘监听器但不取消已开始的 body 读取。
 
-上下文更新链路：`react_simplified` / `langgraph_bridge` 注入 `project_id`、`user_id`、`userId`、`result_context` → `cdp_tool` 入口先 `assert_owned(session_id, owner_key)` 校验会话归属，再 `ensure_llm_capture(..., project_id, cdp_run_id)` → `session_manager` 在建会话（`create(project_id=..., cdp_run_id=...)`）与后续 `attach` 新 page 时同步上下文。**校验先于更新**：拿不到归属的调用直接返回 `CdpError`，不会被写进别人的运行里。`batch` 子动作只提供操作参数，不能覆盖调用方的归属。
+上下文更新链路：`langgraph_bridge`（`enrich_tool_params_for_execute`，复用 `react_legacy_helpers`）注入 `project_id`、`user_id`、`userId`、`result_context` → `cdp_tool` 入口先 `assert_owned(session_id, owner_key)` 校验会话归属，再 `ensure_llm_capture(..., project_id, cdp_run_id)` → `session_manager` 在建会话（`create(project_id=..., cdp_run_id=...)`）与后续 `attach` 新 page 时同步上下文。**校验先于更新**：拿不到归属的调用直接返回 `CdpError`，不会被写进别人的运行里。`batch` 子动作只提供操作参数，不能覆盖调用方的归属。
 
 ### 17.3 落盘与回读
 
@@ -417,4 +419,4 @@ BadCase 详情（`NewBadcase.vue`）新增子 tab：**基本信息 / 采集参�
 ### 17.8 本期涉及文件
 
 - 新增：`electron-vue3/src/components/BadcaseEvidencePanel.vue`、`tests/test_badcase_evidence.py`
-- 修改：`agents/cdp/llm_capture.py`、`agents/cdp/session_manager.py`、`agents/cdp/test_task.py`、`agents/cdp/postprocess.py`、`agents/tools/cdp_tool.py`、`agents/langgraph_bridge.py`、`agents/react_simplified.py`、`routers/agent.py`、`models/orm.py`（`bad_case.cdp_run_ids` + 迁移）、`app_services/db_schema.py`、`electron-vue3/src/components/NewBadcase.vue`、`electron-vue3/src/api.js`
+- 修改：`agents/cdp/llm_capture.py`、`agents/cdp/session_manager.py`、`agents/cdp/test_task.py`、`agents/cdp/postprocess.py`、`agents/tools/cdp_tool.py`、`agents/langgraph_bridge.py`、`agents/react_legacy_helpers.py`、`routers/agent.py`、`models/orm.py`（`bad_case.cdp_run_ids` + 迁移）、`app_services/db_schema.py`、`electron-vue3/src/components/NewBadcase.vue`、`electron-vue3/src/api.js`

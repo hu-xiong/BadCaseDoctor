@@ -1,5 +1,7 @@
 # 需求文档：任务状态管理与并发执行系统（MySQL + DAG）
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 ## 1. 文档目标
 
 本文档定义在 BadCaseDoctor 项目中引入**持久化任务队列**与 **DAG 依赖调度**的产品与技术需求，用于：

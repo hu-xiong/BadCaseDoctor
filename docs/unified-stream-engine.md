@@ -1,5 +1,9 @@
 # 统一流式 ReAct 引擎说明
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
+> **现状（2026-09）**：引擎核心已迁至 `agents/langgraph_engine.py`（图循环）；出口仍由 `agents/sse_react_v1.py` 的 `engine_dict_to_wire_packets` 转 **SSE v1**，因此「事件契约 / SSE 映射」分节仍可对照，`_run_unified_xml_stream` 等旧函数名仅供历史参照。
+
 本文描述 BadCaseDoctor 中 **统一 XML 流式 ReAct** 的设计：单条异步生成器流水线、事件契约、SSE v1 映射与前端对齐要点，以及常见故障对照。
 
 ## 1. 定位与目标

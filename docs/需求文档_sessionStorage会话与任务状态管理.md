@@ -1,5 +1,7 @@
 # 需求文档：Chat Session 与 Tab 本地缓存（会话状态管理）
 
+> **历史文档**：本文写作时的自研 ReAct 引擎（`agents/react_simplified.py`、`react_macro`、`AGENT_ENGINE`）与 `agent_tasks` 写入路径（`REACT_AGENT_TASK_DAG`／`run_dag_async`）均已删除；现役引擎为 `agents/langgraph_engine.py`（LangGraphReactEngine），领域助手在 `agents/react_legacy_helpers.py`、桥接在 `agents/langgraph_bridge.py`。文中旧路径／函数名／开关名仅作历史参考。
+
 > **术语约定（团队口头「sessionStorage」= 下文「Chat Session」）**  
 > 讨论需求、排期、Agent 完善时，若说 **sessionStorage / 会话存储**，默认指 **后端 `ChatSession`（MySQL + `/api/chat-sessions`）** 及其关联态（消息、`session_id`、Diff 的 `source_session_id`、未来 `agent_tasks`），**不是** 浏览器 `window.sessionStorage`。  
 > 浏览器 Tab 内加速请称 **Tab 本地缓存** 或 **`bcd:ss:*`**，避免与 Chat Session 混称。
