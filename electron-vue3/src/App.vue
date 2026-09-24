@@ -1,8 +1,11 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 
 const currentTime = ref('')
 const clickCount = ref(0)
+const router = useRouter()
+let offMenuAction = null
 
 const updateTime = () => {
   currentTime.value = new Date().toLocaleString('zh-CN')
@@ -15,6 +18,19 @@ const testClick = () => {
 onMounted(() => {
   updateTime()
   setInterval(updateTime, 1000)
+
+  // 原生菜单动作 → 页面跳转
+  offMenuAction = window.electronMenu?.onAction?.((action) => {
+    if (action === 'new-project') {
+      router.push('/new-project')
+    } else if (action === 'import-excel') {
+      router.push('/import-excel')
+    }
+  })
+})
+
+onBeforeUnmount(() => {
+  offMenuAction?.()
 })
 </script>
 

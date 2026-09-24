@@ -54,8 +54,11 @@
               class="result-card"
               @click="handleSelectCard(result)"
             >
-              <div class="card-title">{{ result.title }}</div>
-              <div class="card-meta">
+              <div class="card-title">
+                <span class="card-type-icon">{{ getResultIcon(result) }}</span>
+                <span class="card-title-text">{{ result.title }}</span>
+              </div>
+              <div v-if="result.status_text || result.status" class="card-meta">
                 <span class="card-status" :class="`status-${result.status}`">{{ result.status_text || result.status }}</span>
               </div>
 
@@ -230,6 +233,13 @@ const getTypeLabel = (type) => {
   return label === key ? type : label
 }
 
+/** 条目图标与所属分组保持一致：卡片按 cardType 归类，实体按自身类型 */
+const getResultIcon = (result) => {
+  if (!result) return '📄'
+  if (result.type === 'card') return getTypeIcon(cardRowGroupKey(result.cardType))
+  return getTypeIcon(result.groupKey || result.type)
+}
+
 // Focus input on mount
 onMounted(() => {
   nextTick(() => {
@@ -392,8 +402,22 @@ onMounted(() => {
 }
 
 .card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   color: #333;
+}
+
+.card-type-icon {
+  flex: none;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.card-title-text {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -279,6 +279,72 @@ def ensure_stop_hooks() -> None:
     atexit.register(stop_managed_local_proxy)
 
 
+def push_tunnel_config(tunnel_url: str, tunnel_token: str, timeout: float = 8.0) -> Dict[str, Any]:
+    """把隧道参数交给本机代理（--tunnel-url/--tunnel-token 落盘 + 运行实例热重载）。
+
+    - 已有实例在跑：新实例落盘配置后探测 health 通过即自行退出（exit 0），运行实例重连；
+    - 没有实例在跑：新实例就成为服务实例，一并纳入托管（owned=True，退出时关闭）。
+    """
+    global _proc, _owned, _started_at, _last_error, _exe_used
+
+    url = (tunnel_url or "").strip()
+    token = (tunnel_token or "").strip()
+    if not url or not token:
+        return {**supervisor_status(), "pushed": "missing_params"}
+
+    exe = resolve_local_proxy_exe()
+    if not exe:
+        _last_error = "binary_not_found"
+        return {**supervisor_status(), "pushed": "binary_not_found"}
+
+    env = os.environ.copy()
+    env.setdefault("LISTEN", local_proxy_listen_addr())
+    # 交由 Flask/前端注入的参数不需要（也不应）注册开机自启
+    env["BADCASE_LOCAL_PROXY_NO_AUTOSTART"] = "1"
+
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+
+    try:
+        proc = subprocess.Popen(
+            [exe, "--tunnel-url", url, "--tunnel-token", token],
+            cwd=os.path.dirname(exe) or None,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as e:
+        _last_error = str(e)
+        _log.error("[local-proxy] tunnel push spawn failed: %s", e)
+        return {**supervisor_status(), "pushed": "spawn_failed"}
+
+    deadline = time.time() + max(1.0, timeout)
+    while time.time() < deadline and proc.poll() is None:
+        time.sleep(0.1)
+
+    if proc.poll() is not None:
+        # 已有实例接住了配置（新实例落盘后退出）
+        _log.info("[local-proxy] tunnel config pushed (helper exited code=%s)", proc.returncode)
+        st = supervisor_status()
+        st["pushed"] = "injected" if proc.returncode == 0 else f"helper_exit={proc.returncode}"
+        return st
+
+    with _lock:
+        _proc = proc
+        _owned = True
+        _started_at = time.time()
+        _exe_used = exe
+        _last_error = ""
+    atexit.register(stop_managed_local_proxy)
+    start_local_proxy_monitor()
+    _log.info("[local-proxy] started with tunnel config pid=%s", proc.pid)
+    return {**supervisor_status(), "pushed": "started_with_tunnel"}
+
+
 def ensure_local_proxy_running(flask_host: str = "") -> Dict[str, Any]:
     """
     按需确保代理在线：已健康则直接返回；否则按托管策略拉起。

@@ -37,6 +37,71 @@ export async function fetchTunnelParams() {
   }
 }
 
+/**
+ * 查询当前登录用户的本机代理隧道是否在线（云端桥服务视角；见 /local-proxy/tunnel-status）。
+ * 后端未就绪/未登录返回 null（未知，调用方不要据此阻断流程）。
+ * @returns {Promise<{online:boolean, device?:object, bridge?:object}|null>}
+ */
+export async function fetchTunnelStatus() {
+  try {
+    const r = await fetch('/api/client-scripts/local-proxy/tunnel-status', {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    })
+    if (!r.ok) return null
+    const j = await r.json().catch(() => null)
+    if (!j || typeof j !== 'object' || typeof j.online !== 'boolean') return null
+    return j
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 轮询等待隧道在线（用于注入隧道参数后等待运行中的代理重连）。
+ * @param {{retries?:number, delayMs?:number, probe?:() => Promise<any>}} [opts]
+ * @returns {Promise<boolean>} 在线 true；超时/未知 false
+ */
+export async function waitTunnelOnline(opts = {}) {
+  const probe = typeof opts.probe === 'function' ? opts.probe : fetchTunnelStatus
+  const retries = Math.max(1, Number(opts.retries) || 8)
+  const delayMs = Math.max(300, Number(opts.delayMs) || 1000)
+  for (let i = 0; i < retries; i++) {
+    const st = await probe()
+    if (st && st.online) return true
+    if (i < retries - 1) await new Promise((r) => setTimeout(r, delayMs))
+  }
+  return false
+}
+
+/**
+ * 代理「本地 health 已就绪但云端隧道离线」时，把隧道参数补投给运行中的代理：
+ * 新实例持久化配置后自行退出（--install-autostart 分支探测 health 后 exit 0），
+ * 运行中实例的隧道 watcher 轮询到新配置后重连。
+ * @param {{injectCommand?: (cmd:string)=>void, ensureTerminalVisible?: ()=>void|Promise<void>, exePath?:string}} [opts]
+ * @returns {Promise<boolean>} 是否成功下发命令
+ */
+export async function injectTunnelConfigToRunningProxy(opts = {}) {
+  if (typeof opts.injectCommand !== 'function') return false
+  const exePath = String(opts.exePath || resolveInstalledLocalProxyPath() || '').trim()
+  const tunnel = await fetchTunnelParams()
+  if (!exePath || !tunnel) return false
+  const cmd = buildLocalProxyStartCommand(exePath, tunnel, { installAutostart: false })
+  if (!cmd) return false
+  try {
+    if (typeof opts.ensureTerminalVisible === 'function') await opts.ensureTerminalVisible()
+  } catch {
+    /* ignore */
+  }
+  try {
+    opts.injectCommand(cmd)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** PowerShell 单引号参数字面量 */
 function psQuote(v) {
   return `'${String(v).replace(/'/g, "''")}'`
@@ -53,24 +118,28 @@ function shQuote(v) {
  * 之后用户无需再手动点击启动或安装。该参数幂等，旧版二进制会忽略未知参数。
  * @param {string} exePath
  * @param {{url:string,token:string}|null} [tunnel] 隧道参数（见 fetchTunnelParams）；旧版二进制忽略未知参数
+ * @param {{installAutostart?:boolean}} [opts] installAutostart=false 时不注册开机自启（仅补投隧道参数）
  * @returns {string}
  */
-export function buildLocalProxyStartCommand(exePath, tunnel) {
+export function buildLocalProxyStartCommand(exePath, tunnel, opts = {}) {
   const p = String(exePath || '').trim()
   if (!p) return ''
+  const installAutostart = opts.installAutostart !== false
   const os = detectClientOS()
   const tunnelPairs =
     tunnel && tunnel.url && tunnel.token ? [['--tunnel-url', tunnel.url], ['--tunnel-token', tunnel.token]] : []
+  const autostartArgs = installAutostart ? ['--install-autostart'] : []
   if (os === 'win') {
     // PowerShell：后台启动 + 隐藏窗口，避免阻塞嵌入终端会话；--install-autostart 注册 Run 键
-    const argList = [psQuote('--install-autostart'), ...tunnelPairs.map(([k, v]) => `${psQuote(k)},${psQuote(v)}`)].join(',')
+    const argList = [...autostartArgs, ...tunnelPairs.map(([k, v]) => `${psQuote(k)},${psQuote(v)}`)].join(',')
     return `Start-Process -FilePath ${JSON.stringify(p)} -ArgumentList ${argList} -WindowStyle Hidden`
   }
   const q = JSON.stringify(p)
   // macOS：浏览器下载会带 com.apple.quarantine（自启/首次执行可能被 Gatekeeper 拦截），先尝试清除
   const dequarantine = os === 'darwin' ? `xattr -d com.apple.quarantine ${q} 2>/dev/null; ` : ''
   const tunnelArgs = tunnelPairs.map(([k, v]) => ` ${shQuote(k)} ${shQuote(v)}`).join('')
-  return `${dequarantine}chmod +x ${q} 2>/dev/null; nohup ${q} --install-autostart${tunnelArgs} >/tmp/badcase-local-proxy.log 2>&1 &`
+  const autostartFlag = autostartArgs.length ? ' --install-autostart' : ''
+  return `${dequarantine}chmod +x ${q} 2>/dev/null; nohup ${q}${autostartFlag}${tunnelArgs} >/tmp/badcase-local-proxy.log 2>&1 &`
 }
 
 /**
@@ -186,6 +255,8 @@ export async function retryWaitingBrowserLocalCards(aiMessage) {
 export const EVT_OPEN_LOCAL_PROXY_INSTALL = 'badcase-open-local-proxy-install'
 /** 自定义事件：安装/唤醒后代理已就绪（可选，供调试） */
 export const EVT_LOCAL_PROXY_BECAME_OK = 'badcase-local-proxy-became-ok'
+/** 自定义事件：browser_local 卡片因本机代理离线进入 waiting_proxy（对话卡监听并自动尝试唤醒） */
+export const EVT_BROWSER_LOCAL_PROXY_DOWN = 'badcase-browser-local-proxy-down'
 
 export function dispatchOpenLocalProxyInstall() {
   if (typeof window === 'undefined') return
@@ -195,4 +266,9 @@ export function dispatchOpenLocalProxyInstall() {
 export function dispatchLocalProxyBecameOk(detail = {}) {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent(EVT_LOCAL_PROXY_BECAME_OK, { detail }))
+}
+
+export function dispatchBrowserLocalProxyDown(detail = {}) {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent(EVT_BROWSER_LOCAL_PROXY_DOWN, { detail }))
 }

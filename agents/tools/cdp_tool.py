@@ -72,6 +72,24 @@ class CdpTool(BaseTool):
 
         if act in ("session", "cdp_session"):
             return await self._session(**kwargs)
+        # 只使用调用上下文的归属；先校验 session owner，再更新后续请求的项目/run。
+        owner = self._owner_key(kwargs)
+        sid = kwargs.get("session_id") or self._mgr.latest_session_id(owner_key=owner)
+        if sid and act != "batch":
+            from agents.cdp.errors import CdpError
+            from agents.cdp.test_task import get_active_run_id
+
+            try:
+                self._mgr.assert_owned(sid, owner_key=owner)
+                await self._mgr.ensure_llm_capture(
+                    sid,
+                    owner_key=owner,
+                    project_id=_int_or_none(kwargs.get("project_id")),
+                    cdp_run_id=get_active_run_id(kwargs.get("result_context")),
+                )
+            except CdpError as ex:
+                return ex.to_dict()
+            kwargs["session_id"] = sid
         if act in ("tabs", "list_tabs"):
             return await self._tabs(**kwargs)
         if act in ("open", "open_tab", "new_tab"):
@@ -162,11 +180,15 @@ class CdpTool(BaseTool):
         headless = kwargs.get("headless")
         if headless is not None:
             headless = str(headless).lower() in ("1", "true", "yes")
+        from agents.cdp.test_task import get_active_run_id
+
         out = await self._mgr.create(
             url=url,
             headless=headless,
             storage_state_path=storage,
             owner_key=owner,
+            project_id=_int_or_none(project_id),
+            cdp_run_id=get_active_run_id(kwargs.get("result_context")),
         )
         if storage:
             out["storage_state_loaded"] = True
@@ -455,7 +477,7 @@ class CdpTool(BaseTool):
                 step = None
         owner_kw = {
             k: kwargs[k]
-            for k in ("project_id", "user_id", "plan_id", "ui_locale", "natural_query", "user_query")
+            for k in ("project_id", "user_id", "userId", "plan_id", "ui_locale", "natural_query", "user_query", "result_context")
             if k in kwargs and kwargs[k] is not None
         }
         out = await run_testcase_step(
@@ -511,7 +533,7 @@ class CdpTool(BaseTool):
             }
         owner_kw = {
             k: kwargs[k]
-            for k in ("project_id", "user_id", "plan_id", "ui_locale", "natural_query", "user_query")
+            for k in ("project_id", "user_id", "userId", "plan_id", "ui_locale", "natural_query", "user_query", "result_context")
             if k in kwargs and kwargs[k] is not None
         }
         out = await run_testcase_steps(
@@ -571,7 +593,14 @@ class CdpTool(BaseTool):
                 continue
             step_kw = dict(kwargs)
             step_kw.update(step)
+            # batch 子动作只提供操作参数，不能覆盖调用方的可信归属。
+            for key in ("project_id", "user_id", "userId", "result_context"):
+                if key in kwargs:
+                    step_kw[key] = kwargs[key]
+                else:
+                    step_kw.pop(key, None)
             step_kw.pop("actions", None)
+            step_kw.pop("action", None)
             sub = (
                 step.get("action")
                 or step.get("kind")
@@ -1015,14 +1044,7 @@ class CdpTool(BaseTool):
         sid = kwargs.get("session_id") or self._mgr.latest_session_id(owner_key=owner)
         if not sid:
             return {"success": False, "error": "explore 需要 session_id（请先 session create）"}
-        # 会话真实归属优先：session create 与 explore 的 kwargs 来源不同（user_id/project_id 组合可能不同），
-        # 重算的 owner 可能匹配不上实际会话，导致拿不到页面/无法复用浏览器
-        try:
-            _sess = self._mgr.get_session(sid, owner_key=None)
-            if _sess is not None and getattr(_sess, "owner_key", None):
-                owner = str(_sess.owner_key)
-        except Exception:
-            pass
+        self._mgr.assert_owned(sid, owner_key=owner)
         nav = await self._ensure_on_target_url(sid, kwargs, owner_key=owner)
         if isinstance(nav, dict) and not nav.get("success"):
             return nav

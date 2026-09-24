@@ -297,6 +297,10 @@ def enrich_tool_params_for_execute(
         return params
 
     if name == "cdp":
+        params["project_id"] = project_id
+        params["user_id"] = user_id
+        params["userId"] = user_id
+        params["result_context"] = result_context
         try:
             from agents.cdp.login_flow import inject_cdp_login_resume_params
 

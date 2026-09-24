@@ -415,6 +415,7 @@ def sync_database_schema():
                     'document_type VARCHAR(100)',
                     'attachments TEXT',
                     'assigned_users TEXT',
+                    'cdp_run_ids JSON',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                 ]

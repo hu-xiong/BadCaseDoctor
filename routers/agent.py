@@ -1914,27 +1914,97 @@ def api_list_agent_tasks():
 @agent_bp.route('/cdp-test-runs', methods=['GET'])
 @login_required
 def api_list_cdp_test_runs():
-    """按 react_request_id 或 chat_session_id 查询 CDP 测试任务。"""
-    try:
-        react_request_id = (request.args.get('react_request_id') or request.args.get('session_id') or '').strip()
-        chat_session_id = request.args.get('chat_session_id')
-        limit = min(int(request.args.get('limit', 20)), 100)
-        # 注意：models.orm 的模型绑定在未 init_app 的 db_extensions.db 上，
-        # 类级 Model.query 会抛 'not registered'，统一走 app 已注册实例的 Session 级查询
-        from app import db
-        from models.orm import CdpTestRun
+    from app import db, has_project_permission
+    from models.orm import CdpTestRun
 
+    try:
+        limit = max(1, min(int(request.args.get('limit', 20)), 100))
+        project_id = request.args.get('project_id', type=int)
+        chat_session_id = request.args.get('chat_session_id', type=int)
+        if 'project_id' in request.args and not project_id:
+            raise ValueError
+        if 'chat_session_id' in request.args and not chat_session_id:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': '查询参数无效'}), 400
+
+    react_request_id = (request.args.get('react_request_id') or request.args.get('session_id') or '').strip()
+    if not project_id and not chat_session_id and not react_request_id:
+        return jsonify({'success': False, 'error': '缺少 project_id、react_request_id 或 chat_session_id'}), 400
+    if project_id and not has_project_permission(current_user.id, project_id):
+        return jsonify({'success': False, 'error': '无权访问此项目'}), 403
+    try:
         q = db.session.query(CdpTestRun)
+        if project_id:
+            q = q.filter(CdpTestRun.project_id == project_id)
+        else:
+            q = q.filter(CdpTestRun.user_id == current_user.id)
         if react_request_id:
             q = q.filter(CdpTestRun.react_request_id == react_request_id[:64])
         elif chat_session_id:
-            q = q.filter(CdpTestRun.chat_session_id == int(chat_session_id))
-        else:
-            return jsonify({'success': False, 'error': '缺少 react_request_id 或 chat_session_id'}), 400
+            q = q.filter(CdpTestRun.chat_session_id == chat_session_id)
         rows = q.order_by(CdpTestRun.created_at.desc()).limit(limit).all()
-        return jsonify({'success': True, 'runs': [r.to_dict() for r in rows]})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        if not project_id:
+            allowed = {r.project_id for r in rows if has_project_permission(current_user.id, r.project_id)}
+            rows = [r for r in rows if r.project_id in allowed]
+        if project_id:
+            runs = [{
+                'id': r.id, 'title': r.title, 'status': r.status,
+                'created_at': r.created_at.isoformat() if r.created_at else None,
+                'cdp_session_id': r.cdp_session_id,
+            } for r in rows]
+        else:
+            runs = [r.to_dict() for r in rows]
+        return jsonify({'success': True, 'runs': runs})
+    except Exception:
+        db.session.rollback()
+        logger.exception('Failed to list CDP runs')
+        return jsonify({'success': False, 'error': '读取采集运行记录失败'}), 500
+
+
+@agent_bp.route('/badcases/<int:badcase_id>/evidence', methods=['GET', 'PUT'])
+@login_required
+def api_badcase_evidence(badcase_id):
+    from app import db, BadCase, _model_for_user_collaborator_access
+    from models.orm import CdpTestRun
+    from agents.cdp.test_task import build_cdp_run_evidence
+
+    try:
+        badcase, error = _model_for_user_collaborator_access(BadCase, badcase_id, current_user.id)
+        if error:
+            return jsonify({'success': False, 'error': 'BadCase 不存在或无权访问'}), 404 if error == 'not_found' else 403
+        run_ids = list(badcase.cdp_run_ids or [])
+        if request.method == 'PUT':
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or not isinstance(payload.get('run_ids'), list):
+                return jsonify({'success': False, 'error': 'run_ids 必须为数组'}), 400
+            values = payload['run_ids']
+            if len(values) > 10 or any(not isinstance(v, str) for v in values):
+                return jsonify({'success': False, 'error': '最多关联 10 条有效运行记录'}), 400
+            try:
+                run_ids = list(dict.fromkeys(str(uuid.UUID(v)) for v in values))
+            except (ValueError, AttributeError):
+                return jsonify({'success': False, 'error': '运行记录 ID 无效'}), 400
+        rows = db.session.query(CdpTestRun).filter(
+            CdpTestRun.id.in_(run_ids), CdpTestRun.project_id == badcase.project_id,
+        ).all() if run_ids else []
+        by_id = {r.id: r for r in rows}
+        missing = [rid for rid in run_ids if rid not in by_id]
+        if request.method == 'PUT':
+            if missing:
+                return jsonify({'success': False, 'error': '只能关联当前项目中存在的运行记录'}), 400
+            badcase.cdp_run_ids = run_ids
+            db.session.commit()
+        evidence = {
+            'run_ids': run_ids,
+            'runs': [build_cdp_run_evidence(by_id[rid]) for rid in run_ids if rid in by_id],
+            'unavailable_run_ids': missing,
+        }
+        return jsonify({'success': True, 'evidence': evidence})
+    except Exception:
+        db.session.rollback()
+        logger.exception('Failed to load or update BadCase evidence')
+        return jsonify({'success': False, 'error': '采集证据读取或关联失败，请重试'}), 500
 
 
 @agent_bp.route('/reports', methods=['GET'])

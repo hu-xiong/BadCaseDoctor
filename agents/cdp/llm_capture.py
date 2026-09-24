@@ -23,8 +23,12 @@ import json
 import os
 import re
 import time
+import uuid
+from collections import deque
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
+from weakref import WeakKeyDictionary
 
 # LLM 接口 URL 特征（自研接口 URL 常无这些词，故另有「POST+JSON 候选」兜底）
 LLM_URL_HINTS = (
@@ -460,39 +464,99 @@ class LlmCapture:
         session_id: str,
         *,
         project_id: Optional[int] = None,
+        cdp_run_id: Optional[str] = None,
         declared: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.session_id = session_id
         self.project_id = project_id
-        self.declared: Dict[str, Any] = declared or {}
-        self._pages: Set[int] = set()
+        self.cdp_run_id = cdp_run_id
+        self.declared: Dict[str, Any] = deepcopy(declared) if declared is not None else {}
+        self._pages: Dict[int, Any] = {}
+        self._request_contexts: WeakKeyDictionary = WeakKeyDictionary()
         self._items: List[Dict[str, Any]] = []
         self._tasks: Set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._skipped = 0
 
+    def set_context(
+        self,
+        *,
+        project_id: Optional[int] = None,
+        cdp_run_id: Optional[str] = None,
+        declared: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """只更新后续请求的上下文；None 清空归属，不回填历史/在途报文。
+
+        同项目未传 declared 时保留申报值；换项目则清空，显式 {} 也可清空。
+        """
+        if declared is not None:
+            self.declared = deepcopy(declared)
+        elif project_id != self.project_id:
+            self.declared = {}
+        self.project_id = project_id
+        self.cdp_run_id = cdp_run_id
+
+    def _context_snapshot(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "cdp_run_id": self.cdp_run_id,
+            "declared": deepcopy(self.declared),
+        }
+
     # ---------- 挂载 ----------
 
     def attach(self, page: Any) -> None:
-        """挂到 Playwright Page 上（重复挂同一个 page 会被忽略）。"""
+        """请求事件同步冻结归属；响应事件仍按原规则决定是否采集报文。"""
         if page is None or id(page) in self._pages:
             return
 
+        def _on_request(request: Any) -> None:
+            self._request_contexts[request] = self._context_snapshot()
+
+        def _on_request_done(request: Any) -> None:
+            self._request_contexts.pop(request, None)
+
         def _on_response(response: Any) -> None:
             try:
+                # 未观察到请求开始（例如接入时已在途）时不可猜测/回填归属。
+                context = self._request_contexts.pop(response.request, None)
+                if context is None:
+                    context = {"project_id": None, "cdp_run_id": None, "declared": {}}
                 if not self._candidate(response):
                     return
-                task = asyncio.ensure_future(self._capture(response))
+                task = asyncio.ensure_future(self._capture(response, context=context))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
             except Exception:
                 pass
 
+        listeners = {
+            "request": _on_request,
+            "response": _on_response,
+            "requestfinished": _on_request_done,
+            "requestfailed": _on_request_done,
+        }
         try:
-            page.on("response", _on_response)
-            self._pages.add(id(page))
+            for event, callback in listeners.items():
+                page.on(event, callback)
+            self._pages[id(page)] = (page, listeners)
         except Exception:
-            pass
+            for event, callback in listeners.items():
+                try:
+                    page.remove_listener(event, callback)
+                except Exception:
+                    pass
+
+    def detach(self) -> None:
+        """停止新请求采集，不取消已开始的 body 读取或修改已有记录。"""
+        for page, listeners in self._pages.values():
+            for event, callback in listeners.items():
+                try:
+                    page.remove_listener(event, callback)
+                except Exception:
+                    pass
+        self._pages.clear()
+        self._request_contexts.clear()
 
     def _candidate(self, response: Any) -> bool:
         if not _env_flag("BADCASE_LLM_CAPTURE_ENABLED", "1"):
@@ -513,9 +577,11 @@ class LlmCapture:
             return False
         return False
 
-    async def _capture(self, response: Any) -> None:
+    async def _capture(
+        self, response: Any, *, context: Optional[Dict[str, Any]] = None
+    ) -> None:
         t0 = time.perf_counter()
-        record = self._blank_record(response)
+        record = self._blank_record(response, context=context)
         try:
             req_info = _extract_request(getattr(response.request, "post_data", None))
             record["request"] = req_info
@@ -569,7 +635,10 @@ class LlmCapture:
         record["body_wait_ms"] = int((time.perf_counter() - t0) * 1000)
         self._finalize(record)
 
-    def _blank_record(self, response: Any) -> Dict[str, Any]:
+    def _blank_record(
+        self, response: Any, *, context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        context = self._context_snapshot() if context is None else deepcopy(context)
         try:
             status = response.status
         except Exception:
@@ -583,9 +652,11 @@ class LlmCapture:
         except Exception:
             method = ""
         rec: Dict[str, Any] = {
+            "exchange_id": str(uuid.uuid4()),
             "ts": datetime.now(timezone.utc).isoformat(),
             "session_id": self.session_id,
-            "project_id": self.project_id,
+            "project_id": context.get("project_id"),
+            "cdp_run_id": context.get("cdp_run_id"),
             "turn": 0,
             "url": url,
             "method": method,
@@ -606,7 +677,7 @@ class LlmCapture:
                 "finish_reason": None,
                 "usage": None,
             },
-            "declared": self.declared,
+            "declared": context.get("declared") or {},
             "model_mismatch": False,
             "error": None,
         }
@@ -617,7 +688,7 @@ class LlmCapture:
         """收尾：轮次编号、模型降级检测、截断标记、落盘。"""
         record.pop("_top_keys", None)
         resp = _as_dict(record.get("response"))
-        declared_model = (self.declared or {}).get("model")
+        declared_model = _as_dict(record.get("declared")).get("model")
         actual = resp.get("model")
         if declared_model and actual and not _model_matches(declared_model, actual):
             record["model_mismatch"] = True
@@ -691,26 +762,38 @@ def ensure_capture(
     session_id: str,
     *,
     project_id: Optional[int] = None,
+    cdp_run_id: Optional[str] = None,
     declared: Optional[Dict[str, Any]] = None,
 ) -> LlmCapture:
     cap = _captures.get(session_id)
     if cap is None:
-        cap = LlmCapture(session_id, project_id=project_id, declared=declared)
+        cap = LlmCapture(
+            session_id, project_id=project_id, cdp_run_id=cdp_run_id, declared=declared
+        )
         _captures[session_id] = cap
-    elif declared:
-        cap.declared = declared
+    else:
+        cap.set_context(project_id=project_id, cdp_run_id=cdp_run_id, declared=declared)
     cap.attach(page)
     return cap
 
 
 def drop_capture(session_id: str) -> None:
-    _captures.pop(session_id, None)
+    cap = _captures.pop(session_id, None)
+    if cap is not None:
+        cap.detach()
 
 
 def read_session_exchanges(
-    session_id: str, limit: Optional[int] = None
+    session_id: str,
+    limit: Optional[int] = None,
+    *,
+    project_id: Optional[int] = None,
+    cdp_run_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """会话结束后从落盘文件回读采集结果（此时内存缓冲已释放）。"""
+    """逐行读取，按 session 和指定的 project/run 精确过滤，再取最后 limit 条。
+
+    不传 project/run 保持旧调用语义；指定后不包含缺失/空归属记录。
+    """
     try:
         from utils.observability import llm_exchange_dir
 
@@ -720,7 +803,9 @@ def read_session_exchanges(
         path = llm_exchange_dir() / f"session_{safe}.jsonl"
         if not path.exists():
             return []
-        out: List[Dict[str, Any]] = []
+        # 正数 limit 时内存仅保留匹配范围内的最后 N 条；0/None 兼容旧版全量读取。
+        out: deque = deque(maxlen=limit if limit and limit > 0 else None)
+        matched = 0
         with path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -730,9 +815,18 @@ def read_session_exchanges(
                     item = json.loads(line)
                 except Exception:
                     continue
-                if isinstance(item, dict):
-                    out.append(item)
-        return out[-limit:] if limit else out
+                if not isinstance(item, dict) or item.get("session_id") != session_id:
+                    continue
+                if project_id is not None and item.get("project_id") != project_id:
+                    continue
+                if cdp_run_id is not None and item.get("cdp_run_id") != cdp_run_id:
+                    continue
+                matched += 1
+                # 兼容旧版负数 limit 的切片语义（跳过前 -limit 条）。
+                if limit and limit < 0 and matched <= -limit:
+                    continue
+                out.append(item)
+        return list(out)
     except Exception:
         return []
 

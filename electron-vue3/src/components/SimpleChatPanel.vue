@@ -429,6 +429,50 @@
           </div>
 
           <div
+            v-if="message.clientBrowserLocalCards && message.clientBrowserLocalCards.length"
+            class="client-local-run-section"
+          >
+            <div
+              v-for="(bc, bcIdx) in message.clientBrowserLocalCards"
+              :key="'bcl-' + message.id + '-' + bcIdx"
+              class="client-local-run-card findings-card"
+            >
+              <div class="client-local-run-head">
+                <span class="card-icon">🌐</span>
+                <span class="card-title">{{ browserLocalCardTitle(bc) }}</span>
+                <span class="badge ms-1" :class="browserLocalStatusBadgeClass(bc.status)">
+                  {{ browserLocalStatusText(bc.status) }}
+                </span>
+              </div>
+              <p v-if="bc.url" class="client-local-run-body text-muted small">{{ bc.url }}</p>
+              <p v-if="bc.error" class="client-local-run-body text-danger small">{{ bc.error }}</p>
+              <template v-if="bc.status === 'waiting_proxy' || bc.status === 'error'">
+                <div class="client-local-run-primary-actions">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-primary"
+                    :disabled="localProxyOneClickBusy"
+                    @click="onOneClickInstallAndStart(message)"
+                  >
+                    {{ localProxyOneClickBusy ? t('chat.localRunOneClickBusy') : t('chat.localRunOneClickInstall') }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    :disabled="localProxyOneClickBusy"
+                    @click="onLocalRunIAmRunning(message)"
+                  >
+                    {{ t('chat.localRunIAmRunning') }}
+                  </button>
+                </div>
+                <p v-if="message.awaitProxyResume && !proxyOkNow()" class="client-local-run-tip small text-muted">
+                  {{ t('chat.localRunProxyWaiting') }}
+                </p>
+              </template>
+            </div>
+          </div>
+
+          <div
             v-if="message.clientTerminalExecCards && message.clientTerminalExecCards.length"
             class="client-terminal-exec-section"
           >
@@ -1004,7 +1048,11 @@ import {
   dispatchOpenLocalProxyInstall,
   tryStartInstalledLocalProxy,
   retryWaitingBrowserLocalCards,
-  EVT_LOCAL_PROXY_BECAME_OK
+  fetchTunnelStatus,
+  waitTunnelOnline,
+  injectTunnelConfigToRunningProxy,
+  EVT_LOCAL_PROXY_BECAME_OK,
+  EVT_BROWSER_LOCAL_PROXY_DOWN
 } from '../utils/localProxyStartAndResume.js'
 import { tryWakeThenPing } from '../utils/localProxyWake.js'
 
@@ -1468,6 +1516,29 @@ function isPlaceholderSessionTitle(title) {
         ? localGoProxyOk.value
         : null
     return ok === true || isElectronPtyAvailable()
+  }
+
+  const browserLocalCardTitle = (bc) => {
+    const action = String(bc?.action || 'start')
+    if (action === 'stop') return t('chat.browserLocalActionStop')
+    if (action === 'status') return t('chat.browserLocalActionStatus')
+    return t('chat.browserLocalActionStart')
+  }
+
+  const browserLocalStatusText = (status) => {
+    if (status === 'running') return t('chat.browserLocalStatusRunning')
+    if (status === 'done') return t('chat.browserLocalStatusDone')
+    if (status === 'waiting_proxy') return t('chat.browserLocalStatusWaitingProxy')
+    if (status === 'error') return t('chat.browserLocalStatusError')
+    return String(status || '')
+  }
+
+  const browserLocalStatusBadgeClass = (status) => {
+    if (status === 'done') return 'bg-success'
+    if (status === 'running') return 'bg-primary'
+    if (status === 'waiting_proxy') return 'bg-warning text-dark'
+    if (status === 'error') return 'bg-danger'
+    return 'bg-secondary'
   }
 
   const execLocalRunInTerminal = async (cmd) => {
@@ -4097,14 +4168,10 @@ const handleSend = async (e) => {
   await sendText(text, imgs)
 }
 
-/**
- * 本地代理刚上线：重试 waiting 的 browser 卡片，并把结果/就绪信号续跑给 Agent。
- */
-async function resumePendingAfterProxyOnline() {
-  if (proxyResumeInFlight || isSending.value) return
-  if (Date.now() - lastProxyResumeAt < 2500) return
+/** 最近一条等待本机代理/浏览器的助手消息（resume 与隧道失败标记共用同一口径） */
+function findAwaitingBrowserLocalMessage() {
   const list = Array.isArray(messages.value) ? messages.value : []
-  const msg = [...list]
+  return [...list]
     .reverse()
     .find(
       (m) =>
@@ -4117,7 +4184,82 @@ async function resumePendingAfterProxyOnline() {
               (c) => c && (c.status === 'waiting_proxy' || c.status === 'error')
             )))
     )
+}
+
+/** 本机代理在跑、但云端隧道没连上：卡片改为等待态并附排查提示（避免 Agent 侧反复失败成死循环） */
+function markBrowserTunnelDown(msg) {
+  const target = msg || findAwaitingBrowserLocalMessage()
+  if (!target) return
+  const hint = t('chat.browserTunnelDownHint')
+  const cards = Array.isArray(target.clientBrowserLocalCards) ? target.clientBrowserLocalCards : []
+  for (const c of cards) {
+    if (!c || c.status === 'done') continue
+    c.status = 'waiting_proxy'
+    c.error = hint
+  }
+  localRunExecTip.value = hint
+  if (localRunExecTipTimer) clearTimeout(localRunExecTipTimer)
+  localRunExecTipTimer = setTimeout(() => {
+    localRunExecTip.value = ''
+  }, 8000)
+}
+
+/**
+ * 隧道是否可用于续跑：未知（后端不支持/未登录）视为可用；
+ * 明确离线时补投隧道参数（持久化 + 运行实例热重载）并等待重连。
+ * @returns {Promise<boolean>}
+ */
+async function ensureTunnelReadyForResume() {
+  const first = await fetchTunnelStatus()
+  if (!first) return true
+  if (first.online) return true
+
+  // 1) 同机 Flask 托管场景：ensure 接口已带当前登录用户的隧道参数补齐代理配置，
+  //    只需等运行中的代理重读配置（轮询间隔 30s）后重连
+  try {
+    const res = await fetch('/api/client-scripts/local-proxy/supervisor/ensure', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    })
+    if (res.ok) {
+      const j = await res.json().catch(() => null)
+      const pushed = String((j && j.tunnel && j.tunnel.pushed) || '')
+      const pushOk = pushed && !['missing_params', 'binary_not_found', 'spawn_failed'].includes(pushed)
+      if (pushOk && (await waitTunnelOnline({ retries: 16, delayMs: 2500 }))) return true
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // 2) 云端后端 + 本机代理场景：只能由本机终端注入隧道参数（代理每 30s 重读配置）
+  const ctl =
+    terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl
+      ? terminalCtl.value
+      : terminalCtl
+  const injected = await injectTunnelConfigToRunningProxy({
+    injectCommand: (cmd) => ctl?.injectCommand?.(cmd),
+    ensureTerminalVisible: ensureBottomTerminalVisible
+  })
+  if (!injected) return false
+  return await waitTunnelOnline({ retries: 14, delayMs: 2500 })
+}
+
+/**
+ * 本地代理刚上线：重试 waiting 的 browser 卡片，并把结果/就绪信号续跑给 Agent。
+ * 隧道离线时不续跑——否则 Agent 仍判定「通道离线」，卡片/续跑会一直循环。
+ */
+async function resumePendingAfterProxyOnline() {
+  if (proxyResumeInFlight || isSending.value) return
+  if (Date.now() - lastProxyResumeAt < 2500) return
+  const msg = findAwaitingBrowserLocalMessage()
   if (!msg) return
+
+  const tunnelReady = await ensureTunnelReadyForResume()
+  if (!tunnelReady) {
+    markBrowserTunnelDown(msg)
+    return
+  }
 
   proxyResumeInFlight = true
   lastProxyResumeAt = Date.now()
@@ -4155,6 +4297,65 @@ watch(
   }
 )
 
+/** browser_local 卡因代理离线失败时，自动尝试唤醒已安装代理（15s 节流，不弹安装窗） */
+let autoProxyWakeInFlight = false
+let lastAutoProxyWakeAt = 0
+/** 同一条消息内自动唤醒上限：超过即停手并提示（防止「失败→唤醒→续跑→再失败」死循环） */
+const BROWSER_PROXY_WAKE_MAX = 3
+
+async function autoWakeProxyAfterBrowserLocalDown() {
+  if (autoProxyWakeInFlight) return
+  if (Date.now() - lastAutoProxyWakeAt < 15000) return
+  const targetMsg = findAwaitingBrowserLocalMessage()
+  if (targetMsg) {
+    targetMsg.browserProxyWakeAttempts = (Number(targetMsg.browserProxyWakeAttempts) || 0) + 1
+    if (targetMsg.browserProxyWakeAttempts > BROWSER_PROXY_WAKE_MAX) {
+      markBrowserTunnelDown(targetMsg)
+      return
+    }
+  }
+  autoProxyWakeInFlight = true
+  lastAutoProxyWakeAt = Date.now()
+  try {
+    const ctl =
+      terminalCtl && typeof terminalCtl === 'object' && 'value' in terminalCtl
+        ? terminalCtl.value
+        : terminalCtl
+    const ok = await tryStartInstalledLocalProxy({
+      ping: pingLocalGoProxy,
+      injectCommand: (cmd) => ctl?.injectCommand?.(cmd),
+      ensureTerminalVisible: ensureBottomTerminalVisible,
+      retries: 3,
+      delayMs: 700
+    })
+    if (ok) {
+      // 隧道未连上时续跑没有意义（Agent 仍报通道离线），交给 resume 里的补投+等待
+      const tunnelReady = await ensureTunnelReadyForResume()
+      if (!tunnelReady) {
+        markBrowserTunnelDown(targetMsg)
+        return
+      }
+      localRunCopyTip.value = t('chat.localRunProxyResumed')
+      if (localRunCopyTimer) clearTimeout(localRunCopyTimer)
+      localRunCopyTimer = setTimeout(() => {
+        localRunCopyTip.value = ''
+      }, 2200)
+      // watch(localGoProxyOk) 在 ping 刷新后触发续跑；若已为 true 则手动触发一次
+      void resumePendingAfterProxyOnline()
+    } else if (targetMsg) {
+      markBrowserTunnelDown(targetMsg)
+    }
+  } catch (e) {
+    console.error('[browserLocal] auto wake proxy failed:', e)
+  } finally {
+    autoProxyWakeInFlight = false
+  }
+}
+
+function onBrowserLocalProxyDownEvent() {
+  void autoWakeProxyAfterBrowserLocalDown()
+}
+
 function onLocalProxyBecameOkEvent() {
   void resumePendingAfterProxyOnline()
 }
@@ -4162,12 +4363,14 @@ function onLocalProxyBecameOkEvent() {
 onMounted(() => {
   if (typeof window !== 'undefined') {
     window.addEventListener(EVT_LOCAL_PROXY_BECAME_OK, onLocalProxyBecameOkEvent)
+    window.addEventListener(EVT_BROWSER_LOCAL_PROXY_DOWN, onBrowserLocalProxyDownEvent)
   }
   void refreshResumableRun()
 })
 onUnmounted(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener(EVT_LOCAL_PROXY_BECAME_OK, onLocalProxyBecameOkEvent)
+    window.removeEventListener(EVT_BROWSER_LOCAL_PROXY_DOWN, onBrowserLocalProxyDownEvent)
   }
 })
 

@@ -38,6 +38,21 @@ _playwright = None
 _async_playwright = None
 
 
+def _cdp_error_with_browser_card(
+    e: CdpError, *, url: Optional[str] = None, headless: Optional[bool] = None
+) -> Dict[str, Any]:
+    """本地代理通道离线时，在错误结果上附带本机浏览器唤起卡片（前端 client_action kind=browser_local）。"""
+    out = e.to_dict()
+    if e.code == LOCAL_CHANNEL_UNAVAILABLE:
+        out["browser_pause_for_client"] = True
+        out["client_browser"] = {
+            "action": "start",
+            "url": str(url or "").strip(),
+            "headless": bool(headless),
+        }
+    return out
+
+
 def _ensure_playwright():
     global _playwright, _async_playwright
     if _async_playwright is not None:
@@ -529,6 +544,8 @@ class CdpSessionManager:
         session.owns_page = owns_page
         session._cdp = None
         session.last_snapshot = None
+        if session.llm_capture is not None:
+            session.llm_capture.attach(page)
 
     async def get_browser_ws_endpoint(self, *, owner_key: str = "anonymous") -> Optional[str]:
         """返回可被 Midscene/Gremlins 子进程复用的浏览器 CDP WebSocket URL。
@@ -663,6 +680,8 @@ class CdpSessionManager:
         headless: Optional[bool] = None,
         storage_state_path: Optional[str] = None,
         owner_key: Optional[str] = None,
+        project_id: Optional[int] = None,
+        cdp_run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         owner = owner_key or "anonymous"
         t0 = time.perf_counter()
@@ -675,7 +694,7 @@ class CdpSessionManager:
             try:
                 conn_mode = await self._resolve_connection_mode(owner_key=owner, url=url)
             except CdpError as e:
-                return e.to_dict() | {
+                return _cdp_error_with_browser_card(e, url=url, headless=headless) | {
                     "tool": "cdp",
                     "action": "create",
                     "owner_key": owner,
@@ -705,7 +724,7 @@ class CdpSessionManager:
                     page = await context.new_page()
                     owns_page = False
             except CdpError as e:
-                return e.to_dict() | {
+                return _cdp_error_with_browser_card(e, url=url, headless=headless) | {
                     "tool": "cdp",
                     "action": "create",
                     "owner_key": owner,
@@ -739,7 +758,9 @@ class CdpSessionManager:
         except Exception:
             pass
         try:
-            await self.ensure_llm_capture(sid, owner_key=owner)
+            await self.ensure_llm_capture(
+                sid, owner_key=owner, project_id=project_id, cdp_run_id=cdp_run_id
+            )
         except Exception:
             pass
         if url:
@@ -1214,6 +1235,7 @@ class CdpSessionManager:
         session_id: str,
         *,
         project_id: Optional[int] = None,
+        cdp_run_id: Optional[str] = None,
         declared: Optional[Dict[str, Any]] = None,
         owner_key: Optional[str] = None,
     ) -> Any:
@@ -1228,6 +1250,7 @@ class CdpSessionManager:
             session.page,
             session_id,
             project_id=project_id,
+            cdp_run_id=cdp_run_id,
             declared=declared,
         )
         return session.llm_capture
@@ -1299,6 +1322,10 @@ class CdpSessionManager:
             ],
             "count": len(rows),
         }
+
+    def assert_owned(self, session_id: str, *, owner_key: str) -> BrowserSession:
+        """显式校验调用方归属，校验前不得更新采集上下文。"""
+        return self._get(session_id, owner_key=owner_key or "anonymous")
 
     def _get(self, session_id: str, *, owner_key: Optional[str] = None) -> BrowserSession:
         s = self._sessions.get(session_id)

@@ -43,6 +43,10 @@ sqlalchemy
 # 本机浏览器 CDP 桥服务（local_browser_bridge.py：隧道 Hub + CDP 网关；纯 Python 无编译依赖）
 aiohttp>=3.9
 
+# CDP 浏览器工具（agents/cdp/*、agents/tools/*、local_browser_bridge）：走系统 Chrome，
+# 不需要 `playwright install` 下载浏览器内核
+playwright>=1.40
+
 # 沙箱执行依赖（可选）
 # pip install llm-sandbox  # Docker 沙箱执行（推荐）
 

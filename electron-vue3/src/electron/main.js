@@ -119,6 +119,20 @@ function createWindow() {
   // 加载应用
   if (isDev) {
     // 开发环境：加载Vite开发服务器
+    // electron:dev 脚本并行启动 vite 与 electron，electron 可能先于 vite 就绪导致连接失败；
+    // 失败后隔秒重试，避免留下白屏窗口
+    let loadRetryCount = 0
+    mainWindow.webContents.on('did-fail-load', (_event, code, desc, url) => {
+      // -3(ABORTED) 为正常导航打断，不重试；其余失败(如 -102 连接被拒)隔秒重试
+      if (code !== -3 && loadRetryCount < 20 && mainWindow && !mainWindow.isDestroyed()) {
+        loadRetryCount++
+        setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.loadURL('http://localhost:5173')
+          }
+        }, 1000)
+      }
+    })
     mainWindow.loadURL('http://localhost:5173')
     // 打开开发者工具
     mainWindow.webContents.openDevTools()
@@ -171,7 +185,7 @@ const template = [
         accelerator: 'CmdOrCtrl+N',
         click: () => {
           if (mainWindow) {
-            mainWindow.webContents.send('menu-new-project')
+            mainWindow.webContents.send('menu-action', 'new-project')
           }
         }
       },
@@ -180,7 +194,7 @@ const template = [
         accelerator: 'CmdOrCtrl+I',
         click: () => {
           if (mainWindow) {
-            mainWindow.webContents.send('menu-import-excel')
+            mainWindow.webContents.send('menu-action', 'import-excel')
           }
         }
       },

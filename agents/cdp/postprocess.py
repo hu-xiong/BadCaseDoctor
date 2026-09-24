@@ -65,6 +65,27 @@ async def enrich_cdp_observation(
             react_request_id=react_request_id,
         )
         run_id = get_active_run_id(result_context)
+        # run 创建后只关联该 observation 的会话，供后续请求使用；不回填旧报文。
+        sid = observation.get("session_id")
+        if sid:
+            try:
+                from agents.cdp.owner import resolve_cdp_owner_key
+                from agents.cdp.session_manager import CdpSessionManager
+
+                owner = resolve_cdp_owner_key(
+                    user_id=getattr(engine, "user_id", None)
+                    or getattr(engine, "_user_id", None)
+                    or par.get("user_id"),
+                    userId=par.get("userId"),
+                    project_id=project_id,
+                )
+                mgr = CdpSessionManager.get()
+                mgr.assert_owned(sid, owner_key=owner)
+                await mgr.ensure_llm_capture(
+                    sid, owner_key=owner, project_id=project_id, cdp_run_id=run_id
+                )
+            except Exception as ex:
+                print(f"[CDP] llm_capture context skipped: {ex}", flush=True)
         if run_id:
             if act in ("session", "list", "list_sessions"):
                 pass

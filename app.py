@@ -224,7 +224,10 @@ if _mysql_read_timeout > 0:
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_size': _sql_pool_size,
     'pool_timeout': 300,
-    'pool_recycle': 3600,
+    # 远端 MySQL 走公网 NAT，空闲连接数分钟即被路径上的 NAT/防火墙静默回收；
+    # recycle 保证被取用的连接最大空闲 4 分钟（错过常见 NAT 回收窗口），
+    # 避免首个查询在死连接上卡 ~20s TCP 重传。代价：闲置超 4 分钟后首次查询付一次重连（约百毫秒）。
+    'pool_recycle': 240,
     'max_overflow': _sql_max_overflow,
     'pool_pre_ping': True,
     'echo': False,
@@ -742,6 +745,38 @@ def get_upload_image_cache_key(file_path: str) -> str:
 
 db = SQLAlchemy(app)
 
+
+def _enable_mysql_socket_keepalive(dbapi_connection, connection_record):
+    """远端 MySQL 走公网 NAT：空闲连接几分钟即被路径上 NAT/防火墙静默回收。
+    TCP keepalive 每 60s 心跳续期 NAT 映射，避免首查卡 ~20s TCP 重传。"""
+    try:
+        sock = getattr(dbapi_connection, "_sock", None)
+        if sock is None:
+            return
+        import socket as _socket
+
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+        if os.name == "nt":
+            # Windows 系统默认 keepalive 时间 2 小时，需用 ioctl 覆盖为 60s/10s
+            # （CPython 在 Windows 上要求传 3 元组：onoff, keepalivetime_ms, keepaliveinterval_ms）
+            _SIO_KEEPALIVE_VALS = 0x98000004
+            sock.ioctl(_SIO_KEEPALIVE_VALS, (1, 60_000, 10_000))
+        else:
+            if hasattr(_socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 60)
+            if hasattr(_socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10)
+            if hasattr(_socket, "TCP_KEEPCNT"):
+                sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3)
+    except Exception:
+        pass
+
+
+from sqlalchemy import event as _sa_event
+
+with app.app_context():
+    _sa_event.listen(db.engine, "connect", _enable_mysql_socket_keepalive)
+
 # 预热数据库连接池。
 #
 # 默认不做同步预热：在脚本/工具首次 import app 时，8 条远端 MySQL 握手会把首次 grep
@@ -1183,6 +1218,7 @@ class BadCase(db.Model):
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
     assigned_users = db.Column(db.Text)  # 指派的人员，JSON格式存储
     card_id = db.Column(db.BigInteger, nullable=True)  # 关联迭代卡片 Card.id（与 Bug.card_id 一致）
+    cdp_run_ids = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1214,6 +1250,7 @@ class BadCase(db.Model):
             'attachments': self.attachments,
             'assigned_users': self.assigned_users,
             'card_id': _json_snowflake_id(getattr(self, 'card_id', None)),
+            'cdp_run_ids': self.cdp_run_ids or [],
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
@@ -7248,9 +7285,9 @@ def api_get_project_cards(project_id):
         # 迭代计划下卡片列表：与前端 selectedPlan 对齐
         plan_id_param = _parse_query_optional_int64('plan_id')
         
-        # 短期缓存 key（须包含 plan 维度，避免错命中）
+        # 短期缓存 key（须包含 plan 维度，避免错命中）；TTL 3s，卡片变更入口统一走 _cache_invalidate_cards 失效
         cache_key = ('cards', project_id, card_type or '', plan_id_param if plan_id_param is not None else '', page, per_page)
-        cache_hit, cached = _cache_get(cache_key, ttl_s=0.5)
+        cache_hit, cached = _cache_get(cache_key, ttl_s=3.0)
         if cache_hit:
             t_total = (time.perf_counter() - t0) * 1000
             print(f"[PERF] GET /api/projects/{project_id}/cards cache_hit total={t_total:.1f}ms", flush=True)
@@ -8687,6 +8724,7 @@ def sync_database_schema():
                     'document_type VARCHAR(100)',
                     'attachments TEXT',
                     'assigned_users TEXT',
+                    'cdp_run_ids JSON',
                     'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                     'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP',
                 ]
@@ -9790,17 +9828,14 @@ def api_get_project_plans(project_id):
 
         # 测试用例数量：按 plan_id 统计（不限制 project_id，避免数据不一致导致漏数）
         plan_ids = list(count_map.keys())
+        tc_all = {}
         if plan_ids:
-            tc_rows = (
+            tc_all = dict(
                 db.session.query(TestCase.plan_id, func.count(TestCase.id))
                 .filter(TestCase.plan_id.in_(plan_ids))
                 .group_by(TestCase.plan_id)
                 .all()
             )
-            tc_direct = {int(pid): int(cnt) for pid, cnt in tc_rows}
-            for pid in count_map:
-                a, b, _ = count_map[pid]
-                count_map[pid] = (a, b, tc_direct.get(int(pid), 0))
 
         def _sort_key(p: Plan):
             # 置顶优先，其次创建时间倒序（与原接口保持一致）
@@ -9815,25 +9850,17 @@ def api_get_project_plans(project_id):
                     ts = 0
             return (-pinned, -ts)
 
-        # 预查询所有 plan 的 test_case 数量，避免 N+1 问题
-        tc_all = dict(
-            db.session.query(TestCase.plan_id, func.count(TestCase.id))
-            .filter(TestCase.plan_id.in_(plan_ids))
-            .group_by(TestCase.plan_id)
-            .all()
-        )
-
+        # 预查询所有 plan 的 test_case 数量（直接计数，与历史输出一致），避免 N+1 问题
         def build_plan_tree(plan: Plan):
-            """递归构建计划树（children 从 children_map 取）；数量含自身+所有子计划"""
+            """递归构建计划树（children 从 children_map 取）；badcase/bug 数量含自身+所有子计划，test_case 为直接计数"""
             children = [build_plan_tree(c) for c in sorted(children_map.get(plan.id, []), key=_sort_key)]
             bc = count_map.get(plan.id, (0, 0, 0))[0]
             bug = count_map.get(plan.id, (0, 0, 0))[1]
-            # 使用预查询的数据
-            tc = tc_all.get(plan.id, 0)
+            # 与历史输出保持一致：test_case_count 为当前计划的直接计数（不含子计划）
+            tc = int(tc_all.get(plan.id, 0) or 0)
             for c in children:
                 bc += c.get('badcase_count', 0)
                 bug += c.get('bug_count', 0)
-                tc += c.get('test_case_count', 0)
             st, st_type = _plan_api_status_and_type(plan.status)
             return {
                 'id': _json_snowflake_id(plan.id),
@@ -9860,39 +9887,6 @@ def api_get_project_plans(project_id):
         root_plans = sorted(children_map.get(None, []), key=_sort_key)
         plans_tree = [build_plan_tree(p) for p in root_plans]
         t_build = (time.perf_counter() - t0) * 1000
-
-        # 二次校验：用一次 GROUP BY 拿到所有 plan 的 test_case 数，再写回树，确保与 DB 一致
-        def _collect_ids(nodes, out):
-            for n in (nodes if isinstance(nodes, list) else [nodes]):
-                pid = n.get('id')
-                if pid is not None:
-                    try:
-                        out.append(int(str(pid)))
-                    except (TypeError, ValueError):
-                        pass
-                if n.get('children'):
-                    _collect_ids(n['children'], out)
-        plan_ids_tree = []
-        _collect_ids(plans_tree, plan_ids_tree)
-        if plan_ids_tree:
-            tc_patch = dict(
-                db.session.query(TestCase.plan_id, func.count(TestCase.id))
-                .filter(TestCase.plan_id.in_(plan_ids_tree))
-                .group_by(TestCase.plan_id)
-                .all()
-            )
-            def _patch(nodes):
-                for n in (nodes if isinstance(nodes, list) else [nodes]):
-                    pid = n.get('id')
-                    if pid is not None:
-                        try:
-                            pk = int(str(pid))
-                            n['test_case_count'] = int(tc_patch.get(pk, 0))
-                        except (TypeError, ValueError):
-                            n['test_case_count'] = 0
-                    if n.get('children'):
-                        _patch(n['children'])
-            _patch(plans_tree)
 
         t0 = time.perf_counter()
         payload = {
@@ -12070,6 +12064,31 @@ if __name__ == '__main__':
             print(f"ℹ️ 本地代理未托管：{_lp.get('skipped')} {_lp.get('last_error') or ''}".strip(), flush=True)
     except Exception as _lp_ex:
         print(f"⚠️ 本地代理托管跳过: {_lp_ex}", flush=True)
+
+    # 本机 CDP 桥服务：本机开发（隧道 URL 指向环回 + 已配 TUNNEL_SECRET）时随 Flask 启停
+    try:
+        from local_bridge_supervisor import ensure_bridge_running
+
+        _bd = ensure_bridge_running()
+        _bd_reason = _bd.get("skipped") or _bd.get("ensured")
+        if _bd.get("owned") and _bd.get("running_child"):
+            print(
+                f"✅ 已托管 CDP 桥服务 pid={_bd.get('pid')} gateway={_bd.get('gateway_port')}"
+                "（退出后端时自动关闭）",
+                flush=True,
+            )
+        elif _bd.get("health_ok"):
+            print("ℹ️ CDP 桥服务已在运行（非本进程拉起，退出后端时不会杀掉）", flush=True)
+        elif _bd_reason == "manage_disabled":
+            print(
+                "ℹ️ 未托管 CDP 桥服务：需 BADCASE_TUNNEL_SECRET + BADCASE_TUNNEL_URL 指向环回"
+                "（本机开发），或自行启动 local_browser_bridge.py",
+                flush=True,
+            )
+        elif _bd.get("skipped"):
+            print(f"ℹ️ CDP 桥服务未托管：{_bd.get('skipped')} {_bd.get('last_error') or ''}".strip(), flush=True)
+    except Exception as _bd_ex:
+        print(f"⚠️ CDP 桥服务托管跳过: {_bd_ex}", flush=True)
 
     try:
         if _use_waitress and not _use_reload:

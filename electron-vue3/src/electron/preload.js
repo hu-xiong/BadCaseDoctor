@@ -93,3 +93,12 @@ contextBridge.exposeInMainWorld('badcaseLocalProxy', {
   saveProxyBlob: (filename, arrayBuffer, targetPath) =>
     ipcRenderer.invoke('badcase-save-local-proxy', { filename, arrayBuffer, targetPath })
 })
+
+contextBridge.exposeInMainWorld('electronMenu', {
+  // 监听原生菜单动作，返回取消监听函数
+  onAction: (callback) => {
+    const handler = (_event, action) => callback(action)
+    ipcRenderer.on('menu-action', handler)
+    return () => ipcRenderer.removeListener('menu-action', handler)
+  }
+})

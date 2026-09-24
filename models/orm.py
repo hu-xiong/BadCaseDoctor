@@ -491,6 +491,7 @@ class BadCase(db.Model):
     attachments = db.Column(db.Text)  # 附件信息，JSON格式存储
     assigned_users = db.Column(db.Text)  # 指派的人员，JSON格式存储
     card_id = db.Column(db.BigInteger, nullable=True)  # 关联迭代卡片 Card.id（与 Bug.card_id 一致）
+    cdp_run_ids = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -522,6 +523,7 @@ class BadCase(db.Model):
             'attachments': self.attachments,
             'assigned_users': self.assigned_users,
             'card_id': _json_snowflake_id(getattr(self, 'card_id', None)),
+            'cdp_run_ids': self.cdp_run_ids or [],
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }

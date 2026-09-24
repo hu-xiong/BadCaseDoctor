@@ -214,8 +214,10 @@ func main() {
 		return
 	}
 
-	// 隧道配置（--tunnel-url/--tunnel-token / env）：落盘供自启无参实例与运行中实例重读
-	if tcfg, ok := parseTunnelArgs(args); ok {
+	// 隧道配置（--tunnel-url/--tunnel-token / env）：落盘供自启无参实例与运行中实例重读。
+	// 必须 url+token 齐全才落盘：只配了 BADCASE_TUNNEL_URL 的无参启动若照写会清掉已有 token，
+	// 让运行实例的隧道配置被抹掉（本机 Flask 托管场景常见，见 docs/技术设计_本机浏览器CDP通道.md）。
+	if tcfg, ok := parseTunnelArgs(args); ok && strings.TrimSpace(tcfg.Token) != "" {
 		if err := persistTunnelConfig(tcfg); err != nil {
 			log.Printf("[tunnel] 配置持久化失败: %v", err)
 		}

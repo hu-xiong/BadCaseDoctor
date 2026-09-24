@@ -7739,6 +7739,10 @@ class SimplifiedReActEngine:
                 if isinstance(_clr, dict) and _clr:
                     for _pkt in engine_dict_to_wire_packets({"event": "client_local_run", **_clr}):
                         yield _pkt
+                _cbr = observation.get("client_browser")
+                if isinstance(_cbr, dict) and _cbr and observation.get("browser_pause_for_client") is True:
+                    for _pkt in engine_dict_to_wire_packets({"event": "client_browser", **_cbr}):
+                        yield _pkt
                 if (
                     tool_name == "terminal"
                     and observation.get("terminal_pause_for_client") is True
@@ -11161,6 +11165,11 @@ class SimplifiedReActEngine:
                         ),
                     }
             else:
+                if tool_name == "cdp":
+                    params["project_id"] = self.project_id
+                    params["user_id"] = getattr(self, "user_id", None) or getattr(self, "_user_id", None)
+                    params["userId"] = params["user_id"]
+                    params["result_context"] = getattr(self, "_unified_result_ctx", None)
                 res = await tool.execute(**params)
             
             print(f"[REACT] ✅ 工具执行完成: {tool_name}")

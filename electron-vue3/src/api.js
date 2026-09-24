@@ -223,6 +223,25 @@ export function getBadcaseDetail(id) {
   return api.get(`/api/badcases/${apiPathId(id)}`)
 }
 
+// 仅读取有可靠运行归属的 BadCase 采集证据
+export function getBadcaseEvidence(id) {
+  return api.get(`/api/agent/badcases/${apiPathId(id)}/evidence`)
+}
+
+// 独立更新证据关联；不会保存基本信息或删除运行记录
+export function updateBadcaseEvidence(id, runIds) {
+  return api.put(`/api/agent/badcases/${apiPathId(id)}/evidence`, {
+    run_ids: runIds.map((runId) => String(runId))
+  })
+}
+
+// 同项目最近的 CDP 测试运行候选
+export function getProjectCdpTestRuns(projectId, limit = 50) {
+  return api.get('/api/agent/cdp-test-runs', {
+    params: { project_id: String(projectId), limit }
+  })
+}
+
 // 邀请成员
 export function inviteMember(project_id, data) {
   return api.post(`/api/projects/${project_id}/invite`, data)

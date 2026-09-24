@@ -92,6 +92,23 @@
     <div class="main-content">
       <!-- 左侧主要内容区 -->
       <div class="content-left">
+        <nav class="detail-tabs" aria-label="BadCase 详情子页">
+          <button type="button" :class="{ active: activeTab === 'basic' }" :aria-pressed="activeTab === 'basic'" @click="activeTab = 'basic'">基本信息</button>
+          <template v-if="isEdit && badcaseId">
+            <button type="button" :class="{ active: activeTab === 'capture' }" :aria-pressed="activeTab === 'capture'" @click="activeTab = 'capture'">采集参数</button>
+            <button type="button" :class="{ active: activeTab === 'ui' }" :aria-pressed="activeTab === 'ui'" @click="activeTab = 'ui'">UI节点</button>
+          </template>
+        </nav>
+        <BadcaseEvidencePanel
+          v-if="isEdit && badcaseId"
+          v-show="activeTab !== 'basic'"
+          :badcase-id="evidenceBadcaseId"
+          :project-id="evidenceProjectId"
+          :active="activeTab !== 'basic'"
+          :mode="activeTab"
+        />
+        <!-- 保留表单及富文本编辑器实例，切换子页不丢失未保存内容。 -->
+        <div v-show="activeTab === 'basic'" class="basic-information">
         <!-- 标题区域 -->
         <div class="title-section">
           <input 
@@ -546,12 +563,13 @@
             <button class="action-btn save-btn" @click="saveBadcase" :disabled="saveLoading">
               {{ saveLoading ? t('cardForm.saving') : t('common.save') }}
             </button>
-                    </div>
-                  </div>
-                </div>
-                
-      <!-- 右侧边栏：默认收起；展开后为固定宽度 -->
-      <div class="right-panel-column">
+          </div>
+        </div>
+        </div>
+      </div>
+
+      <!-- 右侧边栏：默认收起；展开后为固定宽度；证据子页不展示无关属性。 -->
+      <div v-show="activeTab === 'basic'" class="right-panel-column">
         <button
           v-show="!isRightSidebarOpen"
           type="button"
@@ -744,6 +762,7 @@ import { personPrimaryLabel, personSecondaryLabel, applyDefaultAssigneeOnCreate 
 import user from '../store/user.js'
 import MonacoDiffEditor from './MonacoDiffEditor.vue'
 import RichTextHtmlEditor from './RichTextHtmlEditor.vue'
+import BadcaseEvidencePanel from './BadcaseEvidencePanel.vue'
 import {
   getPendingModifyDiffForDetail,
   clearPendingModifyDiffForDetail,
@@ -753,7 +772,7 @@ import {
 
 export default {
   name: 'NewBadcase',
-  components: { MonacoDiffEditor, RichTextHtmlEditor, InlineFieldDiffBox },
+  components: { MonacoDiffEditor, RichTextHtmlEditor, InlineFieldDiffBox, BadcaseEvidencePanel },
   props: {
     id: {
       type: [String, Number],
@@ -798,6 +817,22 @@ export default {
     const saveLoading = ref(false)
     const isEdit = ref(false)
     const badcaseId = ref(null)
+    const activeTab = ref('basic')
+    // 候选必须来自已落库项目，不能随基本信息里尚未保存的项目选择改变。
+    const savedEvidenceContext = ref({ id: '', projectId: '' })
+    const evidenceBadcaseId = computed(() => snowflakeIdStr(
+      props.id ?? (props.embedded ? null : route.query.id) ?? badcaseId.value
+    ))
+    const evidenceProjectId = computed(() =>
+      savedEvidenceContext.value.id === evidenceBadcaseId.value ? savedEvidenceContext.value.projectId : ''
+    )
+    watch(evidenceBadcaseId, () => { activeTab.value = 'basic' })
+    watch(
+      () => [props.show_diff, props.pending_diff_seq, props.embedded ? null : route.query.show_diff],
+      () => {
+        if (props.show_diff || (!props.embedded && route.query.show_diff === 'true')) activeTab.value = 'basic'
+      }
+    )
     const isRightSidebarOpen = ref(false)
     const toggleRightSidebar = () => {
       isRightSidebarOpen.value = !isRightSidebarOpen.value
@@ -1382,6 +1417,7 @@ export default {
         pendingDiff.value = null
         return
       }
+      activeTab.value = 'basic'
       const pd0 = getPendingModifyDiffForDetail(
         snowflakeIdStr(props.project_id) || snowflakeIdStr(badcase.project_id)
       )
@@ -1759,6 +1795,10 @@ export default {
             console.log('复现步骤类型:', typeof response.data.badcase.reproduction_steps)
             
             Object.assign(badcase, response.data.badcase)
+            savedEvidenceContext.value = {
+              id: effectiveItemId,
+              projectId: snowflakeIdStr(response.data.badcase.project_id)
+            }
             normalizeBadcasePriorityForForm()
             normalizeBadcaseCaseCategoryForForm()
             console.log('BadCase信息加载成功:', badcase)
@@ -1878,6 +1918,10 @@ export default {
               const response = await getBadcaseDetail(fallbackId)
               if (response.data.success && response.data.badcase) {
                 Object.assign(badcase, response.data.badcase)
+                savedEvidenceContext.value = {
+                  id: fallbackId,
+                  projectId: snowflakeIdStr(response.data.badcase.project_id)
+                }
                 normalizeBadcasePriorityForForm()
                 normalizeBadcaseCaseCategoryForForm()
                 console.log('兜底编辑模式：BadCase信息加载成功:', badcase)
@@ -2542,6 +2586,7 @@ export default {
     }
 
     const scrollToDiffField = async (field) => {
+      activeTab.value = 'basic'
       await nextTick()
       const el = document.getElementById(`diff-field-${field}`)
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -2973,6 +3018,10 @@ export default {
       loading,
       saveLoading,
       isEdit,
+      badcaseId,
+      activeTab,
+      evidenceBadcaseId,
+      evidenceProjectId,
       editContextCrumb,
       pageHeadline,
       badcase,
@@ -3731,9 +3780,39 @@ export default {
   overflow: hidden;
 }
 
+/* 内部子页沿用 NewTestCase 的蓝色下划线视觉。 */
+.detail-tabs {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid #e4e7ed;
+}
+
+.detail-tabs button {
+  padding: 12px 0;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #606266;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.detail-tabs button.active {
+  color: #409eff;
+  border-bottom-color: #409eff;
+}
+
+.detail-tabs button:focus-visible {
+  outline: 2px solid #409eff;
+  outline-offset: 2px;
+}
+
 /* 左侧内容区 */
 .content-left {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   padding: 24px;
   overflow-y: auto;

@@ -147,12 +147,14 @@ def _explore_login_wait_sec() -> int:
 
 
 async def _cdp_probe_page(
-    tool: Any, sid: str, uid: Any, project_id: Optional[int]
+    tool: Any, sid: str, uid: Any, project_id: Optional[int],
+    result_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """当前页快照探针：同一次 snapshot 同时取 url 与交互元素（供登录完成检测复用）。"""
     try:
         snap = await tool.execute(
-            action="snapshot", session_id=sid, user_id=uid, project_id=project_id
+            action="snapshot", session_id=sid, user_id=uid, project_id=project_id,
+            result_context=result_context,
         )
         if not isinstance(snap, dict):
             return {}
@@ -167,9 +169,10 @@ async def _cdp_probe_page(
 
 
 async def _cdp_current_page_url(
-    tool: Any, sid: str, uid: Any, project_id: Optional[int]
+    tool: Any, sid: str, uid: Any, project_id: Optional[int],
+    result_context: Optional[Dict[str, Any]] = None,
 ) -> str:
-    return str((await _cdp_probe_page(tool, sid, uid, project_id)).get("url") or "")
+    return str((await _cdp_probe_page(tool, sid, uid, project_id, result_context)).get("url") or "")
 
 
 _LOGIN_FIELD_ROLES = frozenset({
@@ -335,7 +338,7 @@ async def _recover_from_login_block(
     from agents.cdp.login_flow import is_login_url
     from agents.cdp.midscene_bridge import CDP_TEXT_PROGRESS_PREFIX, _push_cdp_progress
 
-    page_url = await _cdp_current_page_url(tool, sid, uid, project_id)
+    page_url = await _cdp_current_page_url(tool, sid, uid, project_id, result_context)
     if not _detect_login_block(out, page_url):
         return None
 
@@ -393,7 +396,10 @@ async def _recover_from_login_block(
         wait_sec = _explore_login_wait_sec()
         # 把浏览器带到前台，用户能直接看到登录页去操作
         try:
-            await tool.execute(action="focus", session_id=sid, user_id=uid)
+            await tool.execute(
+                action="focus", session_id=sid, user_id=uid, project_id=project_id,
+                result_context=result_context,
+            )
         except Exception:
             pass
         if wait_sec > 0:
@@ -415,7 +421,7 @@ async def _recover_from_login_block(
         form_gone_streak = 0
         while time.time() < deadline:
             await asyncio.sleep(3)
-            probe = await _cdp_probe_page(tool, sid, uid, project_id)
+            probe = await _cdp_probe_page(tool, sid, uid, project_id, result_context)
             cur = str(probe.get("url") or "")
             if not cur:
                 continue
@@ -503,6 +509,7 @@ async def _recover_from_login_block(
             session_id=sid,
             user_id=uid,
             project_id=project_id,
+            result_context=result_context,
             url=target_url or None,
         )
         print(

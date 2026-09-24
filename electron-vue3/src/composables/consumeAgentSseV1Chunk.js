@@ -149,8 +149,16 @@ export function consumeAgentSseV1Chunk(chunk, aiMessage, ctx) {
             err === 'Failed to fetch'
           card.status = proxyLikelyDown ? 'waiting_proxy' : 'error'
           card.error = err
-          // 仅代理未就绪时挂起，等上线后续跑
-          if (proxyLikelyDown) aiMessage.awaitProxyResume = true
+          // 仅代理未就绪时挂起，等上线后续跑；同时通知对话卡自动尝试唤醒代理
+          if (proxyLikelyDown) {
+            aiMessage.awaitProxyResume = true
+            try {
+              const { dispatchBrowserLocalProxyDown } = await import('../utils/localProxyStartAndResume.js')
+              dispatchBrowserLocalProxyDown({ messageId: aiMessage.id, url: brow.url, action: brow.action })
+            } catch {
+              /* ignore */
+            }
+          }
         }
       })()
     }

@@ -7,8 +7,53 @@ import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from .test_intent import detect_cdp_test_intent, extract_testcase_ids_from_context
+
+
+def _evidence_url(value: Any) -> str:
+    try:
+        url = urlsplit(str(value or ""))
+        return urlunsplit((url.scheme, url.netloc.rsplit("@", 1)[-1], url.path, "", ""))
+    except ValueError:
+        return ""
+
+
+def build_cdp_run_evidence(row: Any) -> Dict[str, Any]:
+    from .llm_capture import read_session_exchanges
+
+    spec = row.spec_json or {}
+    sessions = list(spec.get("cdp_session_ids") or [])
+    if row.cdp_session_id and row.cdp_session_id not in sessions:
+        sessions.append(row.cdp_session_id)
+    items = []
+    for sid in dict.fromkeys(sessions):
+        items.extend(read_session_exchanges(
+            sid, limit=21, project_id=row.project_id, cdp_run_id=row.id,
+        ))
+    items.sort(key=lambda item: str(item.get("ts") or ""))
+    exchanges = [{**item, "url": _evidence_url(item.get("url"))} for item in items[-20:]]
+    steps = [
+        {key: step.get(key) for key in (
+            "index", "action", "success", "summary", "ref", "duration_ms", "url",
+        )}
+        for step in (row.steps_json or [])
+    ]
+    for step in steps:
+        step["url"] = _evidence_url(step.get("url"))
+    return {
+        "id": row.id,
+        "title": row.title,
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "summary": row.summary,
+        "steps": steps,
+        "snapshots": spec.get("snapshots") or [],
+        "exchanges": exchanges,
+        "exchanges_truncated": len(items) > 20,
+        "capture_status": "available" if exchanges else "not_captured",
+    }
 
 
 def cdp_test_task_enabled() -> bool:
@@ -204,6 +249,35 @@ def append_cdp_test_step(
         step_rec["issues"] = observation.get("exploration_issues")
     steps.append(_json_safe(step_rec))
 
+    spec = dict(row.spec_json or {})
+    sid = observation.get("session_id")
+    if sid:
+        sessions = list(spec.get("cdp_session_ids") or [])
+        if str(sid) not in sessions:
+            sessions.append(str(sid))
+        spec["cdp_session_ids"] = sessions
+    snapshot = observation if observation.get("snapshot_id") else observation.get("snapshot")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("nodes"), list):
+        nodes = snapshot["nodes"]
+        snapshots = list(spec.get("snapshots") or [])
+        snapshots.append({
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "session_id": sid,
+            "url": _evidence_url(snapshot.get("url")),
+            "title": str(snapshot.get("title") or "")[:300],
+            "truncated": bool(snapshot.get("truncated")) or len(nodes) > 200,
+            "nodes": [
+                {
+                    "ref": str(node.get("ref") or "")[:40],
+                    "role": str(node.get("role") or "")[:80],
+                    "name": str(node.get("name") or "")[:200],
+                    "disabled": bool(node.get("disabled")),
+                }
+                for node in nodes[:200] if isinstance(node, dict)
+            ],
+        })
+        spec["snapshots"] = snapshots[-5:]
+    row.spec_json = _json_safe(spec)
     row.steps_json = steps
     row.pass_count = sum(1 for s in steps if s.get("success"))
     row.fail_count = sum(1 for s in steps if not s.get("success"))
@@ -380,7 +454,7 @@ def ensure_cdp_test_task(
     uid = getattr(engine, "user_id", None) or getattr(engine, "_user_id", None)
     try:
         run = open_cdp_test_run(
-            db,
+            db=db,
             project_id=project_id,
             user_id=int(uid) if uid is not None else None,
             plan_id=plan_id,

@@ -1,7 +1,8 @@
 # 技术设计：本机浏览器 CDP 通道（go-local-proxy 反连隧道 + 云端 CDP 网关）
 
-> 状态：设计稿 v1（待评审）
-> 关联现状代码：`agents/cdp/`、`agents/midscene_runner/`、`go-local-proxy/`、`local_proxy_supervisor.py`、`electron-vue3/src/utils/localBrowserProxyClient.js`
+> 状态：设计稿 v1；P1–P3（隧道 / 网关 / local 模式）已实现，P4 未开工
+> 另：CDP 层采集与 BadCase 证据关联已落地，见 §17
+> 关联现状代码：`agents/cdp/`、`agents/midscene_runner/`、`go-local-proxy/`、`local_browser_bridge.py`、`local_proxy_supervisor.py`、`electron-vue3/src/utils/localBrowserProxyClient.js`
 
 ## 0. 一句话结论
 
@@ -343,3 +344,77 @@ badcase-local-proxy --tunnel-url wss://api.example.com/api/local-proxy/tunnel --
 - `agents/midscene_runner/*`（零改动）
 - `go-local-proxy/browser_chrome.go`、`/ws`、`/pty`（保留）
 - 单机部署路径（`local_proxy_supervisor.py` + `/browser/cdp`）保留为开发/单机模式
+
+## 17. CDP 层采集与 BadCase 证据关联（已落地）
+
+> 本节与上文"设计稿"不同：**已实现并在跑**。目标是让"Agent 操作本机浏览器的过程"成为可回看的证据——被测系统的对话报文（LLM 出入参）+ 页面快照/节点 + 步骤流水，落到具体一条 BadCase 上。
+
+### 17.1 采集运行单元（CdpTestRun）
+
+一次 CDP 测试任务 = 一行 `cdp_test_runs`，也是采集证据的归属单元。字段分工：
+
+| 字段 | 内容 |
+|---|---|
+| `project_id` / `user_id` | 归属（权限与证据过滤的唯一依据） |
+| `cdp_session_id` | 主会话；一任务可能开多个 tab/session |
+| `steps_json` | 步骤流水（action / success / summary / ref / duration_ms / url） |
+| `spec_json.cdp_session_ids` | 该运行涉及的全部浏览器会话 ID |
+| `spec_json.snapshots` | UI 节点快照（见 17.5 边界） |
+| `pass_count` / `fail_count` | 由 steps 统计 |
+
+入口：`open_cdp_test_run(db=db, ...)`（**注意 `db` 必须按关键字传**，其余调用方用位置参会拿到未注册的 `db_extensions.db`）、`ensure_cdp_test_task(engine, user_input=..., tool_action=..., result_context=...)`，run_id 经 `result_context['cdp_test_run_id']` 在链路里传递（`get_active_run_id`）。
+
+### 17.2 报文归属：请求级冻结
+
+采集器 `agents/cdp/llm_capture.py` 的归属不是"会话级"而是**请求级**——同一条会话中途换项目/换 run，历史与在途报文不会被改写：
+
+1. `LlmCapture.set_context(project_id, cdp_run_id, declared)` 只影响**后续**请求；`None` 清空归属，不回填历史。
+2. 每个 Playwright `request` 事件把当前上下文快照存入 `WeakKeyDictionary`（以 request 对象为键）；`response` 事件取回该快照写入 `record.project_id` / `record.cdp_run_id` / `record.declared`。
+3. **未观察到 request 开始**（例如采集器接入时请求已在途）→ 归属为空，不猜测、不回填；这类记录不会被任何项目/运行的证据查询命中（防串号）。
+4. `requestfinished` / `requestfailed` 清理快照，避免 WeakKeyDictionary 之外的悬挂；`detach()` 摘监听器但不取消已开始的 body 读取。
+
+上下文更新链路：`react_simplified` / `langgraph_bridge` 注入 `project_id`、`user_id`、`userId`、`result_context` → `cdp_tool` 入口先 `assert_owned(session_id, owner_key)` 校验会话归属，再 `ensure_llm_capture(..., project_id, cdp_run_id)` → `session_manager` 在建会话（`create(project_id=..., cdp_run_id=...)`）与后续 `attach` 新 page 时同步上下文。**校验先于更新**：拿不到归属的调用直接返回 `CdpError`，不会被写进别人的运行里。`batch` 子动作只提供操作参数，不能覆盖调用方的归属。
+
+### 17.3 落盘与回读
+
+- 路径：`observability/llm_exchange/`（`BADCASE_LLM_EXCHANGE_DIR` 可改）
+  - `llm_exchange_YYYYMMDD.jsonl`（按天全量）
+  - `session_<sid>.jsonl`（按会话）
+  - 总开关 `BADCASE_LLM_CAPTURE_ENABLED`
+- 单条记录关键字段：`exchange_id`、`ts`、`session_id`、`project_id`、`cdp_run_id`、`url`、`request`（含 declared model）、`response`、`model_mismatch`、`error`。
+- 回读 `read_session_exchanges(sid, limit, project_id=..., cdp_run_id=...)`：**逐行扫描 + 精确过滤**（指定后不含缺失/空归属记录），`limit` 为正时内存只留最后 N 条。
+
+### 17.4 证据 API
+
+| 方法/路径 | 说明 |
+|---|---|
+| `GET /api/agent/badcases/<id>/evidence` | 读证据：`{run_ids, runs[], unavailable_run_ids}` |
+| `PUT /api/agent/badcases/<id>/evidence` | 写关联：`{"run_ids":[...]}`，**只改 `bad_case.cdp_run_ids`，不动表单其他字段** |
+| `GET /api/agent/cdp-test-runs` | 候选列表：`project_id` / `react_request_id` / `chat_session_id` 三选一 |
+
+约束：
+
+- 权限：读走 `_model_for_user_collaborator_access`（负责人 + 协作者可读写，viewer/无关用户 403，未登录 401，不存在 404）；候选列表按 `has_project_permission` 过滤，**跨项目运行不返回**。
+- 写入：最多 10 个、必须合法 UUID、去重保序；**存在性与项目归属校验在同一个请求内完成，失败整体拒绝（原子）**，不允许把别的项目的运行挂上来。
+- 读取：已被删除或已不属于当前项目的 run 不泄露内容，只出现在 `unavailable_run_ids`。
+- 返回体最小化：候选列表只给 `id/title/status/created_at/cdp_session_id`（`spec_json` 不外发）；证据内 `exchanges` 最多 20 条（`exchanges_truncated` 标记），`steps` 只取白名单字段。
+- **URL 一律脱敏**（`_evidence_url`：去 userinfo / query / fragment），页面的表单 field 值、节点 `value`、`selector_hint` **不落库**——证据用于"复现路径"，不搬运用户输入。
+
+### 17.5 快照落库边界
+
+`append_cdp_test_step` 每次落一份快照到 `spec_json.snapshots`，硬上限防爆库：只留**最近 5 份**，每份**最多 200 个节点**（超出置 `truncated`），节点只存 `ref/role/name/disabled`；`title` 截 300 字符。
+
+### 17.6 前端
+
+BadCase 详情（`NewBadcase.vue`）新增子 tab：**基本信息 / 采集参数 / UI节点**。表单始终 `v-show` 保留实例（切子页不丢未保存内容），右栏仅在"基本信息"显示；`BadcaseEvidencePanel.vue` 负责候选选择、关联列表、报文与快照展示、空态。保存只提交 `run_ids`，保存后提示"证据关联已保存；基本信息未改动"。候选来源锁定在**已保存的 BadCase 所属项目**（`savedEvidenceContext`），防止未保存状态下跨项目选错。
+
+### 17.7 测试与验收
+
+- `tests/test_badcase_evidence.py`：证据读写、权限矩阵、非法载荷 400、跨项目原子拒绝、已删/越权运行不外泄、候选列表权限、快照边界与脱敏、真实文件证据的 project+run+session 三重过滤。
+- `tests/test_llm_capture.py`：归属冻结（请求级快照）、`set_context` 不清洗历史、在途请求归属为空、`read_session_exchanges` 过滤语义。
+- 手工：本机代理拉起 Chrome → 对话触发探测 → 详情页关联运行 → 「采集参数」看到脱敏 URL 与 `model_mismatch`、「UI节点」看到节点表 → 解绑回空态。
+
+### 17.8 本期涉及文件
+
+- 新增：`electron-vue3/src/components/BadcaseEvidencePanel.vue`、`tests/test_badcase_evidence.py`
+- 修改：`agents/cdp/llm_capture.py`、`agents/cdp/session_manager.py`、`agents/cdp/test_task.py`、`agents/cdp/postprocess.py`、`agents/tools/cdp_tool.py`、`agents/langgraph_bridge.py`、`agents/react_simplified.py`、`routers/agent.py`、`models/orm.py`（`bad_case.cdp_run_ids` + 迁移）、`app_services/db_schema.py`、`electron-vue3/src/components/NewBadcase.vue`、`electron-vue3/src/api.js`
